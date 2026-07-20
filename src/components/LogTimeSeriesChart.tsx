@@ -99,20 +99,20 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
             orientation: 'h',
             y: 1.1,         // Top
             x: 0,           // Left aligned
-            font: { color: '#94a3b8' },
+            font: { color: '#9A9AA8' },
             bgcolor: 'rgba(0,0,0,0)',
         },
         xaxis: {
             title: { text: 'Time (s)' },
-            color: '#64748b',
-            gridcolor: '#1e293b',
-            zerolinecolor: '#334155',
+            color: '#70707E',
+            gridcolor: '#17171C',
+            zerolinecolor: '#2A2A33',
         },
         yaxis: {
             title: { text: 'RPM / Load' },
-            color: '#94a3b8',
-            gridcolor: '#1e293b',
-            zerolinecolor: '#334155',
+            color: '#9A9AA8',
+            gridcolor: '#17171C',
+            zerolinecolor: '#2A2A33',
             side: 'left',
             range: [0, 8500], // Correct range for RPM/Load? Load is 0-100, RPM 0-8000.
             // Problem: RPM (8000) and Load (100) are vastly different scales.
@@ -186,38 +186,38 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
         hovermode: 'x unified', // [NEW] Link all traces in hover
         // [NEW] Modern Tooltip Styling
         hoverlabel: {
-            bgcolor: 'rgba(30, 41, 59, 0.95)', // Slate-900 with slight opacity
-            bordercolor: '#334155', // Slate-700
-            font: { family: 'sans-serif', size: 12, color: '#f8fafc' }, // Slate-50
+            bgcolor: 'rgba(23, 23, 28, 0.95)', // panel charcoal with slight opacity
+            bordercolor: '#2A2A33', // border charcoal
+            font: { family: 'sans-serif', size: 12, color: '#F2F2F5' }, // near-white
             namelength: -1,
         },
         legend: {
             orientation: 'h',
             y: 1.1,
             x: 0,
-            font: { color: '#94a3b8' },
+            font: { color: '#9A9AA8' },
             bgcolor: 'rgba(0,0,0,0)',
         },
         xaxis: {
             title: { text: 'Time (s)' },
-            color: '#64748b',
-            gridcolor: '#1e293b',
-            zerolinecolor: '#334155',
+            color: '#70707E',
+            gridcolor: '#17171C',
+            zerolinecolor: '#2A2A33',
             domain: [0, 1],
             // [NEW] Sleek Spike Line - Minimalist
             showspikes: true,
             spikethickness: 1,
             spikedash: 'solid',
             spikemode: 'across',
-            spikecolor: 'rgba(148, 163, 184, 0.2)', // Slate-400 with 20% opacity (Very subtle)
+            spikecolor: 'rgba(154, 154, 168, 0.2)', // slate-400 charcoal, 20% opacity (Very subtle)
         },
         // RPM (Left)
         yaxis: {
-            title: { text: 'RPM', font: { color: '#94a3b8' } },
-            tickfont: { color: '#94a3b8' },
+            title: { text: 'RPM', font: { color: '#9A9AA8' } },
+            tickfont: { color: '#9A9AA8' },
             side: 'left',
             range: [0, 9000],
-            gridcolor: '#1e293b',
+            gridcolor: '#17171C',
             // Custom Ticks: 1k, 2k, ...
             tickmode: 'array',
             tickvals: [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000],
@@ -241,8 +241,8 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
         // If I put Load on Left, visually 100 sits at the very bottom of the 9000 RPM range.
         // I will map Load to Y3, on the Left, overlaid, range 0-120.
         yaxis3: {
-            title: { text: 'Load %', font: { color: '#3b82f6' } },
-            tickfont: { color: '#3b82f6' },
+            title: { text: 'Load %', font: { color: '#0A9BDB' } },
+            tickfont: { color: '#0A9BDB' },
             overlaying: 'y',
             side: 'right',
             range: [0, 120],

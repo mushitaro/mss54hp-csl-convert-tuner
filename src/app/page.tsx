@@ -636,7 +636,7 @@ export default function Home() {
       {/* App Header - Ultra Minimal */}
       <header className="px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md border-b border-slate-900 z-10 shrink-0 h-[48px]">
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className={`w-2 h-2 rounded-full ${dmeStatusColor} shadow-[0_0_8px_rgba(59,130,246,0.5)]`} title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}></div>
+          <div className={`w-2 h-2 rounded-full ${dmeStatusColor} shadow-[0_0_8px_rgba(10,155,219,0.5)]`} title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}></div>
           <h1 className="shrink-0 text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
             MSS54HP CSL CONVERT <span className="text-slate-600">///</span> TUNER
           </h1>
@@ -932,7 +932,7 @@ export default function Home() {
         </div>
 
         {/* === RIGHT COLUMN (30% desktop / 60% stacked) === */}
-        <div className="flex-1 min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[30%] flex flex-col bg-slate-901/20 backdrop-blur-sm relative z-20 overflow-hidden">
+        <div className="flex-1 min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[30%] flex flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden">
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">

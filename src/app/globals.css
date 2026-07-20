@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #000000;
+  --foreground: #F2F2F5;
 }
 
 @theme inline {
@@ -12,10 +12,65 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* ── TSUNAGI brand palette ──────────────────────────────────────────────
+   True-black base + cool-charcoal neutrals, keyed to the BMW ///M logo
+   tricolor. Overriding these built-in Tailwind tokens re-skins every
+   slate-* / blue-* / red-* / indigo-* utility across the app from one
+   place. Semantic roles (one color = one meaning, everywhere):
+     • M-blue   (#008AC9) → primary / interactive / "lean" heatmap
+     • M-red    (#F11A22) → danger / destructive / error / "rich" heatmap
+     • M-violet (#2B115A) → secondary / lineage / reference / diagnostic
+   Functional status colors are deliberately kept at their Tailwind
+   defaults so the instrument's machine state stays unambiguous:
+     • emerald        → connected / OK / verified
+     • amber / orange → busy / caution / warning */
+@theme {
+  /* Neutral ramp — pure-black anchor, cool charcoal */
+  --color-slate-950: #000000;
+  --color-slate-900: #0A0A0D;
+  --color-slate-800: #17171C;
+  --color-slate-700: #2A2A33;
+  --color-slate-600: #4C4C58;
+  --color-slate-500: #70707E;
+  --color-slate-400: #9A9AA8;
+  --color-slate-300: #C6C6CF;
+  --color-slate-200: #DFDFE6;
+  --color-slate-100: #F2F2F5;
+
+  /* Primary accent — shifted toward the M-blue (#008AC9), hue ≈ 199° */
+  --color-blue-100: #D6EEFA;
+  --color-blue-200: #B6E4F5;
+  --color-blue-300: #6CCBEF;
+  --color-blue-400: #26AEE4;
+  --color-blue-500: #0A9BDB;
+  --color-blue-600: #0883BD;
+  --color-blue-900: #06354E;
+
+  /* Danger / destructive — BMW ///M red (#F11A22), hue ≈ 358° */
+  --color-red-100: #FBD9DA;
+  --color-red-200: #F9C0C2;
+  --color-red-300: #F87A7F;
+  --color-red-400: #F64A50;
+  --color-red-500: #F11A22;
+  --color-red-600: #D0121A;
+  --color-red-900: #4A0A0D;
+
+  /* Secondary / lineage / diagnostic — BMW ///M navy-violet (#2B115A),
+     hue ≈ 261°. Lightened for legibility on black; the deepest step is the
+     logo navy itself, used for filled badges. The Factor column (a hardcoded
+     hex in LogDataTable) is set to the -400 step so it reads as the same
+     brand violet as the lineage badges. */
+  --color-indigo-300: #B9A6EE;
+  --color-indigo-400: #9B84E8;
+  --color-indigo-500: #7E63DB;
+  --color-indigo-600: #6547C2;
+  --color-indigo-900: #2B115A;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #000000;
+    --foreground: #F2F2F5;
   }
 }
 
@@ -36,20 +91,20 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
-  /* slate-700 */
+  background: #2A2A33;
+  /* slate-700 (cool charcoal) */
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-  /* slate-600 */
+  background: #4C4C58;
+  /* slate-600 (cool charcoal) */
 }
 
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #334155 transparent;
+  scrollbar-color: #2A2A33 transparent;
 }
 
 /* Hide Next.js Dev Tools / Static Indicator */

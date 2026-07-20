@@ -16,7 +16,7 @@ interface Props {
 
 // Factor is a computed diagnostic (rawLoad / correctedLoad, driven by the Alpha-N table), so it is
 // styled here as a fixed column rather than a toggleable data channel.
-const FACTOR_COLOR = '#a855f7';
+const FACTOR_COLOR = '#9B84E8'; // M-violet (secondary / diagnostic) — matches lineage badges
 
 export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData }) => {
     const limit = 2000;

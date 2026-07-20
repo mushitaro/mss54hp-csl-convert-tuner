@@ -24,15 +24,15 @@ export interface FieldMeta {
 export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
     rpm: {
         key: 'rpm', label: 'RPM', unit: '', format: v => v.toFixed(0),
-        relevance: 'core', chartAxis: 'y1', color: '#94a3b8',
+        relevance: 'core', chartAxis: 'y1', color: '#9A9AA8', // slate-400 (cool charcoal)
     },
     rawLoad: {
         key: 'rawLoad', label: 'Raw RO %', unit: '%', format: v => v.toFixed(2),
-        relevance: 'core', chartAxis: 'y3', color: '#64748b',
+        relevance: 'core', chartAxis: 'y3', color: '#70707E', // slate-500 (cool charcoal)
     },
     correctedLoad: {
         key: 'correctedLoad', label: 'Corr. RO %', unit: '%', format: v => v.toFixed(2),
-        relevance: 'core', chartAxis: 'y3', color: '#3b82f6',
+        relevance: 'core', chartAxis: 'y3', color: '#0A9BDB', // M-blue accent
     },
     lambda1: {
         key: 'lambda1', label: 'Lambda 1', unit: '', format: v => v.toFixed(3),

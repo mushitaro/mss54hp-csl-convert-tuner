@@ -98,11 +98,11 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                         if (deviation > 0) {
                                             // Positive Diff (New > Old) -> Adding fuel -> RED (or customized)
                                             // Usually adding fuel = Richer map setting
-                                            style = { backgroundColor: `rgba(220, 38, 38, ${intensity})` }; // red-600 base
+                                            style = { backgroundColor: `rgba(241, 26, 34, ${intensity})` }; // M-red base
                                             textColor = 'text-red-100';
                                         } else {
                                             // Negative Diff (New < Old) -> Removing fuel -> BLUE
-                                            style = { backgroundColor: `rgba(37, 99, 235, ${intensity})` }; // blue-600 base
+                                            style = { backgroundColor: `rgba(10, 155, 219, ${intensity})` }; // M-blue base
                                             textColor = 'text-blue-100';
                                         }
                                     }

@@ -30,14 +30,14 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
     ];
 
     const layout: Partial<Layout> = {
-        title: { text: title, font: { color: '#fff' } },
+        title: { text: title, font: { color: '#F2F2F5' } },
         autosize: true,
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         scene: {
-            xaxis: { title: { text: 'RPM' }, color: '#ccc', gridcolor: '#444' },
-            yaxis: { title: { text: 'RO %' }, color: '#ccc', gridcolor: '#444' },
-            zaxis: { title: { text: zAxisLabel }, color: '#ccc', gridcolor: '#444' },
+            xaxis: { title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            yaxis: { title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            zaxis: { title: { text: zAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             camera: {
                 eye: { x: 1.6, y: -1.6, z: 0.6 }
             }
