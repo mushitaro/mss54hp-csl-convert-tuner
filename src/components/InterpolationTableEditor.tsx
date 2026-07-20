@@ -9,6 +9,8 @@ interface Props {
     // [NEW] Enabled State
     enabled: boolean;
     onToggle: (enabled: boolean) => void;
+    /** Archived sessions show the table their tune was built with, but must not re-derive it. */
+    readOnly?: boolean;
 }
 
 // Custom Alpha Icon component to match Lucide style
@@ -30,7 +32,7 @@ const AlphaIcon = ({ className }: { className?: string }) => (
     </svg>
 );
 
-export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enabled, onToggle }) => {
+export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enabled, onToggle, readOnly = false }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [points, setPoints] = useState<InterpolationPoint[]>(config);
 
@@ -76,8 +78,15 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
                                 </h3>
                             </div>
 
+                            {readOnly && (
+                                <p className="text-[9px] font-mono text-amber-500/80 leading-relaxed">
+                                    Locked — this is the table this saved tune was built with.
+                                    Start a new session to tune with a different one.
+                                </p>
+                            )}
+
                             {/* [NEW] Enable Toggle */}
-                            <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider bg-slate-800/50 p-2 rounded">
+                            <div className={`flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider bg-slate-800/50 p-2 rounded ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input
                                         type="checkbox"
@@ -94,7 +103,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
                         </div>
 
                         <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                            <table className={`w-full text-left text-[10px] ${!enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+                            <table className={`w-full text-left text-[10px] ${!enabled || readOnly ? 'opacity-50 pointer-events-none' : ''}`}>
                                 <thead className="text-slate-500 uppercase">
                                     <tr>
                                         <th className="pb-2">RPM</th>
@@ -126,20 +135,22 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
                             </table>
                         </div>
 
-                        <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center">
-                            <button
-                                onClick={handleReset}
-                                className="text-[10px] text-red-500 hover:text-red-400 flex items-center gap-1"
-                            >
-                                <RotateCcw className="w-3 h-3" /> Reset
-                            </button>
-                            <button
-                                onClick={handleSave}
-                                className="bg-blue-600 hover:bg-blue-500 text-white text-[10px] px-3 py-1 rounded flex items-center gap-1"
-                            >
-                                <Save className="w-3 h-3" /> Save Config
-                            </button>
-                        </div>
+                        {!readOnly && (
+                            <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center">
+                                <button
+                                    onClick={handleReset}
+                                    className="text-[10px] text-red-500 hover:text-red-400 flex items-center gap-1"
+                                >
+                                    <RotateCcw className="w-3 h-3" /> Reset
+                                </button>
+                                <button
+                                    onClick={handleSave}
+                                    className="bg-blue-600 hover:bg-blue-500 text-white text-[10px] px-3 py-1 rounded flex items-center gap-1"
+                                >
+                                    <Save className="w-3 h-3" /> Save Config
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </>
             )}

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { LogDataPoint } from '@/lib/types';
 import { Layout, Data } from 'plotly.js';
+import { FieldKey, LOG_FIELD_REGISTRY, isFieldPresent, DEFAULT_FIELD_VISIBILITY } from '@/lib/field-registry/registry';
 
 // Dynamically import Plotly to avoid SSR issues
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as React.ComponentType<any>;
@@ -10,10 +11,15 @@ interface Props {
     data: LogDataPoint[];
     selectedIndex?: number | null;
     onPointClick?: (index: number) => void;
+    visibleFields?: Record<FieldKey, boolean>;
+    /** Full/raw log used only to decide which optional series exist, so the trace set stays stable
+     *  even when the filtered view (`data`) is empty. Falls back to `data` when not provided. */
+    presenceData?: LogDataPoint[];
 }
 
-export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPointClick }) => {
+export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData }) => {
     const lastHoveredIndex = React.useRef<number | null>(null);
+    const presenceSource = presenceData && presenceData.length > 0 ? presenceData : data;
 
     // Memoize data preparation for performance
     const chartData = useMemo((): Data[] => {
@@ -23,12 +29,6 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
         const rpms = data.map(d => d.rpm);
         const rawLoads = data.map(d => d.rawLoad);
         const correctedLoads = data.map(d => d.correctedLoad ?? d.rawLoad); // Fallback if no correction
-        const lambda1s = data.map(d => d.lambda1);
-        const lambda2s = data.map(d => d.lambda2);
-
-        // Filter out undefined lambdas if they don't exist in the log
-        const hasLambda1 = lambda1s.some(l => l !== undefined);
-        const hasLambda2 = lambda2s.some(l => l !== undefined);
 
         const traces: Data[] = [
             // Y1 Axis: RPM & Load
@@ -37,8 +37,8 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
                 y: rpms,
                 type: 'scatter', // SVG for better interaction
                 mode: 'lines',
-                name: 'RPM',
-                line: { color: '#94a3b8', width: 1 }, // Slate-400
+                name: LOG_FIELD_REGISTRY.rpm.label,
+                line: { color: LOG_FIELD_REGISTRY.rpm.color, width: 1 },
                 yaxis: 'y1',
             },
             {
@@ -46,8 +46,8 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
                 y: rawLoads,
                 type: 'scatter',
                 mode: 'lines',
-                name: 'Raw RO %',
-                line: { color: '#64748b', width: 1, dash: 'dot' }, // Slate-500 dotted
+                name: LOG_FIELD_REGISTRY.rawLoad.label,
+                line: { color: LOG_FIELD_REGISTRY.rawLoad.color, width: 1, dash: 'dot' },
                 yaxis: 'y1',
             },
             {
@@ -55,39 +55,40 @@ export const LogTimeSeriesChart: React.FC<Props> = ({ data, selectedIndex, onPoi
                 y: correctedLoads,
                 type: 'scatter',
                 mode: 'lines',
-                name: 'Corr. RO %',
-                line: { color: '#3b82f6', width: 2 }, // Blue-500
+                name: LOG_FIELD_REGISTRY.correctedLoad.label,
+                line: { color: LOG_FIELD_REGISTRY.correctedLoad.color, width: 2 },
                 yaxis: 'y1',
             },
         ];
 
-        // Y2 Axis: Lambda
-        if (hasLambda1) {
+        // Y2 Axis: Lambda (each toggleable; charted when the log source provides the channel — a
+        // stable check against presenceSource, not the possibly-empty filtered view)
+        if (visibleFields.lambda1 && isFieldPresent('lambda1', presenceSource)) {
             traces.push({
                 x: times,
-                y: lambda1s as number[],
+                y: data.map(d => d.lambda1) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: 'Lambda 1',
-                line: { color: '#4ade80', width: 1.5 }, // Green-400
+                name: LOG_FIELD_REGISTRY.lambda1.label,
+                line: { color: LOG_FIELD_REGISTRY.lambda1.color, width: 1.5 },
                 yaxis: 'y2',
             });
         }
 
-        if (hasLambda2) {
+        if (visibleFields.lambda2 && isFieldPresent('lambda2', presenceSource)) {
             traces.push({
                 x: times,
-                y: lambda2s as number[],
+                y: data.map(d => d.lambda2) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: 'Lambda 2',
-                line: { color: '#86efac', width: 1.5, dash: 'dash' }, // Green-300 dashed
+                name: LOG_FIELD_REGISTRY.lambda2.label,
+                line: { color: LOG_FIELD_REGISTRY.lambda2.color, width: 1.5, dash: 'dash' },
                 yaxis: 'y2',
             });
         }
 
         return traces;
-    }, [data]);
+    }, [data, presenceSource, visibleFields.lambda1, visibleFields.lambda2]);
 
     const layout: Partial<Layout> = {
         paper_bgcolor: 'transparent',

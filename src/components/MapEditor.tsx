@@ -3,6 +3,7 @@
 import React from 'react';
 import { VEMap } from '@/lib/types';
 import clsx from 'clsx'; // Install clsx if not already
+import { Info } from 'lucide-react';
 
 interface Props {
     mapData: VEMap;
@@ -31,8 +32,13 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
             <table className="w-full text-xs text-right border-collapse bg-slate-900">
                 <thead className="sticky top-0 bg-slate-800 z-10">
                     <tr>
-                        <th className="p-2 text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20">
-                            RO % \ RPM
+                        <th
+                            className="p-2 text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
+                            title="Rows = RO % (load) / Columns = RPM"
+                        >
+                            <div className="flex items-center justify-center">
+                                <Info className="w-3.5 h-3.5" />
+                            </div>
                         </th>
                         {mapData.xAxis.map((rpm, i) => (
                             <th key={i} className="p-2 text-slate-300 font-mono border-b border-slate-700 min-w-[50px]">

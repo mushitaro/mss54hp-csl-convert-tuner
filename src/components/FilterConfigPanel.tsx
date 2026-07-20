@@ -5,9 +5,12 @@ import { LogFilterConfig } from '@/lib/types';
 interface Props {
     config: LogFilterConfig;
     onConfigChange: (newConfig: LogFilterConfig) => void;
+    /** Archived sessions show the settings their tune was built with, but must not re-derive it —
+     *  changing a filter here would be tuning, which only a draft session may do. */
+    readOnly?: boolean;
 }
 
-export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange }) => {
+export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
 
@@ -17,6 +20,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange }) =
     }, [config]);
 
     const handleChange = (key: keyof LogFilterConfig, value: number | boolean) => {
+        if (readOnly) return;
         // @ts-ignore
         const newCfg = { ...localConfig, [key]: value };
         setLocalConfig(newCfg);
@@ -53,7 +57,14 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange }) =
                             </button>
                         </div>
 
-                        <div className="space-y-5">
+                        {readOnly && (
+                            <p className="mb-3 text-[9px] font-mono text-amber-500/80 leading-relaxed">
+                                Locked — these are the settings this saved tune was built with.
+                                Start a new session to tune with different filters.
+                            </p>
+                        )}
+
+                        <div className={`space-y-5 ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
                             {/* Alpha-N Correction Moved to Table Editor */}
 
                             {/* Min Temp */}

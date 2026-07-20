@@ -6,7 +6,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "MSS54HP CSL Tuning Tool",
+  title: "MSS54HP CSL CONVERT /// TUNER",
   description: "Alpha-N Tuning and Log Analysis Tool for E46 M3 CSL",
   icons: {
     icon: '/icon.svg',

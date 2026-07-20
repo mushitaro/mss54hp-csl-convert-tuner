@@ -1,6 +1,8 @@
 import { BinaryParser } from './parser';
 import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP } from '@/config/constants';
 import { VEMap } from '@/lib/types';
+import { analyzeDataChecksum, correctDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
+import type { ChecksumSlotResult } from '@/lib/checksum/dmeDataChecksum';
 
 export class BinaryPatcher extends BinaryParser {
     constructor(buffer: ArrayBuffer) {
@@ -57,6 +59,17 @@ export class BinaryPatcher extends BinaryParser {
 
     public getPatchedBuffer(): ArrayBuffer {
         return this.buffer;
+    }
+
+    /**
+     * Recalculates and writes the MSS54HP data-pair checksum (slave @ 0x3FFC, master @ 0xBFFC).
+     * No-ops for buffer sizes other than the confirmed 65536-byte "0401 partial BIN" format.
+     */
+    public applyChecksumCorrection(): ChecksumSlotResult[] | null {
+        if (this.uint8Array.length !== DATA_PAIR_LENGTH) return null;
+        const before = analyzeDataChecksum(this.uint8Array);
+        correctDataChecksum(this.uint8Array);
+        return before;
     }
 
     /**
