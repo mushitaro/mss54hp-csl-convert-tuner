@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Eraser, Loader2, X, AlertTriangle } from 'lucide-react';
 import { AdaptationSnapshot, AdaptationReading } from '@/lib/dme-link/adaptationBlocks';
+import { useDialogLang } from '@/hooks/useDialogLang';
 
 interface Props {
     /** dmeLink.readAdaptations — resolves null on failure (the reason lands in `error`). */
@@ -19,6 +20,48 @@ interface Props {
  * therefore renders no cancel affordance at all — no X, no backdrop dismiss.
  */
 type Phase = 'reading' | 'viewing' | 'confirming' | 'clearing' | 'result' | 'failed';
+
+// 表示言語ごとの文言。強調を含む一部は span 付き JSX で保持する。表示言語は useDialogLang で全ダイアログ共有。
+const TEXT = {
+    ja: {
+        title: 'RESET ADAPT — DME学習値',
+        close: '閉じる',
+        failLead: '学習値の読み出し/リセットに失敗しました。',
+        failHint: 'リセットは何度実行しても同じ結果になります。接続を確認して、そのまま再試行できます。',
+        retry: '再試行',
+        loading: '現在の学習値を読み込み中…',
+        colItem: '項目',
+        colCurrent: '現在値',
+        colExpected: '期待値',
+        expectedNote: (<>期待値: ラムダ学習係数は<span className="text-slate-500">乗算</span>のため中立は 1(0ではありません)。他は加算のため 0。</>),
+        confirmQuestion: 'リセットしていいですか？',
+        reset: 'リセット',
+        warn: (<>上の12項目をDMEから消去します。取り消せません。<span className="text-slate-500">{' '}スロットル/ペダル・SMGクラッチ・検出装備の学習値は消えません。</span></>),
+        cancel: 'やめる',
+        runReset: 'リセット実行',
+        clearing: '学習値をクリア中… DMEの反映を待っています(約2秒)',
+        done: '✅ リセット完了。このまま START TUNE できます。',
+    },
+    en: {
+        title: 'RESET ADAPT — DME Adaptations',
+        close: 'Close',
+        failLead: 'Failed to read / reset the adaptation values.',
+        failHint: 'The reset is idempotent — repeating it changes nothing. Check the connection and retry.',
+        retry: 'Retry',
+        loading: 'Reading the current adaptations…',
+        colItem: 'Item',
+        colCurrent: 'Current',
+        colExpected: 'Expected',
+        expectedNote: (<>Expected: the lambda factors are <span className="text-slate-500">multiplicative</span>, so neutral is 1 (not 0). The others are additive, so 0.</>),
+        confirmQuestion: 'Reset these values?',
+        reset: 'Reset',
+        warn: (<>This erases the 12 items above from the DME. It cannot be undone.<span className="text-slate-500">{' '}Throttle/pedal, SMG clutch, and detected-equipment adaptations are not cleared.</span></>),
+        cancel: 'Cancel',
+        runReset: 'Run Reset',
+        clearing: 'Clearing adaptations… waiting for the DME to apply (~2s).',
+        done: '✅ Reset complete. You can START TUNE now.',
+    },
+};
 
 /** Mirrors the reference's DmeAdaptationDecoder.FormatNumber: integers plain, everything else to at
  *  most 5 decimals with trailing zeros dropped. */
@@ -42,6 +85,8 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
     const [phase, setPhase] = useState<Phase>('reading');
     const [before, setBefore] = useState<AdaptationSnapshot | null>(null);
     const [after, setAfter] = useState<AdaptationSnapshot | null>(null);
+    const lang = useDialogLang();
+    const t = TEXT[lang];
 
     // No setState before the first await: `phase` already starts at 'reading', so the mount effect
     // has nothing to synchronise, and retry() sets it back itself.
@@ -93,10 +138,10 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                 <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
                     <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                         <Eraser className="w-3 h-3" />
-                        RESET ADAPT — DME学習値
+                        {t.title}
                     </h3>
                     {dismissable && (
-                        <button onClick={onClose} aria-label="閉じる" className="text-slate-500 hover:text-slate-300">
+                        <button onClick={onClose} aria-label={t.close} className="text-slate-500 hover:text-slate-300">
                             <X className="w-4 h-4" />
                         </button>
                     )}
@@ -105,33 +150,33 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                 {phase === 'failed' ? (
                     <div className="space-y-4">
                         <p className="text-[10px] font-mono text-red-400 leading-relaxed">
-                            {error ?? '学習値の読み出し/リセットに失敗しました。'}
+                            {error ?? t.failLead}
                         </p>
                         <p className="text-[9px] font-mono text-slate-500 leading-relaxed">
-                            リセットは何度実行しても同じ結果になります。接続を確認して、そのまま再試行できます。
+                            {t.failHint}
                         </p>
                         <div className="flex justify-end gap-4 pt-1">
                             <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                閉じる
+                                {t.close}
                             </button>
                             <button onClick={retry} className="text-[10px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
-                                再試行
+                                {t.retry}
                             </button>
                         </div>
                     </div>
                 ) : !shown ? (
                     <div className="flex items-center gap-2 py-8 justify-center text-[10px] font-mono text-slate-500">
                         <Loader2 className="w-3 h-3 animate-spin" />
-                        現在の学習値を読み込み中…
+                        {t.loading}
                     </div>
                 ) : (
                     <>
                         <div className="flex-1 overflow-y-auto -mx-1 px-1">
                             <div className="flex items-center gap-3 text-[9px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
-                                <span className="flex-1">項目</span>
-                                <span className="w-[72px] text-right">{after ? 'BEFORE' : '現在値'}</span>
+                                <span className="flex-1">{t.colItem}</span>
+                                <span className="w-[72px] text-right">{after ? 'BEFORE' : t.colCurrent}</span>
                                 {after && <span className="w-[72px] text-right">AFTER</span>}
-                                <span className="w-[64px] text-right">期待値</span>
+                                <span className="w-[64px] text-right">{t.colExpected}</span>
                             </div>
 
                             {groupReadings(shown.readings).map(group => (
@@ -162,20 +207,20 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             {/* Why the two factors clear to 1 and not 0, said once rather than per row. Stated as
                                 information, not as a verdict: nothing here checks the values against it. */}
                             <p className="mt-4 pt-2 border-t border-slate-800/60 text-[9px] font-mono text-slate-600 leading-relaxed">
-                                期待値: ラムダ学習係数は<span className="text-slate-500">乗算</span>のため中立は 1(0ではありません)。他は加算のため 0。
+                                {t.expectedNote}
                             </p>
                         </div>
 
                         <div className="shrink-0 pt-3 mt-3 border-t border-slate-800">
                             {phase === 'viewing' && (
                                 <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-mono text-slate-500">リセットしていいですか？</span>
+                                    <span className="text-[10px] font-mono text-slate-500">{t.confirmQuestion}</span>
                                     <div className="flex gap-4">
                                         <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            閉じる
+                                            {t.close}
                                         </button>
                                         <button onClick={() => setPhase('confirming')} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            リセット
+                                            {t.reset}
                                         </button>
                                     </div>
                                 </div>
@@ -185,19 +230,14 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                                 <div className="space-y-2.5">
                                     <p className="flex items-start gap-2 text-[10px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                                        <span>
-                                            上の12項目をDMEから消去します。取り消せません。
-                                            <span className="text-slate-500">
-                                                {' '}スロットル/ペダル・SMGクラッチ・検出装備の学習値は消えません。
-                                            </span>
-                                        </span>
+                                        <span>{t.warn}</span>
                                     </p>
                                     <div className="flex justify-end gap-4">
                                         <button onClick={() => setPhase('viewing')} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            やめる
+                                            {t.cancel}
                                         </button>
                                         <button onClick={() => void handleReset()} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            リセット実行
+                                            {t.runReset}
                                         </button>
                                     </div>
                                 </div>
@@ -206,15 +246,15 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             {phase === 'clearing' && (
                                 <div className="flex items-center gap-2 text-[10px] font-mono text-amber-400">
                                     <Loader2 className="w-3 h-3 animate-spin" />
-                                    学習値をクリア中… DMEの反映を待っています(約2秒)
+                                    {t.clearing}
                                 </div>
                             )}
 
                             {phase === 'result' && (
                                 <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-mono text-emerald-400">✅ リセット完了。このまま START TUNE できます。</span>
+                                    <span className="text-[10px] font-mono text-emerald-400">{t.done}</span>
                                     <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                        閉じる
+                                        {t.close}
                                     </button>
                                 </div>
                             )}

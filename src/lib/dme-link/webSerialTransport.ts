@@ -29,6 +29,10 @@ export class WebSerialTransport {
         }
         // Must be called from within a real user gesture (e.g. a button click handler).
         this.port = await navigator.serial!.requestPort();
+        // 8E1 is mandatory — do not "simplify" this to 8N1 while chasing line errors. DS2/MSS54 is
+        // even-parity; an 8N1 receiver samples the parity bit where the stop bit should be, so every
+        // even-popcount byte raises a framing error. DS2's own address 0x12 and ACK 0xA0 both have
+        // popcount 2, so effectively every frame would fault on its first byte. 8E1 is proven on the car.
         await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even' });
         this.writer = this.port.writable!.getWriter();
         this.reader = this.port.readable!.getReader();
@@ -113,6 +117,17 @@ export class WebSerialTransport {
     }
 
     /**
+     * The latched pump error, WITHOUT clearing it, so a caller can name the cause in its own message.
+     *
+     * Deliberately non-consuming: clearing the latch here would make hasReadError() report false, and
+     * resyncTransport() would then purge() instead of recoverRead() — leaving the dead pump unrestarted,
+     * which is strictly worse than not looking at all. Only recoverRead()/open()/reopen() clear it.
+     */
+    peekReadError(): Error | null {
+        return this.pumpError;
+    }
+
+    /**
      * Restarts the read side after an error latched the pump, without closing the port.
      *
      * A serial break — the K-line held low by a DME reset or a transient fault — rejects the pump's
@@ -127,7 +142,13 @@ export class WebSerialTransport {
         try { await this.reader?.cancel(); } catch { }
         try { this.reader?.releaseLock(); } catch { }
         await new Promise(r => setTimeout(r, 100)); // let the break / idle condition settle
-        this.reader = this.port.readable!.getReader();
+        // A break is recoverable; the device physically vanishing is not. Chromium leaves readable
+        // null after a fatal NetworkError, and a bare `!` here would surface that as an opaque
+        // TypeError — retried up to nine times by drainUntilQuiet — instead of naming the real cause.
+        if (!this.port.readable) {
+            throw new DmeLinkError('The serial device disconnected — unplug and replug the cable, then reconnect.');
+        }
+        this.reader = this.port.readable.getReader();
         this.buffer = [];
         this.pumpError = null;
         this.pumpActive = true;
@@ -141,7 +162,11 @@ export class WebSerialTransport {
     async readExact(length: number, timeoutMs: number): Promise<Uint8Array> {
         const deadline = Date.now() + timeoutMs;
         while (this.buffer.length < length) {
-            if (this.pumpError) throw new DmeLinkError('Serial read failed: ' + this.pumpError.message);
+            // Name the error class too: a BreakError/FramingError (recoverable, and the signature of a
+            // disturbed K-line) and a NetworkError (device gone) otherwise read identically.
+            if (this.pumpError) {
+                throw new DmeLinkError(`Serial read failed: ${this.pumpError.name} (${this.pumpError.message})`);
+            }
             if (Date.now() >= deadline) {
                 throw new DmeLinkError(`Timed out waiting for ${length} byte(s) (received ${this.buffer.length})`);
             }

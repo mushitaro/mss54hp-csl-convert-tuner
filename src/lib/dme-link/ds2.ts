@@ -90,6 +90,90 @@ export function isPositiveResponse(frame: Ds2Frame): boolean {
     return frame.controlOrStatus === Ds2Status.ACKNOWLEDGE;
 }
 
+export interface EchoMismatchAnalysis {
+    /** Byte offset at which `got` best lines up with `sent` (0 = same position, 1 = one byte lost). */
+    lag: number;
+    /** How many byte pairs the verdict rests on. */
+    compared: number;
+    /** Every compared byte of `got` is a bitwise subset of its `sent` byte (only 1→0, never 0→1). */
+    allSubset: boolean;
+    flips1to0: number;
+    flips0to1: number;
+    trailingZeroRun: number;
+    /** `got` looks like a DS2 response frame — i.e. we read a reply where the echo belonged. */
+    looksLikeResponse: boolean;
+    verdict: string;
+}
+
+/**
+ * Explains WHY a K-line echo didn't match, so an unstable-cable report can be told apart from a
+ * software desync without a second forensic pass.
+ *
+ * The discriminator is bit direction. The K-line is open-collector: a device can only pull it LOW,
+ * never drive it high. So if every received bit that changed went 1→0 and none went 0→1, the request
+ * was electrically corrupted on the wire — a cable, connector, ground, or DME-reset event. If instead
+ * `got` parses as the head of a DS2 response, the buffer was simply out of frame and a stale reply was
+ * read in the echo's place, which IS a software-recoverable desync.
+ *
+ * Pure and self-contained so it can be reasoned about (and unit-tested) without a serial port.
+ */
+export function classifyEchoMismatch(sent: Uint8Array, got: Uint8Array): EchoMismatchAnalysis {
+    let trailingZeroRun = 0;
+    for (let i = got.length - 1; i >= 0 && got[i] === 0; i--) trailingZeroRun++;
+
+    const looksLikeResponse = got.length >= 3
+        && got[0] === DS2_DEFAULT_ADDRESS
+        && (got[2] === Ds2Status.ACKNOWLEDGE || got[2] === Ds2Status.BUSY || got[2] === Ds2Status.REJECTED);
+
+    // Try small alignments; a dropped leading byte shifts everything by one. Score by how well the
+    // "only pulled low" model fits, so the winner is the alignment that best explains the corruption.
+    let best: EchoMismatchAnalysis | null = null;
+    for (let lag = 0; lag < Math.min(4, sent.length); lag++) {
+        let compared = 0, flips1to0 = 0, flips0to1 = 0, subset = true;
+        for (let i = 0; i + lag < sent.length && i < got.length; i++) {
+            const s = sent[i + lag], g = got[i];
+            compared++;
+            flips1to0 += popcount(s & ~g);
+            flips0to1 += popcount(~s & g & 0xFF);
+            if ((g & ~s & 0xFF) !== 0) subset = false;
+        }
+        if (compared === 0) continue;
+        const candidate: EchoMismatchAnalysis = {
+            lag, compared, allSubset: subset, flips1to0, flips0to1,
+            trailingZeroRun, looksLikeResponse, verdict: '',
+        };
+        // Prefer an alignment where nothing went 0→1 (physically impossible from an interfering
+        // driver), then the one covering the most bytes, then the fewest corrupted bits.
+        if (!best
+            || (candidate.allSubset && !best.allSubset)
+            || (candidate.allSubset === best.allSubset && candidate.compared > best.compared)
+            || (candidate.allSubset === best.allSubset && candidate.compared === best.compared && candidate.flips1to0 < best.flips1to0)) {
+            best = candidate;
+        }
+    }
+
+    const a = best ?? {
+        lag: 0, compared: 0, allSubset: false, flips1to0: 0, flips0to1: 0,
+        trailingZeroRun, looksLikeResponse, verdict: '',
+    };
+
+    a.verdict = looksLikeResponse
+        ? 'a stale DS2 response was read where the echo belonged — buffer out of frame (software-recoverable)'
+        // Needs enough bytes to be meaningful: one or two matching bytes prove nothing.
+        : (a.compared >= 3 && a.allSubset && a.flips0to1 === 0)
+            ? 'line-level electrical event — the K-line was pulled low during our own transmission (cable, connector, ground, or DME reset). Not a buffer desync.'
+            : a.trailingZeroRun >= 2
+                ? 'the line was held low (break / framing errors) — electrical, not a buffer desync'
+                : 'unclassified — could be either a desync or line noise';
+    return a;
+}
+
+function popcount(byte: number): number {
+    let n = byte & 0xFF, c = 0;
+    while (n) { c += n & 1; n >>>= 1; }
+    return c;
+}
+
 /** Reconstructs the raw frame bytes [Address][Length][Control][Payload...][Checksum] from a parsed frame. */
 export function frameToBytes(frame: Ds2Frame): Uint8Array {
     const bytes = new Uint8Array(frame.length);

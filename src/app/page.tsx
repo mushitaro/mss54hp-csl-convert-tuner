@@ -13,6 +13,7 @@ import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
+import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
@@ -28,6 +29,7 @@ import { useComparison } from '@/hooks/useComparison';
 import { useSessionDb } from '@/hooks/useSessionDb';
 import { useFieldVisibility } from '@/hooks/useFieldVisibility';
 import { useDmeLink } from '@/hooks/useDmeLink';
+import { useDisclaimer } from '@/hooks/useDisclaimer';
 
 type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup' | 'wot';
 
@@ -96,6 +98,8 @@ export default function Home() {
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
   const [adaptDialogOpen, setAdaptDialogOpen] = useState(false);
+  // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
+  const disclaimer = useDisclaimer();
 
   const {
     binaryFile, currentMap, binaryBuffer, patchStatus,
@@ -422,29 +426,26 @@ export default function Home() {
     }
   };
 
-  const handleStartTune = () => {
-    liveSamplesRef.current = [];
-    lastFlushRef.current = 0;
-    setLiveSample(null);
-    dmeLink.startTuning((sample) => {
-      const point: LogDataPoint = {
-        time: sample.time,
-        rpm: sample.rpm,
-        rawLoad: sample.rawLoad,
-        stft1: sample.stft1,
-        stft2: sample.stft2,
-        lambda1: sample.stft1,
-        lambda2: sample.stft2,
-        coolantTemp: sample.coolantTemp,
-      };
-      liveSamplesRef.current.push(point);
-      setLiveSample(point); // live raw readout, independent of the VE filters
-      flushLiveSamples(false);
-    });
-  };
+  /** One-shot per tuning session — reset in handleStartTune, deliberately NOT per mount. A per-mount
+   *  guard would silently skip the teardown for every datalog after the first. */
+  const finishedRef = useRef(false);
 
-  const handleStopTune = async () => {
-    dmeLink.stopTuning();
+  /**
+   * Ends a datalog — however it ended.
+   *
+   * Both endings must land here. A log stops either because the user pressed STOP or because the link
+   * failed mid-run, and on an unstable cable the second is the common one. Previously only the button
+   * ran this: a failed poll tore the loop down inside useDmeLink and quietly returned the link to
+   * 'connected', so STOP stopped being offered and this teardown never happened — the user was left
+   * connected, with no key-cycle instruction, and (because a partial log still produces a newMap) with
+   * the hub silently re-armed to WRITE. That is one click from flashing with the engine running.
+   *
+   * Order matters: disconnect BEFORE alert, because alert blocks the main thread and would freeze the
+   * read pump behind the dialog.
+   */
+  const finishLog = async (failure: string | null) => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
     flushLiveSamples(true);
 
     // Logging runs with the engine going; writing needs it stopped, and stopping it ends the DME's
@@ -452,7 +453,11 @@ export default function Home() {
     // on screen would just mean WRITE times out after the key cycle. Drop it and say what to do.
     await dmeLink.disconnect();
     alert(
-      'データログを終了しました。\n\n' +
+      (failure
+        ? '⚠ 通信が途切れたため、データログを中断しました。\n\n' +
+        `理由: ${failure}\n\n` +
+        '※ ここまでに記録したサンプルは保持しています。\n\n'
+        : 'データログを終了しました。\n\n') +
       'DMEへ書き込む場合は、次の手順で進めてください:\n' +
       '1. エンジンを停止(キーを OFF)\n' +
       '2. 再度イグニッションを ON にする(エンジンはかけない)\n' +
@@ -461,6 +466,48 @@ export default function Home() {
       '※ エンジンを止めると通信が切れるため、接続はここで解除しました。\n\n' +
       '書き込まない場合は、このまま Write Bytes で書き出せます(WRITEが送るバイト列そのもの)。'
     );
+  };
+
+  /** startTuning captures onEnd once, when START TUNE is pressed, so it must not close over a stale
+   *  finishLog — the final flush has to use the CURRENT map and filters, not the ones frozen at the
+   *  start of the run. Routing through a ref refreshed each render avoids re-creating the callback
+   *  (adding deps to startTuning would restart the poll loop on every render — far worse on a live
+   *  cable). */
+  const finishLogRef = useRef(finishLog);
+  finishLogRef.current = finishLog;
+
+  const handleStartTune = () => {
+    liveSamplesRef.current = [];
+    lastFlushRef.current = 0;
+    finishedRef.current = false;
+    setLiveSample(null);
+    dmeLink.startTuning(
+      (sample) => {
+        const point: LogDataPoint = {
+          time: sample.time,
+          rpm: sample.rpm,
+          rawLoad: sample.rawLoad,
+          stft1: sample.stft1,
+          stft2: sample.stft2,
+          lambda1: sample.stft1,
+          lambda2: sample.stft2,
+          coolantTemp: sample.coolantTemp,
+        };
+        liveSamplesRef.current.push(point);
+        setLiveSample(point); // live raw readout, independent of the VE filters
+        flushLiveSamples(false);
+      },
+      (failure) => { void finishLogRef.current(failure); },
+    );
+  };
+
+  const handleStopTune = async () => {
+    dmeLink.stopTuning();
+    // Run the teardown here rather than waiting for onEnd. On a dying cable the in-flight poll can
+    // take a full response timeout to settle, and STOP must not sit there looking dead. onEnd still
+    // fires afterwards, finds finishedRef already set, and returns — so this runs exactly once
+    // whichever path gets here first.
+    await finishLog(null);
   };
 
   /** Describes toggle drift from what the session was saved with, so the confirm dialog can say so
@@ -560,6 +607,22 @@ export default function Home() {
         return;
       }
       setActiveTab('startup');
+    } else {
+      // A failed write used to show nothing at all — no alert, no dialog — leaving only the small red
+      // notice line and a WRITE button that still looked ready. That is the most consequential moment
+      // in the app to stay silent about: writePartialBin erases the data area BEFORE it writes, so a
+      // failure part-way through can leave the ECU partially programmed.
+      alert(
+        '❌ 書き込みに失敗しました。\n\n' +
+        `理由: ${dmeLink.error ?? '不明なエラー'}\n\n` +
+        '⚠ DMEのデータ領域は消去済みで、書き込みが途中の可能性があります。\n' +
+        '  この状態でイグニッションを切ったり走行したりしないでください。\n\n' +
+        '対処:\n' +
+        '1. 電源(バッテリー)とケーブルの接続を安定させる\n' +
+        '2. 通信が切れている場合は CONNECTION で接続し直す\n' +
+        '3. 書き込みが成功するまで WRITE をやり直す\n\n' +
+        '※ WRITE は毎回消去からやり直すため、再実行しても安全です。'
+      );
     }
   };
 
@@ -1034,11 +1097,11 @@ export default function Home() {
                             onChange={(e) => dmeLink.setMockMode(e.target.checked)}
                             className="w-3 h-3 accent-amber-500 rounded bg-slate-700 border-none"
                           />
-                          MOCK
+                          PRACTICE
                         </label>
-                        {/* Baud only applies to a real DME, so it's hidden under MOCK — but it stays
+                        {/* Baud only applies to a real DME, so it's hidden under PRACTICE — but it stays
                             mounted and keeps its box. Unmounting it shrank this row, which shoved the
-                            MOCK checkbox sideways out from under the pointer as you clicked it. */}
+                            PRACTICE checkbox sideways out from under the pointer as you clicked it. */}
                         <label
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
@@ -1059,7 +1122,7 @@ export default function Home() {
                       </>
                     ) : (
                       <>
-                        <span className="text-[9px] text-slate-600 font-mono uppercase">{dmeLink.mockMode ? 'mock' : 'live'} · {dmeLink.state}</span>
+                        <span className="text-[9px] text-slate-600 font-mono uppercase">{dmeLink.mockMode ? 'practice' : 'live'} · {dmeLink.state}</span>
                         <button
                           onClick={dmeLink.disconnect}
                           className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
@@ -1078,7 +1141,7 @@ export default function Home() {
                 <div className="h-[14px] px-2 flex items-center overflow-hidden">
                   {(() => {
                     const warning = !dmeLink.mockMode && dmeLink.state === 'disconnected' && !dmeLink.isWebSerialSupported
-                      ? 'Web Serial API not available in this browser — use Chrome/Edge, or check MOCK to test offline.'
+                      ? 'Web Serial API not available in this browser — use Chrome/Edge, or check PRACTICE to test offline.'
                       : null;
                     const notice = dmeLink.error ?? warning;
                     if (!notice) return null;
@@ -1295,6 +1358,8 @@ export default function Home() {
           error={dmeLink.error}
         />
       )}
+
+      {disclaimer.open && <DisclaimerDialog onAccept={disclaimer.accept} />}
     </main >
   );
 }

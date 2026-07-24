@@ -119,25 +119,54 @@ export function useDmeLink() {
         linkRef.current?.abort();
     }, []);
 
-    // Begins the live-telemetry polling loop, invoking onSample for each reading until stopTuning
-    // is called. Runs until the caller (page.tsx) stops it, decoupled from React re-renders.
-    const startTuning = useCallback((onSample: (sample: LiveMeasurement) => void) => {
-        if (!linkRef.current) return;
+    /**
+     * Begins the live-telemetry polling loop, invoking onSample for each reading until stopTuning is
+     * called. Runs detached from React re-renders.
+     *
+     * onEnd fires exactly once when the loop exits, with the error message if the link failed or null
+     * if it stopped cleanly. It exists because the loop can end on its own: a transport failure used
+     * to tear it down internally and quietly return the link to 'connected', so the caller's
+     * end-of-log teardown — dropping the connection and telling the user to key-cycle before writing —
+     * simply never ran. That teardown is bound to a STOP button that had already stopped being
+     * offered. onEnd stays a pure link fact ("the poll loop ended, and this is what ended it"); what
+     * to DO about it belongs to the caller.
+     */
+    const startTuning = useCallback((
+        onSample: (sample: LiveMeasurement) => void,
+        onEnd?: (failure: string | null) => void,
+    ) => {
+        if (!linkRef.current) { onEnd?.('Not connected to DME'); return; }
+        // Every other operation clears the previous error first; this one didn't, so a failed
+        // adaptation reset — the step designed to happen immediately before a log — left the status
+        // dot red for the whole run and made the abort invisible.
+        setError(null);
         setState('tuning');
         pollingRef.current = true;
 
         (async () => {
-            while (pollingRef.current && linkRef.current) {
-                try {
-                    const sample = await linkRef.current.pollLiveMeasurement();
-                    if (!pollingRef.current) break;
-                    onSample(sample);
-                } catch (e: any) {
-                    setError(e?.message ?? String(e));
-                    pollingRef.current = false;
-                    setState('connected');
-                    break;
+            let failure: string | null = null;
+            try {
+                while (pollingRef.current && linkRef.current) {
+                    try {
+                        const sample = await linkRef.current.pollLiveMeasurement();
+                        if (!pollingRef.current) break;
+                        onSample(sample);
+                    } catch (e) {
+                        // A stop already in flight owns the teardown: disconnect() closes the port under
+                        // the in-flight read, and reporting that as a link failure would resurrect
+                        // 'connected' after disconnect() had already set 'disconnected'.
+                        if (!pollingRef.current) break;
+                        failure = e instanceof Error ? e.message : String(e);
+                        setError(failure);
+                        pollingRef.current = false;
+                        setState('connected');
+                        break;
+                    }
                 }
+            } finally {
+                // finally, not the catch: the loop's normal exit is the while condition / the break,
+                // so this is the only true single exit point — and it makes a double-fire impossible.
+                onEnd?.(failure);
             }
         })();
     }, []);
@@ -195,10 +224,16 @@ export function useDmeLink() {
             await linkRef.current.writePartialBin(buffer, makeThrottledProgress());
             setState('connected');
             return true;
-        } catch (e: any) {
-            setError(e?.message ?? String(e));
-            // Idle again, still connected. The tune is untouched, so the button goes back to WRITE
-            // on its own and the flash can be retried.
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+            // Idle again, still connected — but do NOT read this as "nothing happened". writePartialBin
+            // erases the data area before it writes, so once it has started the ECU is not untouched;
+            // a failure here can leave it partially programmed. And if the transport latched a break,
+            // an in-place retry is not merely inadvisable but mechanically impossible: the pre-flight
+            // login throws immediately. The caller must say so — see handleDmeWrite's failure branch.
+            //
+            // Deliberately NOT auto-disconnecting: after the destructive phase has begun, closing the
+            // port contradicts this file's own "keep power stable and re-write before disconnecting".
             setState('connected');
             return false;
         } finally {

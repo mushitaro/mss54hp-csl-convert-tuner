@@ -138,7 +138,7 @@ This is a [Next.js](https://nextjs.org) project.
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:5054](http://localhost:5054) with your browser to see the result.
 
 The DME features need a real K+DCAN cable and a secure context; `localhost` counts as secure, so
 `npm run dev` is enough for hardware testing. A **MOCK** toggle in the DME panel simulates a DME so

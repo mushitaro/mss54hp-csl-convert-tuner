@@ -408,3 +408,71 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 - **README is stale**: it still says checksum correction is "not yet included" and that flashing is
   "still researching". Both are now implemented and hardware-verified.
 - `reference/` is gitignored third-party software — never commit it.
+
+---
+
+## 12. K-line instability on the car (2026-07 real-vehicle testing)
+
+Two failures were captured on the vehicle, at seemingly random points in the session:
+
+```
+Serial read failed: Break received
+Unexpected K-line echo — check the cable connection (sent 12 05 0b 06 1a, got 05 08 00 00 00)
+```
+
+### These are one physical event, not two bugs
+
+Align the captured echo at lag +1 and every received byte is a strict **bitwise subset** of the byte
+that was sent:
+
+| sent | got | |
+|---|---|---|
+| `05` | `05` | — |
+| `0B` | `08` | 2 bits 1→0 |
+| `06` | `00` | 2 bits 1→0 |
+| `1A` | `00` | 3 bits 1→0 |
+
+**7 one-bits went 1→0. Zero of the 22 zero-bits went 0→1.** The K-line is open-collector: a device can
+only pull it *low*, never drive it high. A corruption that is exclusively 1→0, followed by three
+sustained `0x00` bytes (a held-low line is exactly the "break" condition), is the signature of
+**something pulling the line down during our own transmission** — not of a software buffer desync.
+
+Which of the two strings surfaces is a race: `readExact` tests `buffer.length < length` *before* it
+tests `pumpError`, so already-buffered corrupt bytes are returned on one attempt and the latched break
+throws on the next.
+
+Decisively: the failing frame's selection `0x06` is the adaptation block read — **the one path that
+already had drain + resync + three retries.** It failed anyway. No amount of software resilience
+prevents this.
+
+`classifyEchoMismatch()` in `ds2.ts` now performs this analysis automatically and puts the verdict in
+the error message, so the next occurrence is self-diagnosing.
+
+### What the software changes actually do
+
+**Fixes (real defects):**
+- A latched `pumpError` was only recoverable from the adaptation paths — every other recovery point
+  was a bare `purge()`, which cannot clear it. One transient break therefore poisoned the *whole*
+  session until a reconnect. All recovery points now use `resyncTransport()`.
+- The live-poll loop had no end-of-session callback, so when it died on a link error the post-log
+  teardown never ran: no disconnect, no key-cycle instruction — and because a partial log still
+  produces a `newMap`, the hub silently re-armed to **WRITE**. The user was one click from flashing
+  with the engine running. `startTuning` now reports the ending via `onEnd`, and both endings go
+  through `finishLog()`.
+- `writePartialBin` never cleared `aborted`. After a cancelled READ, a *fully successful* flash was
+  reported as failed on the read-back verify — inviting a needless re-flash of a 20-year-old ECU.
+- A failed write produced no user-facing message at all.
+
+**Mitigations (do not mistake for cures):** the block-3 poll retry and the broadened resync reduce how
+often a transient glitch is fatal. They do not repair a bad cable.
+
+### Physical checklist for the next drive
+
+Cheapest discriminator first:
+
+1. **Compare engine-off (ignition on) vs engine-running failure rates.** If it only misbehaves with
+   the engine running, it is ignition EMI on an unshielded cable — not the software.
+2. Reseat the OBD plug; wiggle-test it while connected.
+3. Try a different USB port, no hub.
+4. Check the OBD port's ground and KL15 supply.
+5. Note the adapter's FTDI VID/PID (`SerialPort.getInfo()`), since clone chips are common.

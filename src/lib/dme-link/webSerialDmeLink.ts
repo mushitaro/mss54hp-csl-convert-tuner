@@ -6,7 +6,7 @@ import {
     buildDs2Frame, parseDs2Frame, frameToBytes, isPositiveResponse,
     buildSeedRequestPayload, buildKeyPayload, isAlreadyUnlockedResponse, isSeedResponse, calculateLoginKey,
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
-    TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload,
+    TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch,
 } from './ds2';
 import {
     parseSystemAddressTable, findPointer, parseAifEntries, latestPopulatedAifEntry,
@@ -37,6 +37,10 @@ const ADAPT_SETTLE_MS = 2000;
 // or partial response finish arriving so the purge that follows actually clears it.
 const ADAPT_RETRY_ATTEMPTS = 3;
 const ADAPT_RETRY_DELAY_MS = 300;
+// Attempts for the one exchange the whole datalog rides on (block 3). Deliberately small: a sample
+// must never block long enough to starve the poll cadence, and this is a mitigation for transient
+// glitches, not a cure for a bad line.
+const POLL_RETRY_ATTEMPTS = 2;
 // Before the first adaptation exchange, wait for the K-line to fall silent so the echo read isn't
 // racing a prior operation's still-arriving response. One quiet window this long with nothing new
 // received counts as silent; give up after this many rounds rather than blocking forever.
@@ -131,13 +135,33 @@ export class WebSerialDmeLink implements DmeLink {
 
         const echo = await this.transport.readExact(request.length, timeoutMs);
         if (!arraysEqual(echo, request)) {
-            // The sent/got bytes make the failure mode legible: `got` starting with 12 LL A0… means
-            // we read a response where the echo should be (the line wasn't drained), whereas garbage
-            // points at a real cable/echo fault.
-            throw new DmeLinkError(`Unexpected K-line echo — check the cable connection (sent ${toHex(request)}, got ${toHex(echo)})`);
+            // Report WHICH failure this is rather than leaving it to be guessed. classifyEchoMismatch
+            // separates "a stale response was read in the echo's place" (software desync) from "the
+            // line was pulled low mid-transmission" (electrical) by bit direction — see ds2.ts.
+            //
+            // Deliberately NO resync here. Recovery belongs to the layers that own retry
+            // (adaptationExchangeWithRetry, the poll retry, readMemoryChunkWithRetry); putting it in
+            // this primitive would also silently clear a latch mid-flash and let the erase-failure
+            // fallback re-issue ERASE after what may have been a DME reset.
+            const a = classifyEchoMismatch(request, echo);
+            const latched = this.transport.peekReadError();
+            throw new DmeLinkError(
+                `Unexpected K-line echo (sent ${toHex(request)}, got ${toHex(echo)}) — ${a.verdict} ` +
+                `[lag +${a.lag}, ${a.flips1to0} bit(s) 1→0, ${a.flips0to1} bit(s) 0→1, ` +
+                `${a.trailingZeroRun}-byte zero tail, ${this.transport.bufferedLength()} byte(s) still buffered` +
+                `${latched ? `, latched ${latched.name}` : ''}]`,
+            );
         }
 
         const header = await this.transport.readExact(2, timeoutMs);
+        // Check the address before trusting the length byte. Out of frame, a bogus length would
+        // otherwise consume up to 253 further bytes (swallowing the NEXT response) or stall a whole
+        // timeout before the checksum finally rejected it.
+        if (header[0] !== DS2_DEFAULT_ADDRESS) {
+            throw new DmeLinkError(
+                `DS2 response out of frame: expected address 0x${DS2_DEFAULT_ADDRESS.toString(16)}, got ${toHex(header)}`,
+            );
+        }
         const declaredLength = header[1];
         if (declaredLength < 4) throw new DmeLinkError(`Invalid DS2 response length byte ${declaredLength}`);
         const rest = await this.transport.readExact(declaredLength - 2, timeoutMs);
@@ -242,8 +266,12 @@ export class WebSerialDmeLink implements DmeLink {
             } catch (e) {
                 lastError = e;
                 if (attempt < CHUNK_RETRY_ATTEMPTS) {
-                    this.transport.purge();
+                    // Delay first, THEN resync. Resyncing first lets the DME's late response arrive
+                    // into the freshly-cleared buffer and desync the next attempt. purge() alone also
+                    // cannot clear a latched break, which is why all five attempts used to burn in
+                    // zero time once the line had glitched.
                     await delay(300);
+                    await this.resyncTransport();
                 }
             }
         }
@@ -323,7 +351,9 @@ export class WebSerialDmeLink implements DmeLink {
         // Refresh the seed/key unlock before reading program/data memory, mirroring the reference
         // EnsureUnlockedForProgramMemoryReadAsync. The diagnostic session can lapse between connect
         // and the user clicking READ; re-login is a no-op if still unlocked.
-        this.transport.purge();
+        // resync, not purge: a break latched by an earlier operation would otherwise kill the login
+        // that follows, and READ would die before transferring a single chunk.
+        await this.resyncTransport();
         await this.login();
 
         // Optional baud boost for the bulk transfer. Skipped entirely at 9600 (no switch, no port
@@ -381,6 +411,15 @@ export class WebSerialDmeLink implements DmeLink {
 
     async writePartialBin(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
         this.assertConnected();
+        // Clear a stale cancel, exactly as readPartialBin does. Without this, a user who pressed
+        // Cancel Read earlier in the session left `aborted` latched true: the flash would then erase,
+        // write and finalize completely — and the read-back verify would throw "Read cancelled" on the
+        // very first chunk. A fully successful flash reported as a failure, whose natural response is
+        // to press WRITE again, burning another erase+program cycle on a 20-year-old ECU every time.
+        // Note this only clears it up-front; no abort check is added inside the write loop, because
+        // "between chunks" is mid-programming-session and honouring a cancel there would abandon a
+        // half-programmed ECU.
+        this.aborted = false;
         const { slave, master } = Mss54HpDataTuneLayout;
         const total = slave.length + master.length;
         if (buffer.byteLength !== total) {
@@ -392,7 +431,9 @@ export class WebSerialDmeLink implements DmeLink {
 
         // Refresh the seed/key unlock before the protected write (matches ForceRefreshUnlock in the
         // reference). The DME rejects erase/write with 0xA2 if the session lapsed or RPM/speed != 0.
-        this.transport.purge();
+        // resync, not purge — same reason as READ. This is strictly BEFORE the erase below, so it
+        // cannot affect flashing itself; it only stops a stale break from failing the pre-flight.
+        await this.resyncTransport();
         await this.login();
 
         // Erase the data area. The normal flow erases directly (no "pre-clean" prepare — that would
@@ -443,8 +484,27 @@ export class WebSerialDmeLink implements DmeLink {
         if (this.startTime === 0) this.startTime = performance.now();
 
         // Standard Measurements (selection 3) is the critical block — it carries RPM and relative
-        // opening, which the VE calculation depends on. A failure here is fatal to the sample.
-        const stdFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([STANDARD_MEASUREMENT_BLOCK.selection]));
+        // opening, which the VE calculation depends on. A failure here is fatal to the sample, and
+        // (via useDmeLink's polling loop) to the entire datalog, so it gets the resync + bounded retry
+        // it previously lacked: it used to be the only user-initiated first exchange with no purge, no
+        // drain and no retry, so it inherited any desync an earlier failed operation left behind.
+        //
+        // Retrying is safe here specifically because READ_IO_STATUS with a selection byte is a pure
+        // idempotent read — readAdaptationBlock already retries the identical control byte. This must
+        // never be widened to WRITE_MEMORY or sendProgrammingControl.
+        let stdFrame: Ds2Frame | null = null;
+        let stdError: unknown;
+        for (let attempt = 1; attempt <= POLL_RETRY_ATTEMPTS; attempt++) {
+            try {
+                await this.resyncTransport();
+                stdFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([STANDARD_MEASUREMENT_BLOCK.selection]));
+                stdError = undefined;
+                break;
+            } catch (e) {
+                stdError = e;
+            }
+        }
+        if (!stdFrame) throw stdError instanceof Error ? stdError : new DmeLinkError(String(stdError));
         if (!isPositiveResponse(stdFrame)) throw new DmeLinkError('Standard measurement block read rejected by DME');
         const std = decodeStandardMeasurementBlock(stdFrame.payload);
 
@@ -467,8 +527,11 @@ export class WebSerialDmeLink implements DmeLink {
                 stft2 = op.stft2 ?? 1.0;
             }
         } catch {
-            // leave neutral; the transport buffer is resynced on the next exchange's write
-            this.transport.purge();
+            // Leave trim neutral — but resync, because a break latched here would otherwise be
+            // reported as a perfectly healthy sample while guaranteeing the NEXT poll dies.
+            // The inner catch is load-bearing: resyncTransport can now throw (device gone), and a
+            // deliberate swallow must not become fatal just because disconnect() raced this poll.
+            try { await this.resyncTransport(); } catch { }
         }
 
         return {
@@ -504,13 +567,16 @@ export class WebSerialDmeLink implements DmeLink {
      */
     private async drainUntilQuiet(): Promise<void> {
         for (let round = 0; round < DRAIN_MAX_ROUNDS; round++) {
-            await this.resyncTransport();
+            // Guarded: resyncTransport can now throw when the device is gone. Draining is preparation,
+            // not the operation, so a failure here must not pre-empt the real DS2 error the caller is
+            // about to produce — it just means this round couldn't clean up.
+            try { await this.resyncTransport(); } catch { }
             await delay(DRAIN_QUIET_MS);
             // Quiet means both empty AND no error: a break latches the pump and stops new bytes, so
             // an empty buffer alone would read as "quiet" on a dead line.
             if (this.transport.bufferedLength() === 0 && !this.transport.hasReadError()) return;
         }
-        await this.resyncTransport();
+        try { await this.resyncTransport(); } catch { }
     }
 
     /** Readies the read side for a fresh attempt: a latched break needs the pump restarted; a plain
@@ -539,8 +605,11 @@ export class WebSerialDmeLink implements DmeLink {
     ): Promise<Ds2Frame> {
         let lastError: unknown;
         for (let attempt = 1; attempt <= ADAPT_RETRY_ATTEMPTS; attempt++) {
-            await this.resyncTransport();
             try {
+                // Inside the try on purpose: resyncTransport can throw (device gone), and outside it
+                // that throw would escape the loop entirely, discarding the remaining attempts and
+                // replacing the actual DS2 diagnosis with a recovery error.
+                await this.resyncTransport();
                 const frame = await this.exchange(control, payload, timeoutMs);
                 if (!isPositiveResponse(frame)) {
                     throw new DmeLinkError(`${describe} rejected by DME (status 0x${frame.controlOrStatus.toString(16)})`);
@@ -552,7 +621,8 @@ export class WebSerialDmeLink implements DmeLink {
             }
         }
         // Leave the transport usable for whatever runs next — most importantly a START TUNE poll.
-        await this.resyncTransport();
+        // Guarded so a failed cleanup can't overwrite lastError one line before we report it.
+        try { await this.resyncTransport(); } catch { }
         throw lastError instanceof Error ? lastError : new DmeLinkError(String(lastError));
     }
 
