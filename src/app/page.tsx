@@ -17,7 +17,7 @@ import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
-import { AdaptationSnapshot } from '@/lib/dme-link/types';
+import { AdaptationSnapshot, TransferPhase } from '@/lib/dme-link/types';
 import { TUNE_ADAPTATION_CLEAR } from '@/lib/dme-link/ds2';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV } from '@/lib/download';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
@@ -69,6 +69,60 @@ function useFitScale(minScale = 0.5) {
   // item's automatic minimum size, so without this `flex-1` collapses the box and clips the main
   // button away entirely on short viewports. Independent of scale, so it can't feed back into it.
   return { outerRef, innerRef, scale, minH: naturalH * minScale };
+}
+
+/** One phase, one color. The hub's progress arc, the percentage inside it and the phase label under
+ *  it all read this table, so the three can never disagree about what stage the transfer is in.
+ *  Amber and emerald are the instrument's functional status layer (busy / verified) rather than
+ *  brand colors, which is exactly why they belong on the two stages that behave unusually: erase
+ *  reports nothing and parks the percentage at 0 until it finishes (ERASE_TIMEOUT_MS allows it 65 s),
+ *  and verify is a second full-length pass that is reading the ECU back, not writing to it. */
+const TRANSFER_PHASE_STYLE: Record<TransferPhase, { label: string; text: string }> = {
+  erasing: { label: 'Erasing…', text: 'text-amber-400' },
+  reading: { label: 'Reading…', text: 'text-blue-400' },
+  writing: { label: 'Writing…', text: 'text-blue-400' },
+  verifying: { label: 'Verifying…', text: 'text-emerald-400' },
+};
+
+/** Progress arc drawn on the hub button's circumference.
+ *
+ *  Absolutely positioned, and rendered only while a transfer is in flight: the idle hub is left
+ *  exactly as it was, and — the rule the whole cluster follows — nothing here can change the
+ *  cluster's natural size and set the auto-fit rescaling the dial mid-read.
+ *
+ *  The box is -inset-1 (88px around the 80px button) and the viewBox matches it 1:1, so every number
+ *  below is in real pixels: the 3px band sits in the gap between the button's own border (r=40) and
+ *  the decorative hairline bezel (r≈44). Rotated -90° so 0% starts at 12 o'clock and fills clockwise.
+ *  Last child of the wrapper so it paints over the button's outer ring rather than under it.
+ *
+ *  `stroke-current` + a currentColor drop-shadow means the caller passes a single text-* class and
+ *  gets the arc, its glow and the percentage in one color. */
+function HubProgressRing({ percent, colorClass, pulse }: { percent: number; colorClass: string; pulse: boolean }) {
+  const R = 42;
+  const CIRCUMFERENCE = 2 * Math.PI * R;
+  const clamped = Math.max(0, Math.min(100, percent));
+  return (
+    <svg viewBox="0 0 88 88" className="absolute -inset-1 w-[88px] h-[88px] -rotate-90 pointer-events-none" aria-hidden="true">
+      {/* Track. Pulses only while erasing — that stage reports no percentage, so the arc alone would
+          look like a stalled transfer for the whole erase. */}
+      <circle cx="44" cy="44" r={R} fill="none" strokeWidth="3" className={`stroke-slate-800 ${pulse ? 'animate-pulse' : ''}`} />
+      {/* Deliberately NOT transitioned. A `transition` on stroke-dashoffset freezes the *rendered*
+          value at whatever it was when the first transition started — the inline style keeps
+          updating, the computed style never does, and the arc sits at ~4% for the whole read.
+          Measured in the browser: with the transition the computed offset never leaves its initial
+          value; without it, it tracks exactly. The link already throttles progress to ~10 Hz, so
+          stepping straight to each value is smooth on its own. */}
+      <circle
+        cx="44" cy="44" r={R} fill="none" strokeWidth="3" strokeLinecap="round"
+        className={`${colorClass} stroke-current`}
+        style={{
+          strokeDasharray: CIRCUMFERENCE,
+          strokeDashoffset: CIRCUMFERENCE * (1 - clamped / 100),
+          filter: 'drop-shadow(0 0 3px currentColor)',
+        }}
+      />
+    </svg>
+  );
 }
 
 export default function Home() {
@@ -689,6 +743,12 @@ export default function Home() {
     }
   })();
 
+  // Which stage the hub's arc, percentage and phase label are all painted for. transferPhase lags
+  // transferProgress by a beat — the link publishes 0% the moment the operation starts, and the
+  // stage only arrives with the first chunk — so fall back to what the link state already says is
+  // happening rather than flashing the read color at the top of a write.
+  const transferStyle = TRANSFER_PHASE_STYLE[dmeLink.transferPhase ?? (dmeLink.state === 'writing' ? 'writing' : 'reading')];
+
   const dmeStatusColor = dmeLink.state === 'disconnected' ? 'bg-slate-600'
     : dmeLink.state === 'connecting' || dmeLink.state === 'reading' || dmeLink.state === 'writing' || dmeLink.state === 'resetting' ? 'bg-amber-500 animate-pulse'
       : dmeLink.error ? 'bg-red-500'
@@ -1224,11 +1284,32 @@ export default function Home() {
                               ${dmeLink.state === 'tuning' ? 'text-amber-500 border-amber-700' : ''}
                           `}
                       >
-                        <dmeButtonConfig.Icon className={`w-5 h-5 transition-transform duration-300 stroke-[1.5] ${dmeButtonConfig.spin ? 'animate-spin' : 'group-hover:scale-110'}`} />
-                        <span className="text-[8px] font-bold tracking-widest uppercase leading-none text-center px-1">
-                          {dmeLink.transferProgress !== null ? `${dmeLink.transferProgress}%` : dmeButtonConfig.label}
-                        </span>
+                        {/* Mid-transfer the percentage IS the button: the arc around it carries the
+                            same number, so a spinner would only say "busy" a second time, and the
+                            8px label the percentage used to share space with was too small to read
+                            across a garage at arm's length. Idle, nothing about the hub changes. */}
+                        {dmeLink.transferProgress !== null ? (
+                          <span className={`flex items-baseline font-mono font-bold leading-none tabular-nums ${transferStyle.text}`}>
+                            <span className="text-[22px] tracking-tight">{dmeLink.transferProgress}</span>
+                            <span className="text-[10px] ml-0.5">%</span>
+                          </span>
+                        ) : (
+                          <>
+                            <dmeButtonConfig.Icon className={`w-5 h-5 transition-transform duration-300 stroke-[1.5] ${dmeButtonConfig.spin ? 'animate-spin' : 'group-hover:scale-110'}`} />
+                            <span className="text-[8px] font-bold tracking-widest uppercase leading-none text-center px-1">
+                              {dmeButtonConfig.label}
+                            </span>
+                          </>
+                        )}
                       </button>
+
+                      {dmeLink.transferProgress !== null && (
+                        <HubProgressRing
+                          percent={dmeLink.transferProgress}
+                          colorClass={transferStyle.text}
+                          pulse={dmeLink.transferPhase === 'erasing'}
+                        />
+                      )}
                     </div>
 
                   </div>
@@ -1289,11 +1370,8 @@ export default function Home() {
                      scaled down along with the dial. */}
               <div className="h-[46px] flex-none flex flex-col items-center justify-start gap-2 pt-2.5">
                 {dmeLink.transferPhase && (
-                  <span className={`whitespace-nowrap text-[9px] font-bold tracking-[0.2em] uppercase animate-pulse ${dmeLink.transferPhase === 'verifying' ? 'text-emerald-400' : dmeLink.transferPhase === 'erasing' ? 'text-amber-400' : 'text-blue-400'}`}>
-                    {dmeLink.transferPhase === 'erasing' ? 'Erasing…'
-                      : dmeLink.transferPhase === 'writing' ? 'Writing…'
-                        : dmeLink.transferPhase === 'verifying' ? 'Verifying…'
-                          : 'Reading…'}
+                  <span className={`whitespace-nowrap text-[9px] font-bold tracking-[0.2em] uppercase animate-pulse ${transferStyle.text}`}>
+                    {transferStyle.label}
                   </span>
                 )}
 
