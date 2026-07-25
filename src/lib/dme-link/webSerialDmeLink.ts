@@ -46,6 +46,12 @@ const POLL_RETRY_ATTEMPTS = 2;
 // received counts as silent; give up after this many rounds rather than blocking forever.
 const DRAIN_QUIET_MS = 150;
 const DRAIN_MAX_ROUNDS = 8;
+// A latched break is a different problem from a stale tail and needs a different remedy. Re-acquiring
+// the reader does not repair a disturbed line: the fresh reader simply re-latches the same break, so
+// cycling it every 150ms is churn, not recovery — the line never gets a quiet stretch long enough to
+// come back. These give it real, escalating silence instead (400 / 800 / 1200 ms).
+const BREAK_SETTLE_MS = 400;
+const BREAK_RECOVERY_ROUNDS = 3;
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -566,12 +572,19 @@ export class WebSerialDmeLink implements DmeLink {
      * READ and START TUNE happen not to run on top of such a tail, which is why only the reset hit it.
      */
     private async drainUntilQuiet(): Promise<void> {
+        let breakRounds = 0;
         for (let round = 0; round < DRAIN_MAX_ROUNDS; round++) {
+            const wasBroken = this.transport.hasReadError();
+            // Stop cycling the reader once a few real settle windows haven't helped. Continuing would
+            // only churn: nine cancel/re-acquire cycles in two seconds is what made a break on this
+            // path survive every automatic attempt while a manual retry seconds later succeeded.
+            if (wasBroken && ++breakRounds > BREAK_RECOVERY_ROUNDS) break;
             // Guarded: resyncTransport can now throw when the device is gone. Draining is preparation,
             // not the operation, so a failure here must not pre-empt the real DS2 error the caller is
             // about to produce — it just means this round couldn't clean up.
             try { await this.resyncTransport(); } catch { }
-            await delay(DRAIN_QUIET_MS);
+            // A stale tail clears in a moment; a disturbed line needs genuine silence, escalating.
+            await delay(wasBroken ? BREAK_SETTLE_MS * breakRounds : DRAIN_QUIET_MS);
             // Quiet means both empty AND no error: a break latches the pump and stops new bytes, so
             // an empty buffer alone would read as "quiet" on a dead line.
             if (this.transport.bufferedLength() === 0 && !this.transport.hasReadError()) return;
@@ -617,7 +630,11 @@ export class WebSerialDmeLink implements DmeLink {
                 return frame;
             } catch (e) {
                 lastError = e;
-                await delay(ADAPT_RETRY_DELAY_MS);
+                // Escalating, and longer after a break: a flat 300ms gave the line barely a second of
+                // total settling across all three attempts, which is why the automatic retries kept
+                // failing where a manual retry a few seconds later worked.
+                const base = this.transport.hasReadError() ? BREAK_SETTLE_MS : ADAPT_RETRY_DELAY_MS;
+                await delay(base * attempt);
             }
         }
         // Leave the transport usable for whatever runs next — most importantly a START TUNE poll.
