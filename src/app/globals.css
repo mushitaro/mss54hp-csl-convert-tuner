@@ -8,8 +8,11 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* Both must stay pointed at variables layout.tsx actually defines. A dangling
+     var() here makes font-family invalid at computed-value time, so font-sans /
+     font-mono silently fall back to whatever is inherited instead of erroring. */
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
 }
 
 /* ── TSUNAGI brand palette ──────────────────────────────────────────────
@@ -74,10 +77,13 @@
   }
 }
 
+/* No font-family here on purpose: `@theme inline` inlines its values into the
+   utilities and never emits --font-sans / --font-mono as custom properties, so
+   a var() reference at this level would silently resolve to the generic system
+   stack. layout.tsx sets the body default via Inter's own className. */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
 }
 
 /* Minimal Scrollbar for Webkit (Chrome, Safari, Edge) */
