@@ -4,8 +4,6 @@ import { processLogData } from '@/lib/log-engine/filter';
 import { ProcessedLog, LogDataPoint, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { APP_CONFIG } from '@/config/constants';
 
-const LOG_WINDOW_SIZE = 2000;
-
 const DEFAULT_FILTER_CONFIG: LogFilterConfig = {
   enableCorrection: true,
   enableMinTemp: true,
@@ -25,24 +23,27 @@ export function useLogFile() {
   const [filterConfig, setFilterConfig] = useState<LogFilterConfig>(DEFAULT_FILTER_CONFIG);
   const [interpolationTable, setInterpolationTable] = useState<InterpolationPoint[]>(APP_CONFIG.MSS54HP.INTERPOLATION_TABLE);
 
-  const [logWindowStart, setLogWindowStart] = useState<number>(0);
   const [selectedLogIndex, setSelectedLogIndex] = useState<number | null>(null);
 
-  // Reset window when file changes
+  // A new log invalidates any row that was selected in the previous one.
   useEffect(() => {
-    setLogWindowStart(0);
     setSelectedLogIndex(null);
   }, [processedLog]);
 
-  // Reset selection when window slides
-  useEffect(() => {
-    setSelectedLogIndex(null);
-  }, [logWindowStart]);
-
-  const windowedLogData = useMemo(() => {
-    if (!processedLog) return [];
-    return processedLog.data.slice(logWindowStart, logWindowStart + LOG_WINDOW_SIZE);
-  }, [processedLog, logWindowStart]);
+  /**
+   * The whole log. There used to be a 2000-point window with a scrub slider in front of it, and it
+   * was wrong twice over.
+   *
+   * It never worked: Plotly keeps a user's zoom until the layout it is handed offers something to
+   * revert to, and the layout supplied no xaxis range or autorange. So after any trackpad zoom the
+   * axis stayed pinned while the window slid underneath it — the data changed and the picture did
+   * not. Below 2000 points (most runs) the slider could not move at all, which hid the rest.
+   *
+   * And it bought nothing: a line trace collapses to one SVG path however many points it holds.
+   * Measured at 20,000 points across five traces, a full Plotly.react is ~32 ms and a pan ~9 ms.
+   * Navigation is the trackpad's job — dragmode 'pan' and scrollZoom are already on.
+   */
+  const displayedLogData = useMemo(() => processedLog?.data ?? [], [processedLog]);
 
   // Parses a new CSV file, sets raw+processed state, and returns the processed result
   const parseAndSetLog = async (file: File): Promise<ProcessedLog | null> => {
@@ -114,7 +115,6 @@ export function useLogFile() {
     setLogFile(null);
     setRawLogData(null);
     setProcessedLog(null);
-    setLogWindowStart(0);
     setSelectedLogIndex(null);
   };
 
@@ -124,12 +124,9 @@ export function useLogFile() {
     processedLog,
     filterConfig,
     interpolationTable,
-    logWindowStart,
-    setLogWindowStart,
     selectedLogIndex,
     setSelectedLogIndex,
-    windowedLogData,
-    LOG_WINDOW_SIZE,
+    displayedLogData,
     parseAndSetLog,
     loadRawLog,
     reprocess,

@@ -8,17 +8,35 @@ import { Layout, Data } from 'plotly.js';
 // Dynamic import for Plotly to avoid SSR issues
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as any;
 
-/** Sequential — absolute magnitude (RF %). Logo navy → M-blue → ice, monotonically lighter, so the
- *  surface still reads low-to-high in greyscale or with any color vision. It discriminates less
- *  finely than the perceptually-uniform Viridis it replaces; that is the cost of holding the
- *  instrument to the ///M tricolor, and it is why the deviation views below get their own scale
+/** Sequential — absolute magnitude (RF %). The ///M tricolor in one climb, weighted so blue owns the
+ *  body of the range and red is the top note rather than the subject: deep blue → M-blue → violet →
+ *  red → warm near-white. Monotonically lighter throughout (L 0.031 → 0.200 → 0.293 → 0.354 →
+ *  0.752), so the surface still reads low-to-high in greyscale or with any colour vision.
+ *
+ *  Two constraints fix the shape, and they pull against each other:
+ *
+ *  1. **Red can only be the top.** M-red #F11A22 sits at L 0.196 and blue-600 #0883BD at L 0.200 —
+ *     near-identical. Any ramp running blue *through* red on the way up has a flat band there where
+ *     the surface stops encoding height at all. Red is structurally dark (green carries 0.7152 of
+ *     the luminance weight), so on a lightness-ordered ramp its light tints are the only way to
+ *     reach the top.
+ *  2. **Therefore the saturated logo red cannot appear here.** Letting blue reach the midtones
+ *     spends the luminance #F11A22 would need. Only #F87A7F survives. That is the price of blue
+ *     keeping the middle of the range, and it is the right trade: the logo red stays exclusively
+ *     the "more" end of SCALE_DEVIATION, where it is a reading rather than a magnitude.
+ *
+ *  The violet step is a hue bridge, not decoration — interpolating M-blue straight to red passes
+ *  through a dead grey, and violet is the only M hue that sits between them.
+ *
+ *  It discriminates less finely than the perceptually-uniform Viridis it replaces; that is the cost
+ *  of holding the instrument to the tricolor, and it is why the deviation views get their own scale
  *  instead of being read off this one. */
 const SCALE_MAGNITUDE: Array<[number, string]> = [
-    [0, '#2B115A'],    // M-violet 900 — the logo navy, darkest anchor
-    [0.25, '#06354E'], // blue-900
-    [0.5, '#0883BD'],  // blue-600
-    [0.75, '#26AEE4'], // blue-400
-    [1, '#B6E4F5'],    // ice
+    [0, '#06354E'],    // blue-900     — darkest anchor
+    [0.32, '#0883BD'], // blue-600
+    [0.55, '#9B84E8'], // M-violet 400 — hue bridge
+    [0.75, '#F87A7F'], // M-red 300
+    [1, '#FBD9DA'],    // M-red 100    — warm near-white
 ];
 
 /** Diverging — signed deviation, anchored on a neutral midpoint by `deviationMidpoint`. Same

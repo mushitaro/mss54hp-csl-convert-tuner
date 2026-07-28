@@ -113,12 +113,15 @@ interface Props {
     /** True while the DME is recording. Suppresses the transition: the series grows on every flush,
      *  and tweening a lengthening line makes it crawl instead of extend. */
     live?: boolean;
+    /** Bump to drop the user's zoom and re-fit the whole log. Feeds uirevision — see the layout memo
+     *  for why an explicit autorange is not enough on its own. */
+    fitToken?: number;
 }
 
 /** Wrapped in React.memo so the page's per-sample re-render during a log run stops at this boundary.
  *  Without it the live HUD's state updates would drag a full Plotly pass along ~8 times a second. */
 export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
-    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false,
+    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0,
 }: Props) {
     const lastHoveredIndex = React.useRef<number | null>(null);
     const presenceSource = presenceData && presenceData.length > 0 ? presenceData : data;
@@ -190,12 +193,22 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         ];
     }, [data, presenceSource, visibleFields.lambda1, visibleFields.lambda2]);
 
-    /** uirevision preserves zoom/pan across updates and is keyed on the window's first timestamp: a
-     *  window slide changes it (reset the zoom, the axis means something else now), a toggle does not
-     *  (keep it). */
+    /** Zoom persistence, and the way out of it.
+     *
+     *  `autorange: true` is stated explicitly, and that is the load-bearing part. Plotly only reverts
+     *  a user's zoom to something the supplied layout actually names — omitting the key is not the
+     *  same as asking for autorange, it means "nothing to revert to", and the axis keeps whatever the
+     *  scroll wheel last set. That is what made the old scrub slider look dead: the data underneath
+     *  changed on every step while the axis stayed pinned where the zoom left it.
+     *
+     *  uirevision then decides when that revert happens. It holds steady while the same log is on
+     *  screen — including as it grows during a live run, since the first timestamp does not move — so
+     *  a zoom survives re-renders. It changes when a different log loads, or when the FIT button
+     *  bumps its token, and either of those re-fits the view. */
     const layout = useMemo((): Partial<Layout> => ({
         ...BASE_LAYOUT,
-        uirevision: data.length > 0 ? data[0].time : 'init',
+        xaxis: { ...BASE_LAYOUT.xaxis, autorange: true },
+        uirevision: `${data.length > 0 ? data[0].time : 'init'}:${fitToken}`,
         transition: (!live && data.length <= TRANSITION_MAX_POINTS) ? TOGGLE_TRANSITION : undefined,
         shapes: selectedIndex !== undefined && selectedIndex !== null && data[selectedIndex] ? [
             {
@@ -215,7 +228,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 },
             },
         ] : [],
-    }), [data, selectedIndex, live]);
+    }), [data, selectedIndex, live, fitToken]);
 
     return (
         <div
