@@ -174,9 +174,18 @@ flashed.
 |---|---|
 | Write segment | `2` |
 | Erase segment | `6` |
+| Recycling segment | `14` (`0x0E`) — flash-counter reset only, see §13 |
 | Finish / pre-clean segment | `15` (`0x0F`) |
 | Data programming session address | `0xA02000` |
 | Finalize address | `0` |
+
+> **Note on `0xA02000`.** The reference `Ds2ProgrammingControl.cs` uses `10502144` = **`0xA04000`**,
+> not `0xA02000`. Both are inside the same slave DataBlock subsegment (nibble `0xA`) and differ only
+> in the offset within it. `0xA02000` is what this app has actually flashed a real vehicle with,
+> read-back verification included — and a skipped erase cannot survive that check, since NOR flash
+> only clears bits (the DME would answer verify byte `3`, "cells were not erased", on the first
+> chunk). The proven value therefore stays. Don't align it to the reference without re-proving it
+> on a car.
 
 ### Sequence
 
@@ -237,9 +246,10 @@ already read `0xFF`, so re-writing them is a wasted program cycle.
 5. Write is **not cancellable** (cancelling after erase would leave the ECU half-programmed).
 6. The tuned session is auto-saved to the DB on success.
 
-Deliberately **not** implemented (kept simple by choice): mandatory tracked-backup gate, power
-monitoring, flash-counter warnings, strict DME-identity backup matching, multi-step typed
-confirmations.
+Deliberately **not** implemented (kept simple by choice): power monitoring, strict DME-identity
+backup matching, multi-step typed confirmations. (Flash-counter reading and its warning colors now
+exist — see §13. The mandatory tracked-backup gate exists only for the flash-counter reset, which
+cannot proceed without one, not for the tune write.)
 
 > **The DME enforces engine-off itself**: erase/write is rejected with `0xA2` unless RPM/vehicle
 > speed are zero. The confirmation dialog is a courtesy, not the only guard.
@@ -476,3 +486,167 @@ Cheapest discriminator first:
 3. Try a different USB port, no hub.
 4. Check the OBD port's ground and KL15 supply.
 5. Note the adapter's FTDI VID/PID (`SerialPort.getInfo()`), since clone chips are common.
+
+---
+
+## 13. Flash counter (read + reset)
+
+Ported from the reference `DmeFlashCounter.cs` and `ClearFlashCounterExecutor.cs`. Pure logic lives
+in `src/lib/dme-link/flashCounter.ts`; the DS2 work is in `webSerialDmeLink.ts`.
+
+### Where it lives
+
+**Not** in the identity response. It is a 256-byte run of 2-byte big-endian markers at offset `0x800`
+inside the 8 KB **Free Identifiers (service info) block** — the same block that holds AIF, ZIF and the
+VIN records. Addresses follow `Ds2ProgrammingSubsegment.CreateAddress` = `(nibble << 20) | offset`,
+where FreeIdentifiers is nibble `0` and the slave processor adds `8`:
+
+| Item | DS2 address | Length |
+|---|---|---|
+| Master service block | `0x000000` | 8192 |
+| Slave service block | `0x800000` | 8192 |
+| Master counter | `0x000800` | 256 |
+| Slave counter | `0x800800` | 256 |
+| Clear-prep marker (both) | block base `+0x900` | 4 |
+
+Limit is **30 slots per processor**. Reading is an ordinary `0x06` memory read (segment `0`), done at
+connect alongside VIN/AIF/SW — six chunk reads, ~1.5 s at 9600. A failure leaves
+`DmeIdentity.flashCounter` **null**, which is a different fact from `0/30` and is rendered as `-`.
+
+### Decoding
+
+Walk 2-byte markers until one isn't `0x0000`; everything before it is a consumed slot.
+
+```
+i = 0
+do { marker = (data[i] << 8) | data[i+1]; i += 2 } while (marker === 0 && i < 254)
+i -= 2
+used = trunc(i / 4)
+```
+
+Two porting traps:
+
+- It is a **do/while**. A region whose first marker is already non-zero still advances `i` and backs
+  it out, landing on 0 used. A `while` loop changes that.
+- `i` steps by 2 but a slot is 4 bytes, so `i / 4` is not always an integer. C# integer division
+  truncates; JS does not. **`Math.trunc` is required** or a field caught mid-programming reports a
+  fractional count.
+
+Marker meanings: `0xFFFF` available · `0x00FF` data programming active · `0xFF00` program programming
+active · anything else full/unknown.
+
+### Reset
+
+**A cleared counter reads `1/30`, not `0/30`.** The reset image fills the 256 bytes with `0xFF` and
+then zeroes the first 4: `0x0000` is the "consumed, keep looking" sentinel the scan walks over, so a
+field of pure `0xFF` would leave no sentinel at all. 1/30 used, 29 remaining is the correct outcome.
+
+The counter cannot be written in place (flash only goes 1→0 without an erase), so the whole service
+block on **both** processors is read, rebuilt, erased and written back:
+
+| # | Step | Control | Seg | Address | Notes |
+|---|---|---|---|---|---|
+| 0 | Read both blocks | `0x06` | `0` | `0x000000`, `0x800000` | 8192 each → the backup |
+| 1 | Prep marker | `0x07` | `2` | base `+0x900` | `4B 31 36 2E` = ASCII `K16.`, only if currently all-`FF`, 30 s timeout |
+| 2 | Recycle-only | `0x07` | `14` | `0x424151` (`"BAQ"`) | verify byte not required |
+| 3 | Erase | `0x07` | `6` | `0x000000` | **one erase covers both processors**, 65 s |
+| 4 | Write | `0x07` | `2` | `0x000000` → `0x800000` | 122-byte chunks, all-`FF` chunks skipped |
+| 5 | Recycle-off | `0x07` | `14` | `0x424152` (`"BAR"`) | verify byte not required |
+| 6 | Finalize | `0x07` | `15` | `0` | verify byte required |
+| 7 | Verify | `0x06` | `0` | both blocks | byte-for-byte, any mismatch throws |
+
+No separate programming-session entry beyond the seed/key re-login, and **no baud boost** (the
+reference switches to 125000; this app's flash path has never done that on real hardware — see §9).
+~1.5–2 min end to end at 9600.
+
+> The reference has a **second** marker at the same `+0x900` offset, `50 60 70 33`, belonging to the
+> Service Info restore and fast-entry read flows. Same address, different payload, different
+> operation. Don't confuse them.
+
+### Gates
+
+| Layer | Condition |
+|---|---|
+| Control enabled | `dmeLink.state === 'connected'` — this excludes reading/writing/tuning/resetting by construction |
+| Dialog | Both boot fields `available`; engine RPM `0` |
+| Link | `assertConnected`; **neither service block already erased**; boot-field state re-checked; `onBackup` resolved |
+| DME | rejects erase/write with `0xA2` unless RPM/speed are zero |
+
+**The already-erased guard is the one that is not obvious.** If a reset dies between its erase and its
+rewrite, the block reads back as all `0xFF` — and the counter alone reports that as a perfectly
+healthy `0/30, available` (or `1/30, available` if the first slot got written). Nothing in the boot
+field reveals that the AIF, ZIF and VIN records are gone. A second run would therefore take the
+erased block as the ECU's "current contents", write it back as the plan, and verify it — turning a
+recoverable interruption into a permanent, confirmed loss. `isServiceBlockErased()` tests the bytes
+*outside* the counter and refuses, which is what makes "do not retry, restore the backup" true advice
+rather than a hope.
+
+Gated on the **link only**, deliberately *not* on `idleAction` like RESET ADAPT. The two look similar
+and are not: clearing adaptations is about the log you are about to record, so it belongs to the
+moment before START TUNE. The flash counter is about the DME's remaining programming life, and what
+consumes it is WRITE — the same gate would hide it at `idleAction` `'write'` and `'writePatch'`, and
+straight after CONNECTION, which are exactly the moments it matters.
+
+### UI
+
+**The header's FLASH field *is* the control** — clicking it opens the reset dialog. There is no
+button for it in the hub's sub-action row: that row is for the workspace and the current run (discard
+this log, clear what the DME learned before recording), while the counter is a property of the ECU
+the header already states. Putting the reset on the number it changes leaves exactly one place to
+look.
+
+The field shows **one** number, not master and slave separately: a flash consumes a slot on both
+processors together. The pair is still read and compared rather than assumed — the erase is a single
+command but the two writes are separate, so a write that succeeds on master and fails on slave leaves
+them permanently apart — and the display falls back to `master · slave/30` only when they actually
+differ. Per-processor detail (used, left, marker, address) is on the tooltip.
+
+### Backup is mandatory, and is not a file
+
+`resetFlashCounter(onBackup, onProgress)` awaits `onBackup` with the 16384-byte master+slave image
+**before any erase**, and does not catch its rejection. If the save fails, nothing is erased. That
+block carries the VIN, AIF and ZIF, so it is the only recovery path if the rewrite is interrupted.
+
+It is stored in a separate IndexedDB database (`mss54hp-tuner-backups`, store `serviceBlocks`, keyed
+by timestamp) — separate because adding a store to the session DB would need a `DB_VERSION` bump,
+which destroys every saved session, and because a reset can happen with no session open at all.
+
+**It does not trigger a file download.** In this app, writing to the DME and producing a file are
+separate, separately-chosen actions: WRITE never emits a file, and every download hangs off a control
+that names what it exports (DOWNLOAD TUNED, the per-artifact buttons in the session list). A save
+dialog appearing out of a vehicle write violates that, so the backup is silent.
+
+### Recovering an interrupted reset
+
+`restoreServiceBlock(pair, onProgress)` writes a saved backup back. It shares
+`programServiceBlocks()` with the reset — same erase, same chunked write, same verifying read-back —
+so the recovery path cannot drift from the path that caused the damage. What it drops is every guard
+the reset has: no read first (the current contents *are* the damage), no backup (nothing left worth
+saving), and no erased-block refusal (an erased block is the case it exists for). Whether the prep
+markers need writing is read from the DME rather than inferred from the saved image, because those
+two answers differ by definition here — the backup predates the erase that cleared them.
+
+The flow reaches the user like this: the reset refuses, attaching `ServiceBlockErasedCause` to the
+`DmeLinkError`; `useDmeLink.resetFlashCounter` returns `{ok: false, needsRecovery: true}`; the dialog
+switches to a recovery phase that lists saved backups and offers **復旧を実行 / Recover** — and
+offers no Retry at all, since retrying is the one action that makes the loss permanent.
+
+> `needsRecovery` is returned from the call, deliberately **not** read off the `errorKind` prop. The
+> dialog resumes from its `await` before React has re-rendered with the new prop value, so the prop
+> is still the previous one at that moment. This was a real bug caught in testing: the dialog landed
+> in the generic failure phase and offered Retry — precisely the wrong button.
+
+`MockDmeLink.simulateInterruptedReset()` arms a one-shot failure just after the simulated erase, so
+the whole loop can be rehearsed offline. Nothing in the UI calls it; it exists for tests.
+
+### After a reset
+
+The connection is dropped and the user is told to key OFF → wait 10 s → key ON → reconnect, mirroring
+the post-write teardown. The DME must re-initialise from the rewritten service block before anything
+else is asked of it.
+
+`MockDmeLink` models the counter as state (12/30 per processor, reset to 1/30) so PRACTICE rehearses
+it faithfully — and answers `readEngineRpm()` with `0`, since a simulator has no engine. That method
+is separate from `pollLiveMeasurement` on purpose: the mock's ~800 rpm idle is telemetry-shaped test
+data for the datalog to plot, not a claim that something is turning, and one method could not
+honestly serve both questions.

@@ -1,4 +1,4 @@
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError } from './types';
+import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause } from './types';
 import { WebSerialTransport } from './webSerialTransport';
 import {
     Ds2Frame, Ds2Control, Ds2ProgrammingControl, Ds2BaudRate, Ds2BaudRateSpec, Ds2SupportedBaud, ds2BaudSpecFor,
@@ -6,16 +6,23 @@ import {
     buildDs2Frame, parseDs2Frame, frameToBytes, isPositiveResponse,
     buildSeedRequestPayload, buildKeyPayload, isAlreadyUnlockedResponse, isSeedResponse, calculateLoginKey,
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
-    TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch,
+    TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
 } from './ds2';
 import {
     parseSystemAddressTable, findPointer, parseAifEntries, latestPopulatedAifEntry,
     parseZifProgramNumber, AIF_TOTAL_LENGTH,
 } from './identity';
 import { STANDARD_MEASUREMENT_BLOCK, OPERATING_MEASUREMENTS_BLOCK, decodeStandardMeasurementBlock, decodeOperatingMeasurementsBlock } from './liveValueBlocks';
+import { FieldDef } from './blockDecoder';
 import {
     AdaptationSnapshot, STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK, buildAdaptationSnapshot,
+    minPayloadLength,
 } from './adaptationBlocks';
+import {
+    FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, CLEAR_PREP_MARKER,
+    analyzeFlashCounter, extractCounterFromServiceBlock, buildResetServiceBlockImage,
+    shouldWriteClearPrepMarker, isServiceBlockErased,
+} from './flashCounter';
 
 // DS2 system-address-table pointer indices (Ds2KnownSystemAddressLengths / IdentifyService)
 const SYSTEM_ADDRESS_INDEX = { DIF: 15, ZIF_BACKUP: 16, BRIF: 18, ZIF: 19, AIF: 20 } as const;
@@ -26,6 +33,10 @@ const RESPONSE_TIMEOUT_MS = 2000;
 // the reference uses 15s at 9600 baud (ProgrammingWriteSupport.GetProgrammingWriteTimeout).
 const WRITE_RESPONSE_TIMEOUT_MS = 15000;
 const ERASE_TIMEOUT_MS = 65000;
+// The first write into the service block wakes something slow in the DME: the reference allows the
+// master prepare marker 30 s where every other data write gets 15 (ClearFlashCounterExecutor).
+// Applied to both processors here — a timeout that is too generous only delays a failure.
+const PREP_MARKER_TIMEOUT_MS = 30000;
 const CHUNK_RETRY_ATTEMPTS = 5;
 // Clearing adaptations writes EEPROM before the DME replies, so the plain read timeout is thin.
 const ADAPT_CLEAR_TIMEOUT_MS = 5000;
@@ -52,6 +63,17 @@ const DRAIN_MAX_ROUNDS = 8;
 // come back. These give it real, escalating silence instead (400 / 800 / 1200 ms).
 const BREAK_SETTLE_MS = 400;
 const BREAK_RECOVERY_ROUNDS = 3;
+// resyncTransport purges (or re-acquires) the reader and the very next thing that happens is a write.
+// Every other DS2 tool leaves an inter-message gap; this one had none. Hygiene rather than a cure —
+// a pre-write pause cannot prevent corruption that happens DURING our own transmission.
+const RESYNC_SETTLE_MS = 30;
+// A DME that answers 0xA1 BUSY is working, not failing, so re-asking must not spend a transport
+// retry. Its own small budget: the clear commits to EEPROM in well under a second, and anything
+// still busy after two seconds is a different problem.
+const BUSY_POLL_INTERVAL_MS = 150;
+const BUSY_POLL_ATTEMPTS = 13;
+// (The keep-alive cadence lives in useDmeLink, which owns the timer. The link only decides whether a
+// given tick is safe to send — see keepAlive.)
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -87,6 +109,25 @@ export class WebSerialDmeLink implements DmeLink {
     private transport = new WebSerialTransport();
     private connected = false;
     private aborted = false;
+    /**
+     * The CommandGate this class was missing.
+     *
+     * One transport, one frame in flight. Until now nothing enforced that: useDmeLink's 'resetting'
+     * state existed purely so the UI could not offer START TUNE during a clear, and its own comment
+     * says so — a UI-level guard standing in for a link-level one. That held while every DS2 request
+     * came from a user action, and stops holding the moment a timer sends one (keepAlive), so the
+     * real primitive goes here.
+     *
+     * Public operations take it exclusively; keepAlive skips rather than queues, because a tester-
+     * present frame is only worth sending when the line is otherwise idle.
+     */
+    private gateHeld = false;
+
+    private async withGate<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.gateHeld) throw new DmeLinkError('Another DME operation is already in progress');
+        this.gateHeld = true;
+        try { return await fn(); } finally { this.gateHeld = false; }
+    }
     /**
      * Baud rate to use for the bulk read. 9600 by default — that's the path proven against real
      * hardware and needs no switch at all. 38400/125000 are the only other rates the DME accepts
@@ -151,11 +192,16 @@ export class WebSerialDmeLink implements DmeLink {
             // fallback re-issue ERASE after what may have been a DME reset.
             const a = classifyEchoMismatch(request, echo);
             const latched = this.transport.peekReadError();
+            // The analysis rides along in `cause`, not just flattened into the message. The dialog
+            // needs the verdict as data so it can offer the physical checklist for an electrical
+            // fault instead of "check the connection and retry" — advice that cannot work when
+            // something is pulling the line down.
             throw new DmeLinkError(
                 `Unexpected K-line echo (sent ${toHex(request)}, got ${toHex(echo)}) — ${a.verdict} ` +
                 `[lag +${a.lag}, ${a.flips1to0} bit(s) 1→0, ${a.flips0to1} bit(s) 0→1, ` +
                 `${a.trailingZeroRun}-byte zero tail, ${this.transport.bufferedLength()} byte(s) still buffered` +
                 `${latched ? `, latched ${latched.name}` : ''}]`,
+                a,
             );
         }
 
@@ -220,9 +266,12 @@ export class WebSerialDmeLink implements DmeLink {
      * DME's system address table (control 0x0D) — confirmed byte-for-byte against the reference
      * Mss54Ds2Tool source (see identity.ts). Falls back to 'UNKNOWN' per-field if a pointer is
      * unavailable or a read fails, rather than aborting the whole connection.
+     *
+     * The flash counter is read here too, but it needs no pointer: it sits at fixed addresses in
+     * the service block (see flashCounter.ts), so it is outside the system-address-table try below.
      */
     private async identify(): Promise<DmeIdentity> {
-        const result: DmeIdentity = { vin: 'UNKNOWN', aif: 'UNKNOWN', softwareVersion: 'UNKNOWN' };
+        const result: DmeIdentity = { vin: 'UNKNOWN', aif: 'UNKNOWN', softwareVersion: 'UNKNOWN', flashCounter: null };
         try {
             const tableFrame = await this.exchange(Ds2Control.READ_SYSTEM_ADDRESSES, new Uint8Array(0));
             if (!isPositiveResponse(tableFrame)) return result;
@@ -249,7 +298,38 @@ export class WebSerialDmeLink implements DmeLink {
                 } catch { /* leave UNKNOWN */ }
             }
         } catch { /* connection succeeded but identify failed entirely — return UNKNOWN fields */ }
+
+        // Separate try, and separate from the pointer table above: this is a fixed-address read, so
+        // it can succeed on a DME whose system address table came back unusable — and it must never
+        // be the reason a connection reports failure. Left null when it can't be read.
+        try {
+            result.flashCounter = await this.readFlashCounterInner();
+        } catch { /* leave null — "not read" is a different fact from "0 used" */ }
+
         return result;
+    }
+
+    /** Reads both 256-byte counter regions and decodes them. Six chunk reads, ~1.5 s at 9600. */
+    private async readFlashCounterInner(): Promise<FlashCounterInfo> {
+        const { master, slave, counterOffset, counterLength } = ServiceBlockLayout;
+        const masterBytes = await this.readRange(master.address + counterOffset, counterLength);
+        const slaveBytes = await this.readRange(slave.address + counterOffset, counterLength);
+        return {
+            master: analyzeFlashCounter(master.name, master.address + counterOffset, masterBytes),
+            slave: analyzeFlashCounter(slave.name, slave.address + counterOffset, slaveBytes),
+            readAt: Date.now(),
+        };
+    }
+
+    async readFlashCounter(): Promise<FlashCounterInfo> {
+        return this.withGate(async () => {
+            this.assertConnected();
+            // Cleared for the same reason readPartialBin clears it: a Cancel Read earlier in the
+            // session leaves `aborted` latched, and readRange checks it on every chunk.
+            this.aborted = false;
+            await this.resyncTransport();
+            return this.readFlashCounterInner();
+        });
     }
 
     private async readMemoryChunk(segment: number, address: number, count: number): Promise<Uint8Array> {
@@ -290,11 +370,11 @@ export class WebSerialDmeLink implements DmeLink {
      * critical safety check: a positive DS2 status alone does NOT mean the cells were programmed;
      * the verify byte reports "verify failed" / "cells not erased" / etc. (Ds2WriteResponseValidator).
      */
-    private async writeMemoryChunk(address: number, data: Uint8Array): Promise<void> {
+    private async writeMemoryChunk(address: number, data: Uint8Array, timeoutMs = WRITE_RESPONSE_TIMEOUT_MS): Promise<void> {
         const frame = await this.exchange(
             Ds2Control.WRITE_MEMORY,
             buildWriteMemoryPayload(Ds2ProgrammingControl.WriteSegment, address, data),
-            WRITE_RESPONSE_TIMEOUT_MS,
+            timeoutMs,
         );
         if (!isPositiveResponse(frame)) throw new DmeLinkError(`Memory write at 0x${address.toString(16)} rejected by DME`);
         const result = parseWriteResult(frame);
@@ -352,6 +432,10 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     async readPartialBin(onProgress?: TransferProgress): Promise<ArrayBuffer> {
+        return this.withGate(() => this.readPartialBinInner(onProgress));
+    }
+
+    private async readPartialBinInner(onProgress?: TransferProgress): Promise<ArrayBuffer> {
         this.assertConnected();
         this.aborted = false;
         // Refresh the seed/key unlock before reading program/data memory, mirroring the reference
@@ -416,6 +500,10 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     async writePartialBin(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
+        return this.withGate(() => this.writePartialBinInner(buffer, onProgress));
+    }
+
+    private async writePartialBinInner(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
         this.assertConnected();
         // Clear a stale cancel, exactly as readPartialBin does. Without this, a user who pressed
         // Cancel Read earlier in the session left `aborted` latched true: the flash would then erase,
@@ -477,6 +565,239 @@ export class WebSerialDmeLink implements DmeLink {
         onProgress?.(100, 'verifying');
     }
 
+    async resetFlashCounter(
+        onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
+        onProgress?: TransferProgress,
+    ): Promise<FlashCounterInfo> {
+        return this.withGate(() => this.resetFlashCounterInner(onBackup, onProgress));
+    }
+
+    /**
+     * Clears the flash counter on both processors, mirroring the reference ClearFlashCounterExecutor.
+     *
+     * The counter cannot be written in place: it lives in flash, and flash only goes 1 -> 0 without an
+     * erase. So the whole 8 KB service block on each processor is read, rebuilt with the counter
+     * reset, erased and written back. That block also carries AIF, ZIF and the VIN records, which is
+     * why the read comes first and its bytes go to `onBackup` before a single erase is sent — those
+     * 16 KB are the only way back if the write is interrupted.
+     *
+     * Deliberately does NOT boost baud. The reference switches to 125000 for this write; this app's
+     * flash path has never done that on real hardware, and a boost the cable doesn't follow desyncs
+     * the link for the rest of the session. 16 KB at 9600 is slow enough to accept and small enough
+     * not to matter (~2 minutes end to end).
+     */
+    private async resetFlashCounterInner(
+        onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
+        onProgress?: TransferProgress,
+    ): Promise<FlashCounterInfo> {
+        this.assertConnected();
+        // Same reasoning as writePartialBinInner: a stale cancel latched by an earlier Cancel Read
+        // would otherwise abort this mid-flight — here it would abort the read-back of an ECU whose
+        // identity block has already been erased and rewritten.
+        this.aborted = false;
+        const { master, slave, counterOffset, prepMarkerOffset } = ServiceBlockLayout;
+
+        // Refresh the seed/key unlock before the protected write, exactly as READ and WRITE do, and
+        // strictly before anything destructive. resync rather than purge so a break latched earlier
+        // can't kill the login.
+        await this.resyncTransport();
+        await this.login();
+
+        // --- Phase 1: read both service blocks (0-25%) -------------------------------------------
+        const READ_SHARE = 25;
+        const WRITE_SHARE = 45;   // 25 -> 70
+        const VERIFY_SHARE = 30;  // 70 -> 100
+        const pairTotal = master.length + slave.length;
+
+        const masterImage = await this.readRange(master.address, master.length,
+            (done) => onProgress?.(Math.round((done / pairTotal) * READ_SHARE), 'reading'));
+        const slaveImage = await this.readRange(slave.address, slave.length,
+            (done) => onProgress?.(Math.round(((master.length + done) / pairTotal) * READ_SHARE), 'reading'));
+
+        // --- Phase 2: guards ---------------------------------------------------------------------
+        // First: refuse if a block is already erased. That means an earlier attempt died between its
+        // erase and its rewrite, so what we just read is not the ECU's data — it is the hole where
+        // the data used to be. Proceeding would take that hole as the "current contents", write it
+        // back as the plan, and verify it, turning a recoverable interruption into a permanent loss
+        // of the VIN, AIF and ZIF. The counter cannot catch this on its own: an erased counter reads
+        // as a healthy 0/30 available field.
+        for (const [name, image] of [[master.name, masterImage], [slave.name, slaveImage]] as const) {
+            if (isServiceBlockErased(image)) {
+                // The cause is data, not prose: this is the one failure with a specific remedy the
+                // app can actually perform, so the UI needs to branch to the restore flow rather
+                // than print a sentence telling the user to do something it hasn't offered them.
+                throw new DmeLinkError(
+                    `Flash counter reset refused: the ${name} service block is erased, which means an earlier ` +
+                    `reset was interrupted before it could write the block back. Re-running now would make that ` +
+                    `loss permanent — restore the saved backup instead.`,
+                    { kind: 'serviceBlockErased', processor: name } satisfies ServiceBlockErasedCause,
+                );
+            }
+        }
+
+        // Then: both boot fields must be closed. A field showing 0x00FF/0xFF00 has a programming
+        // session still open, and erasing the block underneath one is how a DME stops being
+        // programmable at all. Same condition the reference refuses on (ClearFlashCounterExecutor).
+        const before: FlashCounterInfo = {
+            master: analyzeFlashCounter(master.name, master.address + counterOffset, extractCounterFromServiceBlock(masterImage)),
+            slave: analyzeFlashCounter(slave.name, slave.address + counterOffset, extractCounterFromServiceBlock(slaveImage)),
+            readAt: Date.now(),
+        };
+        for (const region of [before.master, before.slave]) {
+            if (region.state !== 'available') {
+                throw new DmeLinkError(
+                    `Flash counter reset refused: the ${region.name} boot field is not in the available/closed state ` +
+                    `(marker 0x${region.firstOpenMarker.toString(16).padStart(4, '0')}). ` +
+                    `A programming session is still open — cycle the ignition and reconnect before retrying.`,
+                );
+            }
+        }
+
+        // --- Phase 3: hand the backup out — the last point of no return --------------------------
+        // Awaited, and its rejection is deliberately NOT caught: if the caller cannot persist these
+        // bytes, nothing below should run. Everything after this line is destructive.
+        const pair = new Uint8Array(SERVICE_BLOCK_PAIR_LENGTH);
+        pair.set(masterImage, 0);
+        pair.set(slaveImage, master.length);
+        await onBackup(pair.buffer);
+
+        // --- Phase 4/5: erase, rewrite, verify ---------------------------------------------------
+        return this.programServiceBlocks(
+            buildResetServiceBlockImage(masterImage),
+            buildResetServiceBlockImage(slaveImage),
+            // Asked of the ORIGINAL images, because the question is what the DME holds now — the
+            // reset copies those 4 bytes through unchanged, so the plan would answer identically.
+            shouldWriteClearPrepMarker(masterImage),
+            shouldWriteClearPrepMarker(slaveImage),
+            'Flash counter reset',
+            READ_SHARE, WRITE_SHARE, VERIFY_SHARE,
+            onProgress,
+        );
+    }
+
+    /**
+     * Erases both service blocks and writes the given images back, then verifies byte-for-byte.
+     *
+     * Shared by the reset and the restore because it is the same programming sequence — only the
+     * bytes differ, and only in how they were arrived at. Keeping one copy means the recovery path
+     * cannot drift away from the path that created the damage, which is the last place a
+     * near-duplicate would be safe.
+     */
+    private async programServiceBlocks(
+        masterPlan: Uint8Array,
+        slavePlan: Uint8Array,
+        masterNeedsPrep: boolean,
+        slaveNeedsPrep: boolean,
+        describe: string,
+        doneBefore: number,
+        writeShare: number,
+        verifyShare: number,
+        onProgress?: TransferProgress,
+    ): Promise<FlashCounterInfo> {
+        const { master, slave, counterOffset, prepMarkerOffset } = ServiceBlockLayout;
+        const pairTotal = master.length + slave.length;
+
+        onProgress?.(doneBefore, 'erasing');
+        if (masterNeedsPrep) {
+            await this.writeMemoryChunk(master.address + prepMarkerOffset, CLEAR_PREP_MARKER, PREP_MARKER_TIMEOUT_MS);
+        }
+        if (slaveNeedsPrep) {
+            await this.writeMemoryChunk(slave.address + prepMarkerOffset, CLEAR_PREP_MARKER, PREP_MARKER_TIMEOUT_MS);
+        }
+
+        // Recycle-only permits the service block to be erased. Its verify byte is not required to be
+        // 1 — the reference passes requireProgrammingOk: false here.
+        await this.sendProgrammingControl(
+            Ds2ProgrammingControl.RecyclingSegment, Ds2ProgrammingControl.RecycleOnlyAddress,
+            WRITE_RESPONSE_TIMEOUT_MS, false);
+        // One erase covers BOTH processors' service blocks, addressed at the master base — the same
+        // shape as the data-area erase, which erases slave and master with a single command.
+        await this.sendProgrammingControl(
+            Ds2ProgrammingControl.EraseSegment, master.address, ERASE_TIMEOUT_MS, true);
+
+        await this.writeBlock(master.address, masterPlan, 0, pairTotal,
+            (w, t) => onProgress?.(doneBefore + Math.round((w / t) * writeShare), 'writing'));
+        await this.writeBlock(slave.address, slavePlan, master.length, pairTotal,
+            (w, t) => onProgress?.(doneBefore + Math.round((w / t) * writeShare), 'writing'));
+
+        await this.sendProgrammingControl(
+            Ds2ProgrammingControl.RecyclingSegment, Ds2ProgrammingControl.RecycleOffAddress,
+            WRITE_RESPONSE_TIMEOUT_MS, false);
+        await this.sendProgrammingControl(
+            Ds2ProgrammingControl.FinishSegment, 0, WRITE_RESPONSE_TIMEOUT_MS, true);
+
+        const verifyBase = doneBefore + writeShare;
+        onProgress?.(verifyBase, 'verifying');
+        const masterReadBack = await this.readRange(master.address, master.length,
+            (done) => onProgress?.(verifyBase + Math.round((done / pairTotal) * verifyShare), 'verifying'));
+        const slaveReadBack = await this.readRange(slave.address, slave.length,
+            (done) => onProgress?.(verifyBase + Math.round(((master.length + done) / pairTotal) * verifyShare), 'verifying'));
+        if (!arraysEqual(masterReadBack, masterPlan) || !arraysEqual(slaveReadBack, slavePlan)) {
+            throw new DmeLinkError(
+                `${describe} verification failed: the read-back does not match what was written. Treat the ECU ` +
+                `state as unknown — keep power on, stay connected, and do not switch the ignition off.`,
+            );
+        }
+        onProgress?.(100, 'verifying');
+
+        // Decoded from what the DME actually returned, not from the image we planned to write. The
+        // reference reports the plan's numbers; these are measured, and they cost nothing extra
+        // because the verifying read already fetched the bytes.
+        return {
+            master: analyzeFlashCounter(master.name, master.address + counterOffset, extractCounterFromServiceBlock(masterReadBack)),
+            slave: analyzeFlashCounter(slave.name, slave.address + counterOffset, extractCounterFromServiceBlock(slaveReadBack)),
+            readAt: Date.now(),
+        };
+    }
+
+    async restoreServiceBlock(serviceBlockPair: ArrayBuffer, onProgress?: TransferProgress): Promise<FlashCounterInfo> {
+        return this.withGate(() => this.restoreServiceBlockInner(serviceBlockPair, onProgress));
+    }
+
+    /**
+     * Writes a saved service block back over whatever the DME currently holds.
+     *
+     * Deliberately guard-free where the reset is careful. It does not read the block first (the
+     * current contents are the damage), does not take a backup (there is nothing left worth saving),
+     * and does not refuse an erased block (that is the case it exists for). The one thing it keeps
+     * is the verifying read-back — recovery that cannot prove it landed is not recovery.
+     *
+     * Whether the prep markers still need writing is read from the DME, not inferred from the saved
+     * image. Those two questions have different answers here by definition: the backup records what
+     * the block held BEFORE the reset, while the erase that followed set the markers back to 0xFF.
+     * Asking the image would skip a marker the DME now needs, and the erase would be refused.
+     */
+    private async restoreServiceBlockInner(serviceBlockPair: ArrayBuffer, onProgress?: TransferProgress): Promise<FlashCounterInfo> {
+        this.assertConnected();
+        this.aborted = false;
+        const { master, slave, prepMarkerOffset } = ServiceBlockLayout;
+        if (serviceBlockPair.byteLength !== SERVICE_BLOCK_PAIR_LENGTH) {
+            throw new DmeLinkError(
+                `Refusing to restore a ${serviceBlockPair.byteLength}-byte service block (expected ${SERVICE_BLOCK_PAIR_LENGTH})`,
+            );
+        }
+        const bytes = new Uint8Array(serviceBlockPair);
+        const masterPlan = bytes.slice(0, master.length);
+        const slavePlan = bytes.slice(master.length, SERVICE_BLOCK_PAIR_LENGTH);
+
+        await this.resyncTransport();
+        await this.login();
+
+        // Two 4-byte reads, so the answer describes the ECU in front of us.
+        const masterNeedsPrep = isAllErased(
+            await this.readRange(master.address + prepMarkerOffset, CLEAR_PREP_MARKER.length));
+        const slaveNeedsPrep = isAllErased(
+            await this.readRange(slave.address + prepMarkerOffset, CLEAR_PREP_MARKER.length));
+
+        // No bulk read phase, so the whole progress bar belongs to the write and the verify.
+        return this.programServiceBlocks(
+            masterPlan, slavePlan, masterNeedsPrep, slaveNeedsPrep,
+            'Service block restore',
+            0, 60, 40,
+            onProgress,
+        );
+    }
+
     private startTime = 0;
 
     /**
@@ -486,6 +807,21 @@ export class WebSerialDmeLink implements DmeLink {
      * (DmeLiveValueCatalog.cs). Two DS2 round-trips per sample.
      */
     async pollLiveMeasurement(): Promise<LiveMeasurement> {
+        return this.withGate(() => this.pollLiveMeasurementInner());
+    }
+
+    /** Engine speed from the same block a datalog sample comes from — block 3 carries RPM, and the
+     *  poll already resyncs and retries it. Throws rather than guessing if the DME can't be asked:
+     *  the caller must not read a failed question as "stopped". */
+    async readEngineRpm(): Promise<number> {
+        return this.withGate(async () => {
+            this.assertConnected();
+            const sample = await this.pollLiveMeasurementInner();
+            return sample.rpm;
+        });
+    }
+
+    private async pollLiveMeasurementInner(): Promise<LiveMeasurement> {
         this.assertConnected();
         if (this.startTime === 0) this.startTime = performance.now();
 
@@ -623,9 +959,23 @@ export class WebSerialDmeLink implements DmeLink {
                 // that throw would escape the loop entirely, discarding the remaining attempts and
                 // replacing the actual DS2 diagnosis with a recovery error.
                 await this.resyncTransport();
-                const frame = await this.exchange(control, payload, timeoutMs);
+                // Let the line settle after the purge before transmitting into it.
+                await delay(RESYNC_SETTLE_MS);
+
+                // BUSY is the DME saying "still working", not "no". Re-ask on its own budget so a
+                // slow EEPROM commit cannot burn the transport retries that exist for line faults.
+                let frame = await this.exchange(control, payload, timeoutMs);
+                for (let busy = 0; frame.controlOrStatus === Ds2Status.BUSY && busy < BUSY_POLL_ATTEMPTS; busy++) {
+                    await delay(BUSY_POLL_INTERVAL_MS);
+                    frame = await this.exchange(control, payload, timeoutMs);
+                }
+
                 if (!isPositiveResponse(frame)) {
-                    throw new DmeLinkError(`${describe} rejected by DME (status 0x${frame.controlOrStatus.toString(16)})`);
+                    const status = frame.controlOrStatus;
+                    throw new DmeLinkError(
+                        `${describe} rejected by DME (status 0x${status.toString(16)}` +
+                        `${status === Ds2Status.BUSY ? ' — still BUSY after retrying' : ''})`,
+                    );
                 }
                 return frame;
             } catch (e) {
@@ -633,8 +983,14 @@ export class WebSerialDmeLink implements DmeLink {
                 // Escalating, and longer after a break: a flat 300ms gave the line barely a second of
                 // total settling across all three attempts, which is why the automatic retries kept
                 // failing where a manual retry a few seconds later worked.
-                const base = this.transport.hasReadError() ? BREAK_SETTLE_MS : ADAPT_RETRY_DELAY_MS;
-                await delay(base * attempt);
+                //
+                // Skipped after the final attempt — there is nothing left to settle for, and paying it
+                // anyway delayed the user's error by up to 1.2 s. readMemoryChunkWithRetry already
+                // guards this the same way.
+                if (attempt < ADAPT_RETRY_ATTEMPTS) {
+                    const base = this.transport.hasReadError() ? BREAK_SETTLE_MS : ADAPT_RETRY_DELAY_MS;
+                    await delay(base * attempt);
+                }
             }
         }
         // Leave the transport usable for whatever runs next — most importantly a START TUNE poll.
@@ -645,11 +1001,20 @@ export class WebSerialDmeLink implements DmeLink {
 
     /** Reads one adaptation block. Same request shape as a live-measurement poll — control 0x0B with
      *  a one-byte selection — just a different block. */
-    private async readAdaptationBlock(selection: number): Promise<Uint8Array> {
+    private async readAdaptationBlock(block: { selection: number; fields: readonly FieldDef[] }): Promise<Uint8Array> {
+        const describe = `Adaptation block 0x${block.selection.toString(16)} read`;
         const frame = await this.adaptationExchangeWithRetry(
-            Ds2Control.READ_IO_STATUS, new Uint8Array([selection]), RESPONSE_TIMEOUT_MS,
-            `Adaptation block 0x${selection.toString(16)} read`,
+            Ds2Control.READ_IO_STATUS, new Uint8Array([block.selection]), RESPONSE_TIMEOUT_MS, describe,
         );
+        // A short payload that still checksums used to pass silently: decodeField bounds-checks and
+        // returns null per field, so the dialog rendered a full table of dashes and called it a
+        // reading. Name it instead — the bulk read already asserts its own length this way.
+        const need = minPayloadLength(block.fields);
+        if (frame.payload.length < need) {
+            throw new DmeLinkError(
+                `${describe} returned ${frame.payload.length} bytes, need at least ${need} to decode its fields`,
+            );
+        }
         return frame.payload;
     }
 
@@ -660,10 +1025,20 @@ export class WebSerialDmeLink implements DmeLink {
      * exactly the wrong conclusion about what the clear did.
      */
     async readAdaptations(): Promise<AdaptationSnapshot> {
-        this.assertAdaptationsAvailable();
-        await this.drainUntilQuiet();
-        const std = await this.readAdaptationBlock(STANDARD_ADAPTATIONS_BLOCK.selection);
-        const obs = await this.readAdaptationBlock(OBSERVATION_ADAPTATIONS_BLOCK.selection);
+        return this.withGate(async () => {
+            this.assertAdaptationsAvailable();
+            await this.drainUntilQuiet();
+            return this.readBothAdaptationBlocks();
+        });
+    }
+
+    /** The two reads without the drain in front, so clearTuneAdaptations can re-read after its settle
+     *  without paying for a second quiet window. It had been calling the public readAdaptations, which
+     *  drained again — a guaranteed-passing 150 ms round on a line that had just been silent for two
+     *  seconds by construction. */
+    private async readBothAdaptationBlocks(): Promise<AdaptationSnapshot> {
+        const std = await this.readAdaptationBlock(STANDARD_ADAPTATIONS_BLOCK);
+        const obs = await this.readAdaptationBlock(OBSERVATION_ADAPTATIONS_BLOCK);
         return buildAdaptationSnapshot(std, obs);
     }
 
@@ -676,6 +1051,10 @@ export class WebSerialDmeLink implements DmeLink {
      * the same values again.
      */
     async clearTuneAdaptations(): Promise<AdaptationSnapshot> {
+        return this.withGate(() => this.clearTuneAdaptationsInner());
+    }
+
+    private async clearTuneAdaptationsInner(): Promise<AdaptationSnapshot> {
         this.assertAdaptationsAvailable();
         await this.drainUntilQuiet();
         const { mask1, mask2 } = TUNE_ADAPTATION_CLEAR;
@@ -683,7 +1062,36 @@ export class WebSerialDmeLink implements DmeLink {
             Ds2Control.CLEAR_ADAPTATIONS, buildClearAdaptationsPayload(mask1, mask2), ADAPT_CLEAR_TIMEOUT_MS,
             'Adaptation clear',
         );
+        // A flat wait, kept deliberately. The tempting replacement — poll the block and stop as soon
+        // as the read succeeds — does not work: a premature read does not fail, it succeeds and hands
+        // back the OLD values. Success is not evidence of commitment, and the one thing that could
+        // test for it (comparing against AdaptationFieldDef.cleared) is explicitly ruled out there,
+        // because two of the twelve rows clear to 1.0 rather than 0. So the floor stays; only the
+        // re-read after it is retried, which is what adaptationExchangeWithRetry already provides.
         await delay(ADAPT_SETTLE_MS);
-        return this.readAdaptations();
+        return this.readBothAdaptationBlocks();
+    }
+
+    /**
+     * Tester-present. Best effort by design: returns false rather than throwing, and skips entirely
+     * when any real operation holds the gate — a keep-alive that interrupted a flash to prove the
+     * link was alive would be worse than the silence it is preventing.
+     */
+    async keepAlive(): Promise<boolean> {
+        if (!this.connected || this.gateHeld) return false;
+        // The try wraps withGate, not just the exchange: this is called from a timer with nothing to
+        // catch it, so a rejection here would surface as an unhandled promise rejection rather than
+        // as anything a user could act on. Everything about a heartbeat is best-effort, including
+        // losing the race for the gate.
+        try {
+            return await this.withGate(async () => {
+                const frame = await this.exchange(Ds2Control.KEEP_ALIVE, new Uint8Array(0));
+                return isPositiveResponse(frame);
+            });
+        } catch {
+            // Deliberately silent. The next real operation reports the link's actual state; raising
+            // an error banner for a request the user never made would only be noise.
+            return false;
+        }
     }
 }

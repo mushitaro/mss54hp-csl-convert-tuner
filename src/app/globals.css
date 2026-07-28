@@ -23,10 +23,8 @@
      • M-blue   (#008AC9) → primary / interactive / "lean" heatmap
      • M-red    (#F11A22) → danger / destructive / error / "rich" heatmap
      • M-violet (#2B115A) → secondary / lineage / reference / diagnostic
-   Functional status colors are deliberately kept at their Tailwind
-   defaults so the instrument's machine state stays unambiguous:
-     • emerald        → connected / OK / verified
-     • amber / orange → busy / caution / warning */
+   The accent set is restricted to those three; the functional status layer
+   is folded into them further down rather than kept on Tailwind hues. */
 @theme {
   /* Neutral ramp — pure-black anchor, cool charcoal */
   --color-slate-950: #000000;
@@ -68,6 +66,60 @@
   --color-indigo-500: #7E63DB;
   --color-indigo-600: #6547C2;
   --color-indigo-900: #2B115A;
+
+  /* ── Functional status layer, folded into the M tricolor ──────────────
+     The instrument used to keep emerald / amber / orange at their Tailwind
+     defaults so machine state read unambiguously by hue alone. With the
+     accent set restricted to the ///M tricolor only three hues survive on
+     black — the logo navy #2B115A is 1.33:1 and can never carry text or an
+     indicator — so the status roles are separated by LIGHTNESS and MOTION
+     inside the blue and violet ramps instead of by hue:
+
+       emerald-* → ice blue   : OK / verified / data present
+       amber-*   → violet     : armed / busy / caution  (+ animate-pulse)
+       green-*   → violet     : measured diagnostic (fuel trim), 2nd action
+       orange-*  → violet -1  : configuration group, informational notice
+
+     green-* is a deliberate alias of amber-*: four roles do not fit in three
+     hues, and these two never share a container. orange-* sits one step
+     darker so the least urgent role stays the dimmest violet on screen.
+
+     The palette NAMES are kept so this stays one CSS edit instead of a
+     rename across 36 call sites — `text-emerald-400` now paints ice blue.
+     Read the name as the ROLE, not the hue. Each namespace is cleared to
+     `initial` first: an undefined step must fail to emit a utility rather
+     than silently leak real Tailwind orange back into the instrument.
+     Ratios are against the true-black base. */
+  --color-emerald-*: initial;
+  --color-emerald-100: #EAF7FD; /* 18.2:1 — text on a filled heat cell */
+  --color-emerald-200: #DCF2FC;
+  --color-emerald-300: #C9EAF8;
+  --color-emerald-400: #B6E4F5; /* 15.4:1 — verified / done / present */
+  --color-emerald-500: #8FD8F2; /* 13.2:1 — connected LED, check marks */
+  --color-emerald-600: #6CCBEF; /* 11.4:1 */
+  --color-emerald-900: #06354E;
+
+  --color-amber-*: initial;
+  --color-amber-100: #EDE7FB;
+  --color-amber-200: #DDD2F7;
+  --color-amber-300: #CBBCF2;
+  --color-amber-400: #B9A6EE; /*  9.8:1 — armed / busy / caution text */
+  --color-amber-500: #9B84E8; /*  6.9:1 — busy LED, armed toggle labels */
+  --color-amber-600: #7E63DB; /*  4.7:1 */
+  --color-amber-700: #6547C2; /*  3.2:1 — borders only, never text */
+  --color-amber-900: #2B115A;
+
+  --color-green-*: initial;
+  --color-green-300: #CBBCF2;
+  --color-green-400: #B9A6EE; /*  9.8:1 — STFT readouts */
+  --color-green-500: #9B84E8; /*  6.9:1 — 4.6:1 at the /80 it is used with */
+  --color-green-600: #7E63DB;
+
+  --color-orange-*: initial;
+  --color-orange-300: #B9A6EE;
+  --color-orange-400: #9B84E8; /*  6.9:1 — informational notice, panel toggle */
+  --color-orange-500: #7E63DB; /*  4.7:1 — accent-* on transient-filter controls */
+  --color-orange-600: #6547C2;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -86,7 +138,20 @@ body {
   color: var(--foreground);
 }
 
-/* Minimal Scrollbar for Webkit (Chrome, Safari, Edge) */
+/* ── Scrollbars ────────────────────────────────────────────────────────
+   The two syntaxes cannot both be declared globally. Chromium discards every
+   ::-webkit-scrollbar rule for an element the moment a standard scrollbar-width
+   OR scrollbar-color is in effect on it, so the blanket `* { scrollbar-width:
+   thin; scrollbar-color: … }` that used to live at the bottom of this file
+   silently beat the 6px block above it — measured: sw/sc both auto gives the
+   intended 6px, the shipped combination gave Chrome's `thin`, which is 10px.
+   That is a quarter of the 44px tab row, sitting under the active tab's
+   underline.
+
+   So gate the standard properties on engines that have no ::-webkit-scrollbar
+   at all: Chromium keeps the 6px bar and its hover state, Firefox still gets a
+   thin themed one. Note `thin` is the narrowest the standard property offers —
+   6px is only reachable through the webkit pseudo-elements. */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -107,10 +172,23 @@ body {
   /* slate-600 (cool charcoal) */
 }
 
-/* Firefox */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #2A2A33 transparent;
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2A2A33 transparent;
+  }
+}
+
+/* Opt-out for strips that carry their own overflow affordance instead — the tab
+   bar, which fades whichever edge still has tabs behind it. Both declarations are
+   needed: scrollbar-width covers Firefox, and it also hides the bar in Chromium,
+   but the pseudo-element rule keeps that independent of the @supports gate above. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* Hide Next.js Dev Tools / Static Indicator */

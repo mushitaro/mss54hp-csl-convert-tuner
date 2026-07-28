@@ -48,7 +48,7 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
                 {truncated && <span className="text-orange-400 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> Truncated for performance</span>}
             </div>
 
-            <div className="flex-1 overflow-auto custom-scrollbar relative">
+            <div className="flex-1 overflow-auto relative">
                 <table className="w-full text-right border-collapse text-[10px] font-mono">
                     <thead className="sticky top-0 bg-slate-950 z-10 text-slate-500 font-bold uppercase tracking-wider">
                         <tr>

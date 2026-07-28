@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download } from 'lucide-react';
-import { TuningSession } from '@/lib/db/schema';
+import { TuningSession, FlashRecord } from '@/lib/db/schema';
 import { DropZone } from '@/components/DropZone';
 
 export type NewFromWhich = 'tuned' | 'base';
@@ -23,6 +23,8 @@ interface Props {
     onDownloadBase: (session: TuningSession) => void;
     onDownloadTuned: (session: TuningSession) => void;
     onDownloadLog: (session: TuningSession) => void;
+    /** Arms this session's stored TUNED for a patch-off flash. Does not write — the hub does. */
+    onFinalize: (session: TuningSession) => void;
 }
 
 /** The download affordance used in every column, so they read as one control repeated rather than
@@ -36,6 +38,27 @@ const DownloadCell: React.FC<{ onClick: () => void; title: string }> = ({ onClic
         <Download className="w-2.5 h-2.5" />
     </button>
 );
+
+/** The ✔×N count mixes two kinds of event now that arming the patch is itself a flash — "×2" is a
+ *  normal first run (patch, then tune) but reads the same as a tune written twice. The number stays
+ *  as it is; the breakdown lives here, on hover.
+ *
+ *  Every line is a stored fact, not a guess: `tuned` says whether a map went with it, `settings` says
+ *  how the patches stood. A record from before `tuned` existed is a tune by construction, since a
+ *  flash without a derived map had no way to happen then. */
+function describeFlashHistory(history: FlashRecord[]): string {
+    if (!history.length) return 'Never written to the DME';
+    const lines = history.map((f, i) => {
+        const kind = (f.tuned ?? true) ? 'TUNED' : 'PATCH ONLY';
+        const patches = [
+            f.settings.applyPatch ? 'PATCH ON' : 'PATCH OFF',
+            f.settings.applyWotDisable ? 'WOT TH ON' : null,
+        ].filter(Boolean).join(' · ');
+        const final = !f.settings.applyPatch && !f.settings.applyWotDisable ? '  (FINAL)' : '';
+        return `${i + 1}. ${formatDate(f.at)}  ${kind.padEnd(10)} ${patches}${final}`;
+    });
+    return `Written to the DME ${history.length} time${history.length > 1 ? 's' : ''}:\n${lines.join('\n')}`;
+}
 
 function formatDate(epochMs: number): string {
     const d = new Date(epochMs);
@@ -126,7 +149,7 @@ export const OriginBadge: React.FC<{ session: TuningSession; parent?: TuningSess
 
 export const SessionList: React.FC<Props> = ({
     sessions, loading, error, onOpen, onNewSession, onNewFrom, onRename, onDelete, onUploadBase,
-    onDownloadBase, onDownloadTuned, onDownloadLog,
+    onDownloadBase, onDownloadTuned, onDownloadLog, onFinalize,
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftLabel, setDraftLabel] = useState('');
@@ -209,6 +232,17 @@ export const SessionList: React.FC<Props> = ({
                             // same start is exactly what it is good for.
                             const canFromTuned = !!session.sha256;
                             const canFromBase = !!session.baseOrigin;
+                            // What is in the ECU *now* — the LAST flash, not any of them. Re-flashing
+                            // patch-on afterwards must take the badge away again, which is the whole
+                            // reason this reads the tail rather than searching the history.
+                            // Both patches, matching the definition the PATCH-ON export uses: WOT TH
+                            // rewrites DME logic just as PATCH does, so a tune still carrying it has
+                            // not been handed back to the road yet.
+                            const lastFlash = session.flashHistory.at(-1);
+                            const isFinal = !!lastFlash && !lastFlash.settings.applyPatch && !lastFlash.settings.applyWotDisable;
+                            // Nothing to finalize without stored TUNED bytes, and nothing to finalize
+                            // if the patches are already off in the ECU.
+                            const canFinalize = canFromTuned && !isFinal;
                             return (
                                 <tr key={session.id} className="text-xs border-b border-slate-900 hover:bg-slate-900/40 transition-colors group align-top">
                                     <td className="px-3 py-2">
@@ -228,6 +262,19 @@ export const SessionList: React.FC<Props> = ({
                                                 {isDraft && (
                                                     <span className="text-[8px] font-bold text-blue-400 bg-blue-500/10 border border-blue-500/30 rounded px-1 py-px shrink-0">
                                                         DRAFT
+                                                    </span>
+                                                )}
+                                                {/* Mutually exclusive with DRAFT by construction — a flash archives the
+                                                    session, so nothing that has reached the ECU is still a draft. They can
+                                                    share a slot without ever colliding.
+                                                    emerald is the OK/verified role in this palette, which is what this says:
+                                                    the tune is on the road with the patches off. */}
+                                                {isFinal && (
+                                                    <span
+                                                        className="text-[8px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-1 py-px shrink-0"
+                                                        title="Last flashed with PATCH and WOT TH off — this tune is in the ECU in its road state."
+                                                    >
+                                                        FINAL
                                                     </span>
                                                 )}
                                                 {editingId === session.id ? (
@@ -290,6 +337,17 @@ export const SessionList: React.FC<Props> = ({
                                             {session.hasLog
                                                 ? <span className="text-emerald-400/80">{session.logPointCount.toLocaleString()}</span>
                                                 : <span className="text-slate-700">—</span>}
+                                            {/* Sits with the point count rather than in a column of its
+                                                own: the rate is a property of this log, and the table is
+                                                already five columns inside the 61.8% pane.
+                                                Absent for rows saved before averageHz existed, and for a
+                                                log too short to measure — nothing renders either way,
+                                                which beats showing a confident 0.0. */}
+                                            {session.hasLog && session.averageHz !== undefined && (
+                                                <span className="text-slate-600" title="Mean sample rate of this log">
+                                                    {session.averageHz.toFixed(1)}Hz
+                                                </span>
+                                            )}
                                             {session.hasLog && (
                                                 <DownloadCell
                                                     onClick={() => onDownloadLog(session)}
@@ -298,7 +356,7 @@ export const SessionList: React.FC<Props> = ({
                                             )}
                                         </span>
                                     </td>
-                                    <td className="px-3 py-2 font-mono whitespace-nowrap" title={flashes ? `Last flashed ${formatDate(session.flashHistory[flashes - 1].at)}` : 'Never written to the DME'}>
+                                    <td className="px-3 py-2 font-mono whitespace-nowrap" title={describeFlashHistory(session.flashHistory)}>
                                         <span className="inline-flex items-center gap-1.5">
                                             {flashes
                                                 ? <span className="text-emerald-400/90">✔{flashes > 1 ? `×${flashes}` : ''}</span>
@@ -335,19 +393,30 @@ export const SessionList: React.FC<Props> = ({
                                                 <Eye className="w-3 h-3" /> Review
                                             </button>
                                         )}
-                                        {(canFromTuned || canFromBase) && (
+                                        {/* Was "Use as base ▾", which named only half of what is in here now.
+                                            Finalize does NOT start a session — it arms this one's stored TUNED
+                                            for a patch-off flash — so leaving it under a trigger that promised
+                                            "Start a NEW tuning session" would have been the same kind of lie the
+                                            entries themselves are careful to avoid. The group headings carry the
+                                            distinction the trigger used to. */}
+                                        {(canFromTuned || canFromBase || canFinalize) && (
                                             <button
                                                 onClick={() => setMenuFor(menuFor === session.id ? null : session.id)}
                                                 className="ml-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-indigo-400 transition-colors px-2 py-1 rounded hover:bg-slate-800"
-                                                title="Start a NEW tuning session that begins from this one's bytes"
+                                                title="Branch a new session from this one's bytes, or finalize this tune"
                                             >
-                                                <GitBranch className="w-3 h-3" /> Use as base ▾
+                                                <GitBranch className="w-3 h-3" /> Actions ▾
                                             </button>
                                         )}
                                         {menuFor === session.id && (
                                             <>
                                                 <div className="fixed inset-0 z-40" onClick={() => setMenuFor(null)} />
                                                 <div className="absolute right-8 top-9 z-50 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 text-left">
+                                                    {(canFromTuned || canFromBase) && (
+                                                        <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
+                                                            New session
+                                                        </div>
+                                                    )}
                                                     {canFromTuned && (
                                                         <button
                                                             onClick={() => { setMenuFor(null); onNewFrom(session, 'tuned'); }}
@@ -363,6 +432,21 @@ export const SessionList: React.FC<Props> = ({
                                                         >
                                                             From BASE <span className="text-slate-600">(retry from the same start)</span>
                                                         </button>
+                                                    )}
+                                                    {canFinalize && (
+                                                        <>
+                                                            {(canFromTuned || canFromBase) && <div className="my-1 border-t border-slate-800" />}
+                                                            <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
+                                                                This session
+                                                            </div>
+                                                            <button
+                                                                onClick={() => { setMenuFor(null); onFinalize(session); }}
+                                                                className="block w-full text-left px-3 py-1.5 text-[10px] font-mono text-slate-300 hover:bg-slate-800 whitespace-nowrap"
+                                                                title="Loads this tune with PATCH and WOT TH off, ready for the hub to write. Nothing is sent until you press WRITE."
+                                                            >
+                                                                Finalize <span className="text-slate-600">(patch off, then WRITE)</span>
+                                                            </button>
+                                                        </>
                                                     )}
                                                 </div>
                                             </>

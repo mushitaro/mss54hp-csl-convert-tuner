@@ -34,17 +34,22 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         key: 'correctedLoad', label: 'Corr. RO %', unit: '%', format: v => v.toFixed(2),
         relevance: 'core', chartAxis: 'y3', color: '#0A9BDB', // M-blue accent
     },
+    // Plotly and the table's inline styles never see Tailwind tokens, so these are literals. They
+    // are still M-palette steps: the lambda pair takes the two violet steps ABOVE the Factor
+    // column's #9B84E8, which shares the table's header row with them and has to stay separable.
     lambda1: {
         key: 'lambda1', label: 'Lambda 1', unit: '', format: v => v.toFixed(3),
-        relevance: 'optional', chartAxis: 'y2', color: '#4ade80',
+        relevance: 'optional', chartAxis: 'y2', color: '#B9A6EE', // M-violet 300 (9.8:1)
     },
     lambda2: {
         key: 'lambda2', label: 'Lambda 2', unit: '', format: v => v.toFixed(3),
-        relevance: 'optional', chartAxis: 'y2', color: '#86efac',
+        relevance: 'optional', chartAxis: 'y2', color: '#CBBCF2', // lighter + dashed = 2nd sensor
     },
     coolantTemp: {
         key: 'coolantTemp', label: 'Temp', unit: '°C', format: v => v.toFixed(1),
-        relevance: 'optional', color: '#f59e0b',
+        // Never charted (no chartAxis) — this only colors the table column and the live TEMP cell,
+        // so it can hold the warm end of the M-red ramp without competing with a plotted series.
+        relevance: 'optional', color: '#F87A7F', // M-red 300 (8.1:1)
     },
 };
 

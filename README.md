@@ -42,7 +42,7 @@ Talks to the DME directly, so no separate reader/logger/flasher is needed:
 
 ```
 CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (ignition off 10s) → done
-                                                            ├→ Write Bytes    (verify in TunerPro first)
+                                                            ├→ Download Tuned (verify in TunerPro first)
                                                             └→ Re-tune        (discard)
 ```
 
@@ -55,16 +55,16 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
   [Technical Specifications](#technical-specifications--limitations) for exactly what is and isn't
   cleared.
 - **START TUNE** — live-logs from the DME and updates the VE calculation in real time
-- **STOP** — ends logging; you can then use **Write Bytes** to inspect the result before committing
+- **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
 - **WRITE** — flashes the tuned BIN (checksum corrected, then read-back verified)
 
 ### Getting files back out
 
 Two different things, so they are two different controls:
 
-- **Write Bytes** (on the session bar, above the map) — builds the bytes **WRITE would send right
-  now**, from the current map and the current toggle settings. This is the one to inspect in TunerPro
-  before flashing, and the only way to export a tune you have not saved yet.
+- **Download Tuned** (on the session bar, above the map) — builds the TUNED bytes **WRITE would send
+  right now**, from the current map and the current toggle settings. This is the one to inspect in
+  TunerPro before flashing, and the only way to export a tune you have not saved yet.
 - **The download icons in the STARTUP session list** — each downloads what that session has
   **stored**: its **BASE** bytes, its **LOG** (as a Testo-format CSV that re-imports cleanly), and its
   **TUNED** bytes. Each sits on the column that names it, so there is no question which file you get.
@@ -97,7 +97,7 @@ This tool can **erase and write your DME**. Flashing an ECU always carries risk.
   interrupt it.**
 - After a successful write, **turn the ignition OFF, wait 10 seconds, then back ON** so the DME
   reinitialises with the new data. The app prompts you for this.
-- Use **Write Bytes** before writing if you want to inspect the exact bytes in TunerPro first — the
+- Use **Download Tuned** before writing if you want to inspect the exact bytes in TunerPro first — the
   downloaded file is byte-for-byte identical to what gets flashed.
 
 ## Technical Specifications & Limitations

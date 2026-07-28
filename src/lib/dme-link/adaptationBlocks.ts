@@ -11,7 +11,20 @@
  * regulator in liveValueBlocks.ts) — a different value entirely.
  */
 
-import { FieldDef, decodeField } from './blockDecoder';
+import { FieldDef, decodeField, byteLength } from './blockDecoder';
+
+/**
+ * Smallest payload that can still carry every field this app decodes from a block.
+ *
+ * Deliberately NOT `expectedLength`. That number comes from the reference and is self-contradictory
+ * — 83 for block 0x06 whose own field table runs to offset 92 — so asserting equality against it
+ * could reject a response the DME is entitled to send. Derived from the fields instead: it fails only
+ * in the case that currently produces a table of silent dashes, and it demotes `expectedLength` to
+ * the documentation it can honestly be.
+ */
+export function minPayloadLength(fields: readonly FieldDef[]): number {
+    return fields.reduce((max, f) => Math.max(max, f.offset + byteLength(f.format)), 0);
+}
 
 /** One displayable adaptation row. */
 export interface AdaptationFieldDef extends FieldDef {

@@ -68,15 +68,12 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                 const hasHits = hits > 0;
 
                                 if (hasHits && (!diffData)) {
-                                    // Heatmap Logic (Green/Teal for high hits)
                                     const intensity = Math.min(hits / maxHits, 1.0);
-                                    // Use HSLA for easy opacity control with Slate-ish tint
-                                    // 210 hue is slate-blue, 160 is emerald/teal
-                                    // Let's use a solid Emerald-900 base but variable opacity
-                                    // Or just hardcoded classes if preferred, but dynamic style is smoother
-
-                                    // Option A: Dynamic Style
-                                    style = { backgroundColor: `rgba(16, 185, 129, ${intensity * 0.3})` }; // Emerald
+                                    // Ice blue (#8FD8F2) = "the log actually visited this cell", the same
+                                    // OK/present role emerald-* now carries. Safe to share the blue family
+                                    // with the lean-diff fill below: the guard above means a cell can never
+                                    // paint both, and diffData is all-or-nothing for the whole table.
+                                    style = { backgroundColor: `rgba(143, 216, 242, ${intensity * 0.3})` };
                                     textColor = hits > maxHits * 0.5 ? 'text-emerald-100' : 'text-slate-300';
                                 }
 

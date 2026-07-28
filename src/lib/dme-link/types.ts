@@ -1,11 +1,20 @@
 import { AdaptationSnapshot } from './adaptationBlocks';
+import { FlashCounterInfo } from './flashCounter';
 
-export type { AdaptationSnapshot };
+export type { AdaptationSnapshot, FlashCounterInfo };
 
 export interface DmeIdentity {
     vin: string;
     aif: string;
     softwareVersion: string;
+    /**
+     * Remaining programming headroom on both processors, read at connect alongside VIN/AIF/SW.
+     *
+     * `null` when it could not be read, which is a different fact from 0/30 and must not be shown
+     * as one — the other three fields make the same distinction with 'UNKNOWN'. A failure here
+     * never fails the connection.
+     */
+    flashCounter: FlashCounterInfo | null;
 }
 
 /** A single live-telemetry sample, using the same field names as LogDataPoint so it can feed
@@ -44,6 +53,57 @@ export interface DmeLink {
      * settle-then-re-read lives here because the wait is a property of the DME, not of the UI.
      */
     clearTuneAdaptations(): Promise<AdaptationSnapshot>;
+    /** Re-reads the flash counter (2 x 256 bytes), so the header can refresh without a reconnect. */
+    readFlashCounter(): Promise<FlashCounterInfo>;
+    /**
+     * Engine speed, for deciding whether a programming operation may run.
+     *
+     * Deliberately separate from pollLiveMeasurement even though the real link answers it with the
+     * same DS2 block. The two ask different questions — "give me a telemetry sample to plot" versus
+     * "is this engine turning?" — and only the second has a defensible answer offline: the mock has
+     * no engine, so it reports 0, while its telemetry stays an idle pattern because a datalog with
+     * a flat 0 rpm trace would rehearse nothing. One method could not honestly serve both.
+     */
+    readEngineRpm(): Promise<number>;
+    /**
+     * Resets the flash counter on both processors, and returns what the DME reads back afterwards.
+     *
+     * This is the most destructive operation this interface exposes. Clearing the counter means
+     * erasing and rewriting the whole 8 KB service block on each processor — the block that also
+     * holds AIF, ZIF and the VIN records — so a failure part-way through can leave the ECU without
+     * its identity data. `onBackup` receives those 16384 bytes (master then slave) BEFORE anything
+     * is erased, and is awaited: if it rejects, no erase is sent at all. That ordering is enforced
+     * here rather than by the caller because this is the layer that issues the erase, and a rule
+     * about "not until the backup is safe" is only worth anything where it can actually be obeyed.
+     *
+     * Not cancellable once the erase has gone out, for the same reason writePartialBin isn't.
+     */
+    resetFlashCounter(
+        onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
+        onProgress?: TransferProgress,
+    ): Promise<FlashCounterInfo>;
+    /**
+     * Writes a previously saved service block back, for recovering from a reset that was interrupted
+     * between its erase and its rewrite.
+     *
+     * The mirror image of resetFlashCounter: no read, no backup — the DME's current contents are the
+     * damage being undone, so there is nothing there worth preserving — and none of the guards that
+     * protect the reset. In particular it does NOT refuse an erased block: an erased block is
+     * precisely what this exists to fill.
+     */
+    restoreServiceBlock(
+        serviceBlockPair: ArrayBuffer,
+        onProgress?: TransferProgress,
+    ): Promise<FlashCounterInfo>;
+    /**
+     * Tester-present, to stop the DME dropping its diagnostic session while nothing is being asked of
+     * it — the adaptation dialog can sit for minutes between reading the values and clearing them.
+     *
+     * Best effort: resolves false instead of throwing, and skips itself whenever a real operation is
+     * in flight. Nothing should branch on the result beyond diagnostics; it is a heartbeat, not a
+     * health check a caller can act on.
+     */
+    keepAlive(): Promise<boolean>;
     /** Requests cancellation of an in-progress readPartialBin. Safe to call any time; no-op if idle. */
     abort(): void;
 }
@@ -54,3 +114,25 @@ export class DmeLinkError extends Error {
         this.name = 'DmeLinkError';
     }
 }
+
+/**
+ * Attached as a DmeLinkError's `cause` when a flash-counter reset is refused because the DME's
+ * service block is already erased — i.e. an earlier attempt died between its erase and its rewrite.
+ *
+ * Carried as data rather than left inside the message so the UI can route to the recovery flow
+ * instead of showing a dead end. It is the one failure here that has a specific, available remedy,
+ * and telling the user to recover without giving them the control to do it is worse than not
+ * mentioning it.
+ */
+export interface ServiceBlockErasedCause {
+    kind: 'serviceBlockErased';
+    processor: string;
+}
+
+export function isServiceBlockErasedCause(cause: unknown): cause is ServiceBlockErasedCause {
+    return typeof cause === 'object' && cause !== null && (cause as ServiceBlockErasedCause).kind === 'serviceBlockErased';
+}
+
+/** What kind of failure the link could name, when it could name one. The echo-mismatch verdicts
+ *  describe a cause; 'serviceBlockErased' names a remedy. */
+export type DmeErrorKind = 'electrical' | 'desync' | 'unclassified' | 'serviceBlockErased';

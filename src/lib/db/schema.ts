@@ -40,6 +40,15 @@ export interface FlashRecord {
     at: number;
     sha256: string;
     settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'writeWarmup' | 'writeWot'>;
+    /** Did these bytes carry a derived map, or only the patches? `settings` cannot answer that — a
+     *  patch-armed BASE and a patch-armed tune record identically — and the flash count is now a mix
+     *  of both, so the history has to say which each one was.
+     *
+     *  Optional because records written before the field existed have no value for it. Those are all
+     *  tunes: flashing without a derived map was unreachable until the hub gained WRITE PATCH-ON, so
+     *  a missing value reads as `true` rather than as unknown. Additive like `adaptationResets` — no
+     *  index changes, so no DB version bump. */
+    tuned?: boolean;
 }
 
 /** What the DME had learned when a tune's data capture began, and what it held after being cleared.
@@ -58,6 +67,24 @@ export interface AdaptationResetRecord {
      *  A failure mid-way writes nothing and the user retries — clearing is idempotent, so a retry
      *  costs nothing, and a record that stays silent is better than one that guesses. */
     after: AdaptationSnapshot;
+}
+
+/** A flash-counter reset performed during this session.
+ *
+ *  Worth keeping because the counter is the DME's own record of how much programming life it has
+ *  left, and a reset is the one act that makes that record stop matching reality — without this,
+ *  a later "1/30 used" gives no hint that the ECU has actually been programmed 40 times. `backupAt`
+ *  is the key into the separate service-block backup database (serviceBackupRepository.ts), which
+ *  is where the recovery image for this reset lives. */
+export interface FlashCounterResetRecord {
+    at: number;
+    /** Slots used per processor before and after, as the DME reported them. */
+    beforeMasterUsed: number;
+    beforeSlaveUsed: number;
+    afterMasterUsed: number;
+    afterSlaveUsed: number;
+    /** Primary key of the pre-erase service-block backup in the separate backup database. */
+    backupAt: number;
 }
 
 /** Metadata only — the ArrayBuffers live in SESSION_BINARIES_STORE so the list can render without
@@ -89,6 +116,14 @@ export interface TuningSession {
     hasLog: boolean;
     logPointCount: number;
 
+    /** Mean sample rate of the stored log, in Hz. Derived in saveTune from the log's own `time`
+     *  column, so a DS2 run and a CSV import are measured the same way and neither has to report it.
+     *
+     *  Optional, and unlike FlashRecord.tuned there is no defensible default for a missing value:
+     *  a rate is either measured or unknown, so old rows render nothing rather than "0.0 Hz".
+     *  Additive — no index change, so no DB_VERSION bump (see the note at the top of this file). */
+    averageHz?: number;
+
     /** Replaces writtenToDme. The same tune legitimately gets flashed more than once with
      *  different options (log runs with PATCH on, the final street flash with it off), and the
      *  record must not claim bytes that were never written. */
@@ -98,6 +133,11 @@ export interface TuningSession {
      *  rather than a bare spread like flashHistory: this field post-dates v3, so rows written before
      *  it genuinely do not have the array. */
     adaptationResets?: AdaptationResetRecord[];
+
+    /** Flash-counter resets performed while this session was open. Optional and spread through
+     *  `?? []` for the same reason as adaptationResets — and no DB_VERSION bump, because an added
+     *  optional property needs none (see the note at the top of this file). */
+    flashCounterResets?: FlashCounterResetRecord[];
 }
 
 export interface SessionLogRecord {

@@ -102,7 +102,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
                             </div>
                         </div>
 
-                        <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                        <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
                             <table className={`w-full text-left text-[10px] ${!enabled || readOnly ? 'opacity-50 pointer-events-none' : ''}`}>
                                 <thead className="text-slate-500 uppercase">
                                     <tr>

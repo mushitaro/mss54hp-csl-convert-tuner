@@ -1,9 +1,12 @@
-import { useCallback, useRef, useState } from 'react';
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferPhase, AdaptationSnapshot } from '@/lib/dme-link/types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+    DmeLink, DmeIdentity, LiveMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
+    DmeLinkError, DmeErrorKind, isServiceBlockErasedCause,
+} from '@/lib/dme-link/types';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { WebSerialTransport } from '@/lib/dme-link/webSerialTransport';
-import { Ds2SupportedBaud } from '@/lib/dme-link/ds2';
+import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
 
 /** What the *link* is doing — and nothing else.
  *
@@ -21,7 +24,19 @@ export type DmeSessionState =
     | 'reading'
     | 'tuning'        // STOP (live recording active)
     | 'writing'
-    | 'resetting';    // adaptation read/clear in flight (RESET ADAPT)
+    | 'resetting';    // a reset-class op in flight: RESET ADAPT, or a flash-counter read/reset
+
+/** Tester-present cadence. Comfortably inside any plausible DS2 session timeout, and cheap: one
+ *  5-byte frame, skipped outright whenever the link is doing something real. */
+const KEEP_ALIVE_INTERVAL_MS = 2000;
+
+/** What a flash-counter reset attempt came back with. `needsRecovery` means the DME's service block
+ *  was found already erased by an earlier interrupted attempt — the caller must offer the restore,
+ *  and must NOT offer a retry. Carried in the return value because a prop would arrive too late;
+ *  see resetFlashCounter. */
+export type FlashCounterOutcome =
+    | { ok: true; info: FlashCounterInfo }
+    | { ok: false; needsRecovery: boolean };
 
 export function useDmeLink() {
     const [state, setState] = useState<DmeSessionState>('disconnected');
@@ -32,11 +47,37 @@ export function useDmeLink() {
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
+    /**
+     * What KIND of failure `error` describes, when the link could tell.
+     *
+     * The message alone is not enough for the UI to give useful advice: an echo mismatch caused by
+     * something pulling the K-line low and one caused by a buffer desync read identically as "check
+     * the connection and retry", and only the second is worth retrying. classifyEchoMismatch already
+     * separates them; this carries that verdict out to the dialog instead of leaving it inside a
+     * sentence nobody can branch on.
+     */
+    const [errorKind, setErrorKind] = useState<DmeErrorKind | null>(null);
     const [transferProgress, setTransferProgress] = useState<number | null>(null);
     const [transferPhase, setTransferPhase] = useState<TransferPhase | null>(null);
 
     const linkRef = useRef<DmeLink | null>(null);
     const pollingRef = useRef<boolean>(false);
+
+    /** Report a failure with whatever the link could say about its cause. Paired with clearError so
+     *  the kind can never outlive the message it explains — a stale "electrical" next to a fresh
+     *  timeout would be worse than no classification at all. */
+    const failWith = useCallback((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        const cause = e instanceof DmeLinkError ? e.cause : undefined;
+        // 'serviceBlockErased' is the one kind that names a remedy rather than a diagnosis: it tells
+        // the flash dialog to offer the restore instead of a retry, which for that state would be
+        // the exact wrong button.
+        if (isServiceBlockErasedCause(cause)) { setErrorKind('serviceBlockErased'); return; }
+        const kind = (cause as EchoMismatchAnalysis | undefined)?.kind;
+        setErrorKind(kind === 'electrical' || kind === 'desync' || kind === 'unclassified' ? kind : null);
+    }, []);
+
+    const clearError = useCallback(() => { setError(null); setErrorKind(null); }, []);
 
     const isWebSerialSupported = WebSerialTransport.isSupported();
 
@@ -61,7 +102,7 @@ export function useDmeLink() {
     };
 
     const connect = useCallback(async (mockSourceBuffer?: ArrayBuffer) => {
-        setError(null);
+        clearError();
         setState('connecting');
         try {
             const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud });
@@ -77,10 +118,10 @@ export function useDmeLink() {
             // read() doesn't surface its own cancel in red. Reporting "No port selected by the user"
             // back to the user who just chose not to select a port is noise.
             const cancelled = e?.name === 'NotFoundError' || /No port selected/i.test(message);
-            setError(cancelled ? null : message);
+            if (cancelled) clearError(); else failWith(e);
             setState('disconnected');
         }
-    }, [mockMode, readBaud]);
+    }, [mockMode, readBaud, clearError, failWith]);
 
     const disconnect = useCallback(async () => {
         pollingRef.current = false;
@@ -90,9 +131,30 @@ export function useDmeLink() {
         setState('disconnected');
     }, []);
 
+    /**
+     * Tester-present while the link is up but nothing is being asked of it.
+     *
+     * The gap this closes is the adaptation dialog's viewing phase: a human reads twelve values and
+     * decides, and for that whole time — seconds to minutes — the K-line is silent. If the DME drops
+     * its diagnostic session in that window, the clear that follows fails, which is exactly where the
+     * failure is experienced.
+     *
+     * Runs on every state, not only 'connected'. The link itself decides whether to send: keepAlive
+     * skips when the CommandGate is held, so a read, a write or a poll loop simply absorbs the tick.
+     * Gating here on state instead would be a second, weaker copy of that rule — and the reset dialog
+     * sits in 'connected' anyway.
+     *
+     * `void` because nothing branches on the result: it is a heartbeat, and a failed one is reported
+     * by the next real operation rather than as an error the user did not ask for.
+     */
+    useEffect(() => {
+        const id = setInterval(() => { void linkRef.current?.keepAlive(); }, KEEP_ALIVE_INTERVAL_MS);
+        return () => clearInterval(id);
+    }, []);
+
     const read = useCallback(async (): Promise<ArrayBuffer | null> => {
         if (!linkRef.current) return null;
-        setError(null);
+        clearError();
         setState('reading');
         setTransferProgress(0);
         try {
@@ -104,14 +166,14 @@ export function useDmeLink() {
         } catch (e: any) {
             const message = e?.message ?? String(e);
             // A user-initiated cancel is not an error — don't surface it in red.
-            setError(/cancel/i.test(message) ? null : message);
+            if (/cancel/i.test(message)) clearError(); else failWith(e);
             setState('connected');
             return null;
         } finally {
             setTransferProgress(null);
             setTransferPhase(null);
         }
-    }, []);
+    }, [clearError, failWith]);
 
     // Aborts an in-progress partial-BIN read (the read() promise rejects with a cancel error,
     // which read()'s catch treats as a clean return to 'connected').
@@ -139,7 +201,7 @@ export function useDmeLink() {
         // Every other operation clears the previous error first; this one didn't, so a failed
         // adaptation reset — the step designed to happen immediately before a log — left the status
         // dot red for the whole run and made the abort invisible.
-        setError(null);
+        clearError();
         setState('tuning');
         pollingRef.current = true;
 
@@ -169,7 +231,7 @@ export function useDmeLink() {
                 onEnd?.(failure);
             }
         })();
-    }, []);
+    }, [clearError]);
 
     const stopTuning = useCallback(() => {
         pollingRef.current = false;
@@ -195,19 +257,19 @@ export function useDmeLink() {
     ): Promise<AdaptationSnapshot | null> => {
         const link = linkRef.current;
         if (!link) return null;
-        setError(null);
+        clearError();
         setState('resetting');
         try {
             return await op(link);
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            failWith(e);
             return null;
         } finally {
             // Idle again either way — the tune is untouched, so the button goes back to whatever the
             // workspace says on its own.
             setState('connected');
         }
-    }, []);
+    }, [clearError, failWith]);
 
     const readAdaptations = useCallback(
         () => runAdaptationOp(link => link.readAdaptations()), [runAdaptationOp]);
@@ -215,9 +277,130 @@ export function useDmeLink() {
     const resetAdaptations = useCallback(
         () => runAdaptationOp(link => link.clearTuneAdaptations()), [runAdaptationOp]);
 
+    /** Folds a fresh counter reading into `identity`, so the header updates without a reconnect.
+     *  Functional update: the reset takes minutes, and re-reading `identity` from this closure would
+     *  write back whatever it held when the operation started. */
+    const applyFlashCounter = useCallback((flashCounter: FlashCounterInfo) => {
+        setIdentity(prev => (prev ? { ...prev, flashCounter } : prev));
+    }, []);
+
+    /**
+     * Engine speed, to answer "may a programming operation run?".
+     *
+     * Returns null when the DME could not be asked, which the caller must NOT read as "stopped" —
+     * an unanswered question is not a zero. Deliberately not folded into readFlashCounter: they are
+     * two independent facts, and a failed RPM read should not cost the counter reading that
+     * succeeded.
+     */
+    const readEngineRpm = useCallback(async (): Promise<number | null> => {
+        const link = linkRef.current;
+        if (!link) return null;
+        setState('resetting');
+        try {
+            return await link.readEngineRpm();
+        } catch {
+            // Deliberately not failWith: this is a precondition probe the user did not ask for, and
+            // painting the status dot red for it would misreport the link. The caller shows its own
+            // "could not confirm" message instead.
+            return null;
+        } finally {
+            setState('connected');
+        }
+    }, []);
+
+    /**
+     * Writes a saved service block back, recovering from a reset that was interrupted mid-rewrite.
+     *
+     * Same state and progress treatment as the reset, because it is the same programming sequence
+     * with different bytes — and because from the user's side it is the second half of one incident,
+     * not a new operation.
+     */
+    const restoreServiceBlock = useCallback(async (
+        serviceBlockPair: ArrayBuffer,
+    ): Promise<FlashCounterInfo | null> => {
+        const link = linkRef.current;
+        if (!link) return null;
+        clearError();
+        setState('resetting');
+        setTransferProgress(0);
+        try {
+            const info = await link.restoreServiceBlock(serviceBlockPair, makeThrottledProgress());
+            applyFlashCounter(info);
+            return info;
+        } catch (e) {
+            failWith(e);
+            return null;
+        } finally {
+            setState('connected');
+            setTransferProgress(null);
+            setTransferPhase(null);
+        }
+    }, [clearError, failWith, applyFlashCounter]);
+
+    /** Re-reads the flash counter. Six chunk reads — 'resetting' rather than 'reading' because
+     *  'reading' is the bulk partial-BIN transfer and paints the hub's progress ring. */
+    const readFlashCounter = useCallback(async (): Promise<FlashCounterInfo | null> => {
+        const link = linkRef.current;
+        if (!link) return null;
+        clearError();
+        setState('resetting');
+        try {
+            const info = await link.readFlashCounter();
+            applyFlashCounter(info);
+            return info;
+        } catch (e) {
+            failWith(e);
+            return null;
+        } finally {
+            setState('connected');
+        }
+    }, [clearError, failWith, applyFlashCounter]);
+
+    /**
+     * Clears the flash counter, and publishes progress while it does.
+     *
+     * Unlike runAdaptationOp this reports a percentage. That function's reason for not doing so —
+     * "two round trips and a fixed settle, not a chunked transfer, so a percentage would be
+     * invented" — simply doesn't hold here: this reads 16 KB, erases, writes it back and reads it
+     * all again, so every number it publishes is measured.
+     *
+     * Stays in 'resetting' rather than 'writing': the dialog owns the screen and shows the progress
+     * itself, and 'writing' additionally means "a tune is going to the ECU" to everything that
+     * branches on it (the toggle disables, the hub's WRITING label).
+     */
+    const resetFlashCounter = useCallback(async (
+        onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
+    ): Promise<FlashCounterOutcome> => {
+        const link = linkRef.current;
+        if (!link) return { ok: false, needsRecovery: false };
+        clearError();
+        setState('resetting');
+        setTransferProgress(0);
+        try {
+            const info = await link.resetFlashCounter(onBackup, makeThrottledProgress());
+            applyFlashCounter(info);
+            return { ok: true, info };
+        } catch (e) {
+            failWith(e);
+            // Returned rather than left for the caller to read off `errorKind`: that is a prop, and
+            // the caller resumes from its await BEFORE React has re-rendered with the new value, so
+            // it would still see the previous one. The caller has to choose between offering Retry
+            // and offering the restore, and getting that backwards is the difference between a
+            // recoverable ECU and a permanently broken one.
+            return { ok: false, needsRecovery: e instanceof DmeLinkError && isServiceBlockErasedCause(e.cause) };
+        } finally {
+            // Idle again, still connected. The caller drops the link straight afterwards for the
+            // key cycle, but that is its decision to make — and on failure the connection is exactly
+            // what is needed to retry or to restore the backup.
+            setState('connected');
+            setTransferProgress(null);
+            setTransferPhase(null);
+        }
+    }, [clearError, failWith, applyFlashCounter]);
+
     const write = useCallback(async (buffer: ArrayBuffer): Promise<boolean> => {
         if (!linkRef.current) return false;
-        setError(null);
+        clearError();
         setState('writing');
         setTransferProgress(0);
         try {
@@ -225,7 +408,7 @@ export function useDmeLink() {
             setState('connected');
             return true;
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            failWith(e);
             // Idle again, still connected — but do NOT read this as "nothing happened". writePartialBin
             // erases the data area before it writes, so once it has started the ECU is not untouched;
             // a failure here can leave it partially programmed. And if the transport latched a break,
@@ -240,7 +423,7 @@ export function useDmeLink() {
             setTransferProgress(null);
             setTransferPhase(null);
         }
-    }, []);
+    }, [clearError, failWith]);
 
     return {
         state,
@@ -250,6 +433,7 @@ export function useDmeLink() {
         setReadBaud,
         identity,
         error,
+        errorKind,
         transferProgress,
         transferPhase,
         isWebSerialSupported,
@@ -262,5 +446,9 @@ export function useDmeLink() {
         write,
         readAdaptations,
         resetAdaptations,
+        readFlashCounter,
+        resetFlashCounter,
+        restoreServiceBlock,
+        readEngineRpm,
     };
 }

@@ -13,14 +13,18 @@ import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
+import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
-import { AdaptationSnapshot, TransferPhase } from '@/lib/dme-link/types';
+import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
+import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
 import { TUNE_ADAPTATION_CLEAR } from '@/lib/dme-link/ds2';
+import { saveServiceBackup, listServiceBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV } from '@/lib/download';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
+import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { sha256Hex } from '@/lib/db/sessionRepository';
 import { useBinaryFile } from '@/hooks/useBinaryFile';
 import { useLogFile } from '@/hooks/useLogFile';
@@ -32,6 +36,72 @@ import { useDmeLink } from '@/hooks/useDmeLink';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
 
 type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup' | 'wot';
+
+/** Live Hz readout tuning. 24 samples is ~3 s of history on the cable (two DS2 exchanges each) and
+ *  ~0.5 s under PRACTICE — long enough to ride out one retried exchange either way. Publishing at
+ *  4 Hz keeps the digits readable; the value itself is recomputed no faster than that. */
+const HZ_WINDOW_SAMPLES = 24;
+const HZ_PUBLISH_INTERVAL_S = 0.25;
+
+/** Replaces the tab strip's scrollbar with a fade on whichever edge still has tabs behind it.
+ *
+ *  The bar had to go: it renders 10px tall inside a 44px row, directly under the active tab's
+ *  2px underline, so the row read as two competing rules. A fade costs no height at all.
+ *
+ *  Only the overflowing side fades. A permanent fade on both edges would say "there is more this
+ *  way" while scrolled hard against a stop, which is exactly when there isn't — and an indicator
+ *  that is always on communicates nothing. Nothing is lost in exchange: Chromium maps a vertical
+ *  wheel onto a container that only scrolls horizontally, and the tabs are real buttons, so Tab-key
+ *  focus scrolls them into view on its own. */
+function useEdgeFade(fadePx = 24) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const update = () => {
+      // 1px of slack: fractional layout widths leave scrollLeft a hair short of the true maximum,
+      // which would otherwise strand a fade on the right edge at the end of the scroll.
+      const max = el.scrollWidth - el.clientWidth;
+      setEdges(prev => {
+        const next = { left: el.scrollLeft > 1, right: el.scrollLeft < max - 1 };
+        return prev.left === next.left && prev.right === next.right ? prev : next;
+      });
+    };
+
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    // Covers the container getting narrower. It does NOT cover the content getting wider: the strip
+    // is flex-1, so its own box is unchanged when what is inside it grows.
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    // Which is exactly what a webfont swap does. Tab labels are laid out in the fallback face first,
+    // and Inter's metrics can push a strip that fit into one that overflows — with no scroll, no
+    // resize and no DOM change to notice it by, leaving the right edge unfaded until the user
+    // happens to scroll. `fonts` is undefined in jsdom-style environments, hence the guard.
+    document.fonts?.ready.then(update);
+    // Insurance for the tab set itself changing. Today every tab is always rendered and only its
+    // `disabled` attribute varies, so this never fires — it is here so that making a tab conditional
+    // later does not silently strand the fades.
+    const mo = new MutationObserver(update);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, []);
+
+  const mask = `linear-gradient(to right, ${[
+    edges.left ? `transparent 0, black ${fadePx}px` : 'black 0',
+    edges.right ? `black calc(100% - ${fadePx}px), transparent 100%` : 'black 100%',
+  ].join(', ')})`;
+
+  return { ref, style: { maskImage: mask, WebkitMaskImage: mask } as React.CSSProperties };
+}
 
 function useFitScale(minScale = 0.5) {
   const outerRef = useRef<HTMLDivElement>(null);
@@ -73,10 +143,11 @@ function useFitScale(minScale = 0.5) {
 
 /** One phase, one color. The hub's progress arc, the percentage inside it and the phase label under
  *  it all read this table, so the three can never disagree about what stage the transfer is in.
- *  Amber and emerald are the instrument's functional status layer (busy / verified) rather than
- *  brand colors, which is exactly why they belong on the two stages that behave unusually: erase
+ *  The two stages that behave unusually get the two colors furthest from the read/write blue: erase
  *  reports nothing and parks the percentage at 0 until it finishes (ERASE_TIMEOUT_MS allows it 65 s),
- *  and verify is a second full-length pass that is reading the ECU back, not writing to it. */
+ *  and verify is a second full-length pass that is reading the ECU back, not writing to it. Since
+ *  the palette collapsed to the M tricolor, `amber` is violet and `emerald` is a near-white ice blue
+ *  — erase separates by hue, verify by lightness (15.4:1 against blue-400's 8.3:1) plus its label. */
 const TRANSFER_PHASE_STYLE: Record<TransferPhase, { label: string; text: string }> = {
   erasing: { label: 'Erasing…', text: 'text-amber-400' },
   reading: { label: 'Reading…', text: 'text-blue-400' },
@@ -135,13 +206,31 @@ export default function Home() {
   const comparison = useComparison(veCalc.newMap, binaryFileState.initialMapData, sessionDb.sessions);
 
   const [activeTab, setActiveTab] = useState<TabId>('startup');
+  /** A tab to move to once it becomes reachable — see the effect that consumes it. */
+  const pendingTabRef = useRef<TabId | null>(null);
+  /** Every explicit navigation goes through here, so deliberately choosing a tab cancels an armed
+   *  auto-move. Without it, a move armed by a run that produced nothing would fire later, on top of
+   *  wherever the user had since sent themselves. */
+  const goToTab = (id: TabId) => { pendingTabRef.current = null; setActiveTab(id); };
 
   const liveSamplesRef = useRef<LogDataPoint[]>([]);
   const lastFlushRef = useRef<number>(0);
+  /** Live sample-rate readout. Refs, not state, on purpose: setLiveSample below already re-renders on
+   *  every sample, so a ref read during render is always current — the same trick the SAMP cell uses
+   *  — and adding state here would double the per-sample render cost for a value that changes at 4 Hz.
+   *
+   *  Two smoothings, both needed. The window averages out a single retried DS2 exchange, which would
+   *  otherwise read as a momentary 0.5 Hz; the publish gate stops the digits churning every sample.
+   *  Both are clocked off `sample.time` rather than Date.now(), so they stay honest if the tab is
+   *  backgrounded and the poll loop keeps running. */
+  const hzWindowRef = useRef<number[]>([]);
+  const hzValueRef = useRef<number | null>(null);
+  const hzPublishedAtRef = useRef<number>(0);
   // Hub/wing cluster auto-fit: measures real available space vs. the cluster's natural size and
   // returns a transform scale, so it always fits (any viewport) instead of estimating from raw
   // window dimensions.
   const { outerRef: clusterOuterRef, innerRef: clusterInnerRef, scale: clusterScale, minH: clusterMinH } = useFitScale(0.4);
+  const tabStrip = useEdgeFade();
   const prevCompactRef = useRef(false);
   const compact = prevCompactRef.current ? clusterScale < 0.88 : clusterScale < 0.78;
   prevCompactRef.current = compact;
@@ -152,6 +241,7 @@ export default function Home() {
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
   const [adaptDialogOpen, setAdaptDialogOpen] = useState(false);
+  const [flashDialogOpen, setFlashDialogOpen] = useState(false);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
 
@@ -186,6 +276,9 @@ export default function Home() {
     veCalc.reset();
     logFileState.clear();
     liveSamplesRef.current = [];
+    // The workspace this move was armed for is going away, so the move has to go with it — otherwise
+    // it fires later against whatever gets loaded next.
+    pendingTabRef.current = null;
   };
 
   /** Sets a specific draft's BASE from a file. Called from that draft's own row, so there is no
@@ -202,14 +295,14 @@ export default function Home() {
       baseBinaryBuffer: buffer,
       baseFileName: file.name,
     });
-    setActiveTab('current');
+    goToTab('current');
   };
 
   const handleLogUpload = async (file: File) => {
     const processed = await logFileState.parseAndSetLog(file);
     if (processed && currentMap) {
       runCalculation(currentMap, processed.data);
-      setActiveTab('diff'); // jump to the result only on the initial CSV load
+      goToTab('diff'); // jump to the result only on the initial CSV load
     }
   };
 
@@ -233,7 +326,7 @@ export default function Home() {
       logFileState.clear();
       veCalc.reset();
       if (activeTab === 'log' || activeTab === 'new' || activeTab === 'diff' || activeTab === 'lambda') {
-        setActiveTab('current');
+        goToTab('current');
       }
     }
   };
@@ -243,9 +336,9 @@ export default function Home() {
   };
 
   // --- Session artifact downloads ---------------------------------------------------------------
-  // These act on what the session has *stored*, which is what makes them unambiguous: the workspace
-  // Download above the map builds bytes live from the current toggles, so it can't stand in for
-  // these, and they can't stand in for it.
+  // These act on what the session has *stored*, which is what makes them unambiguous: DOWNLOAD TUNED
+  // above the map builds bytes live from the current toggles, so it can't stand in for these, and
+  // they can't stand in for it.
 
   const handleDownloadSessionBase = async (session: TuningSession) => {
     const bins = await sessionDb.loadBinaries(session.id);
@@ -263,6 +356,40 @@ export default function Home() {
     const points = await sessionDb.loadLog(session.id);
     if (!points?.length) { alert('This session has no stored log.'); return; }
     downloadBlob(serializeLogFile(points), `${fileSafe(session.label)}_log.csv`, MIME_CSV);
+  };
+
+  /** The last step of a tune: put the finished map back on the road with the patches off.
+   *
+   *  Loads the session's STORED TUNED as the working binary and disarms both patch toggles, which
+   *  leaves the bytes patched and the toggles saying otherwise — the drift the hub reads to offer
+   *  WRITE PATCH-OFF. Everything about the flash itself therefore stays on the one path that has the
+   *  confirm gate, the engine-stopped warning, the read-back verify and the key-cycle instructions.
+   *
+   *  It does NOT re-derive from the log the way opening an archived session does. There is nothing to
+   *  re-derive: the tuned map is already inside these bytes, and the only edit is the correction flag.
+   *  That also means it still works for a session whose log can no longer be replayed, and it cannot
+   *  reach the double-correction trap (V0*C^2) that rebuilding from a tuned map would.
+   *
+   *  No new session, either. This is the same tune reaching the ECU a second time, so it belongs in
+   *  the same row's flashHistory — see handleDmeWrite, which skips saveSessionTune for an archived
+   *  session precisely so the earlier flash record keeps pointing at the bytes it actually sent. */
+  const handleFinalizeSession = async (session: TuningSession) => {
+    const bins = await sessionDb.loadBinaries(session.id);
+    if (!bins?.tunedBinaryBuffer) { alert('This session has no saved tune to finalize.'); return; }
+    setActiveSessionId(session.id);
+    resetDerived();
+    const map = await binaryFileState.loadFromBuffer(
+      bins.tunedBinaryBuffer,
+      session.binaryFileName ?? 'tuned.bin',
+      // Explicit, not detected: detection would read the patch back OFF the bytes and re-arm the very
+      // toggles this is here to clear, leaving nothing for the hub to notice.
+      { applyPatch: false, applyWotDisable: false, writeWarmup: false, writeWot: false },
+    );
+    if (!map) return;
+    // CURRENT MAP, not TUNED MAP: nothing was derived, so `newMap` is null and the TUNED MAP tab is
+    // disabled. The map to check before flashing is the one inside the bytes just loaded, and that
+    // is what CURRENT MAP shows.
+    goToTab('current');
   };
 
   // --- Session lifecycle -----------------------------------------------------------------------
@@ -286,8 +413,30 @@ export default function Home() {
     { id: 'wot', label: 'WOT (DERIVED / EXP.)', enabled: !!wotMap },
   ];
 
+  /** A tab move armed before its target exists, released the moment it does.
+   *
+   *  A log run's two interesting moments both precede their own data. At START TUNE there is no
+   *  correctionMap and no newMap, so LAMBDA FEEDBACK is disabled and setting it directly would just be
+   *  bounced to startup by the guard below. Arming instead lets the move wait: the first sample runs
+   *  an unthrottled flush (handleStartTune zeroes lastFlushRef), correctionMap and newMap appear
+   *  together, and this fires — roughly one DS2 round trip after the button.
+   *
+   *  It never sets a disabled tab, so it cannot fight the guard; the two effects agree by
+   *  construction rather than by ordering. */
+  useEffect(() => {
+    const want = pendingTabRef.current;
+    if (!want) return;
+    if (!TABS.find(t => t.id === want)?.enabled) return;   // not yet — stay armed
+    pendingTabRef.current = null;                          // one-shot
+    setActiveTab(want);
+  }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap]);
+
   // Clearing the log or swapping the BASE can disable the tab you're standing on; without this you'd
   // be stranded on a placeholder with its own tab greyed out.
+  //
+  // Deliberately the one place that still calls setActiveTab raw. A forced bounce is not the user
+  // navigating, so it must NOT disarm a pending move — goToTab would, and a run whose result is still
+  // being derived would lose its landing.
   useEffect(() => {
     if (!TABS.find(t => t.id === activeTab)?.enabled) setActiveTab('startup');
   }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap, activeTab]);
@@ -317,13 +466,13 @@ export default function Home() {
     const created = await sessionDb.newDraft();
     setActiveSessionId(created.id);
     resetDerived();
-    setActiveTab('startup');
+    goToTab('startup');
     return created;
   };
 
   /** Opens a saved session. Draft -> keep tuning. Archived -> reference + flash only. */
   const handleOpenSession = async (session: TuningSession) => {
-    if (!session.baseOrigin) { setActiveSessionId(session.id); setActiveTab('startup'); return; }
+    if (!session.baseOrigin) { setActiveSessionId(session.id); goToTab('startup'); return; }
     const bins = await sessionDb.loadBinaries(session.id);
     if (!bins) { alert('This session has no stored binary.'); return; }
 
@@ -334,7 +483,7 @@ export default function Home() {
       // Continue where it left off: the BASE is the working map.
       const map = await binaryFileState.loadFromBuffer(bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin');
       if (!map) return;
-      setActiveTab('current');
+      goToTab('current');
       return;
     }
 
@@ -373,7 +522,7 @@ export default function Home() {
     // WRITE only appears because the rebuild produced a tune; buildPatchedBuffer(null) does not
     // no-op — it returns the BASE — so an unreconstructed session must not offer it.
     if (!rebuilt) alert('This session could not be reconstructed from its stored log — flashing is disabled.');
-    setActiveTab('current');
+    goToTab('current');
   };
 
   /** Starts a new session whose BASE is another session's TUNED (continue) or BASE (retry). */
@@ -407,7 +556,7 @@ export default function Home() {
       baseBinaryBuffer: buffer.slice(0),   // copied, so deleting the parent can't strand this one
       baseFileName: fileName,
     });
-    setActiveTab('current');
+    goToTab('current');
   };
 
   /** Saves the draft's tune. The only way to persist a session without a cable.
@@ -432,13 +581,35 @@ export default function Home() {
 
     await sessionDb.saveSessionTune({
       sessionId: target.id,
-      binaryFileName: binaryFileState.buildFileName(),
+      binaryFileName: binaryFileState.buildFileName(newMap),
       tunedBinaryBuffer: patchedBuffer,
       veMapSnapshot: newMap,
       tuneSettings: buildSettings(),
       log: logFileState.rawLogData,
     });
-    alert('Session saved.');
+
+    // saveTune archives the session — the record now describes a specific set of bytes. But the
+    // workspace does not know that: newMap is still loaded, so idleAction stays 'write' and the hub
+    // keeps offering WRITE against a session the DB considers closed. That is the "button says the
+    // wrong thing" class idleAction was written to eliminate, arriving through the one door it did
+    // not cover, and it is the state the user described as frightening.
+    //
+    // Ask rather than decide, at the one moment the answer is known — the same idiom handleDmeWrite
+    // already uses for the re-tune question. Keeping it loaded is a legitimate answer: save-then-flash
+    // is a real sequence, and forcing a reopen would tax it for no safety gain while the user is
+    // standing right there.
+    const keepLoaded = confirm(
+      'セッションを保存しました。\n\n' +
+      'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
+      'キャンセル = ワークスペースを閉じてセッション一覧に戻る'
+    );
+    if (keepLoaded) return;
+
+    // resetDerived also clears pendingTabRef, which is what stops a run's end-of-log move from firing
+    // later on top of the session list.
+    resetDerived();
+    setActiveSessionId(null);
+    goToTab('startup');
   };
 
   // --- DME connection flow (CONNECTION -> READ -> START TUNE -> STOP -> WRITE / Re-tune) ---
@@ -467,17 +638,22 @@ export default function Home() {
       baseBinaryBuffer: buffer.slice(0),
       baseFileName: fileName,
     });
-    setActiveTab('current');
+    goToTab('current');
   };
 
+  /** Returns whether this call actually derived anything, so the end-of-run tab move can be armed only
+   *  when there is a result to move to. The throttled early return reports null, which matters solely
+   *  to force=true callers — and finishLog is the only one. */
   const flushLiveSamples = (force: boolean) => {
     const now = Date.now();
-    if (!force && now - lastFlushRef.current < 500) return;
+    if (!force && now - lastFlushRef.current < 500) return null;
     lastFlushRef.current = now;
     const processed = logFileState.loadRawLog([...liveSamplesRef.current], 'live-session.csv');
     if (processed && currentMap) {
       veCalc.runCalculation(currentMap, processed.data);
+      return processed;
     }
+    return null;
   };
 
   /** One-shot per tuning session — reset in handleStartTune, deliberately NOT per mount. A per-mount
@@ -500,7 +676,13 @@ export default function Home() {
   const finishLog = async (failure: string | null) => {
     if (finishedRef.current) return;
     finishedRef.current = true;
-    flushLiveSamples(true);
+    const flushed = flushLiveSamples(true);
+
+    // Land on the tune this run produced — and only if it produced one. A run that captured nothing
+    // must arm nothing, or the move would sit waiting and later hijack an unrelated navigation.
+    // Armed before the disconnect/alert below on purpose: alert blocks, so React commits the move
+    // behind the dialog and dismissing it reveals TUNED MAP already open.
+    pendingTabRef.current = flushed ? 'new' : null;
 
     // Logging runs with the engine going; writing needs it stopped, and stopping it ends the DME's
     // diagnostic session. So this connection physically cannot survive into the write — keeping it
@@ -518,7 +700,7 @@ export default function Home() {
       '3. CONNECTION で接続し直す → WRITE\n\n' +
       '※ エンジンが回っているとDMEが書き込みを拒否します。\n' +
       '※ エンジンを止めると通信が切れるため、接続はここで解除しました。\n\n' +
-      '書き込まない場合は、このまま Write Bytes で書き出せます(WRITEが送るバイト列そのもの)。'
+      '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。'
     );
   };
 
@@ -534,6 +716,13 @@ export default function Home() {
     liveSamplesRef.current = [];
     lastFlushRef.current = 0;
     finishedRef.current = false;
+    hzWindowRef.current = [];
+    hzValueRef.current = null;
+    hzPublishedAtRef.current = 0;
+    // LAMBDA FEEDBACK is where a run is actually read — it is the trim the log is being captured to
+    // measure. It is disabled at this instant (no correctionMap, no newMap), which is exactly what
+    // arming is for; the first sample's unthrottled flush releases it.
+    pendingTabRef.current = 'lambda';
     setLiveSample(null);
     dmeLink.startTuning(
       (sample) => {
@@ -548,6 +737,21 @@ export default function Home() {
           coolantTemp: sample.coolantTemp,
         };
         liveSamplesRef.current.push(point);
+
+        // Trailing window of sample times. There is no poll interval to read — the loop in
+        // startTuning awaits pollLiveMeasurement back to back, so the rate IS the DS2 round trip and
+        // the only way to know it is to measure it.
+        const w = hzWindowRef.current;
+        w.push(point.time);
+        if (w.length > HZ_WINDOW_SAMPLES) w.splice(0, w.length - HZ_WINDOW_SAMPLES);
+        if (point.time - hzPublishedAtRef.current >= HZ_PUBLISH_INTERVAL_S) {
+          const hz = sampleRateHzFromTimes(w);
+          // Leave the last good value standing on a degenerate window rather than blanking the cell
+          // mid-run: the rate did not become unknown, we just could not measure it this tick.
+          if (hz !== undefined) hzValueRef.current = hz;
+          hzPublishedAtRef.current = point.time;
+        }
+
         setLiveSample(point); // live raw readout, independent of the VE filters
         flushLiveSamples(false);
       },
@@ -592,7 +796,9 @@ export default function Home() {
     // write (0xA2) unless the engine is stopped (RPM/speed = 0), but we warn explicitly.
     const confirmed = confirm(
       'DMEへ書き込みます。\n\n' +
-      `書き込む内容: ${newMap ? 'チューニング済みマップ' : '⚠ 未チューニング(読み込んだBINそのまま)'}\n` +
+      `書き込む内容: ${newMap
+        ? 'チューニング済みマップ'
+        : `⚠ マップは変更しません(パッチのみ) — ${(applyPatch || applyWotDisable) ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
       (drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${drift.join('\n  ')}\n` : '') +
       '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
       '  エンジンが回っているとDMEが書き込みを拒否します。\n' +
@@ -606,28 +812,68 @@ export default function Home() {
     const ok = await dmeLink.write(patchedBuffer);
     if (ok) {
       const target = currentSession ?? (await ensureDraft());
-      const veMapSnapshot = newMap || currentMap;
+      // One flash, so one hash and one timestamp, taken here and used by whichever branch runs below.
+      const sha256 = await sha256Hex(patchedBuffer);   // the bytes actually sent, not the stored ones
+      const flashedAt = Date.now();
+
+      // The key-off power-cycle ends the DME's diagnostic session, so the serial connection goes
+      // stale either way. Both branches below say so and then disconnect; they differ in what the
+      // session becomes and where you go next.
+      const KEY_CYCLE =
+        '次の手順で終了してください:\n' +
+        '1. イグニッションキーを OFF にする\n' +
+        '2. そのまま 10秒間 待つ\n' +
+        '3. キーを ON に戻す\n\n' +
+        'DMEが新しいデータで再初期化されます。';
+
+      if (!newMap) {
+        // Patch-only flash. Deliberately NOT saveSessionTune and NOT archive:
+        //  - saveSessionTune would record a TUNED whose map is just the BASE's, which is precisely
+        //    the "BASE dressed as a TUNED" that handleSaveSession's doc describes removing.
+        //  - archive would end the session before it has tuned anything — !isArchived is what makes
+        //    the hub offer START TUNE, so archiving here would strand the whole point of the step.
+        // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
+        if (target) await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: false });
+
+        alert(
+          '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
+          KEY_CYCLE + '\n\n' +
+          'その後 CONNECTION で接続し直すと、START TUNE でデータログを開始できます。'
+        );
+        await dmeLink.disconnect();
+
+        // The ECU now holds these bytes, so the workspace has to as well — otherwise patchStatus
+        // still describes the pre-patch BASE, the drift never clears, and the hub would keep
+        // offering the same write forever. Toggles are passed through rather than re-detected so
+        // the reload cannot bounce them.
+        await binaryFileState.loadFromBuffer(
+          patchedBuffer,
+          binaryFileState.buildFileName(null),
+          { applyPatch, applyWotDisable, writeWarmup, writeWot },
+        );
+        goToTab('current');
+        return;
+      }
+
       // saveSessionTune returns the updated record; `target` is a pre-save snapshot whose
       // binaryFileName is still unset for a draft, and re-tuning below needs that name.
       let flashed: TuningSession | null = target;
-      if (target && veMapSnapshot) {
+      if (target) {
         // A draft's tune isn't in the DB yet; an archived session's already is and must not be
-        // rewritten — only its flash history grows.
+        // rewritten — only its flash history grows. That is also what makes FINALIZE safe: it
+        // re-flashes an archived session patch-off without touching the TUNED its earlier flash
+        // record already points at.
         if (target.status === 'draft' && target.baseOrigin) {
           flashed = await sessionDb.saveSessionTune({
             sessionId: target.id,
-            binaryFileName: binaryFileState.buildFileName(),
+            binaryFileName: binaryFileState.buildFileName(newMap),
             tunedBinaryBuffer: patchedBuffer,
-            veMapSnapshot,
+            veMapSnapshot: newMap,
             tuneSettings: flashedSettings,
             log: logFileState.rawLogData,
           });
         }
-        await sessionDb.recordFlash(target.id, {
-          at: Date.now(),
-          sha256: await sha256Hex(patchedBuffer),   // the bytes actually sent, not the stored ones
-          settings: flashedSettings,
-        });
+        await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: true });
         // These bytes are now in the ECU, so this session is a record of what was flashed, not a
         // workspace: archive it. Leaving it a draft let you keep tuning it afterwards, which would
         // drift its TUNED away from the bytes its own flash history points at — and the list would
@@ -636,17 +882,8 @@ export default function Home() {
       }
 
       // Post-write instruction: the DME must be power-cycled to reinitialize with the new data.
-      alert(
-        '✅ 書き込みが完了しました(リードバック検証OK)。\n\n' +
-        '次の手順で終了してください:\n' +
-        '1. イグニッションキーを OFF にする\n' +
-        '2. そのまま 10秒間 待つ\n' +
-        '3. キーを ON に戻す\n\n' +
-        'DMEが新しいデータで再初期化されます。'
-      );
+      alert('✅ 書き込みが完了しました(リードバック検証OK)。\n\n' + KEY_CYCLE);
 
-      // The key-off power-cycle ends the DME's diagnostic session, so the serial connection is now
-      // stale — disconnect to keep the UI honest. Reconnect when you want to read/verify again.
       await dmeLink.disconnect();
 
       // Re-tune: the next session starts from exactly the bytes now in the ECU. Asked here because
@@ -660,7 +897,7 @@ export default function Home() {
         await handleNewFrom(flashed, 'tuned');
         return;
       }
-      setActiveTab('startup');
+      goToTab('startup');
     } else {
       // A failed write used to show nothing at all — no alert, no dialog — leaving only the small red
       // notice line and a WRITE button that still looked ready. That is the most consequential moment
@@ -700,13 +937,104 @@ export default function Home() {
     }
   };
 
+  /** Key of the pre-erase service block backup, so the session record points at the stored row. */
+  const flashBackupRef = useRef<{ at: number; vin?: string } | null>(null);
+
+  /**
+   * Saves the 16 KB service block the flash-counter reset is about to erase — to a file AND to the
+   * browser — and rejects if either fails.
+   *
+   * Rejecting is the whole point. resetFlashCounter awaits this before it sends a single erase, so
+   * a throw here means the ECU is never touched. That block carries the VIN, AIF and ZIF records,
+   * and once it is erased this image is the only way back, so "we couldn't save it, but let's erase
+   * anyway" is not a trade worth offering.
+   *
+   * Saves silently. It deliberately does NOT trigger a file download: in this app writing to the
+   * DME and downloading a file are separate, separately-chosen actions — WRITE never produces a
+   * file, and every download hangs off a control that names what it exports (DOWNLOAD TUNED, the
+   * per-artifact buttons in the session list). Firing a save dialog out of a vehicle write broke
+   * that, which is why it is gone.
+   */
+  const handleFlashCounterBackup = async (pair: ArrayBuffer) => {
+    const at = Date.now();
+    const vin = dmeLink.identity?.vin;
+    await saveServiceBackup({ at, vin, buffer: pair.slice(0) });
+    flashBackupRef.current = { at, vin };
+  };
+
+  /** Records the reset against the open session, if there is one. Best-effort and deliberately
+   *  after the fact, exactly like handleAdaptationResetComplete: by the time this runs the DME has
+   *  already been rewritten and verified, so a failed bookkeeping write must not present itself as
+   *  a failed reset. There may also be no session at all — the reset is offered whenever the link
+   *  is connected, including straight after CONNECTION with nothing loaded. */
+  const handleFlashCounterResetComplete = async (before: FlashCounterInfo, after: FlashCounterInfo) => {
+    const backup = flashBackupRef.current;
+    if (!currentSession || !backup) return;
+    try {
+      await sessionDb.recordFlashCounterReset(currentSession.id, {
+        at: Date.now(),
+        beforeMasterUsed: before.master.used,
+        beforeSlaveUsed: before.slave.used,
+        afterMasterUsed: after.master.used,
+        afterSlaveUsed: after.slave.used,
+        backupAt: backup.at,
+      });
+    } catch (e) {
+      console.error('Flash counter reset could not be recorded', e);
+    }
+  };
+
+  /**
+   * Writes a saved service block back, recovering a reset that was interrupted mid-rewrite.
+   *
+   * Marks the backup as consumed so the close handler below does not then tell the user to cycle
+   * the ignition: after a recovery the right next step is to check the result, not to power-cycle
+   * an ECU that has just been rebuilt.
+   */
+  const handleFlashCounterRestore = async (at: number): Promise<FlashCounterInfo | null> => {
+    const record = await loadServiceBackup(at);
+    if (!record) return null;
+    const info = await dmeLink.restoreServiceBlock(record.buffer);
+    if (info) flashBackupRef.current = null;
+    return info;
+  };
+
+  /**
+   * Closes the reset dialog. When the reset actually ran, the connection has to go: the DME needs a
+   * power cycle to re-initialise from the rewritten service block, and every DS2 operation after
+   * this point would be talking to an ECU in an in-between state. Same shape as the post-write
+   * teardown — say what to do, then drop the link.
+   *
+   * Keyed on whether a backup was taken rather than on the dialog's phase: that ref is set inside
+   * onBackup, which is the last thing to happen before the first erase, so it is exactly "the ECU
+   * may have been touched".
+   */
+  const handleFlashDialogClose = async () => {
+    setFlashDialogOpen(false);
+    if (!flashBackupRef.current) return;
+    flashBackupRef.current = null;
+    if (dmeLink.state === 'disconnected') return;
+    alert(
+      'フラッシュカウンターのリセット処理を終了しました。\n\n' +
+      '次の手順で進めてください:\n' +
+      '1. イグニッションキーを OFF にする\n' +
+      '2. そのまま 10秒間 待つ\n' +
+      '3. キーを ON に戻す\n' +
+      '4. CONNECTION で接続し直す\n\n' +
+      'DMEはサービス情報ブロックを書き直した状態で再初期化されます。\n' +
+      '※ 再初期化されるまで、このセッションでの読み書きは行わないでください。\n' +
+      '※ 接続はここで解除しました。'
+    );
+    await dmeLink.disconnect();
+  };
+
   /** Throws away the log just recorded so it can be re-driven, without touching the BASE. */
   const handleDiscardLog = () => {
     if (!confirm('Discard the log just recorded and start over?')) return;
     logFileState.clear();
     veCalc.reset();
     liveSamplesRef.current = [];
-    setActiveTab('current');
+    goToTab('current');
   };
 
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
@@ -718,10 +1046,47 @@ export default function Home() {
    *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
    *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
    */
-  const idleAction: 'read' | 'tune' | 'write' =
+  /** Do the loaded bytes already carry the patches the toggles are asking for? Derived, like
+   *  everything else here, rather than tracked: patchStatus is read out of the binary itself, so this
+   *  compares "what is in the ECU" against "what you have armed" without storing either.
+   *
+   *  applyPatch is seeded on load from mapOff && tempLimit (uploadBinary), so the comparison has to
+   *  use the same pair — testing mapOff alone would call a half-patched BIN patched. */
+  const bytesPatched = !!patchStatus && patchStatus.mapOff && patchStatus.tempLimit;
+  const bytesWotDisabled = !!patchStatus && patchStatus.wotDisabled;
+  const patchDrift = !!patchStatus && (bytesPatched !== applyPatch || bytesWotDisabled !== applyWotDisable);
+
+  /** A draft is a workspace, so drift in either direction there is you arming something. An archived
+   *  session is a record, and the only legitimate reason to send it to the ECU again is finalising —
+   *  taking the patches off. Without this, reopening an archived session whose log could not be
+   *  replayed would raise drift by accident (its stored settings say PATCH ON, its BASE bytes are
+   *  unpatched) and the hub would offer a patch write in place of READ, which is the one thing that
+   *  state actually needs. */
+  const patchWriteAllowed = !isArchived || (!applyPatch && !applyWotDisable);
+
+  /** What the ring offers while the link is connected and idle — derived from the workspace on every
+   *  render, never stored.
+   *
+   *  A tune to flash outranks everything: that's what lets STOP drop the connection for the key cycle
+   *  and still come back to WRITE. Then a BASE with no tune yet means record one. Nothing loaded means
+   *  fetch a BASE. Because it's read off the data, it cannot disagree with the data — the whole class
+   *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
+   *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
+   *
+   *  'writePatch' sits between them and covers the two steps that have no derived map but still have
+   *  bytes worth sending: arming the patch before the first log run, and taking a finished tune back
+   *  off patch afterwards. It outranks 'tune' on purpose — with the patch not yet in the ECU, START
+   *  TUNE would record STFT through the DME's own map correction, which is the wrong next step.
+   *  Unlike 'tune' it is NOT gated on !isArchived: finalising is exactly an archived session's job. */
+  const idleAction: 'read' | 'tune' | 'write' | 'writePatch' =
     newMap ? 'write'
-      : (currentMap && currentSession && !isArchived) ? 'tune'
-        : 'read';
+      : (patchDrift && patchWriteAllowed && currentMap && currentSession) ? 'writePatch'
+        : (currentMap && currentSession && !isArchived) ? 'tune'
+          : 'read';
+
+  // Names the bytes by what they will carry once written, not by what is in the ECU now — the label
+  // is a promise about the file being sent, the same rule DOWNLOAD PATCH-ON follows.
+  const writePatchLabel = (applyPatch || applyWotDisable) ? 'WRITE PATCH-ON' : 'WRITE PATCH-OFF';
 
   const dmeButtonConfig = (() => {
     switch (dmeLink.state) {
@@ -736,6 +1101,7 @@ export default function Home() {
       case 'connected':
         switch (idleAction) {
           case 'write': return { label: 'WRITE', Icon: Zap, onClick: handleDmeWrite, disabled: false, spin: false };
+          case 'writePatch': return { label: writePatchLabel, Icon: Zap, onClick: handleDmeWrite, disabled: false, spin: false };
           // Tuning is a draft-only act: an archived session must never re-derive its own map.
           case 'tune': return { label: 'START TUNE', Icon: Play, onClick: handleStartTune, disabled: false, spin: false };
           case 'read': return { label: 'READ', Icon: Zap, onClick: handleDmeRead, disabled: false, spin: false };
@@ -749,25 +1115,103 @@ export default function Home() {
   // happening rather than flashing the read color at the top of a write.
   const transferStyle = TRANSFER_PHASE_STYLE[dmeLink.transferPhase ?? (dmeLink.state === 'writing' ? 'writing' : 'reading')];
 
+  // Four states on a 8px dot, with the accent set down to three hues. Each one carries its own glow
+  // rather than the single blue halo this used to wear under every state — a red error dot ringed in
+  // M-blue was already wrong, and it gets worse now that the OK state is itself blue-family. Busy
+  // additionally pulses, which is the channel that survives when hue does not.
+  /** The header's FLASH field: how much programming life the DME has left.
+   *
+   *  ONE number, because a flash consumes a slot on both processors together — they track each
+   *  other. The pair is still read and compared rather than assumed: the erase is a single command
+   *  but the two writes are separate, so a write that succeeds on master and fails on slave leaves
+   *  them permanently apart. That is rare and it is exactly the case worth seeing, so the display
+   *  falls back to `master · slave` only when they actually disagree.
+   *
+   *  Colour comes from the status layer, not a new hue: violet ("amber") once either side is inside
+   *  the reference's 5-slot warning band, red once a boot field is not closed — that one is not a
+   *  headroom warning at all but "a programming session is still open", which blocks the reset. */
+  const flashCounter = dmeLink.identity?.flashCounter ?? null;
+  const flashSplit = !!flashCounter && flashCounter.master.used !== flashCounter.slave.used;
+  const flashText = !flashCounter ? '-'
+    : flashSplit
+      ? `${flashCounter.master.used} · ${flashCounter.slave.used}/${ServiceBlockLayout.limitPerProcessor}`
+      : `${flashCounter.master.used}/${ServiceBlockLayout.limitPerProcessor}`;
+  const flashRegions = flashCounter ? [flashCounter.master, flashCounter.slave] : [];
+  const flashColor = flashRegions.some(r => r.state !== 'available') ? 'text-red-400'
+    : flashRegions.some(r => r.remaining < LOW_SLOT_WARNING_THRESHOLD) ? 'text-amber-400'
+      : 'text-slate-300';
+  /** The per-processor detail the single number above folds away, kept on hover. Also where the
+   *  click affordance is spelled out, since a bare number gives no hint that it is a control. */
+  const flashTitle = flashCounter
+    ? flashRegions.map(r => `${r.name}: ${r.used}/${ServiceBlockLayout.limitPerProcessor} used, ${r.remaining} left, marker 0x${r.firstOpenMarker.toString(16).toUpperCase().padStart(4, '0')} @ 0x${r.address.toString(16).padStart(6, '0')}`).join('\n')
+      + '\n\nClick to read the flash counter and reset it.'
+    : 'Flash counter not read';
+
   const dmeStatusColor = dmeLink.state === 'disconnected' ? 'bg-slate-600'
-    : dmeLink.state === 'connecting' || dmeLink.state === 'reading' || dmeLink.state === 'writing' || dmeLink.state === 'resetting' ? 'bg-amber-500 animate-pulse'
-      : dmeLink.error ? 'bg-red-500'
-        : 'bg-emerald-500';
+    : dmeLink.state === 'connecting' || dmeLink.state === 'reading' || dmeLink.state === 'writing' || dmeLink.state === 'resetting' ? 'bg-amber-500 shadow-[0_0_8px_rgba(155,132,232,0.6)] animate-pulse'
+      : dmeLink.error ? 'bg-red-500 shadow-[0_0_8px_rgba(241,26,34,0.6)]'
+        : 'bg-emerald-500 shadow-[0_0_8px_rgba(143,216,242,0.6)]';
+
+  // WRITE WARMUP / WRITE WOT build their tables FROM the tuned map, so they have nothing to derive
+  // until a log has produced one — buildPatchedBuffer generates both inside `if (newMap)` and ignores
+  // the flags entirely otherwise. Same condition, expressed once, for the disabled state and the
+  // effective value. PATCH and WOT TH are not in here: those patch the DME's logic directly and are
+  // meaningful on a bare BASE, which is exactly what DOWNLOAD PATCH-ON exports.
+  const derivedTablesLocked = !newMap;
+  const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
 
   return (
     <main className="h-screen flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
       {/* App Header - Ultra Minimal */}
-      <header className="px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md border-b border-slate-900 z-10 shrink-0 h-[48px]">
+      <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md z-10 shrink-0 h-[48px]">
+        {/* The ///M stripe as the header's bottom rule, replacing a slate-900 border-b. Absolutely
+            positioned inside the 48px rather than added below it, so the pane split underneath keeps
+            its measured 61.8/38.2 and nothing reflows. Hard color stops — a gradient would blend the
+            three into muddy intermediates at 2px. Middle stripe is the legible violet for the same
+            reason as the wordmark: #2B115A at 1.33:1 would read as a gap between blue and red. */}
+        <div
+          aria-hidden="true"
+          className="absolute inset-x-0 bottom-0 h-0.5 pointer-events-none"
+          style={{ background: 'linear-gradient(to right, #0A9BDB 0 33.333%, #9B84E8 33.333% 66.667%, #F11A22 66.667% 100%)' }}
+        />
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className={`w-2 h-2 rounded-full ${dmeStatusColor} shadow-[0_0_8px_rgba(10,155,219,0.5)]`} title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}></div>
+          <div className={`w-2 h-2 rounded-full ${dmeStatusColor}`} title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}></div>
           <h1 className="shrink-0 text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
-            MSS54HP CSL CONVERT <span className="text-slate-600">///</span> TUNER
+            {/* The ///M mark, not punctuation — icon.svg has carried the tricolor in the browser tab
+                all along while this rendered slate-600. It is also the one place red can live
+                permanently without costing it any alarm value: a wordmark states no machine state,
+                so it does not compete with the error LED two elements to the left.
+                The middle stripe is the legible violet, not the logo navy #2B115A — at 1.33:1 on
+                black that glyph would read as missing rather than dark. */}
+            MSS54HP CSL CONVERT{' '}
+            <span className="tracking-tight" aria-hidden="true">
+              <span className="text-blue-500">/</span>
+              <span className="text-indigo-400">/</span>
+              <span className="text-red-500">/</span>
+            </span>{' '}
+            TUNER
           </h1>
           <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2 β</span>
           <div className="flex-1 min-w-0 flex items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">
             <span>VIN <span className="text-slate-300">{dmeLink.identity?.vin ?? '-'}</span></span>
             <span>AIF <span className="text-slate-300">{dmeLink.identity?.aif ?? '-'}</span></span>
             <span>SW <span className="text-slate-300">{dmeLink.identity?.softwareVersion ?? '-'}</span></span>
+            {/* The only one of the four that is a control: clicking it opens the reset dialog. The
+                reset has no button of its own anywhere else — it belongs on the number it changes,
+                and the hub's sub-action row is for actions on the workspace and the current run.
+                Disabled rather than hidden while disconnected, so the field never moves.
+
+                Last in the strip on purpose: it is overflow-hidden, so whatever sits here is the
+                first thing to clip on a narrow window. */}
+            <button
+              type="button"
+              title={flashTitle}
+              disabled={dmeLink.state !== 'connected'}
+              onClick={() => setFlashDialogOpen(true)}
+              className="whitespace-nowrap enabled:cursor-pointer enabled:hover:text-slate-300 disabled:cursor-default transition-colors"
+            >
+              FLASH <span className={flashColor}>{flashText}</span>
+            </button>
           </div>
         </div>
 
@@ -800,15 +1244,19 @@ export default function Home() {
       <div className="flex flex-1 flex-col min-[900px]:flex-row overflow-hidden">
 
         {/* === LEFT COLUMN (70% desktop / 40% stacked) === */}
-        <div className="h-[40%] min-[900px]:h-full min-[900px]:w-[70%] flex flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0">
+        <div className="h-[38.2%] min-[900px]:h-full min-[900px]:w-[61.8%] flex flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0">
 
           {/* Header Frame (Tabs) - Matches Right Column Header Height */}
           <div className="h-[44px] flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-50">
-            <div className="flex space-x-6 h-full mr-auto flex-1 min-w-0 overflow-x-auto overflow-y-hidden">
+            <div
+              ref={tabStrip.ref}
+              style={tabStrip.style}
+              className="no-scrollbar flex space-x-6 h-full mr-auto flex-1 min-w-0 overflow-x-auto overflow-y-hidden"
+            >
               {TABS.map(tab => (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => goToTab(tab.id)}
                   disabled={!tab.enabled}
                   className={`relative h-full flex items-center shrink-0 whitespace-nowrap text-[10px] font-bold tracking-widest transition-all ${activeTab === tab.id
                     ? 'text-blue-400 border-b-2 border-blue-400'
@@ -900,21 +1348,49 @@ export default function Home() {
               )}
 
               <div className="ml-auto flex items-center gap-4 shrink-0">
-                {/* Not "Download": that never said whether you got the BASE or the TUNED, and the
-                    honest answer is neither — this builds the bytes live from the current map and
-                    toggles, so it is the only way to inspect an unsaved tune in TunerPro before
-                    flashing it. The session list downloads what each session has *stored*; this
-                    downloads what WRITE would send right now. Both are needed, so both say which. */}
-                {binaryBuffer && (
-                  <button onClick={handleDownloadBin} className="group inline-flex items-center gap-1.5" title="Download the exact bytes WRITE would send right now — reflects the current map and toggles, saved or not">
+                {/* Two exports of the same builder, split on whether a tune exists, so exactly one of
+                    them is ever on screen. Both stand down while the DME is recording: 'tuning' is
+                    the live log run, the map moves with every sample, and a file or session record
+                    written mid-run would claim to be the result of a run that had not finished. STOP
+                    is what makes the numbers final; both come back the moment it does.
+                    Neither offers the raw BASE — the session tree already downloads each session's
+                    stored BASE and LOG from the row that names them, and these bytes are not that:
+                    buildPatchedBuffer runs the patches and recalculates the checksum, so even with no
+                    tune the result differs from the BASE that went in. That is the whole reason this
+                    one is named for the PATCH and not for the base it was built from. */}
+
+                {/* The PATCH-ON BIN: no tune yet, but a patch is armed, which is the state you flash
+                    from before a log run.
+                    "Patch" here means PATCH or WOT TH — both rewrite DME logic in place, and either
+                    one alone already makes these bytes something other than the BASE. WRITE WARMUP and
+                    WRITE WOT are deliberately not in that set: they inject derived TABLES built from a
+                    tune, so they cannot apply in this no-tune state anyway.
+                    The same expression drives the _PatchON suffix in buildFileName, so the button and
+                    the file it produces cannot disagree about whether this BIN is patched. */}
+                {binaryBuffer && !newMap && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning' && (
+                  <button
+                    onClick={handleDownloadBin}
+                    className="group inline-flex items-center gap-1.5"
+                    title="Download the BASE with the PATCH applied and the checksum corrected — the exact bytes WRITE would send right now. This is the PATCH-ON BIN to flash before a log run."
+                  >
                     <Download className="w-3 h-3 text-slate-600 group-hover:text-blue-400 transition-colors" />
-                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-blue-400 transition-colors">Write Bytes</span>
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-blue-400 transition-colors">Download Patch-On</span>
+                  </button>
+                )}
+                {binaryBuffer && newMap && dmeLink.state !== 'tuning' && (
+                  <button
+                    onClick={handleDownloadBin}
+                    className="group inline-flex items-center gap-1.5"
+                    title="Download the TUNED bytes WRITE would send right now — built live from the current map and toggles, saved or not. To get a session's stored TUNED instead, use its row in the session list."
+                  >
+                    <Download className="w-3 h-3 text-slate-600 group-hover:text-blue-400 transition-colors" />
+                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-blue-400 transition-colors">Download Tuned</span>
                   </button>
                 )}
                 {/* Keyed on there being a tune, not just bytes: Save records a TUNED, and with only a
                     BASE loaded there is no TUNED to record — the BASE was already stored when it was
                     chosen. Offering it anyway is what let a base-only session claim a tune. */}
-                {newMap && !isArchived && (
+                {newMap && !isArchived && dmeLink.state !== 'tuning' && (
                   <button onClick={handleSaveSession} className="group inline-flex items-center gap-1.5" title="Save this tune to the session — no cable needed">
                     <Database className="w-3 h-3 text-slate-600 group-hover:text-amber-400 transition-colors" />
                     <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-amber-400 transition-colors">Save</span>
@@ -1038,6 +1514,7 @@ export default function Home() {
                     onDownloadBase={handleDownloadSessionBase}
                     onDownloadTuned={handleDownloadSessionTuned}
                     onDownloadLog={handleDownloadSessionLog}
+                    onFinalize={handleFinalizeSession}
                   />
                 </div>
               )}
@@ -1055,7 +1532,7 @@ export default function Home() {
         </div>
 
         {/* === RIGHT COLUMN (30% desktop / 60% stacked) === */}
-        <div className="flex-1 min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[30%] flex flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden">
+        <div className="flex-1 min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden">
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
@@ -1074,12 +1551,25 @@ export default function Home() {
                   the latest DME sample (independent of the VE filters) WITHOUT shifting the inputs /
                   dashboard layout: the panel below is identical whether logging or stopped. */}
               {dmeLink.state === 'tuning' && (
-                <div className="absolute top-2 left-2 right-2 z-20 px-2 py-1.5 rounded bg-slate-950/85 border border-slate-800 backdrop-blur-sm grid grid-cols-6 gap-x-2 font-mono pointer-events-none">
+                <div className="absolute top-2 left-2 right-2 z-20 px-2 py-1.5 rounded bg-slate-950/85 border border-slate-800 backdrop-blur-sm grid grid-cols-7 gap-x-2 font-mono pointer-events-none">
                   {([
                     { label: 'RPM', value: liveSample ? liveSample.rpm.toFixed(0) : '—', color: 'text-slate-200' },
                     { label: 'RO %', value: liveSample ? liveSample.rawLoad.toFixed(1) : '—', color: 'text-blue-400' },
-                    { label: 'TEMP', value: liveSample?.coolantTemp !== undefined ? `${liveSample.coolantTemp.toFixed(0)}°` : '—', color: 'text-amber-400' },
+                    // Warm end of the M-red ramp, matching LOG_FIELD_REGISTRY.coolantTemp. Not the
+                    // amber (now violet) status ramp: violet reads as "armed / busy" everywhere
+                    // else in this panel, and coolant temp is a readout, not a machine state.
+                    { label: 'TEMP', value: liveSample?.coolantTemp !== undefined ? `${liveSample.coolantTemp.toFixed(0)}°` : '—', color: 'text-red-300' },
                     { label: 'SAMP', value: String(liveSamplesRef.current.length), color: 'text-slate-500' },
+                    // Grey, deliberately. A sample rate is a readout, not machine state — violet
+                    // means "armed / busy" and the red ramp is coolant temp, so borrowing either
+                    // would report a condition this cell does not describe.
+                    {
+                      label: 'HZ',
+                      value: hzValueRef.current === null ? '—'
+                        : hzValueRef.current >= 100 ? hzValueRef.current.toFixed(0)
+                          : hzValueRef.current.toFixed(1),
+                      color: 'text-slate-400',
+                    },
                     { label: 'STFT1', value: liveSample ? liveSample.stft1.toFixed(3) : '—', color: 'text-green-400' },
                     { label: 'STFT2', value: liveSample ? liveSample.stft2.toFixed(3) : '—', color: 'text-green-400' },
                   ]).map(cell => (
@@ -1092,11 +1582,14 @@ export default function Home() {
               )}
               {(activeTab === 'current' && currentMap) && <MapVisualizer mapData={currentMap} title="" zAxisLabel="RF %" />}
               {(activeTab === 'new' && newMap) && <MapVisualizer mapData={newMap} title="" zAxisLabel="RF %" />}
+              {/* The two signed maps. Their neutral value differs — useComparison emits a percentage
+                  difference (no change = 0), the VE calculator emits an STFT multiplier (no change =
+                  1.0) — so each states its own midpoint rather than letting the scale guess. */}
               {(activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
-                <MapVisualizer mapData={{ ...(newMap || currentMap!), data: diffMapForVisualization }} title="" zAxisLabel="Diff %" />
+                <MapVisualizer mapData={{ ...(newMap || currentMap!), data: diffMapForVisualization }} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
               )}
               {(activeTab === 'lambda' && correctionMap && newMap) && (
-                <MapVisualizer mapData={{ ...newMap, data: correctionMap }} title="" zAxisLabel="Lambda" />
+                <MapVisualizer mapData={{ ...newMap, data: correctionMap }} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
               )}
               {(activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
               {(activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
@@ -1112,6 +1605,7 @@ export default function Home() {
                         onPointClick={setSelectedLogIndex}
                         visibleFields={fieldVisibility.visibleFields}
                         presenceData={logFileState.rawLogData ?? undefined}
+                        live={dmeLink.state === 'tuning'}
                       />
                     </div>
                     <div className="flex-none flex items-center gap-3 px-2.5 pt-2 pb-0.5">
@@ -1332,24 +1826,48 @@ export default function Home() {
                       </span>
                     </div>
 
+                    {/* ROWS 2-3 inject TABLES derived from a tune, so they do nothing without one:
+                        buildPatchedBuffer generates both inside `if (newMap)`. That made them the only
+                        switches on the hub that could be armed and silently ignored.
+
+                        `checked` is ANDed with the tune rather than the stored flag being cleared. A
+                        disabled control still reading ON would be the worse half of the same problem —
+                        stuck armed with no way to turn it off — and clearing would throw away a
+                        preference the user set, or one restored from a saved session whose tune has not
+                        been rebuilt yet ([page.tsx] loadSession passes tuneSettings.writeWarmup/Wot
+                        straight back in). Deriving instead shows exactly what WRITE will do in every
+                        path, and hands the preference back untouched the moment a tune exists. */}
+
                     {/* ROW 2: WRITE WARMUP (Pushed Away/Far) */}
-                    <div className="h-7 flex items-center gap-4 ml-8 pl-1 shrink-0">
-                      <label className="relative inline-flex items-center cursor-pointer group">
-                        <input type="checkbox" className="sr-only peer" checked={writeWarmup} disabled={dmeLink.state === 'writing'} onChange={(e) => setWriteWarmup(e.target.checked)} />
+                    <div className={`h-7 flex items-center gap-4 ml-8 pl-1 shrink-0 transition-opacity ${derivedTablesLocked ? 'opacity-40' : ''}`}>
+                      <label
+                        className={`relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                      >
+                        <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWarmup} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWarmup(e.target.checked)} />
                         <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
-                      <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${writeWarmup ? 'text-blue-400' : 'text-slate-500'}`}>
+                      <span
+                        className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!derivedTablesLocked && writeWarmup ? 'text-blue-400' : 'text-slate-500'}`}
+                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                      >
                         {compact ? 'WARMUP' : 'WRITE WARMUP'}
                       </span>
                     </div>
 
                     {/* ROW 3: WRITE WOT (Close to Ring) */}
-                    <div className="h-7 flex items-center gap-3 ml-1 opacity-90 transition-opacity shrink-0">
-                      <label className="relative inline-flex items-center cursor-pointer group">
-                        <input type="checkbox" className="sr-only peer" checked={writeWot} disabled={dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />
+                    <div className={`h-7 flex items-center gap-3 ml-1 transition-opacity shrink-0 ${derivedTablesLocked ? 'opacity-40' : 'opacity-90'}`}>
+                      <label
+                        className={`relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                      >
+                        <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWot} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />
                         <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
-                      <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${writeWot ? 'text-blue-400' : 'text-slate-500'}`}>
+                      <span
+                        className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!derivedTablesLocked && writeWot ? 'text-blue-400' : 'text-slate-500'}`}
+                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                      >
                         {compact ? 'WOT' : 'WRITE WOT'}
                       </span>
                     </div>
@@ -1367,18 +1885,28 @@ export default function Home() {
                      made it jump: in flow they changed the cluster's height, absolutely they fell
                      outside its overflow-hidden box and got clipped away.)
                   2. Outside the cluster's transform, so the labels stay legible instead of being
-                     scaled down along with the dial. */}
-              <div className="h-[46px] flex-none flex flex-col items-center justify-start gap-2 pt-2.5">
+                     scaled down along with the dial.
+
+                  A ROW, not a column. Stacked, this overflowed its own reserved height: 46px minus
+                  the 10px top padding left 36px, each button is 15px tall (line-height 1.5 on
+                  text-[10px], taller than the 12px icon) and the gap was 8, so two of them wanted
+                  48px — measured, not estimated. Two is reachable today, whenever a log produced no
+                  valid points (Discard log needs a processedLog, Reset Adapt needs no newMap), and
+                  the overflow scrolled the whole inputs panel since this sits in an overflow-y-auto
+                  box. Laid out horizontally the content is 31px tall whatever it holds, and the
+                  reserved height is untouched so the hub still cannot move. No flex-wrap: a second
+                  line would put the height back over budget, which is the bug this fixes. */}
+              <div className="h-[46px] flex-none flex flex-row items-center justify-center gap-x-4">
                 {dmeLink.transferPhase && (
                   <span className={`whitespace-nowrap text-[9px] font-bold tracking-[0.2em] uppercase animate-pulse ${transferStyle.text}`}>
                     {transferStyle.label}
                   </span>
                 )}
 
-                {/* Downloading is not here. "Write Bytes" on the session bar covers the live bytes in
-                    every state rather than only after STOP, and the session list downloads each
-                    stored artifact from the row that names it. Two buttons calling the same handler
-                    is what made the old "Download BIN" / "Download BIN File" pair confusing.
+                {/* Downloading is not here. DOWNLOAD TUNED on the session bar covers the live bytes
+                    once the run is over, and the session list downloads each stored artifact from the
+                    row that names it. Two buttons calling the same handler is what made the old
+                    "Download BIN" / "Download BIN File" pair confusing.
                     Re-tuning isn't here either — it means "start the next session from this tune",
                     and by then the DME is disconnected for the key cycle. What is genuinely local to
                     this moment is throwing away a bad log.
@@ -1408,6 +1936,12 @@ export default function Home() {
                   </button>
                 )}
 
+                {/* No flash-counter action here. It lives on the header's FLASH field instead: this
+                    row is for the workspace and the current run (throw away this log, clear what the
+                    DME learned before recording), while the flash counter is a property of the ECU
+                    that the header already states. Putting the reset on the number it changes also
+                    means there is exactly one place to look for it. */}
+
                 {/* Cancel sub-button, shown while a partial-BIN read is in progress */}
                 {dmeLink.state === 'reading' && (
                   <button
@@ -1434,6 +1968,24 @@ export default function Home() {
           onClose={() => setAdaptDialogOpen(false)}
           onResetComplete={handleAdaptationResetComplete}
           error={dmeLink.error}
+          errorKind={dmeLink.errorKind}
+        />
+      )}
+
+      {flashDialogOpen && (
+        <FlashCounterResetDialog
+          onRead={dmeLink.readFlashCounter}
+          onReadRpm={dmeLink.readEngineRpm}
+          onReset={dmeLink.resetFlashCounter}
+          onBackup={handleFlashCounterBackup}
+          onListBackups={listServiceBackups}
+          onRestore={handleFlashCounterRestore}
+          onClose={() => void handleFlashDialogClose()}
+          onResetComplete={handleFlashCounterResetComplete}
+          transferProgress={dmeLink.transferProgress}
+          transferPhase={dmeLink.transferPhase}
+          error={dmeLink.error}
+          errorKind={dmeLink.errorKind}
         />
       )}
 

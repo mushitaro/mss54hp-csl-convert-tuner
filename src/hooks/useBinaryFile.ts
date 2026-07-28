@@ -30,7 +30,10 @@ export function useBinaryFile() {
   const [currentMap, setCurrentMap] = useState<VEMap | null>(null);
   const [initialMapData, setInitialMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
 
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean } | null>(null);
+  // What the LOADED BYTES say, as opposed to what the toggles are asking for. Keeping wotDisabled
+  // here — it used to be computed in uploadBinary and thrown away after seeding the toggle — is what
+  // lets the hub compare the two and offer a write when they disagree.
+  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean } | null>(null);
   const [debugHex, setDebugHex] = useState<string>('');
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
@@ -71,7 +74,8 @@ export function useBinaryFile() {
 
       setPatchStatus({
         mapOff: isMapOff, // True if OFF
-        tempLimit: isTempHigh
+        tempLimit: isTempHigh,
+        wotDisabled: isWotDisabled,
       });
 
       // Detection off the bytes is right when a BASE arrives fresh (upload / DME read), but wrong
@@ -144,16 +148,30 @@ export function useBinaryFile() {
     return patcher.getBuffer();
   };
 
-  const buildFileName = (): string => {
+  /** `newMap` is required, not optional, so that adding a caller cannot silently default to
+   *  claiming a tune. It decides the prefix only — the bytes come from buildPatchedBuffer. */
+  const buildFileName = (newMap: VEMap | null): string => {
     const dateStr = getFormattedDate();
     let baseName = binaryFile?.name.replace(/\.bin$/i, '') || 'tune';
 
-    // Clean up existing prefixes/suffixes to avoid duplication like "Tune_..._Tune_..."
-    baseName = baseName.replace(/^Tune_\d{12}_/, '');
+    // Clean up existing prefixes/suffixes to avoid duplication like "Tune_..._Tune_...". Both
+    // prefixes have to be stripped, or re-downloading a file this function already named would
+    // nest them ("Tune_..._Base_...") and the outer prefix would win while the inner one lingers.
+    baseName = baseName.replace(/^(?:Tune|Base)_\d{12}_/, '');
     baseName = baseName.replace(/(_PatchON|_PatchOFF|_LTFT&MAPOFFPached)$/, '');
 
-    const patchSuffix = applyPatch ? '_PatchON' : '_PatchOFF';
-    return `Tune_${dateStr}_${baseName}${patchSuffix}.bin`;
+    // PATCH or WOT TH: both rewrite DME logic in place, so either one alone means these bytes are
+    // patched and the name has to say so. This is the same expression that decides whether the
+    // DOWNLOAD PATCH-ON button appears, which is what keeps the button and the file it produces from
+    // contradicting each other. writeWarmup / writeWot are excluded on purpose — they inject derived
+    // TABLES rather than patching logic, and they are already implied by the `Tune_` prefix, since
+    // buildPatchedBuffer only ever applies them when there is a map to derive them from.
+    const patchSuffix = (applyPatch || applyWotDisable) ? '_PatchON' : '_PatchOFF';
+    // Without a derived map buildPatchedBuffer returns the BASE with the toggles applied. That is a
+    // real artifact — it is the PATCH-ON BIN you flash for a log run — but it is not a tune, and a
+    // `Tune_` prefix would be the one claim about these bytes that the file itself cannot support.
+    const prefix = newMap ? 'Tune' : 'Base';
+    return `${prefix}_${dateStr}_${baseName}${patchSuffix}.bin`;
   };
 
   const downloadBin = (newMap: VEMap | null) => {
@@ -164,7 +182,7 @@ export function useBinaryFile() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = buildFileName();
+    a.download = buildFileName(newMap);
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

@@ -102,6 +102,9 @@ export interface EchoMismatchAnalysis {
     trailingZeroRun: number;
     /** `got` looks like a DS2 response frame — i.e. we read a reply where the echo belonged. */
     looksLikeResponse: boolean;
+    /** The verdict as a value rather than prose, so the UI can branch on it instead of re-deriving
+     *  the classification (or worse, matching on the sentence below). */
+    kind: 'electrical' | 'desync' | 'unclassified';
     verdict: string;
 }
 
@@ -140,7 +143,8 @@ export function classifyEchoMismatch(sent: Uint8Array, got: Uint8Array): EchoMis
         if (compared === 0) continue;
         const candidate: EchoMismatchAnalysis = {
             lag, compared, allSubset: subset, flips1to0, flips0to1,
-            trailingZeroRun, looksLikeResponse, verdict: '',
+            // Both filled in once a winner is picked — scoring below only reads the bit counts.
+            trailingZeroRun, looksLikeResponse, kind: 'unclassified', verdict: '',
         };
         // Prefer an alignment where nothing went 0→1 (physically impossible from an interfering
         // driver), then the one covering the most bytes, then the fewest corrupted bits.
@@ -154,12 +158,18 @@ export function classifyEchoMismatch(sent: Uint8Array, got: Uint8Array): EchoMis
 
     const a = best ?? {
         lag: 0, compared: 0, allSubset: false, flips1to0: 0, flips0to1: 0,
-        trailingZeroRun, looksLikeResponse, verdict: '',
+        trailingZeroRun, looksLikeResponse, kind: 'unclassified' as const, verdict: '',
     };
+
+    a.kind = looksLikeResponse
+        ? 'desync'
+        // Needs enough bytes to be meaningful: one or two matching bytes prove nothing.
+        : (a.compared >= 3 && a.allSubset && a.flips0to1 === 0) || a.trailingZeroRun >= 2
+            ? 'electrical'
+            : 'unclassified';
 
     a.verdict = looksLikeResponse
         ? 'a stale DS2 response was read where the echo belonged — buffer out of frame (software-recoverable)'
-        // Needs enough bytes to be meaningful: one or two matching bytes prove nothing.
         : (a.compared >= 3 && a.allSubset && a.flips0to1 === 0)
             ? 'line-level electrical event — the K-line was pulled low during our own transmission (cable, connector, ground, or DME reset). Not a buffer desync.'
             : a.trailingZeroRun >= 2
@@ -295,8 +305,26 @@ export function buildClearAdaptationsPayload(mask1: number, mask2: number): Uint
 export const Ds2ProgrammingControl = {
     WriteSegment: 2,
     EraseSegment: 6,
+    /** Recycling control segment — carries the recycle-only / recycle-off addresses below. */
+    RecyclingSegment: 14,
     FinishSegment: 15,
-    DataProgrammingSessionAddress: 0xA02000, // 10502144
+    /**
+     * Address sent with the data-area erase (segment 6) and the pre-clean (segment 15).
+     *
+     * NOTE a deliberate divergence from the reference: Ds2ProgrammingControl.cs uses 10502144,
+     * which is 0xA04000 — not the 0xA02000 below. Both land inside the same slave DataBlock
+     * subsegment (nibble 0xA) and differ only in the offset within it, and 0xA02000 is what this
+     * app has actually flashed a real vehicle with, read-back verification included. Since a
+     * skipped erase cannot survive that verification — NOR flash can only clear bits, so writing
+     * into un-erased cells mismatches, and the DME would have answered verify byte 3 ("cells were
+     * not erased") on the first chunk anyway — the proven value stays. Don't "fix" it to match the
+     * reference without re-proving it on a car.
+     */
+    DataProgrammingSessionAddress: 0xA02000,
+    /** ASCII "BAQ" — enter recycle-only mode before erasing the service block. */
+    RecycleOnlyAddress: 0x424151,
+    /** ASCII "BAR" — leave recycle mode once the service block has been rewritten. */
+    RecycleOffAddress: 0x424152,
 } as const;
 
 /**

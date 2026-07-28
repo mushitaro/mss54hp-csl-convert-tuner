@@ -1,4 +1,5 @@
 import { LogDataPoint, VEMap } from '@/lib/types';
+import { sampleRateHz } from '@/lib/log-engine/rate';
 import {
     openDb,
     SESSIONS_STORE,
@@ -11,6 +12,7 @@ import {
     TuneSettings,
     FlashRecord,
     AdaptationResetRecord,
+    FlashCounterResetRecord,
 } from './schema';
 
 function promisify<T>(request: IDBRequest<T>): Promise<T> {
@@ -149,6 +151,11 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             tuneSettings: input.tuneSettings,
             hasLog,
             logPointCount: input.log?.length ?? 0,
+            // Derived here rather than passed in, alongside the two fields above that already work
+            // this way. Both call sites get it for free, and a CSV import is measured by exactly the
+            // same rule as a live DS2 run. Assigned unconditionally: `...existing` means a
+            // conditional spread would let a previous log's rate survive a re-save with a new one.
+            averageHz: sampleRateHz(input.log ?? []),
         };
         store.put(updated);
 
@@ -197,6 +204,11 @@ export function appendFlashRecord(id: string, record: FlashRecord): Promise<Tuni
  *  is spread through `?? []` — a session created before the field existed has no array to spread. */
 export function appendAdaptationReset(id: string, record: AdaptationResetRecord): Promise<TuningSession> {
     return patchSession(id, s => ({ ...s, adaptationResets: [...(s.adaptationResets ?? []), record] }));
+}
+
+/** Appends a flash-counter reset. Optional array, so spread through `?? []` like the one above. */
+export function appendFlashCounterReset(id: string, record: FlashCounterResetRecord): Promise<TuningSession> {
+    return patchSession(id, s => ({ ...s, flashCounterResets: [...(s.flashCounterResets ?? []), record] }));
 }
 
 export async function listSessions(): Promise<TuningSession[]> {

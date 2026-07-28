@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Eraser, Loader2, X, AlertTriangle } from 'lucide-react';
 import { AdaptationSnapshot, AdaptationReading } from '@/lib/dme-link/adaptationBlocks';
+import { DmeErrorKind } from '@/lib/dme-link/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 interface Props {
@@ -12,6 +13,10 @@ interface Props {
     /** Fired once, only after a clear and its verifying re-read have both succeeded. */
     onResetComplete: (before: AdaptationSnapshot, after: AdaptationSnapshot) => void;
     error: string | null;
+    /** What kind of failure `error` is, when the link could classify it. 'electrical' swaps the retry
+     *  advice for the physical checklist — see the failed phase below. Other kinds are ignored here:
+     *  they belong to operations this dialog does not perform. */
+    errorKind: DmeErrorKind | null;
 }
 
 /**
@@ -28,6 +33,15 @@ const TEXT = {
         close: '閉じる',
         failLead: '学習値の読み出し/リセットに失敗しました。',
         failHint: 'リセットは何度実行しても同じ結果になります。接続を確認して、そのまま再試行できます。',
+        // 電気的な破損と判定されたときは「再試行」を勧めない。送信中に K-line が引き下げられている
+        // ので、何度試しても同じ結果になる — 直すべきは配線側。
+        failHintElectrical: (<>
+            通信線（K-line）が<span className="text-slate-100 font-bold">送信中に電気的に乱されて</span>います。再試行では直りません。
+            <br />1. まずエンジン停止（IG ON）と始動中で発生頻度を比べる — 始動中だけなら点火系ノイズ
+            <br />2. OBDプラグを挿し直し、接続したまま軽く動かして再現するか確認
+            <br />3. USBポートを変える（ハブを介さない）
+            <br />4. OBDポートのグラウンドと KL15 電源を確認
+        </>),
         retry: '再試行',
         loading: '現在の学習値を読み込み中…',
         colItem: '項目',
@@ -47,6 +61,15 @@ const TEXT = {
         close: 'Close',
         failLead: 'Failed to read / reset the adaptation values.',
         failHint: 'The reset is idempotent — repeating it changes nothing. Check the connection and retry.',
+        // Retrying is the wrong advice for an electrical fault: something is pulling the line low
+        // while we transmit, and it will do it again. Point at the wiring instead.
+        failHintElectrical: (<>
+            The K-line was <span className="text-slate-100 font-bold">electrically disturbed during transmission</span>. Retrying will not fix this.
+            <br />1. Compare failure rates engine-off (ignition on) vs engine-running — running only means ignition EMI
+            <br />2. Reseat the OBD plug; wiggle-test it while connected
+            <br />3. Try a different USB port, with no hub
+            <br />4. Check the OBD port&apos;s ground and KL15 supply
+        </>),
         retry: 'Retry',
         loading: 'Reading the current adaptations…',
         colItem: 'Item',
@@ -81,7 +104,7 @@ function groupReadings(readings: AdaptationReading[]): { name: string; rows: Ada
     return groups;
 }
 
-export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClose, onResetComplete, error }) => {
+export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClose, onResetComplete, error, errorKind }) => {
     const [phase, setPhase] = useState<Phase>('reading');
     const [before, setBefore] = useState<AdaptationSnapshot | null>(null);
     const [after, setAfter] = useState<AdaptationSnapshot | null>(null);
@@ -152,14 +175,20 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                         <p className="text-[10px] font-mono text-red-400 leading-relaxed">
                             {error ?? t.failLead}
                         </p>
+                        {/* The link classifies an echo mismatch by bit direction — only a pull-down can
+                            turn 1s into 0s on an open-collector K-line — so when it says 'electrical'
+                            we know retrying cannot help and say what will. */}
                         <p className="text-[9px] font-mono text-slate-500 leading-relaxed">
-                            {t.failHint}
+                            {errorKind === 'electrical' ? t.failHintElectrical : t.failHint}
                         </p>
                         <div className="flex justify-end gap-4 pt-1">
                             <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                 {t.close}
                             </button>
-                            <button onClick={retry} className="text-[10px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                            {/* Still offered for an electrical fault — the checklist asks the user to
+                                wiggle the plug and try again, and this is the button that tries. It is
+                                just no longer the primary suggestion. */}
+                            <button onClick={retry} className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
                                 {t.retry}
                             </button>
                         </div>

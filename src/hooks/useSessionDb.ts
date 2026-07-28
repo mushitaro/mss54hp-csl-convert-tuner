@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { LogDataPoint, VEMap } from '@/lib/types';
-import { TuningSession, BaseOrigin, TuneSettings, FlashRecord, AdaptationResetRecord, SessionBinariesRecord } from '@/lib/db/schema';
+import { TuningSession, BaseOrigin, TuneSettings, FlashRecord, AdaptationResetRecord, FlashCounterResetRecord, SessionBinariesRecord } from '@/lib/db/schema';
 import {
     createDraft,
     setSessionBase,
@@ -9,6 +9,7 @@ import {
     archiveSession,
     appendFlashRecord,
     appendAdaptationReset,
+    appendFlashCounterReset,
     listSessions,
     getSessionLog,
     getSessionBinaries,
@@ -80,6 +81,11 @@ export function useSessionDb() {
         await refresh();
     }, [refresh]);
 
+    const recordFlashCounterReset = useCallback(async (id: string, record: FlashCounterResetRecord) => {
+        await appendFlashCounterReset(id, record);
+        await refresh();
+    }, [refresh]);
+
     const remove = useCallback(async (id: string) => {
         await deleteSession(id);
         await refresh();
@@ -90,7 +96,8 @@ export function useSessionDb() {
 
     return {
         sessions, loading, error, refresh,
-        newDraft, setBase, saveSessionTune, rename, archive, recordFlash, recordAdaptationReset, remove,
+        newDraft, setBase, saveSessionTune, rename, archive, recordFlash, recordAdaptationReset,
+        recordFlashCounterReset, remove,
         loadLog, loadBinaries,
     };
 }
