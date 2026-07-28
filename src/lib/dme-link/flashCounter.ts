@@ -76,6 +76,25 @@ export interface FlashCounterInfo {
 /** Below this many free slots the header switches to a warning color (the reference warns at 5). */
 export const LOW_SLOT_WARNING_THRESHOLD = 5;
 
+/**
+ * The reset is enabled. It was disabled for one day and the disabling was itself a mistake.
+ *
+ * What happened: on a real vehicle the slave service block looked "erased" to the old guard, so the
+ * reset refused. That was read as evidence the slave address was wrong and the feature was switched
+ * off. A read-only dump of both blocks then settled it (2026-07-28, VIN WBSBL92000PP86271):
+ *
+ *  - `AIF 0x001D50 -> lies in: master`, and real VIN/software numbers parsed out of the master image,
+ *    so the master read lands correctly.
+ *  - Slave block: 99.3% 0xFF, exactly **two** distinct byte values, and a flash counter reading
+ *    15/30 — the same count as the master. The slave read lands correctly too; that block simply
+ *    holds nothing but the counter.
+ *  - Every identity pointer (DIF, ZIF backup, BRIF, ZIF, AIF) resolves into master space.
+ *
+ * So a near-empty slave block is the normal state, not damage, and the address was never in doubt.
+ * The guard was wrong; see hasIntactAif for what replaced it.
+ */
+export const FLASH_COUNTER_RESET_ENABLED = true;
+
 function decodeState(marker: number): FlashCounterState {
     switch (marker) {
         case 0xFFFF: return 'available';
@@ -154,27 +173,36 @@ export function buildResetServiceBlockImage(image: Uint8Array): Uint8Array {
 }
 
 /**
- * True when this service block holds nothing but erased cells outside the counter.
+ * True when the AIF records the reset is about to preserve are actually present.
  *
- * That is the fingerprint of a reset that was interrupted between its erase and its rewrite: the
- * block's real contents — the AIF, the ZIF, the VIN records — are gone and have not been put back.
+ * This replaces an earlier check that asked "is everything outside the counter erased?" and treated
+ * yes as the fingerprint of an interrupted reset. Real-vehicle data (2026-07-28) showed that test to
+ * be worthless: the **slave** service block normally contains nothing but the flash counter — the
+ * AIF, ZIF, DIF and BRIF pointers all resolve into master space — so the old check reported "erased"
+ * on every healthy DME and blocked the reset outright.
  *
- * It has to be tested separately because the counter alone cannot reveal it. An erased counter reads
- * as marker `0xFFFF`, which `analyzeFlashCounter` reports as `available` with 0 slots used — a
- * perfectly healthy-looking field. A second reset run would therefore sail past the boot-field guard,
- * take the erased block as its "current contents", and write that back as the plan, making the loss
- * permanent and verified.
+ * What is actually worth verifying is narrower and concrete: the block still holds the identity
+ * records, so that erasing and writing it back preserves rather than cements. Everything else about
+ * the block being sparse is normal and says nothing.
+ *
+ * `aifOffset` is the DME's own AIF pointer converted to an offset within this image; pass null when
+ * the AIF does not live in this block, in which case there is nothing here to protect and the answer
+ * is true.
  */
-export function isServiceBlockErased(image: Uint8Array): boolean {
+export function hasIntactAif(image: Uint8Array, aifOffset: number | null): boolean {
     assertServiceBlockLength(image);
-    const counterStart = ServiceBlockLayout.counterOffset;
-    const counterEnd = counterStart + ServiceBlockLayout.counterLength;
-    for (let i = 0; i < image.length; i++) {
-        if (i >= counterStart && i < counterEnd) continue; // the counter is 0xFF by design after a reset
-        if (image[i] !== 0xFF) return false;
+    if (aifOffset === null) return true;
+    // One populated 46-byte record is enough — a DME with any programming history has at least one,
+    // and requiring more would refuse a legitimately once-programmed ECU.
+    const end = Math.min(aifOffset + AIF_RECORD_LENGTH * AIF_RECORD_COUNT, image.length);
+    for (let i = aifOffset; i < end; i++) {
+        if (image[i] !== 0xFF && image[i] !== 0x00) return true;
     }
-    return true;
+    return false;
 }
+
+const AIF_RECORD_LENGTH = 46;
+const AIF_RECORD_COUNT = 14;
 
 /**
  * Whether the clear-preparation marker still needs writing on this processor

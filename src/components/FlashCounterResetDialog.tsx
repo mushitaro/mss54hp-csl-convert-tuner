@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Gauge, Loader2, X, AlertTriangle, LifeBuoy } from 'lucide-react';
-import { FlashCounterInfo, FlashCounterRegion, ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
+import { FlashCounterInfo, FlashCounterRegion, ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD, FLASH_COUNTER_RESET_ENABLED } from '@/lib/dme-link/flashCounter';
 import { TransferPhase, DmeErrorKind } from '@/lib/dme-link/types';
 import { FlashCounterOutcome } from '@/hooks/useDmeLink';
+import { ServiceBlockReport, formatServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { ServiceBackupSummary } from '@/lib/db/serviceBackupRepository';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
@@ -17,6 +18,10 @@ interface Props {
     onReset: (onBackup: (pair: ArrayBuffer) => Promise<void>) => Promise<FlashCounterOutcome>;
     /** Saves the pre-erase service block. Rejecting here stops the reset before anything is erased. */
     onBackup: (pair: ArrayBuffer) => Promise<void>;
+    /** Reads both service blocks. Read-only. Null on failure. */
+    onInspect: () => Promise<ServiceBlockReport | null>;
+    /** Offers the inspected 16 KB as a file — an explicit, separately-chosen export. */
+    onSaveInspection: () => void;
     /** Saved pre-erase backups, newest first — what the recovery phase can restore from. */
     onListBackups: () => Promise<ServiceBackupSummary[]>;
     /** Writes one saved backup back to the DME. Null on failure. */
@@ -47,7 +52,11 @@ type Phase = 'reading' | 'viewing' | 'blocked' | 'confirming' | 'resetting' | 'r
     // Reached only when the DME's block is found already erased, i.e. an earlier reset was
     // interrupted. Split from 'failed' because the correct action is the opposite one: 'failed'
     // offers Retry, and retrying here is exactly what makes the loss permanent.
-    | 'recover' | 'restoring' | 'restored';
+    | 'recover' | 'restoring' | 'restored'
+    // Read-only inspection of both service blocks. Reachable from every non-busy phase, because the
+    // question it answers ("what is actually in there?") is the one that has to come before deciding
+    // anything else — including whether the reset's premise holds at all.
+    | 'inspecting' | 'inspected';
 
 // 表示言語ごとの文言。表示言語は useDialogLang で全ダイアログ共有。
 const TEXT = {
@@ -84,6 +93,11 @@ const TEXT = {
         blockedRpmUnknown: (<>
             エンジン回転数を確認できませんでした。安全のため実行を止めています。
             <br />接続を確認して再試行してください（回転数が読めないことと、停止していることは別です）。
+        </>),
+        blockedDisabled: (<>
+            <span className="text-slate-100 font-bold">リセットは現在無効化されています。</span>カウンターの表示のみ利用できます。
+            <br />実車で Slave 側の読み出しが全 0xFF になる事象を確認したため、読み出しアドレスが未確定です。
+            消去は両プロセッサを一度に消すため、この状態で実行すると Slave 側の車両情報を破壊する恐れがあります。
         </>),
         // 内部用語（サービス情報ブロック / ブートフィールド / ZIF …）はここには出さない。
         // ユーザーが判断できるのは「何が失われうるか」と「何をすればいいか」だけ。
@@ -133,6 +147,19 @@ const TEXT = {
         restoring: '書き戻し中… 中断できません。',
         restored: '✅ 復旧完了。車両情報を書き戻し、読み戻して確認しました。',
         restoredNext: 'このあとフラッシュカウンターのリセットをやり直せます。',
+        inspect: 'サービス情報を読み出す',
+        inspectHint: '読み出しのみ。消去も書き込みも行いません（約25秒）。',
+        inspecting: 'サービス情報ブロックを読み出し中…',
+        inspectTitle: 'サービス情報ブロックの内容',
+        inspectPointers: 'DMEが申告しているアドレス',
+        inspectAifIn: { master: 'マスター側にあります', slave: 'スレーブ側にあります', outside: '読み出した2ブロックの外にあります', unavailable: '取得できませんでした' } as Record<string, string>,
+        inspectAllErased: '全て 0xFF（消去状態）',
+        inspectHasData: 'データあり',
+        inspectAifSlots: (n: number, total: number) => `AIFスロット: ${total}個中 ${n}個に記録あり`,
+        inspectAifUnparsed: 'AIFは読み出した範囲の外にあるため解析できません。',
+        inspectSave: '16KBを保存',
+        inspectCopy: 'テキストをコピー',
+        copied: 'コピーしました',
     },
     en: {
         title: 'RESET FLASH — Flash Counter',
@@ -167,6 +194,11 @@ const TEXT = {
         blockedRpmUnknown: (<>
             Engine speed could not be confirmed, so this is being held back.
             <br />Check the connection and retry — &quot;we couldn&apos;t read it&quot; is not the same as &quot;it is stopped&quot;.
+        </>),
+        blockedDisabled: (<>
+            <span className="text-slate-100 font-bold">The reset is currently disabled;</span> the counter reading still works.
+            <br />On a real vehicle the slave side read back as all-0xFF, so the read address is unconfirmed. The erase clears
+            both processors at once, so running it in this state could destroy the slave&apos;s vehicle information.
         </>),
         // No internal vocabulary here (service block / boot field / ZIF). All a user can act on is
         // what could be lost and what to do about it.
@@ -216,6 +248,19 @@ const TEXT = {
         restoring: 'Writing back… this cannot be interrupted.',
         restored: '✅ Recovered. The vehicle information was written back and read back to confirm.',
         restoredNext: 'You can retry the flash counter reset after this.',
+        inspect: 'Read service info',
+        inspectHint: 'Read-only. Nothing is erased or written (~25 s).',
+        inspecting: 'Reading the service blocks…',
+        inspectTitle: 'Service block contents',
+        inspectPointers: 'Addresses the DME reports',
+        inspectAifIn: { master: 'in the master block', slave: 'in the slave block', outside: 'outside both blocks that were read', unavailable: 'unavailable' } as Record<string, string>,
+        inspectAllErased: 'all 0xFF (erased)',
+        inspectHasData: 'has data',
+        inspectAifSlots: (n: number, total: number) => `AIF slots: ${n} of ${total} populated`,
+        inspectAifUnparsed: 'AIF could not be parsed — it lies outside the range that was read.',
+        inspectSave: 'Save 16 KB',
+        inspectCopy: 'Copy as text',
+        copied: 'Copied',
     },
 };
 
@@ -228,8 +273,8 @@ function markerHex(marker: number): string {
 }
 
 export const FlashCounterResetDialog: React.FC<Props> = ({
-    onRead, onReadRpm, onReset, onBackup, onListBackups, onRestore, onClose, onResetComplete,
-    transferProgress, transferPhase, error, errorKind,
+    onRead, onReadRpm, onReset, onBackup, onInspect, onSaveInspection, onListBackups, onRestore,
+    onClose, onResetComplete, transferProgress, transferPhase, error, errorKind,
 }) => {
     const [phase, setPhase] = useState<Phase>('reading');
     const [before, setBefore] = useState<FlashCounterInfo | null>(null);
@@ -237,6 +282,10 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
     const [blockedReason, setBlockedReason] = useState<React.ReactNode>(null);
     const [checkingRpm, setCheckingRpm] = useState(false);
     const [backups, setBackups] = useState<ServiceBackupSummary[]>([]);
+    const [report, setReport] = useState<ServiceBlockReport | null>(null);
+    const [copied, setCopied] = useState(false);
+    /** Where to return when the inspection is closed, so it can be opened from any resting phase. */
+    const [returnPhase, setReturnPhase] = useState<Phase>('viewing');
     const lang = useDialogLang();
     const t = TEXT[lang];
 
@@ -255,6 +304,14 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
         const busyRegion = regionRows(info).find(r => r.state !== 'available');
         if (busyRegion) {
             setBlockedReason(t.blockedNotAvailable(busyRegion.name, markerHex(busyRegion.firstOpenMarker)));
+            setPhase('blocked');
+            return;
+        }
+
+        // Checked before the RPM probe, and before the reset button is ever offered: while the reset
+        // is disabled there is nothing to make ready for.
+        if (!FLASH_COUNTER_RESET_ENABLED) {
+            setBlockedReason(t.blockedDisabled);
             setPhase('blocked');
             return;
         }
@@ -323,7 +380,18 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
         setPhase('restored');
     };
 
-    const busy = phase === 'reading' || phase === 'resetting' || phase === 'restoring';
+    const runInspect = async () => {
+        setReturnPhase(phase);
+        setPhase('inspecting');
+        const r = await onInspect();
+        if (!r) { setPhase('failed'); return; }
+        setReport(r);
+        setPhase('inspected');
+    };
+
+    const busy = phase === 'reading' || phase === 'resetting' || phase === 'restoring' || phase === 'inspecting';
+    /** Offered from every resting phase — it is read-only, and it is what answers "what is in there?" */
+    const canInspect = phase === 'viewing' || phase === 'blocked' || phase === 'failed' || phase === 'recover';
     const dismissable = !busy;
     const shown = after ?? before;
     const afterByName = new Map((after ? regionRows(after) : []).map(r => [r.name, r]));
@@ -331,10 +399,10 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
     return (
         <>
             <div
-                className="fixed inset-0 z-40 bg-slate-950/70 backdrop-blur-sm"
+                className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
                 onClick={dismissable ? onClose : undefined}
             />
-            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
                 <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
                     <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                         <Gauge className="w-3 h-3" />
@@ -347,24 +415,111 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                     )}
                 </div>
 
-                {phase === 'recover' || phase === 'restoring' || phase === 'restored' ? (
+                {phase === 'inspecting' ? (
+                    <div className="space-y-2 py-6">
+                        <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
+                            <span className="flex items-center gap-2"><Loader2 className="w-3 h-3 animate-spin" />{t.inspecting}</span>
+                            {transferProgress !== null && <span className="tabular-nums font-bold">{transferProgress}%</span>}
+                        </div>
+                        <div className="h-0.5 bg-slate-800 rounded overflow-hidden">
+                            <div className="h-full bg-blue-400 transition-[width] duration-200" style={{ width: `${transferProgress ?? 0}%` }} />
+                        </div>
+                    </div>
+                ) : phase === 'inspected' && report ? (
+                    <>
+                        <div className="flex-1 overflow-y-auto -mx-1 px-1 space-y-3 text-[11px] font-mono">
+                            <div className="text-[10px] uppercase tracking-widest text-slate-600">{t.inspectPointers}</div>
+                            <div className="space-y-0.5">
+                                {([['AIF', report.pointers.aif], ['ZIF', report.pointers.zif], ['BRIF', report.pointers.brif], ['DIF', report.pointers.dif]] as const).map(([label, addr]) => (
+                                    <div key={label} className="flex justify-between">
+                                        <span className="text-slate-500">{label}</span>
+                                        <span className="text-slate-300">{addr === null ? '—' : `0x${addr.toString(16).toUpperCase().padStart(6, '0')}`}</span>
+                                    </div>
+                                ))}
+                                {/* The line that decides everything: if the AIF is on the master, a blank
+                                    slave block says nothing about the identity records. */}
+                                <div className="flex justify-between pt-1 border-t border-slate-800/60">
+                                    <span className="text-slate-500">AIF の所在</span>
+                                    <span className={report.aifLocation === 'unavailable' || report.aifLocation === 'outside' ? 'text-amber-400' : 'text-emerald-400'}>
+                                        {t.inspectAifIn[report.aifLocation]}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {[report.master, report.slave].map(region => (
+                                <div key={region.name} className="pt-2 border-t border-slate-800/60 space-y-0.5">
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-300 font-bold">{region.name}</span>
+                                        <span className={region.allErased ? 'text-amber-400' : 'text-emerald-400'}>
+                                            {region.allErased ? t.inspectAllErased : t.inspectHasData}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between text-slate-500">
+                                        <span>0x{region.address.toString(16).toUpperCase().padStart(6, '0')} · {region.length} B</span>
+                                        <span>0xFF {region.erasedPercent.toFixed(1)}% · 値の種類 {region.distinctBytes}</span>
+                                    </div>
+                                    <div className="flex justify-between text-slate-500">
+                                        <span>counter</span>
+                                        <span>{region.counter.used}/{ServiceBlockLayout.limitPerProcessor} · marker {markerHex(region.counter.firstOpenMarker)}</span>
+                                    </div>
+                                    <div className="text-slate-600 break-all">{region.counterHead}</div>
+                                </div>
+                            ))}
+
+                            <div className="pt-2 border-t border-slate-800/60">
+                                {report.aifSlots ? (
+                                    <>
+                                        <div className="text-slate-300 mb-1">{t.inspectAifSlots(report.aifPopulatedCount ?? 0, report.aifSlots.length)}</div>
+                                        {report.aifSlots.map(s => (
+                                            <div key={s.index} className="flex justify-between">
+                                                <span className="text-slate-600">{String(s.index).padStart(2, '0')}</span>
+                                                <span className={s.blank ? 'text-slate-700' : 'text-slate-300'}>
+                                                    {s.blank ? '—' : `${s.vin}  ${s.softwareNumber}`}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </>
+                                ) : (
+                                    <div className="text-amber-400">{t.inspectAifUnparsed}</div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="shrink-0 pt-3 mt-3 border-t border-slate-800 flex justify-between items-center">
+                            <div className="flex gap-4">
+                                <button onClick={onSaveInspection} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                    {t.inspectSave}
+                                </button>
+                                <button
+                                    onClick={() => { void navigator.clipboard?.writeText(formatServiceBlockReport(report)).then(() => setCopied(true)); }}
+                                    className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
+                                >
+                                    {copied ? t.copied : t.inspectCopy}
+                                </button>
+                            </div>
+                            <button onClick={() => { setCopied(false); setPhase(returnPhase); }} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                {t.close}
+                            </button>
+                        </div>
+                    </>
+                ) : phase === 'recover' || phase === 'restoring' || phase === 'restored' ? (
                     /* Takes over the whole dialog rather than appearing under the counter table:
                        with the block erased, that table is reporting a healthy 0/30 on data that
                        is not there, and showing it next to a recovery prompt would be actively
                        misleading about what state the ECU is in. */
                     <div className="space-y-4">
-                        <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400 leading-relaxed">
+                        <p className="flex items-start gap-2 text-[12px] font-mono text-amber-400 leading-relaxed">
                             <LifeBuoy className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                             <span className="font-bold">{t.recoverTitle}</span>
                         </p>
-                        <p className="text-[10px] font-mono text-slate-400 leading-relaxed">{t.recoverLead}</p>
+                        <p className="text-[11px] font-mono text-slate-400 leading-relaxed">{t.recoverLead}</p>
 
                         {backups.length === 0 ? (
-                            <p className="text-[10px] font-mono text-red-400 leading-relaxed">{t.recoverNone}</p>
+                            <p className="text-[11px] font-mono text-red-400 leading-relaxed">{t.recoverNone}</p>
                         ) : (
                             <>
-                                <p className="text-[10px] font-mono text-slate-400 leading-relaxed">{t.recoverAction}</p>
-                                <div className="text-[9px] font-mono text-slate-500 border-t border-slate-800 pt-2">
+                                <p className="text-[11px] font-mono text-slate-400 leading-relaxed">{t.recoverAction}</p>
+                                <div className="text-[10px] font-mono text-slate-500 border-t border-slate-800 pt-2">
                                     <div className="text-slate-600 mb-1">{t.recoverPick}</div>
                                     <div className="flex items-center justify-between text-slate-300">
                                         <span>{new Date(backups[0].at).toLocaleString()}</span>
@@ -379,12 +534,12 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                         <div className="shrink-0 pt-3 border-t border-slate-800">
                             {phase === 'recover' && (
                                 <div className="flex justify-end gap-4">
-                                    <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
                                     </button>
                                     {/* No Retry anywhere in this phase — see the Phase comment. */}
                                     {backups.length > 0 && (
-                                        <button onClick={() => void handleRestore()} className="text-[10px] font-bold uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-colors">
+                                        <button onClick={() => void handleRestore()} className="text-[11px] font-bold uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-colors">
                                             {t.restore}
                                         </button>
                                     )}
@@ -393,7 +548,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
 
                             {phase === 'restoring' && (
                                 <div className="space-y-1.5">
-                                    <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-amber-400">
+                                    <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
                                             <Loader2 className="w-3 h-3 animate-spin" />
                                             {transferPhase ? t.phase[transferPhase] : t.restoring}
@@ -403,16 +558,16 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     <div className="h-0.5 bg-slate-800 rounded overflow-hidden">
                                         <div className="h-full bg-amber-400 transition-[width] duration-200" style={{ width: `${transferProgress ?? 0}%` }} />
                                     </div>
-                                    <p className="text-[9px] font-mono text-slate-600">{t.restoring}</p>
+                                    <p className="text-[10px] font-mono text-slate-600">{t.restoring}</p>
                                 </div>
                             )}
 
                             {phase === 'restored' && (
                                 <div className="space-y-2">
-                                    <p className="text-[10px] font-mono text-emerald-400">{t.restored}</p>
+                                    <p className="text-[11px] font-mono text-emerald-400">{t.restored}</p>
                                     <div className="flex justify-between items-center">
-                                        <span className="text-[9px] font-mono text-slate-500">{t.restoredNext}</span>
-                                        <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <span className="text-[10px] font-mono text-slate-500">{t.restoredNext}</span>
+                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.close}
                                         </button>
                                     </div>
@@ -422,29 +577,29 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                     </div>
                 ) : phase === 'failed' ? (
                     <div className="space-y-4">
-                        <p className="text-[10px] font-mono text-red-400 leading-relaxed">{error ?? t.failLead}</p>
-                        <p className="text-[9px] font-mono text-slate-500 leading-relaxed">
+                        <p className="text-[11px] font-mono text-red-400 leading-relaxed">{error ?? t.failLead}</p>
+                        <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
                             {errorKind === 'electrical' ? t.failHintElectrical : t.failHint}
                         </p>
-                        <p className="text-[9px] font-mono text-amber-400/90 leading-relaxed">{t.failRecovery}</p>
+                        <p className="text-[10px] font-mono text-amber-400/90 leading-relaxed">{t.failRecovery}</p>
                         <div className="flex justify-end gap-4 pt-1">
-                            <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                            <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                 {t.close}
                             </button>
-                            <button onClick={retry} className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
+                            <button onClick={retry} className={`text-[11px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
                                 {t.retry}
                             </button>
                         </div>
                     </div>
                 ) : !shown ? (
-                    <div className="flex items-center gap-2 py-8 justify-center text-[10px] font-mono text-slate-500">
+                    <div className="flex items-center gap-2 py-8 justify-center text-[11px] font-mono text-slate-500">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         {t.loading}
                     </div>
                 ) : (
                     <>
                         <div className="flex-1 overflow-y-auto -mx-1 px-1">
-                            <div className="flex items-center gap-3 text-[9px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
+                            <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
                                 <span className="flex-1">{t.colItem}</span>
                                 <span className="w-[64px] text-right">{after ? t.colBefore : t.colUsed}</span>
                                 {after && <span className="w-[64px] text-right">{t.colAfter}</span>}
@@ -460,7 +615,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                 // the one it started from.
                                 const latest = afterRow ?? row;
                                 return (
-                                    <div key={row.name} className="flex items-center gap-3 text-[10px] font-mono py-[3px]">
+                                    <div key={row.name} className="flex items-center gap-3 text-[11px] font-mono py-[3px]">
                                         <span className="flex-1 text-slate-500 truncate" title={`0x${row.address.toString(16).padStart(6, '0')} · marker ${markerHex(latest.firstOpenMarker)}`}>
                                             {row.name}
                                         </span>
@@ -482,7 +637,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                 );
                             })}
 
-                            <p className="mt-4 pt-2 border-t border-slate-800/60 text-[9px] font-mono text-slate-600 leading-relaxed">
+                            <p className="mt-4 pt-2 border-t border-slate-800/60 text-[10px] font-mono text-slate-600 leading-relaxed">
                                 {t.note}
                             </p>
                         </div>
@@ -490,14 +645,17 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                         <div className="shrink-0 pt-3 mt-3 border-t border-slate-800">
                             {phase === 'viewing' && (
                                 <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-mono text-slate-500">
+                                    <span className="text-[11px] font-mono text-slate-500">
                                         {checkingRpm ? t.checkingRpm : t.confirmQuestion}
                                     </span>
                                     <div className="flex gap-4">
-                                        <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                            {t.inspect}
+                                        </button>
+                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.close}
                                         </button>
-                                        <button onClick={() => setPhase('confirming')} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
                                             {t.reset}
                                         </button>
                                     </div>
@@ -506,15 +664,20 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
 
                             {phase === 'blocked' && (
                                 <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[10px] font-mono text-amber-400/90 leading-relaxed">
+                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
                                         <span>{blockedReason}</span>
                                     </p>
                                     <div className="flex justify-end gap-4">
-                                        <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {canInspect && (
+                                            <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                                {t.inspect}
+                                            </button>
+                                        )}
+                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.close}
                                         </button>
-                                        <button onClick={retry} className="text-[10px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                        <button onClick={retry} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
                                             {t.retry}
                                         </button>
                                     </div>
@@ -523,11 +686,11 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
 
                             {phase === 'confirming' && (
                                 <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[10px] font-mono text-amber-400/90 leading-relaxed">
+                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
                                         <span>{t.warn}</span>
                                     </p>
-                                    <ul className="text-[9px] font-mono text-slate-500 leading-relaxed space-y-1 pl-5">
+                                    <ul className="text-[10px] font-mono text-slate-500 leading-relaxed space-y-1 pl-5">
                                         <li>{t.warnPower}</li>
                                         <li>{t.warnInterrupted}</li>
                                         <li>{t.warnKeyCycle}</li>
@@ -535,14 +698,14 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     {/* Set apart from the list above rather than a fourth bullet: the
                                         others are things to do now, this is the one to remember for
                                         a moment when the screen may be all you have left. */}
-                                    <p className="text-[9px] font-mono text-amber-400/80 leading-relaxed border-t border-slate-800 pt-2">
+                                    <p className="text-[10px] font-mono text-amber-400/80 leading-relaxed border-t border-slate-800 pt-2">
                                         {t.warnRecovery}
                                     </p>
                                     <div className="flex justify-end gap-4">
-                                        <button onClick={() => setPhase('viewing')} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.cancel}
                                         </button>
-                                        <button onClick={() => void handleReset()} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
                                             {t.runReset}
                                         </button>
                                     </div>
@@ -551,7 +714,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
 
                             {phase === 'resetting' && (
                                 <div className="space-y-1.5">
-                                    <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-amber-400">
+                                    <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
                                             <Loader2 className="w-3 h-3 animate-spin" />
                                             {transferPhase ? t.phase[transferPhase] : t.resetting}
@@ -563,16 +726,16 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     <div className="h-0.5 bg-slate-800 rounded overflow-hidden">
                                         <div className="h-full bg-amber-400 transition-[width] duration-200" style={{ width: `${transferProgress ?? 0}%` }} />
                                     </div>
-                                    <p className="text-[9px] font-mono text-slate-600">{t.resetting}</p>
+                                    <p className="text-[10px] font-mono text-slate-600">{t.resetting}</p>
                                 </div>
                             )}
 
                             {phase === 'result' && (
                                 <div className="space-y-2">
-                                    <p className="text-[10px] font-mono text-emerald-400">{t.done}</p>
+                                    <p className="text-[11px] font-mono text-emerald-400">{t.done}</p>
                                     <div className="flex justify-between items-center">
-                                        <span className="text-[9px] font-mono text-amber-400/90">{t.doneKeyCycle}</span>
-                                        <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <span className="text-[10px] font-mono text-amber-400/90">{t.doneKeyCycle}</span>
+                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.close}
                                         </button>
                                     </div>

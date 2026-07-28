@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     DmeLink, DmeIdentity, LiveMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
-    DmeLinkError, DmeErrorKind, isServiceBlockErasedCause,
+    DmeLinkError, DmeErrorKind, isServiceBlockErasedCause, ServiceBlockDump,
 } from '@/lib/dme-link/types';
+import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { WebSerialTransport } from '@/lib/dme-link/webSerialTransport';
@@ -41,9 +42,9 @@ export type FlashCounterOutcome =
 export function useDmeLink() {
     const [state, setState] = useState<DmeSessionState>('disconnected');
     const [mockMode, setMockMode] = useState(false); // real hardware by default — mock is an explicit opt-in
-    // Baud rate for the bulk read. 9600 is the proven path (no switch needed). 38400 / 125000 are the
-    // only other rates the DME accepts; they need a 0x91 switch + local port reopen, so they're opt-in
-    // until confirmed on real hardware.
+    // Baud rate for the bulk read. 9600 is the default and sends no switch at all; 38400 is confirmed
+    // on a real vehicle. Everything faster needs a 0x91 switch + local port reopen and stays opt-in —
+    // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -59,9 +60,20 @@ export function useDmeLink() {
     const [errorKind, setErrorKind] = useState<DmeErrorKind | null>(null);
     const [transferProgress, setTransferProgress] = useState<number | null>(null);
     const [transferPhase, setTransferPhase] = useState<TransferPhase | null>(null);
+    /**
+     * Something the user should know that is not a failure. Separate from `error` so it can be shown
+     * without painting the status dot red: a baud switch the DME refused is a normal, harmless
+     * outcome that the read recovers from by itself — but staying silent about it is what made a
+     * refused switch look identical to a slow tool.
+     */
+    const [warning, setWarning] = useState<string | null>(null);
+    /** 'info' is a plain result (a read's measured speed); 'warn' asks for attention. Kept as data so
+     *  the notice line can colour it without matching on the sentence. */
+    const [warningKind, setWarningKind] = useState<'info' | 'warn'>('info');
 
     const linkRef = useRef<DmeLink | null>(null);
     const pollingRef = useRef<boolean>(false);
+    const lastServiceDumpRef = useRef<ServiceBlockDump | null>(null);
 
     /** Report a failure with whatever the link could say about its cause. Paired with clearError so
      *  the kind can never outlive the message it explains — a stale "electrical" next to a fresh
@@ -77,7 +89,7 @@ export function useDmeLink() {
         setErrorKind(kind === 'electrical' || kind === 'desync' || kind === 'unclassified' ? kind : null);
     }, []);
 
-    const clearError = useCallback(() => { setError(null); setErrorKind(null); }, []);
+    const clearError = useCallback(() => { setError(null); setErrorKind(null); setWarning(null); }, []);
 
     const isWebSerialSupported = WebSerialTransport.isSupported();
 
@@ -157,8 +169,21 @@ export function useDmeLink() {
         clearError();
         setState('reading');
         setTransferProgress(0);
+        const startedAt = performance.now();
         try {
             const buffer = await linkRef.current.readPartialBin(makeThrottledProgress());
+            // Always report the measured result, not just failures. "It didn't feel faster" is not
+            // something a baud rate can be judged on — that guess already cost three rates being
+            // deleted on a wrong conclusion — so the read states its own elapsed time and throughput.
+            const seconds = (performance.now() - startedAt) / 1000;
+            const actual = linkRef.current.getLastReadBaud?.() ?? null;
+            const rate = `${Math.round(buffer.byteLength / seconds).toLocaleString()} B/s`;
+            const measured = `Read ${(buffer.byteLength / 1024).toFixed(0)} KB in ${seconds.toFixed(1)} s (${rate}).`;
+            const refused = actual !== null && actual !== readBaud;
+            setWarningKind(refused ? 'warn' : 'info');
+            setWarning(refused
+                ? `${measured} The DME refused the ${readBaud} baud switch, so this ran at ${actual}.`
+                : `${measured}${actual !== null ? ` Link ran at ${actual} baud.` : ''}`);
             // Idle again. The caller loads these bytes as the BASE, which is what turns the button
             // into START TUNE — it isn't this function's business to say so.
             setState('connected');
@@ -337,6 +362,43 @@ export function useDmeLink() {
         }
     }, [clearError, failWith, applyFlashCounter]);
 
+    /**
+     * Reads both service blocks for inspection. Read-only, but it moves 16 KB, so it publishes
+     * progress like the other bulk operations.
+     */
+    const readServiceBlocks = useCallback(async (): Promise<ServiceBlockReport | null> => {
+        const link = linkRef.current;
+        if (!link) return null;
+        clearError();
+        setState('resetting');
+        setTransferProgress(0);
+        try {
+            const dump = await link.readServiceBlocks(makeThrottledProgress());
+            // The raw bytes are kept alongside the report so the UI can offer them as a file without
+            // a second 16 KB read — this is a diagnostic whose whole purpose is being sent onward.
+            const report = buildServiceBlockReport(dump.master, dump.slave, dump.pointers);
+            lastServiceDumpRef.current = dump;
+            return report;
+        } catch (e) {
+            failWith(e);
+            return null;
+        } finally {
+            setState('connected');
+            setTransferProgress(null);
+            setTransferPhase(null);
+        }
+    }, [clearError, failWith]);
+
+    /** The bytes behind the most recent report, as one 16384-byte master+slave image. */
+    const getServiceBlockBytes = useCallback((): ArrayBuffer | null => {
+        const dump = lastServiceDumpRef.current;
+        if (!dump) return null;
+        const pair = new Uint8Array(dump.master.length + dump.slave.length);
+        pair.set(dump.master, 0);
+        pair.set(dump.slave, dump.master.length);
+        return pair.buffer;
+    }, []);
+
     /** Re-reads the flash counter. Six chunk reads — 'resetting' rather than 'reading' because
      *  'reading' is the bulk partial-BIN transfer and paints the hub's progress ring. */
     const readFlashCounter = useCallback(async (): Promise<FlashCounterInfo | null> => {
@@ -434,6 +496,8 @@ export function useDmeLink() {
         identity,
         error,
         errorKind,
+        warning,
+        warningKind,
         transferProgress,
         transferPhase,
         isWebSerialSupported,
@@ -447,6 +511,8 @@ export function useDmeLink() {
         readAdaptations,
         resetAdaptations,
         readFlashCounter,
+        readServiceBlocks,
+        getServiceBlockBytes,
         resetFlashCounter,
         restoreServiceBlock,
         readEngineRpm,

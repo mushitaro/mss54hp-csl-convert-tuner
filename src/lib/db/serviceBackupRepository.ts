@@ -28,14 +28,37 @@ export const SERVICE_BLOCKS_STORE = 'serviceBlocks';
 export interface ServiceBackupRecord {
     /** Epoch ms — also the primary key. One reset, one record. */
     at: number;
-    /** Whatever the DME reported at connect, for telling two cars' backups apart in the list. */
+    /**
+     * The VIN the DME reported when this was taken. Load-bearing, not decorative: a restore writes
+     * 16 KB of identity data into an ECU, so it must be provably the *same* ECU's data. Optional only
+     * because a DME can fail to report one, and a backup with no VIN can never be matched to anything
+     * and so can never be offered.
+     */
     vin?: string;
+    /**
+     * True when this came from PRACTICE mode rather than a real DME.
+     *
+     * Exists because both modes write to this one store, and without the flag a simulated backup is
+     * indistinguishable from a real one. That is not hypothetical: a real vehicle was once offered a
+     * MOCKVIN backup as its recovery source. A mock backup must never be writable to a real ECU.
+     */
+    mock?: boolean;
     /** Master service block followed by slave: 16384 bytes, the reference's artifact order. */
     buffer: ArrayBuffer;
 }
 
 /** Metadata without the 16 KB payload, so a list doesn't hydrate every backup. */
 export type ServiceBackupSummary = Omit<ServiceBackupRecord, 'buffer'> & { size: number };
+
+/** Purges every stored backup. For clearing simulated ones out of a store shared with real data. */
+export async function clearServiceBackups(): Promise<void> {
+    const db = await openBackupDb();
+    try {
+        await runTransaction(db, 'readwrite', store => store.clear());
+    } finally {
+        db.close();
+    }
+}
 
 function openBackupDb(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -95,13 +118,26 @@ export async function saveServiceBackup(record: ServiceBackupRecord): Promise<vo
     }
 }
 
-/** Newest first. */
-export async function listServiceBackups(): Promise<ServiceBackupSummary[]> {
+/**
+ * Backups that may be written back to the DME identified by `vin`, newest first.
+ *
+ * Takes the target rather than returning everything and trusting the caller to filter, because the
+ * caller is a dialog whose button erases and rewrites an ECU's identity block. A backup qualifies
+ * only if its VIN is known and equal, and only if its origin (real vs PRACTICE) matches the link
+ * asking. An unknown VIN on either side matches nothing — "we could not tell" must not resolve to
+ * "close enough" when the cost of being wrong is a bricked identity block.
+ */
+export async function listRestorableBackups(
+    vin: string | undefined,
+    mock: boolean,
+): Promise<ServiceBackupSummary[]> {
+    if (!vin || vin === 'UNKNOWN') return [];
     const db = await openBackupDb();
     try {
         const all = await runTransaction<ServiceBackupRecord[]>(db, 'readonly', store => store.getAll());
         return all
-            .map(({ at, vin, buffer }) => ({ at, vin, size: buffer.byteLength }))
+            .filter(r => r.vin === vin && Boolean(r.mock) === mock)
+            .map(({ at, vin, mock, buffer }) => ({ at, vin, mock, size: buffer.byteLength }))
             .sort((a, b) => b.at - a.at);
     } finally {
         db.close();

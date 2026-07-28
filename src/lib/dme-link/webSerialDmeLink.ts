@@ -1,4 +1,5 @@
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause } from './types';
+import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause, ServiceBlockDump } from './types';
+import { ServiceBlockPointers } from './serviceBlockReport';
 import { WebSerialTransport } from './webSerialTransport';
 import {
     Ds2Frame, Ds2Control, Ds2ProgrammingControl, Ds2BaudRate, Ds2BaudRateSpec, Ds2SupportedBaud, ds2BaudSpecFor,
@@ -21,7 +22,7 @@ import {
 import {
     FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, CLEAR_PREP_MARKER,
     analyzeFlashCounter, extractCounterFromServiceBlock, buildResetServiceBlockImage,
-    shouldWriteClearPrepMarker, isServiceBlockErased,
+    shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED,
 } from './flashCounter';
 
 // DS2 system-address-table pointer indices (Ds2KnownSystemAddressLengths / IdentifyService)
@@ -129,10 +130,10 @@ export class WebSerialDmeLink implements DmeLink {
         try { return await fn(); } finally { this.gateHeld = false; }
     }
     /**
-     * Baud rate to use for the bulk read. 9600 by default — that's the path proven against real
-     * hardware and needs no switch at all. 38400/125000 are the only other rates the DME accepts
-     * (per the reference Ds2BaudRate); they require a 0x91 switch plus a local port close/reopen,
-     * which is unproven on this hardware, so they stay opt-in.
+     * Baud rate to use for the bulk read. 9600 by default — proven, and it sends no switch at all.
+     * 38400 is also proven on a real vehicle. Anything faster requires a 0x91 switch plus a local
+     * port close/reopen: 125000 (the reference's programming rate) reproducibly fails here, and
+     * 57600/76800/115200 are untested candidates between the two. See Ds2SupportedBaud.
      */
     private readonly readBaud: Ds2SupportedBaud;
     /**
@@ -145,6 +146,12 @@ export class WebSerialDmeLink implements DmeLink {
      * is exactly the reference's "reconnect" remedy.
      */
     private hasBoostedThisSession = false;
+    /** The rate the last bulk read ran at — see DmeLink.getLastReadBaud. */
+    private lastReadBaud: number | null = null;
+
+    getLastReadBaud(): number | null {
+        return this.lastReadBaud;
+    }
 
     constructor(options?: { readBaud?: Ds2SupportedBaud }) {
         this.readBaud = options?.readBaud ?? 9600;
@@ -276,6 +283,16 @@ export class WebSerialDmeLink implements DmeLink {
             const tableFrame = await this.exchange(Ds2Control.READ_SYSTEM_ADDRESSES, new Uint8Array(0));
             if (!isPositiveResponse(tableFrame)) return result;
             const entries = parseSystemAddressTable(tableFrame.payload);
+            // Kept for the service-block report. These pointers are the DME's own statement of where
+            // it puts each record, which is the only authority on whether the AIF lives in master or
+            // slave space — a question this code had been answering by assumption.
+            this.pointers = {
+                dif: findPointer(entries, SYSTEM_ADDRESS_INDEX.DIF),
+                zifBackup: findPointer(entries, SYSTEM_ADDRESS_INDEX.ZIF_BACKUP),
+                brif: findPointer(entries, SYSTEM_ADDRESS_INDEX.BRIF),
+                zif: findPointer(entries, SYSTEM_ADDRESS_INDEX.ZIF),
+                aif: findPointer(entries, SYSTEM_ADDRESS_INDEX.AIF),
+            };
 
             const zifAddress = findPointer(entries, SYSTEM_ADDRESS_INDEX.ZIF);
             if (zifAddress !== null) {
@@ -319,6 +336,29 @@ export class WebSerialDmeLink implements DmeLink {
             slave: analyzeFlashCounter(slave.name, slave.address + counterOffset, slaveBytes),
             readAt: Date.now(),
         };
+    }
+
+    /** Pointers captured during identify; all null until a connect has run. */
+    private pointers: ServiceBlockPointers = { dif: null, zifBackup: null, brif: null, zif: null, aif: null };
+
+    /**
+     * Reads both service blocks. Read-only: two readRange calls and nothing else, so it is safe to
+     * run on a DME whose state is unknown — which is exactly when it is worth running.
+     */
+    async readServiceBlocks(onProgress?: TransferProgress): Promise<ServiceBlockDump> {
+        return this.withGate(async () => {
+            this.assertConnected();
+            this.aborted = false;
+            await this.resyncTransport();
+            const { master, slave } = ServiceBlockLayout;
+            const total = master.length + slave.length;
+            const masterImage = await this.readRange(master.address, master.length,
+                (done) => onProgress?.(Math.round((done / total) * 100), 'reading'));
+            const slaveImage = await this.readRange(slave.address, slave.length,
+                (done) => onProgress?.(Math.round(((master.length + done) / total) * 100), 'reading'));
+            onProgress?.(100, 'reading');
+            return { master: masterImage, slave: slaveImage, pointers: this.pointers };
+        });
     }
 
     async readFlashCounter(): Promise<FlashCounterInfo> {
@@ -452,6 +492,9 @@ export class WebSerialDmeLink implements DmeLink {
         const boosted = this.readBaud !== 9600
             ? await this.trySwitchBaud(ds2BaudSpecFor(this.readBaud))
             : false;
+        // Recorded so the UI can state what happened. A refused switch is not an error and must not
+        // become one, but it must not be invisible either.
+        this.lastReadBaud = boosted ? this.readBaud : 9600;
         this.hasBoostedThisSession ||= boosted;
         try {
             const { slave, master } = Mss54HpDataTuneLayout;
@@ -591,6 +634,17 @@ export class WebSerialDmeLink implements DmeLink {
         onProgress?: TransferProgress,
     ): Promise<FlashCounterInfo> {
         this.assertConnected();
+        // Hard stop before anything is read, let alone erased. See FLASH_COUNTER_RESET_ENABLED: the
+        // slave block read all-0xFF on a real car, so the addressing this whole sequence rests on is
+        // not trustworthy, and the erase clears both processors at once.
+        if (!FLASH_COUNTER_RESET_ENABLED) {
+            throw new DmeLinkError(
+                'Flash counter reset is disabled. On a real vehicle the slave service block read back as all-0xFF ' +
+                'while the master read real data, which means the slave address this operation depends on is not ' +
+                'confirmed. Since the erase clears both processors in one command, running it could destroy the ' +
+                'slave\'s VIN/AIF/ZIF records. Reading the counter is unaffected.',
+            );
+        }
         // Same reasoning as writePartialBinInner: a stale cancel latched by an earlier Cancel Read
         // would otherwise abort this mid-flight — here it would abort the read-back of an ECU whose
         // identity block has already been erased and rewritten.
@@ -615,24 +669,26 @@ export class WebSerialDmeLink implements DmeLink {
             (done) => onProgress?.(Math.round(((master.length + done) / pairTotal) * READ_SHARE), 'reading'));
 
         // --- Phase 2: guards ---------------------------------------------------------------------
-        // First: refuse if a block is already erased. That means an earlier attempt died between its
-        // erase and its rewrite, so what we just read is not the ECU's data — it is the hole where
-        // the data used to be. Proceeding would take that hole as the "current contents", write it
-        // back as the plan, and verify it, turning a recoverable interruption into a permanent loss
-        // of the VIN, AIF and ZIF. The counter cannot catch this on its own: an erased counter reads
-        // as a healthy 0/30 available field.
-        for (const [name, image] of [[master.name, masterImage], [slave.name, slaveImage]] as const) {
-            if (isServiceBlockErased(image)) {
-                // The cause is data, not prose: this is the one failure with a specific remedy the
-                // app can actually perform, so the UI needs to branch to the restore flow rather
-                // than print a sentence telling the user to do something it hasn't offered them.
-                throw new DmeLinkError(
-                    `Flash counter reset refused: the ${name} service block is erased, which means an earlier ` +
-                    `reset was interrupted before it could write the block back. Re-running now would make that ` +
-                    `loss permanent — restore the saved backup instead.`,
-                    { kind: 'serviceBlockErased', processor: name } satisfies ServiceBlockErasedCause,
-                );
-            }
+        // Refuse if the identity records this operation is supposed to preserve are not there. The
+        // reset erases and writes back, so it can only carry forward what it actually read: if the
+        // AIF is missing from the image, the rewrite would make that state the verified truth.
+        //
+        // Checked only where the AIF actually lives, which the DME tells us. An earlier version asked
+        // "is everything outside the counter erased?" of BOTH blocks and refused on yes — that fires
+        // on every healthy DME, because the slave block normally holds nothing but the counter.
+        const aifOffset = this.pointers.aif !== null
+            && this.pointers.aif >= master.address && this.pointers.aif < master.address + master.length
+            ? this.pointers.aif - master.address
+            : null;
+        if (!hasIntactAif(masterImage, aifOffset)) {
+            // Carried as data, not prose: this is the one failure with a remedy the app can perform,
+            // so the UI branches to the restore rather than printing advice it hasn't enabled.
+            throw new DmeLinkError(
+                `Flash counter reset refused: the AIF records are missing from the ${master.name} service block. ` +
+                `Writing it back in this state would make that permanent. Read the service info to see what is ` +
+                `there, and restore a saved backup if one matches this DME.`,
+                { kind: 'serviceBlockErased', processor: master.name } satisfies ServiceBlockErasedCause,
+            );
         }
 
         // Then: both boot fields must be closed. A field showing 0x00FF/0xFF00 has a programming

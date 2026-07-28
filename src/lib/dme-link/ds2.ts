@@ -337,18 +337,54 @@ export interface Ds2BaudRateSpec {
     baudRate: number;
     payload: Uint8Array;
 }
-export const Ds2BaudRate: Record<'Baud9600' | 'Baud38400' | 'Baud125000', Ds2BaudRateSpec> = {
-    Baud9600: { baudRate: 9600, payload: new Uint8Array([0, 37, 128, 25]) },      // 0x002580
-    Baud38400: { baudRate: 38400, payload: new Uint8Array([0, 150, 0, 25]) },     // 0x009600
-    Baud125000: { baudRate: 125000, payload: new Uint8Array([1, 232, 72, 25]) },  // 0x01E848
-};
 
-/** The only rates the MSS54 DME accepts via the 0x91 switch (per the reference Ds2BaudRate). */
-export type Ds2SupportedBaud = 9600 | 38400 | 125000;
+/** Builds a 0x91 payload for any rate. The encoding is generic — the reference hardcodes three
+ *  rates, but all three are just this: the rate big-endian in 24 bits, then the constant. */
+function ds2BaudPayload(baudRate: number): Uint8Array {
+    return new Uint8Array([(baudRate >>> 16) & 0xFF, (baudRate >>> 8) & 0xFF, baudRate & 0xFF, 0x19]);
+}
+
+export const Ds2BaudRate = {
+    Baud9600: { baudRate: 9600, payload: ds2BaudPayload(9600) },        // 0x002580
+    Baud38400: { baudRate: 38400, payload: ds2BaudPayload(38400) },     // 0x009600
+    Baud57600: { baudRate: 57600, payload: ds2BaudPayload(57600) },     // 0x00E100
+    Baud76800: { baudRate: 76800, payload: ds2BaudPayload(76800) },     // 0x012C00
+    Baud115200: { baudRate: 115200, payload: ds2BaudPayload(115200) },  // 0x01C200
+    Baud125000: { baudRate: 125000, payload: ds2BaudPayload(125000) },  // 0x01E848
+} as const satisfies Record<string, Ds2BaudRateSpec>;
+
+/**
+ * Rates the 0x91 switch may be asked for.
+ *
+ * 9600 and 38400 are confirmed on a real vehicle; 125000 is the reference tool's programming rate
+ * and reproducibly FAILS here (the DME ACKs, then every exchange times out). 57600 / 76800 / 115200
+ * are ours, not the reference's — the payload encoding admits any rate, so these are candidates to
+ * probe between the proven 38400 and the broken 125000, on the theory that what breaks is either
+ * non-standard rates through the VCP driver or the K-line's RC-limited rise time. See §9 of
+ * docs/implementation-notes.md, including how the echo-mismatch analysis tells those two apart.
+ *
+ * Asking for an unsupported rate is safe: the DME rejects it and trySwitchBaud leaves the port alone.
+ */
+export type Ds2SupportedBaud = 9600 | 38400 | 57600 | 76800 | 115200 | 125000;
+
+/**
+ * Every selectable rate, slowest first — the single source the UI's selector renders from, so a
+ * rate can never exist in the switch table but be unreachable (or vice versa).
+ *
+ * The three between 38400 and 125000 are ours, not the reference's, which defines only 9600 / 38400 /
+ * 125000. They were briefly deleted on the strength of "it didn't feel any faster" and then restored:
+ * a subjective impression cannot tell a rejected switch (falls back to 9600, silently) from an
+ * accepted one that simply didn't help. The link now reports which rate a read actually ran at, so
+ * that question is answered by the UI instead of by inference.
+ */
+export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 57600, 76800, 115200, 125000];
 
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
         case 38400: return Ds2BaudRate.Baud38400;
+        case 57600: return Ds2BaudRate.Baud57600;
+        case 76800: return Ds2BaudRate.Baud76800;
+        case 115200: return Ds2BaudRate.Baud115200;
         case 125000: return Ds2BaudRate.Baud125000;
         default: return Ds2BaudRate.Baud9600;
     }

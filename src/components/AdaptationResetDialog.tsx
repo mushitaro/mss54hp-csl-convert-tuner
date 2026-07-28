@@ -154,10 +154,10 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
     return (
         <>
             <div
-                className="fixed inset-0 z-40 bg-slate-950/70 backdrop-blur-sm"
+                className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
                 onClick={dismissable ? onClose : undefined}
             />
-            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
                 <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
                     <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                         <Eraser className="w-3 h-3" />
@@ -172,36 +172,36 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
 
                 {phase === 'failed' ? (
                     <div className="space-y-4">
-                        <p className="text-[10px] font-mono text-red-400 leading-relaxed">
+                        <p className="text-[11px] font-mono text-red-400 leading-relaxed">
                             {error ?? t.failLead}
                         </p>
                         {/* The link classifies an echo mismatch by bit direction — only a pull-down can
                             turn 1s into 0s on an open-collector K-line — so when it says 'electrical'
                             we know retrying cannot help and say what will. */}
-                        <p className="text-[9px] font-mono text-slate-500 leading-relaxed">
+                        <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
                             {errorKind === 'electrical' ? t.failHintElectrical : t.failHint}
                         </p>
                         <div className="flex justify-end gap-4 pt-1">
-                            <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                            <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                 {t.close}
                             </button>
                             {/* Still offered for an electrical fault — the checklist asks the user to
                                 wiggle the plug and try again, and this is the button that tries. It is
                                 just no longer the primary suggestion. */}
-                            <button onClick={retry} className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
+                            <button onClick={retry} className={`text-[11px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
                                 {t.retry}
                             </button>
                         </div>
                     </div>
                 ) : !shown ? (
-                    <div className="flex items-center gap-2 py-8 justify-center text-[10px] font-mono text-slate-500">
+                    <div className="flex items-center gap-2 py-8 justify-center text-[11px] font-mono text-slate-500">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         {t.loading}
                     </div>
                 ) : (
                     <>
                         <div className="flex-1 overflow-y-auto -mx-1 px-1">
-                            <div className="flex items-center gap-3 text-[9px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
+                            <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
                                 <span className="flex-1">{t.colItem}</span>
                                 <span className="w-[72px] text-right">{after ? 'BEFORE' : t.colCurrent}</span>
                                 {after && <span className="w-[72px] text-right">AFTER</span>}
@@ -210,11 +210,11 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
 
                             {groupReadings(shown.readings).map(group => (
                                 <div key={group.name} className="mt-3">
-                                    <div className="text-[9px] uppercase tracking-widest text-slate-600 mb-1">{group.name}</div>
+                                    <div className="text-[10px] uppercase tracking-widest text-slate-600 mb-1">{group.name}</div>
                                     {group.rows.map(row => {
                                         const beforeValue = before?.readings.find(r => r.symbol === row.symbol)?.value ?? null;
                                         return (
-                                            <div key={row.symbol} className="flex items-center gap-3 text-[10px] font-mono py-[3px]">
+                                            <div key={row.symbol} className="flex items-center gap-3 text-[11px] font-mono py-[3px]">
                                                 <span className="flex-1 text-slate-500 truncate" title={row.symbol}>
                                                     {row.label}{row.unit && <span className="text-slate-600"> ({row.unit})</span>}
                                                 </span>
@@ -235,7 +235,7 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
 
                             {/* Why the two factors clear to 1 and not 0, said once rather than per row. Stated as
                                 information, not as a verdict: nothing here checks the values against it. */}
-                            <p className="mt-4 pt-2 border-t border-slate-800/60 text-[9px] font-mono text-slate-600 leading-relaxed">
+                            <p className="mt-4 pt-2 border-t border-slate-800/60 text-[10px] font-mono text-slate-600 leading-relaxed">
                                 {t.expectedNote}
                             </p>
                         </div>
@@ -243,12 +243,12 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                         <div className="shrink-0 pt-3 mt-3 border-t border-slate-800">
                             {phase === 'viewing' && (
                                 <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-mono text-slate-500">{t.confirmQuestion}</span>
+                                    <span className="text-[11px] font-mono text-slate-500">{t.confirmQuestion}</span>
                                     <div className="flex gap-4">
-                                        <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.close}
                                         </button>
-                                        <button onClick={() => setPhase('confirming')} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
                                             {t.reset}
                                         </button>
                                     </div>
@@ -257,15 +257,15 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
 
                             {phase === 'confirming' && (
                                 <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[10px] font-mono text-amber-400/90 leading-relaxed">
+                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
                                         <span>{t.warn}</span>
                                     </p>
                                     <div className="flex justify-end gap-4">
-                                        <button onClick={() => setPhase('viewing')} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                             {t.cancel}
                                         </button>
-                                        <button onClick={() => void handleReset()} className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
                                             {t.runReset}
                                         </button>
                                     </div>
@@ -273,7 +273,7 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             )}
 
                             {phase === 'clearing' && (
-                                <div className="flex items-center gap-2 text-[10px] font-mono text-amber-400">
+                                <div className="flex items-center gap-2 text-[11px] font-mono text-amber-400">
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     {t.clearing}
                                 </div>
@@ -281,8 +281,8 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
 
                             {phase === 'result' && (
                                 <div className="flex justify-between items-center">
-                                    <span className="text-[10px] font-mono text-emerald-400">{t.done}</span>
-                                    <button onClick={onClose} className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                    <span className="text-[11px] font-mono text-emerald-400">{t.done}</span>
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
                                     </button>
                                 </div>

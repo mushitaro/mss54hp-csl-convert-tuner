@@ -1,7 +1,15 @@
 import { AdaptationSnapshot } from './adaptationBlocks';
 import { FlashCounterInfo } from './flashCounter';
+import { ServiceBlockPointers } from './serviceBlockReport';
 
 export type { AdaptationSnapshot, FlashCounterInfo };
+
+/** Raw service-block bytes plus the DME's own pointers, for buildServiceBlockReport to analyse. */
+export interface ServiceBlockDump {
+    master: Uint8Array;
+    slave: Uint8Array;
+    pointers: ServiceBlockPointers;
+}
 
 export interface DmeIdentity {
     vin: string;
@@ -56,6 +64,16 @@ export interface DmeLink {
     /** Re-reads the flash counter (2 x 256 bytes), so the header can refresh without a reconnect. */
     readFlashCounter(): Promise<FlashCounterInfo>;
     /**
+     * Reads both 8 KB service blocks and the DME's system-address pointers. **Read-only** — it sends
+     * no erase, no write, and no programming control of any kind.
+     *
+     * Diagnostic, and deliberately separate from the reset that also reads these bytes: the reset
+     * reads them in order to overwrite them, this reads them in order to find out what is actually
+     * there. Conflating the two is how a blank block came to be treated as damage to be repaired
+     * rather than a fact to be explained.
+     */
+    readServiceBlocks(onProgress?: TransferProgress): Promise<ServiceBlockDump>;
+    /**
      * Engine speed, for deciding whether a programming operation may run.
      *
      * Deliberately separate from pollLiveMeasurement even though the real link answers it with the
@@ -106,6 +124,15 @@ export interface DmeLink {
     keepAlive(): Promise<boolean>;
     /** Requests cancellation of an in-progress readPartialBin. Safe to call any time; no-op if idle. */
     abort(): void;
+    /**
+     * The rate the last bulk read actually ran at, or null if none has run.
+     *
+     * Exists because a refused baud switch is deliberately not an error — the read just proceeds at
+     * 9600 — and that silence is indistinguishable from a switch that worked but didn't help. Judging
+     * it by how fast the read felt is guesswork, and guesswork already cost three rates being deleted
+     * on a wrong conclusion. Optional: only the real link switches baud at all.
+     */
+    getLastReadBaud?(): number | null;
 }
 
 export class DmeLinkError extends Error {

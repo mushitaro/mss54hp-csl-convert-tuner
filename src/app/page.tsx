@@ -20,8 +20,8 @@ import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
-import { TUNE_ADAPTATION_CLEAR } from '@/lib/dme-link/ds2';
-import { saveServiceBackup, listServiceBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
+import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
+import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV } from '@/lib/download';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
@@ -206,6 +206,10 @@ export default function Home() {
   const comparison = useComparison(veCalc.newMap, binaryFileState.initialMapData, sessionDb.sessions);
 
   const [activeTab, setActiveTab] = useState<TabId>('startup');
+  /** Bumped by the chart's FIT button. Folded into the plot's uirevision so Plotly drops the
+   *  user's zoom and re-fits — the only way back, since doubleClick is off to keep
+   *  click-to-select unambiguous. */
+  const [chartFitToken, setChartFitToken] = useState(0);
   /** A tab to move to once it becomes reachable — see the effect that consumes it. */
   const pendingTabRef = useRef<TabId | null>(null);
   /** Every explicit navigation goes through here, so deliberately choosing a tab cancels an armed
@@ -253,8 +257,7 @@ export default function Home() {
 
   const {
     logFile, processedLog, filterConfig, interpolationTable,
-    logWindowStart, setLogWindowStart, selectedLogIndex, setSelectedLogIndex,
-    windowedLogData, LOG_WINDOW_SIZE,
+    selectedLogIndex, setSelectedLogIndex, displayedLogData,
   } = logFileState;
 
   const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap } = veCalc;
@@ -958,9 +961,26 @@ export default function Home() {
   const handleFlashCounterBackup = async (pair: ArrayBuffer) => {
     const at = Date.now();
     const vin = dmeLink.identity?.vin;
-    await saveServiceBackup({ at, vin, buffer: pair.slice(0) });
+    // `mock` is recorded, not inferred later: both modes share this store, and a PRACTICE backup must
+    // never be a restore candidate for a real ECU. Recovering the origin afterwards would mean
+    // guessing from the VIN string, which is exactly the kind of guess this field removes.
+    await saveServiceBackup({ at, vin, mock: dmeLink.mockMode, buffer: pair.slice(0) });
     flashBackupRef.current = { at, vin };
   };
+
+  /** Offers the inspected service blocks as a file. Explicit and separately chosen, which is the
+   *  app's rule for exports — unlike the pre-erase backup, which is a side effect of a write and so
+   *  stays silent. */
+  const handleSaveServiceBlocks = () => {
+    const bytes = dmeLink.getServiceBlockBytes();
+    if (!bytes) return;
+    const vin = dmeLink.identity?.vin;
+    downloadBlob(bytes, `ServiceBlock_${fileSafe(vin && vin !== 'UNKNOWN' ? vin : 'DME')}_${Date.now()}.bin`, MIME_BIN);
+  };
+
+  /** Restore candidates for the DME actually on the other end of the cable — never anything else. */
+  const handleListFlashBackups = () =>
+    listRestorableBackups(dmeLink.identity?.vin, dmeLink.mockMode);
 
   /** Records the reset against the open session, if there is one. Best-effort and deliberately
    *  after the fact, exactly like handleAdaptationResetComplete: by the time this runs the DME has
@@ -994,6 +1014,20 @@ export default function Home() {
   const handleFlashCounterRestore = async (at: number): Promise<FlashCounterInfo | null> => {
     const record = await loadServiceBackup(at);
     if (!record) return null;
+    // Re-checked here even though the list was already filtered. The list is a UI convenience; this
+    // is the last line before 16 KB of identity data goes into an ECU, and the two must not be able
+    // to disagree — a stale list, a reconnect to a different car, or a future caller that forgets to
+    // filter would otherwise all end the same way.
+    const vin = dmeLink.identity?.vin;
+    if (!vin || vin === 'UNKNOWN' || record.vin !== vin || Boolean(record.mock) !== dmeLink.mockMode) {
+      alert(
+        '❌ このバックアップは書き戻せません。\n\n' +
+        `接続中のDME: ${vin ?? '不明'}${dmeLink.mockMode ? '（PRACTICE）' : ''}\n` +
+        `バックアップ: ${record.vin ?? '不明'}${record.mock ? '（PRACTICE）' : ''}\n\n` +
+        '別の車両、またはPRACTICEで取得したデータです。書き戻すと識別情報が壊れます。'
+      );
+      return null;
+    }
     const info = await dmeLink.restoreServiceBlock(record.buffer);
     if (info) flashBackupRef.current = null;
     return info;
@@ -1247,7 +1281,12 @@ export default function Home() {
         <div className="h-[38.2%] min-[900px]:h-full min-[900px]:w-[61.8%] flex flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0">
 
           {/* Header Frame (Tabs) - Matches Right Column Header Height */}
-          <div className="h-[44px] flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-50">
+          {/* z-30, not z-50. The row has to outrank the right pane (z-20) so the config popovers
+              anchored in it can hang over the map below — but it was sharing z-50 with the modal
+              panels, which put it ABOVE every dialog's backdrop (z-40) and left the tab bar sitting
+              crisp on top of a blurred page. Modals now live in their own tier (z-100/110), and the
+              layers here read: 10 chrome / 20 panes / 30 this row / 40 popover scrims / 50 popovers. */}
+          <div className="h-[44px] flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-30">
             <div
               ref={tabStrip.ref}
               style={tabStrip.style}
@@ -1486,7 +1525,7 @@ export default function Home() {
               {(activeTab === 'log' && processedLog) && (
                 <div className="h-full w-full pb-0">
                   <LogDataTable
-                    data={windowedLogData}
+                    data={displayedLogData}
                     selectedIndex={selectedLogIndex}
                     onRowClick={setSelectedLogIndex}
                     totalCount={processedLog.data.length}
@@ -1600,28 +1639,32 @@ export default function Home() {
                   <div className="absolute inset-0 flex flex-col">
                     <div className="flex-1 min-h-0">
                       <LogTimeSeriesChart
-                        data={windowedLogData}
+                        data={displayedLogData}
                         selectedIndex={selectedLogIndex}
                         onPointClick={setSelectedLogIndex}
                         visibleFields={fieldVisibility.visibleFields}
                         presenceData={logFileState.rawLogData ?? undefined}
                         live={dmeLink.state === 'tuning'}
+                        fitToken={chartFitToken}
                       />
                     </div>
+                    {/* The scrub slider used to live here. Navigation is the trackpad's now — the chart
+                        already runs dragmode 'pan' with scrollZoom — so all this row still owes the
+                        user is the way back out of a zoom, which doubleClick:false takes away. */}
                     <div className="flex-none flex items-center gap-3 px-2.5 pt-2 pb-0.5">
-                      <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
-                        WIN: {logWindowStart} - {Math.min(processedLog.data.length, logWindowStart + LOG_WINDOW_SIZE)}
+                      <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">
+                        {processedLog.validCount.toLocaleString()} pts
                       </span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={Math.max(0, processedLog.data.length - LOG_WINDOW_SIZE)}
-                        step={100}
-                        value={logWindowStart}
-                        onChange={(e) => setLogWindowStart(Number(e.target.value))}
-                        className="flex-1 min-w-[60px] h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
-                      />
-                      <span className="text-[9px] text-slate-600 font-mono whitespace-nowrap">/ {processedLog.validCount}</span>
+                      <span className="flex-1 text-[9px] text-slate-600 font-mono truncate">
+                        scroll to zoom · drag to pan
+                      </span>
+                      <button
+                        onClick={() => setChartFitToken(t => t + 1)}
+                        className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors whitespace-nowrap"
+                        title="Fit the whole log back into view"
+                      >
+                        Fit
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1659,18 +1702,26 @@ export default function Home() {
                         <label
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
-                          title="Bulk-read baud rate. 9600 is the proven path (no switch). 38400 / 125000 are the only other rates the DME accepts — they require a baud switch that is unproven on this cable; if it fails, cycle the ignition to reset the DME."
+                          title={'Bulk-read baud rate.\n'
+                            + '9600 — default, no switch is sent at all. Proven.\n'
+                            + '38400 — proven on a real vehicle.\n'
+                            + '57600 / 76800 / 115200 — untested candidates between the two known points.\n'
+                            + '125000 — the reference tool\'s rate, but it fails here: the DME accepts the switch and then every exchange times out.\n\n'
+                            + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover.'}
                         >
                           READ
+                          {/* Options come from DS2_SELECTABLE_BAUDS rather than being listed here, so a
+                              rate cannot exist in the switch table but be unreachable from the UI —
+                              or, worse, be offered here without a payload behind it. */}
                           <select
                             value={dmeLink.readBaud}
                             disabled={dmeLink.mockMode}
-                            onChange={(e) => dmeLink.setReadBaud(Number(e.target.value) as 9600 | 38400 | 125000)}
+                            onChange={(e) => dmeLink.setReadBaud(Number(e.target.value) as Ds2SupportedBaud)}
                             className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
                           >
-                            <option value={9600}>9600</option>
-                            <option value={38400}>38400</option>
-                            <option value={125000}>125000</option>
+                            {DS2_SELECTABLE_BAUDS.map(baud => (
+                              <option key={baud} value={baud}>{baud}</option>
+                            ))}
                           </select>
                         </label>
                       </>
@@ -1694,13 +1745,21 @@ export default function Home() {
                     the same shift. The full text is on hover, and on the header status dot. */}
                 <div className="h-[14px] px-2 flex items-center overflow-hidden">
                   {(() => {
-                    const warning = !dmeLink.mockMode && dmeLink.state === 'disconnected' && !dmeLink.isWebSerialSupported
-                      ? 'Web Serial API not available in this browser — use Chrome/Edge, or check PRACTICE to test offline.'
-                      : null;
+                    // dmeLink.warning first: it describes the operation that just ran, and the
+                    // Web Serial notice only applies while disconnected, so the two never compete.
+                    const warning = dmeLink.warning
+                      ?? (!dmeLink.mockMode && dmeLink.state === 'disconnected' && !dmeLink.isWebSerialSupported
+                        ? 'Web Serial API not available in this browser — use Chrome/Edge, or check PRACTICE to test offline.'
+                        : null);
                     const notice = dmeLink.error ?? warning;
                     if (!notice) return null;
+                    // Three levels, because a read reporting its own speed is not a warning and
+                    // should not wear the warning colour on every successful transfer.
+                    const tone = dmeLink.error ? 'text-red-400'
+                      : dmeLink.warning && dmeLink.warningKind === 'info' ? 'text-slate-500'
+                        : 'text-amber-500/80';
                     return (
-                      <p className={`text-[9px] font-mono truncate ${dmeLink.error ? 'text-red-400' : 'text-amber-500/80'}`} title={notice}>
+                      <p className={`text-[9px] font-mono truncate ${tone}`} title={notice}>
                         {notice}
                       </p>
                     );
@@ -1978,7 +2037,9 @@ export default function Home() {
           onReadRpm={dmeLink.readEngineRpm}
           onReset={dmeLink.resetFlashCounter}
           onBackup={handleFlashCounterBackup}
-          onListBackups={listServiceBackups}
+          onInspect={dmeLink.readServiceBlocks}
+          onSaveInspection={handleSaveServiceBlocks}
+          onListBackups={handleListFlashBackups}
           onRestore={handleFlashCounterRestore}
           onClose={() => void handleFlashDialogClose()}
           onResetComplete={handleFlashCounterResetComplete}

@@ -1,4 +1,4 @@
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause } from './types';
+import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause, ServiceBlockDump } from './types';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
     STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK,
@@ -258,6 +258,49 @@ export class MockDmeLink implements DmeLink {
         this.assertConnected();
         await delay(20);
         return 0;
+    }
+
+    /**
+     * A pair of service blocks shaped like the real thing.
+     *
+     * Modelled on an actual dump (2026-07-28): the AIF sits on the **master**, two slots populated
+     * with the same VIN, and the **slave holds nothing but the flash counter** — 99.3% 0xFF, two
+     * distinct byte values, same slot count as the master. That last part is the detail worth
+     * preserving here, because assuming it meant damage is what disabled the reset for a day.
+     */
+    async readServiceBlocks(onProgress?: TransferProgress): Promise<ServiceBlockDump> {
+        this.assertConnected();
+        const { master, slave, counterOffset } = ServiceBlockLayout;
+        const aifOffset = 0x1D50; // where a real MSS54's pointer put it
+
+        const masterImage = new Uint8Array(master.length).fill(0xFF);
+        masterImage.set(this.counterBytes(this.flashSlotsUsed.master), counterOffset);
+        // Two populated AIF slots followed by blanks, which is what a twice-programmed DME looks like.
+        const enc = new TextEncoder();
+        for (const [slot, vin, stand] of [[0, 'MOCKVIN000001', [0, 7, 214, 1, 20]], [1, 'MOCKVIN000001', [0, 7, 214, 1, 21]]] as const) {
+            const entry = new Uint8Array(46).fill(0x20);
+            entry.set(enc.encode(vin), 0);
+            entry.set(stand as unknown as number[], 17);
+            masterImage.set(entry, aifOffset + slot * 46);
+        }
+
+        const slaveImage = new Uint8Array(slave.length).fill(0xFF);
+        slaveImage.set(this.counterBytes(this.flashSlotsUsed.slave), counterOffset);
+
+        for (let i = 1; i <= 20; i++) {
+            await delay(15);
+            onProgress?.(Math.round((i / 20) * 100), 'reading');
+        }
+        return {
+            master: masterImage,
+            slave: slaveImage,
+            // Real pointer values, so the report's "which block does the AIF lie in" logic is
+            // exercised against addresses that actually occur rather than convenient ones.
+            pointers: {
+                dif: 0x203FB8, zifBackup: 0x401E00, brif: 0x103FD2, zif: 0x531B90,
+                aif: master.address + aifOffset,
+            },
+        };
     }
 
     async readFlashCounter(): Promise<FlashCounterInfo> {

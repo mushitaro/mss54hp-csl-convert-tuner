@@ -21,8 +21,8 @@ Last updated: 2026-07 (after the first successful real-vehicle write).
 | Baud boost to 38400 | ❌ Untested |
 | Baud boost to 125000 | ❌ **Failed on real hardware** (see §9) |
 
-Everything runs at **9600 baud**. A full read takes ~70 s; a full write ~4 min (write ~2.5 min +
-read-back verify ~70 s).
+Everything runs at **9600 baud**. A full read takes **~124 s** (measured 2026-07-28; the "~70 s" this
+line used to claim is not reproducible — see §9). A full write is ~4 min.
 
 ---
 
@@ -346,40 +346,182 @@ Confirmed against the [WICG Web Serial spec](https://wicg.github.io/serial/):
    open (the classic "opening the port resets my Arduino" problem). The reference explicitly holds
    `DTR = false, RTS = false` and never toggles them.
 
-### Supported baud rates (only these three)
+### Baud rates
 
-Switch = `0x91` with a 4-byte payload: 24-bit big-endian rate + constant `0x19`.
+Switch = `0x91` with a 4-byte payload: **24-bit big-endian rate + constant `0x19`**. The encoding is
+generic, so any rate can be *requested*; whether the DME accepts it is a separate question.
 
-| Rate | Payload | Check |
+| Rate | Payload | Check | Status |
+|---|---|---|---|
+| 9600 | `[0, 37, 128, 25]` | `0x002580` | **Proven on the car.** Default; no switch attempted at all |
+| 38400 | `[0, 150, 0, 25]` | `0x009600` | **Proven on the car** (2026-07) |
+| 125000 | `[1, 232, 72, 25]` | `0x01E848` | **Fails on the car.** The reference's programming rate |
+
+57600 / 76800 / 115200 are ours, derived from the payload encoding; the reference defines only the
+other three. On a real vehicle they produced no *perceived* speed-up, and they were deleted on that
+basis — then restored, because that reasoning was wrong. "It didn't feel faster" cannot distinguish
+
+- the DME **refusing** the switch (`trySwitchBaud` returns false, the read silently runs at 9600), from
+- the DME **accepting** it while something else dominates the transfer time.
+
+Deleting them threw away the experiment instead of running it. **144000** is separately known not to
+work.
+
+The fix is to stop inferring. `getLastReadBaud()` reports the rate a read actually ran at, and
+`useDmeLink` raises a non-error **warning** whenever that differs from what was selected — shown in
+the DME notice line, in amber, without painting the status dot red. A refused switch is a normal,
+harmless outcome; being unable to tell that it happened was the defect.
+
+The expensive failure is the DME *accepting* a rate neither side can run, which desyncs the link until
+the ignition is cycled.
+
+### 38400 works, 125000 does not — what that rules out
+
+**The close/reopen hypothesis is dead.** This section used to argue that the mandatory
+`close()`/`open()` pulses DTR/RTS and disturbs the K-line, and predicted that *if that were the cause,
+38400 would fail identically*. 38400 was then confirmed working on the car. The reopen is not the
+variable; **the rate is.**
+
+The observed 125000 failure: the DME **accepted** the switch (ACKed) and the port **did** reopen — the
+failure was a plain timeout on every subsequent exchange, not an open error. The restore-to-9600
+request then also had to travel at the broken rate, so it failed too, leaving both sides desynced
+until the ignition was cycled.
+
+**FTDI divisors are exact for both rates**, so the chip's capability is not the issue (3 MHz base,
+14-bit integer + 3-bit fractional divisor):
+
+| Rate | 3 MHz / rate | Representable? |
 |---|---|---|
-| 9600 | `[0, 37, 128, 25]` | `0x002580` = 9600 |
-| 38400 | `[0, 150, 0, 25]` | `0x009600` = 38400 |
-| 125000 | `[1, 232, 72, 25]` | `0x01E848` = 125000 |
+| 38400 | 78.125 | 78 + 1/8 — exact, 0% error |
+| 125000 | 24.0 | integer — exact, 0% error |
 
-**144000 is not supported by the DME** — the payload could encode it, but the ECU's UART won't
-follow. Baud choice is the DME's to make, not ours.
+That leaves two candidates, not mutually exclusive:
 
-### What happened with 125000
+**(a) The transport layer.** The reference calls `FT_SetBaudRate(handle, 125000)` straight into
+`ftd2xx.dll` (`FtdiD2xxTransport.ApplySettings`), programming the divisor directly. This app goes
+Web Serial → OS VCP driver → `SetCommState`. 125000 is a **non-standard** rate (outside the
+9600/19200/38400/57600/115200 ladder); non-standard values are where VCP drivers — and especially
+CH340 / counterfeit-FTDI cables — reject or silently snap to something else. 38400 being standard and
+125000 not matches the observation exactly.
 
-The DME **accepted** the switch (it ACKed) and the port **did** reopen at 125000 — the failure was a
-plain timeout on every subsequent exchange, not an open error. Because the restore-to-9600 request
-then also had to travel at the broken 125000, it failed too, leaving both sides desynced: every later
-operation (including live polling on a fresh connect) timed out until the ignition was cycled.
+**(b) K-line rise time.** The K-line is single-wire open-collector with a pull-up, so edges are
+RC-limited. With ~1 kΩ pull-up and ~2 nF of harness + cable capacitance, the 10–90% rise is ≈4.4 µs:
 
-**Leading hypothesis**: the mandatory `close()`/`open()` pulses DTR/RTS and disturbs the K-line
-interface mid-session. If that's the cause, **38400 will fail identically** — the rate isn't the
-variable, the reopen is.
+| Rate | Bit period | Rise time as a fraction of it |
+|---|---|---|
+| 38400 | 26 µs | ~17% — comfortable |
+| 125000 | 8 µs | ~55% — broken |
+
+The existing "144000 doesn't work" note fits the same ceiling.
+
+### What the 125000 failure actually looks like
+
+Captured on the car:
+
+```
+Timed out waiting for 2 byte(s) (received 0)
+```
+
+Two bytes is the **response header** read, which comes *after* the echo read has already succeeded.
+So at 125000 the host transmits and reads back its own K-line echo correctly — the local UART is
+self-consistent at that rate — and then the DME says **nothing at all**. Not garbled: zero bytes.
+
+That reshapes the diagnosis, and retires an earlier suggestion recorded here: `classifyEchoMismatch()`
+cannot help with this failure, because there is no mismatched echo to classify. Its 1→0 versus 0→1
+test only applies when bytes come back wrong, not when none come back.
+
+Silence rather than corruption points at **(a)** over **(b)**: a signal-integrity problem generally
+mangles bytes, whereas nothing arriving is what you see when the far end is not at that rate at all —
+the DME ACKed the switch at 9600 and then either never moved or could not sustain it. (A rise time
+too slow to trigger the receiver's start-bit detection would also produce zero bytes, so **(b)** is
+weakened, not eliminated.)
 
 ### Current state
 
-`READ [9600 ▼]` selector in the DME panel, **default 9600** (no switch is attempted at all at 9600 —
-the proven path). 38400/125000 are opt-in experiments. On failure the local port is force-restored to
-9600 so a reconnect / ignition cycle recovers instead of silently hanging.
+`READ [9600 ▼]` selector in the DME panel, **default 9600** (no switch attempted at 9600 — the proven
+path). Everything above it is opt-in. On failure the local port is force-restored to 9600 so a
+reconnect / ignition cycle recovers instead of silently hanging.
 
-**Next diagnostic step**: try 38400. Success → the issue was 125000-specific. Failure → the
-close/reopen glitch is confirmed and baud switching is not viable via Web Serial; stay at 9600.
-(If pursuing it: try `setSignals({dataTerminalReady:false, requestToSend:false})` immediately after
-reopen to restore the reference's line state — but change one variable at a time.)
+**38400 is the highest rate confirmed working**; 125000 does not run. Whether anything between them is
+accepted is still open — the notice above is what will answer it, one read at a time.
+
+### Why raising the baud produced no speed-up (2026-07-28)
+
+Reported from the car: 57600 felt no faster than 9600, and desktop tools feel roughly twice as fast
+even at 9600. The cause was in `readExact`, which waited like this:
+
+```ts
+await new Promise(r => setTimeout(r, 2));   // polled until enough bytes were buffered
+```
+
+Browsers **clamp nested `setTimeout` to ~4 ms**, so that loop could sit on bytes that had already
+arrived for up to a full clamp period. A DS2 exchange calls `readExact` three times — echo, header,
+body — so the floor was roughly 12 ms per 122-byte chunk, ~540 chunks per read, i.e. **6–7 seconds of
+pure timer latency** independent of baud. At 9600 the wire needs ~150 ms per chunk and that hides;
+at 57600 the wire drops to ~26 ms and the fixed cost becomes the dominant term, which is exactly the
+shape of "it didn't get faster".
+
+`readExact` is now event-driven: the pump wakes a parked waiter the instant the byte count is
+satisfiable, with a single timer for the deadline rather than one per poll. Measured against a fake
+pump, a late arrival is now served ~2 ms after it lands instead of up to a clamp period later, and a
+latched break wakes the reader immediately instead of waiting out the full timeout.
+
+**Reads now report their own measured throughput** in the DME notice line
+(`Read 64 KB in 71.2 s (921 B/s). Link ran at 9600 baud.`), in slate for a plain result and amber when
+a switch was refused. Comparing rates is now arithmetic, not impression — which matters, because an
+impression is what previously led to three rates being deleted on a wrong conclusion.
+
+### The FTDI latency timer — and a correction
+
+The chip buffers received bytes and hands them to the host when either a 62-byte USB packet fills or
+its **latency timer** expires. Default 16 ms. Per DS2 chunk two receives are short of a full packet —
+the 9-byte echo, and the 2-byte tail of the 126-byte response — so the timer is paid roughly twice
+per chunk. The reference sets it to the minimum at open: `FT_SetLatencyTimer(handle, 1)`
+(`FtdiD2xxTransport`), which is also what the community advises.
+
+**Correction to an earlier claim here:** this was described as something Web Serial cannot reach and
+therefore a permanent advantage for native tools. That is wrong. The latency timer is a *driver-level
+property of the device*, set in Device Manager → Port Settings → Advanced → Latency Timer, and it
+applies to whichever application opens the port — Chrome included. The only difference is that D2XX
+programs it itself while the VCP path inherits whatever the driver is configured with.
+
+### Measured on the car (2026-07-28) — and two dead hypotheses
+
+Real numbers, with the latency timer confirmed at **1 ms** and **unchanged for the life of the
+project**:
+
+| Rate | Result |
+|---|---|
+| 9600 | **123.7 s / 124.0 s** (530 B/s), reproducible |
+| 38400 | **times out mid-read**, after ~10% on one attempt and ~3% on the next |
+| 57600 | ran, no improvement reported |
+
+Theoretical floor at 9600 (538 chunks × 144 wire bytes × 11 bits ÷ 9600) is **~83 s**, so ~40 s —
+about 75 ms per chunk — is still unaccounted for.
+
+**Dead hypothesis 1: "the ~70 s figure regressed to 124 s when the latency timer changed."** The timer
+was never changed. Whatever produced the "~70 s" that this document previously reported as measured,
+it is not comparable to the 124 s above; treat 124 s as the first trustworthy figure and the earlier
+number as unreliable.
+
+**Dead hypothesis 2: "1 ms fragments the stream into per-byte USB packets and that is the 40 s."** The
+arithmetic still holds — at 9600 a byte takes 1.15 ms to arrive, longer than a 1 ms timer, so the chip
+really does emit roughly one packet per byte — but it cannot be *the regression*, because nothing
+regressed: this is simply how it has always run. It remains a plausible contributor to the standing
+40 s gap and is worth testing by raising the timer, but it explains no change over time.
+
+**38400 fails differently than assumed.** It is not silent from the moment of the switch — it reads
+successfully for 3–10% of the transfer and then stops answering. That is the signature of the
+intermittent K-line fault in §12 (or of errors accumulating faster at higher rate), not of a DME that
+never moved to the new baud. The earlier note here that it looked "exactly like 125000" was wrong:
+125000 produced zero bytes immediately.
+
+Open, with no current explanation: the ~75 ms/chunk overhead at 9600, and why 38400 now fails
+part-way when it previously completed.
+
+If 125000 is ever worth revisiting, the remaining lever is the transport, not the rate: the reference
+programs the FTDI divisor directly through `ftd2xx.dll`, which Web Serial cannot do. That would mean
+a native helper, not a browser change.
 
 ---
 
@@ -407,7 +549,8 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 
 ## 11. Known limitations / TODO
 
-- **Speed**: everything at 9600. Read ~70 s, write ~4 min. Baud boost unresolved (§9).
+- **Speed**: everything at 9600. Read ~124 s measured, write ~4 min. ~40 s of that read is overhead
+  no one has explained yet, and 38400 now fails part-way through. Both open — see §9.
 - **STFT cross-check**: `la_f_regler` vs Testo *Lambdaintegrator* not validated (§8).
 - **Write baud**: write is always 9600 (the reference boosts to 125000 after erase). Deferred until
   baud switching is proven.
@@ -534,6 +677,52 @@ Two porting traps:
 
 Marker meanings: `0xFFFF` available · `0x00FF` data programming active · `0xFF00` program programming
 active · anything else full/unknown.
+
+### What a real service block actually contains (2026-07-28)
+
+Measured on a real vehicle with the read-only inspector, and worth recording because guessing at it
+caused a chain of wrong decisions:
+
+```
+AIF 0x001D50 -> lies in: master     DIF 0x203FB8   BRIF 0x103FD2
+ZIF 0x531B90                        ZIF backup 0x401E00
+
+Master @ 0x000000, 8192 B   0xFF 98.1%   distinct 32   counter 15/30, marker 0xFFFF
+Slave  @ 0x800000, 8192 B   0xFF 99.3%   distinct  2   counter 15/30, marker 0xFFFF
+AIF: 2 of 14 slots populated, VIN and software number decode cleanly
+```
+
+Three things follow:
+
+1. **Both addresses are right.** The master image yields a real VIN and software number, and the
+   slave counter reads the same 15/30 as the master — two independent confirmations.
+2. **The slave block normally holds nothing but the flash counter.** Two distinct byte values across
+   8 KB: `0xFF` everywhere and `0x00` in the consumed counter markers. *Every* identity pointer
+   resolves into master space.
+3. A near-empty slave block is therefore **normal**, not damage.
+
+**The old guard was wrong and blocked every healthy DME.** It asked "is everything outside the counter
+erased?" of both blocks and refused on yes — which is precisely what a normal slave block looks like.
+On the car it fired, and that firing was then misread as evidence the *address* was wrong, which is
+why the whole feature was disabled for a day. Both conclusions were mistaken.
+
+`hasIntactAif()` replaces it: check, only where the DME's own pointer says the AIF lives, that at
+least one record is present. That is the thing the rewrite has to carry forward, so it is the thing
+worth verifying — and it says nothing about how sparse the rest of the block is.
+
+One genuine defect was found alongside it and is fixed: **the restore offered a PRACTICE backup to a
+real car.** Both modes wrote to one store and the recovery list was unfiltered, so a `MOCKVIN…` record
+appeared as the recovery source for a real ECU. Backups now record their origin, and
+`listRestorableBackups(vin, mock)` returns only records whose VIN *and* origin match the connected
+DME; the restore re-checks both immediately before writing.
+
+### Read-only inspection
+
+`readServiceBlocks()` + `buildServiceBlockReport()` dump both blocks and report the pointers, the
+0xFF ratio, the distinct byte count, the raw counter head, and the parsed AIF slots. It writes
+nothing. `aifLocation` is the load-bearing line: it distinguishes "the read is not landing", "the
+records really are gone", and "this block is empty by design" — three situations that had been
+collapsed into one assumption. Reachable from the FLASH dialog in every resting phase.
 
 ### Reset
 

@@ -18,6 +18,35 @@ export class WebSerialTransport {
     private buffer: number[] = [];
     private pumpActive = false;
     private pumpError: Error | null = null;
+    /**
+     * A single reader parked in readExact, woken by the pump the moment enough bytes have arrived.
+     *
+     * Replaces a `setTimeout(2)` polling loop. Browsers clamp nested timers to ~4 ms, so that loop
+     * could sit on data that had already arrived for up to a full clamp period — three times per DS2
+     * exchange (echo, header, body). At 9600 the wire dominates and it hides; the faster the rate,
+     * the larger that fixed cost looms, which is why raising the baud stopped producing a speed-up.
+     *
+     * One waiter is enough: the transport is serialised by the link's command gate, so readExact is
+     * never re-entered concurrently.
+     */
+    private waiter: { need: number; wake: () => void } | null = null;
+
+    /** Wakes the parked reader once its byte count is satisfiable — or once it can only fail. */
+    private signalWaiter(): void {
+        const w = this.waiter;
+        if (w && (this.buffer.length >= w.need || this.pumpError)) {
+            this.waiter = null;
+            w.wake();
+        }
+    }
+
+    /** Releases a parked reader unconditionally. Used wherever the pump it is waiting on is about to
+     *  be torn down: after that point no byte can ever arrive to wake it, so leaving it parked would
+     *  cost a full timeout for nothing. */
+    private releaseWaiter(): void {
+        const w = this.waiter;
+        if (w) { this.waiter = null; w.wake(); }
+    }
 
     static isSupported(): boolean {
         return typeof navigator !== 'undefined' && 'serial' in navigator;
@@ -51,16 +80,21 @@ export class WebSerialTransport {
                     if (done) break;
                     if (value) {
                         for (let i = 0; i < value.length; i++) this.buffer.push(value[i]);
+                        this.signalWaiter();
                     }
                 }
             } catch (e: unknown) {
                 this.pumpError = e instanceof Error ? e : new Error(String(e));
+                // A latched error must wake the reader too, or it waits out its whole timeout for
+                // bytes that can no longer arrive — turning a break into a multi-second stall.
+                this.signalWaiter();
             }
         })();
     }
 
     async close(): Promise<void> {
         this.pumpActive = false;
+        this.releaseWaiter();
         try { await this.reader?.cancel(); } catch { }
         try { this.reader?.releaseLock(); } catch { }
         try { this.writer?.releaseLock(); } catch { }
@@ -74,12 +108,13 @@ export class WebSerialTransport {
     /**
      * Reconfigures the serial port to a new baud rate. The Web Serial API has no way to change baud
      * on an open port, so this closes and reopens the SAME port object at the new rate and restarts
-     * the read pump. Used for DS2 baud-rate boosting (9600 ⇄ 125000) mid-session.
+     * the read pump. Used for DS2 baud-rate boosting (9600 ⇄ a faster rate) mid-session.
      */
     async reopen(baudRate: number): Promise<void> {
         if (!this.port) throw new DmeLinkError('Serial port is not open');
         const port = this.port;
         this.pumpActive = false;
+        this.releaseWaiter();
         try { await this.reader?.cancel(); } catch { }
         try { this.reader?.releaseLock(); } catch { }
         try { this.writer?.releaseLock(); } catch { }
@@ -100,6 +135,9 @@ export class WebSerialTransport {
 
     /** Discards any buffered received bytes — used to resynchronize after a timeout before retrying. */
     purge(): void {
+        // No waiter can be parked here: purge runs between exchanges, and the link's command gate
+        // makes those strictly sequential. Emptying the buffer under a parked reader would strand it
+        // until its deadline, so if that invariant ever changes this needs a signalWaiter().
         this.buffer = [];
     }
 
@@ -139,6 +177,7 @@ export class WebSerialTransport {
     async recoverRead(): Promise<void> {
         if (!this.port) throw new DmeLinkError('Serial port is not open');
         this.pumpActive = false;
+        this.releaseWaiter();
         try { await this.reader?.cancel(); } catch { }
         try { this.reader?.releaseLock(); } catch { }
         await new Promise(r => setTimeout(r, 100)); // let the break / idle condition settle
@@ -167,10 +206,21 @@ export class WebSerialTransport {
             if (this.pumpError) {
                 throw new DmeLinkError(`Serial read failed: ${this.pumpError.name} (${this.pumpError.message})`);
             }
-            if (Date.now() >= deadline) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) {
                 throw new DmeLinkError(`Timed out waiting for ${length} byte(s) (received ${this.buffer.length})`);
             }
-            await new Promise(r => setTimeout(r, 2));
+            // Park until the pump says the bytes are here, or the deadline passes — whichever first.
+            // The loop still re-checks afterwards, so a spurious wake costs one comparison.
+            await new Promise<void>(resolve => {
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
+                timer = setTimeout(() => {
+                    if (this.waiter?.wake === wake) this.waiter = null;
+                    resolve();
+                }, remaining);
+                this.waiter = { need: length, wake };
+            });
         }
         return Uint8Array.from(this.buffer.splice(0, length));
     }

@@ -26,6 +26,7 @@ The tool automates and combines the following steps:
 8. **Checksum correction** (replacing external checksum tools)
 9. **Direct DME communication** — read, live logging, and flashing over a K+DCAN cable (replacing separate reader/flasher tools)
 10. **DME adaptation reset** — clears the learned lambda, knock, and VANOS trims before a re-tune, so the next log is captured from a known baseline instead of one still shaped by the previous map
+11. **Flash counter** — reads how many programming cycles the DME has left and can reset the counter, so a tool built around repeated flashes stops running into an invisible ceiling; includes a read-only inspection of the DME's identity records (VIN / AIF)
 
 (The tool is completely free.)
 
@@ -46,7 +47,7 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
                                                             └→ Re-tune        (discard)
 ```
 
-- **CONNECTION** — connects and shows VIN / AIF / software number
+- **CONNECTION** — connects and shows VIN / AIF / software number / **flash counter**
 - **READ** — reads the partial BIN straight out of the DME
 - **RESET ADAPT** — available any time START TUNE is. Shows the DME's current learned adaptation
   values, then lets you clear them so the next log is captured from a known baseline rather than one
@@ -57,6 +58,26 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
 - **START TUNE** — live-logs from the DME and updates the VE calculation in real time
 - **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
 - **WRITE** — flashes the tuned BIN (checksum corrected, then read-back verified)
+
+### FLASH — how many writes the DME has left
+
+The DME will only accept a limited number of programming cycles: **30 slots per processor**, tracked
+in its own boot field. Every WRITE consumes one. Run out and it simply stops accepting programming,
+which on a tool built around repeated flashes is a real ceiling — so the count is read at connect and
+shown in the header next to VIN / AIF / SW:
+
+```
+FLASH 12/30
+```
+
+Normally one number, because a flash consumes a slot on both processors together. Both are still read
+and compared, and if they ever disagree the field shows `master · slave` instead. It turns amber below
+5 free slots. Hover for the per-processor detail.
+
+**Clicking FLASH opens the counter detail**, which offers a read-only inspection of the service blocks
+and the reset itself. The reset puts the counter back to `1/30` — the correct result, not an
+off-by-one: the first slot stays marked as consumed by design. Read the safety section before using
+it; this is the most destructive thing the app can do.
 
 ### Getting files back out
 
@@ -100,6 +121,33 @@ This tool can **erase and write your DME**. Flashing an ECU always carries risk.
 - Use **Download Tuned** before writing if you want to inspect the exact bytes in TunerPro first — the
   downloaded file is byte-for-byte identical to what gets flashed.
 
+### Resetting the flash counter — additional risk
+
+The counter lives in flash and flash cannot be rewritten without an erase, so the reset erases and
+rewrites the whole block it sits in — the same block that holds the VIN and the programming history.
+On success those records are byte-for-byte unchanged. If power is lost part-way, they are gone.
+
+- Takes about **1.5–2 minutes**. The same power rules as a WRITE apply, and they matter more here.
+- The block is **saved inside the browser before anything is erased**, and the reset refuses to start
+  if that save fails. No file is produced — writing to the DME and exporting a file stay separate
+  actions in this app.
+- The reset also refuses if the AIF records are not present in what it just read, since a rewrite
+  could only carry forward what it found.
+- **If it is interrupted, do not run the reset again.** Leave the ignition on, leave the cable in,
+  **do not close the browser**, and click **FLASH** again — a **Recover** action appears that writes
+  the saved block back. Only a backup from the *same* DME is ever offered.
+
+### Read the service info first — read-only
+
+The FLASH dialog has a **read-only** inspection that dumps both service blocks and reports what is
+actually in them: the addresses the DME itself reports for AIF/ZIF/DIF/BRIF, whether each block is
+erased, the flash counter's raw bytes, and the parsed AIF slots with their VIN and software number.
+It erases and writes nothing, and the 16 KB can be saved to a file.
+
+This is the honest first step on any DME whose history is unclear — including the fairly common CSL
+conversion case of a failed tune having wiped the AIF. It answers, from the DME's own pointers rather
+than from assumption, whether the identity records are present and which processor holds them.
+
 ## Technical Specifications & Limitations
 
 - **Supported BINs**: Only **0401 partial BINs** (65536 bytes — slave data block followed by master data block).
@@ -109,7 +157,8 @@ This tool can **erase and write your DME**. Flashing an ECU always carries risk.
 - **Checksums**: **Now implemented.** CRC-16/ARC is recalculated automatically before every BIN download and every DME write — you do **not** need to correct checksums with external tools. The algorithm was verified byte-for-byte against a known-good stock partial BIN.
 - **Flashing**: **Now implemented**, using the BMW DS2 protocol over a K+DCAN (FTDI) cable, and verified on a real vehicle. Each written chunk is validated against the DME's programming verify byte, and the whole region is read back and compared byte-for-byte before the write is reported successful.
 - **Adaptation reset**: Clears the DME's learned lambda trim (2 factors + 2 offsets), knock adaptation (6 cylinders), and VANOS adaptation (intake/exhaust) — 12 values, decoded and displayed before and after the clear. This is a **scoped** clear (DS2 service 0x43, mask 0x47), not a diagnostic tool's full "Clear All": throttle/pedal/EGAS, SMG clutch, detected-equipment and crank-wheel adaptations are left untouched, since the CSL's SMG-II clutch adaptation would otherwise need a full re-adaptation procedure to recover. Both the DS2 frame bytes and the field layout were verified against a decompiled reference tool. A snapshot of the values immediately before and after the clear is saved with the session. Not yet cross-checked against a real DME's actual post-clear values (only that the clear command and read-back path are correct) — verify the results look sane before relying on them.
-- **Speed**: All DME communication runs at 9600 baud. A full read takes ~70 s. Faster rates (38400 / 125000) are the only others the DME accepts and are selectable as an experiment, but they are **not working reliably** — the Web Serial API cannot change baud on an open port, and the required close/reopen appears to disturb the K-line. See the implementation notes for details.
+- **Flash counter**: Read at connect from the DME's boot field — a run of 2-byte markers, 30 slots per processor, decoded with the same scan the reference tool uses. Resetting it erases and rewrites the 8 KB service block on **both** processors (the block also carrying the AIF, ZIF and VIN records), then reads all 16 KB back and compares byte-for-byte. The pre-erase block is stored in a separate browser database first, and the reset aborts if that fails. Three guards refuse to start: engine not stopped, a boot field still mid-programming, or a block found already erased by an earlier interrupted attempt — that last one matters because an erased block reads as a healthy `0/30 available` on the counter alone, so a naive retry would write the hole back and verify it. An interrupted reset is recovered by writing the saved block back (**Recover**, offered in place of a retry). A cleared counter reads `1/30`, not `0/30`: `0x0000` is the "consumed, keep looking" sentinel the scan walks over. **Confirmed on a real vehicle** (2026-07-28): the counter reads and the reset completes. A read-only inspection of both service blocks is also available and is the right first step on any DME with an unclear history.
+- **Speed**: DME communication defaults to 9600 baud, where a full read takes **~124 s measured** (530 B/s) — about 40 s more than the wire alone accounts for, and that gap is currently unexplained. Faster rates are selectable but **none is reliable yet**: 38400 has both completed and, more recently, timed out 3–10% into a read; 125000 fails outright (the DME accepts the switch, then answers nothing); 57600 / 76800 / 115200 are unconfirmed. If the DME refuses a rate the read silently falls back to 9600, so every read now reports its own elapsed time, throughput and the rate it actually used — otherwise "refused" and "didn't help" look identical. Writes always run at 9600 regardless.
 - **Browser compatibility**:
   - *File workflow*: any Chromium browser (Chrome / Edge / Opera).
   - *Direct DME workflow*: **Chrome / Edge / Opera desktop only** — it requires the Web Serial API, which Safari does not support and Firefox does not support out of the box.
@@ -141,5 +190,7 @@ npm run dev
 Open [http://localhost:5054](http://localhost:5054) with your browser to see the result.
 
 The DME features need a real K+DCAN cable and a secure context; `localhost` counts as secure, so
-`npm run dev` is enough for hardware testing. A **MOCK** toggle in the DME panel simulates a DME so
-the whole flow (read → live tune → write) can be exercised offline without a cable.
+`npm run dev` is enough for hardware testing. A **PRACTICE** toggle in the DME panel simulates a DME
+so the whole flow (read → live tune → write, plus the flash-counter reset) can be exercised offline
+without a cable. The simulated DME keeps state, so a reset stays reset across re-reads the way a real
+one would.
