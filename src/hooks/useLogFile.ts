@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { parseLogFile } from '@/lib/log-engine/parser';
 import { processLogData } from '@/lib/log-engine/filter';
 import { ProcessedLog, LogDataPoint, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { APP_CONFIG } from '@/config/constants';
+
+const LOG_WINDOW_SIZE = 2000;
 
 const DEFAULT_FILTER_CONFIG: LogFilterConfig = {
   enableCorrection: true,
@@ -23,27 +25,55 @@ export function useLogFile() {
   const [filterConfig, setFilterConfig] = useState<LogFilterConfig>(DEFAULT_FILTER_CONFIG);
   const [interpolationTable, setInterpolationTable] = useState<InterpolationPoint[]>(APP_CONFIG.MSS54HP.INTERPOLATION_TABLE);
 
+  const [logWindowStart, setLogWindowStart] = useState<number>(0);
   const [selectedLogIndex, setSelectedLogIndex] = useState<number | null>(null);
 
-  // A new log invalidates any row that was selected in the previous one.
+  // Reset window when file changes
   useEffect(() => {
+    setLogWindowStart(0);
     setSelectedLogIndex(null);
   }, [processedLog]);
 
   /**
-   * The whole log. There used to be a 2000-point window with a scrub slider in front of it, and it
-   * was wrong twice over.
+   * `selectedLogIndex` is an index into the WHOLE log, not into the window.
    *
-   * It never worked: Plotly keeps a user's zoom until the layout it is handed offers something to
-   * revert to, and the layout supplied no xaxis range or autorange. So after any trackpad zoom the
-   * axis stayed pinned while the window slid underneath it — the data changed and the picture did
-   * not. Below 2000 points (most runs) the slider could not move at all, which hid the rest.
+   * It used to be window-relative, which forced a reset on every scrub: the same number meant a
+   * different row once the window moved, so keeping it would have silently mis-marked the data. That
+   * reset is why the reference line vanished the moment you slid — the selection was being thrown
+   * away, not just scrolled off.
    *
-   * And it bought nothing: a line trace collapses to one SVG path however many points it holds.
-   * Measured at 20,000 points across five traces, a full Plotly.react is ~32 ms and a pan ~9 ms.
-   * Navigation is the trackpad's job — dragmode 'pan' and scrollZoom are already on.
+   * Absolute, it simply survives. The two views convert to their own local index where they render,
+   * and a selection outside the current window is a selection you cannot see yet rather than one
+   * that has been lost.
    */
-  const displayedLogData = useMemo(() => processedLog?.data ?? [], [processedLog]);
+
+  /**
+   * The shared data window — the one thing the chart and the row table are both looking at.
+   *
+   * This is the load-bearing idea of the log view, and removing it broke the pairing outright: the
+   * chart was given the whole log while the table kept its own 2,000-row cap, so the two stopped
+   * indexing the same array and clicking a point past row 2,000 addressed a row that was never
+   * rendered. One window, two views, one index space — anything that moves the view has to move THIS,
+   * not a per-view range.
+   */
+  const windowedLogData = useMemo(() => {
+    if (!processedLog) return [];
+    return processedLog.data.slice(logWindowStart, logWindowStart + LOG_WINDOW_SIZE);
+  }, [processedLog, logWindowStart]);
+
+  /** Furthest the window can start and still be full — the slider's max, and the clamp every other
+   *  input (trackpad pan) has to respect so the two can never disagree about the limits. */
+  const maxWindowStart = Math.max(0, (processedLog?.data.length ?? 0) - LOG_WINDOW_SIZE);
+
+  /** Moves the window by a signed number of points, clamped. The single entry point for "scroll the
+   *  view", so the slider and the trackpad are the same operation with different hardware.
+   *
+   *  useCallback is not decoration here: this is passed to the chart, which is React.memo'd so the
+   *  per-sample re-render during a live log stops at its boundary. A fresh function identity every
+   *  render would defeat that memo and drag a full Plotly pass along with every sample. */
+  const panWindow = useCallback((deltaPoints: number) => {
+    setLogWindowStart(prev => Math.max(0, Math.min(maxWindowStart, Math.round(prev + deltaPoints))));
+  }, [maxWindowStart]);
 
   // Parses a new CSV file, sets raw+processed state, and returns the processed result
   const parseAndSetLog = async (file: File): Promise<ProcessedLog | null> => {
@@ -115,6 +145,7 @@ export function useLogFile() {
     setLogFile(null);
     setRawLogData(null);
     setProcessedLog(null);
+    setLogWindowStart(0);
     setSelectedLogIndex(null);
   };
 
@@ -124,9 +155,14 @@ export function useLogFile() {
     processedLog,
     filterConfig,
     interpolationTable,
+    logWindowStart,
+    setLogWindowStart,
+    maxWindowStart,
+    panWindow,
     selectedLogIndex,
     setSelectedLogIndex,
-    displayedLogData,
+    windowedLogData,
+    LOG_WINDOW_SIZE,
     parseAndSetLog,
     loadRawLog,
     reprocess,

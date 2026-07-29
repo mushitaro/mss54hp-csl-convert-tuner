@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic'; // Added dynamic import
 import { DropZone } from '@/components/DropZone';
 import { MapEditor } from '@/components/MapEditor';
@@ -257,8 +257,19 @@ export default function Home() {
 
   const {
     logFile, processedLog, filterConfig, interpolationTable,
-    selectedLogIndex, setSelectedLogIndex, displayedLogData,
+    logWindowStart, setLogWindowStart, maxWindowStart, panWindow,
+    selectedLogIndex, setSelectedLogIndex, windowedLogData, LOG_WINDOW_SIZE,
   } = logFileState;
+
+  /** The selection is stored against the WHOLE log; both log views index their own window. Converting
+   *  in one place is what lets a selection survive a scrub instead of being reset by it — outside the
+   *  window the relative index simply misses, which both views already render as "nothing selected"
+   *  without needing an extra branch. */
+  const windowRelativeSelection = selectedLogIndex === null ? null : selectedLogIndex - logWindowStart;
+  const selectAbsoluteFromWindow = useCallback(
+    (windowIndex: number) => setSelectedLogIndex(logWindowStart + windowIndex),
+    [logWindowStart, setSelectedLogIndex],
+  );
 
   const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap } = veCalc;
   const { diffSubject, setDiffSubject, diffReference, setDiffReference, diffMapForVisualization } = comparison;
@@ -1525,9 +1536,9 @@ export default function Home() {
               {(activeTab === 'log' && processedLog) && (
                 <div className="h-full w-full pb-0">
                   <LogDataTable
-                    data={displayedLogData}
-                    selectedIndex={selectedLogIndex}
-                    onRowClick={setSelectedLogIndex}
+                    data={windowedLogData}
+                    selectedIndex={windowRelativeSelection}
+                    onRowClick={selectAbsoluteFromWindow}
                     totalCount={processedLog.data.length}
                     visibleFields={fieldVisibility.visibleFields}
                     presenceData={logFileState.rawLogData ?? undefined}
@@ -1639,33 +1650,61 @@ export default function Home() {
                   <div className="absolute inset-0 flex flex-col">
                     <div className="flex-1 min-h-0">
                       <LogTimeSeriesChart
-                        data={displayedLogData}
-                        selectedIndex={selectedLogIndex}
-                        onPointClick={setSelectedLogIndex}
+                        data={windowedLogData}
+                        selectedIndex={windowRelativeSelection}
+                        onPointClick={selectAbsoluteFromWindow}
                         visibleFields={fieldVisibility.visibleFields}
                         presenceData={logFileState.rawLogData ?? undefined}
                         live={dmeLink.state === 'tuning'}
                         fitToken={chartFitToken}
+                        onPanWindow={panWindow}
+                        logKey={logFileState.logFile?.name ?? 'none'}
                       />
                     </div>
-                    {/* The scrub slider used to live here. Navigation is the trackpad's now — the chart
-                        already runs dragmode 'pan' with scrollZoom — so all this row still owes the
-                        user is the way back out of a zoom, which doubleClick:false takes away. */}
-                    <div className="flex-none flex items-center gap-3 px-2.5 pt-2 pb-0.5">
-                      <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">
-                        {processedLog.validCount.toLocaleString()} pts
-                      </span>
-                      <span className="flex-1 text-[9px] text-slate-600 font-mono truncate">
-                        scroll to zoom · drag to pan
-                      </span>
-                      <button
-                        onClick={() => setChartFitToken(t => t + 1)}
-                        className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors whitespace-nowrap"
-                        title="Fit the whole log back into view"
-                      >
-                        Fit
-                      </button>
-                    </div>
+                    {/* The window scrub. It drives what BOTH this chart and the row table are looking
+                        at, which is what keeps a clicked point and its row the same index. A two-finger
+                        horizontal swipe on the chart calls the same panWindow, so the slider and the
+                        trackpad are one control with two grips.
+
+                        step is clamped to the range: it used to be a flat 100 while max could be as
+                        little as 1, so a log that HAD outgrown the window still could not be scrubbed. */}
+                    {(() => {
+                      const canScrub = maxWindowStart > 0;
+                      const step = Math.max(1, Math.min(100, maxWindowStart));
+                      const windowEnd = Math.min(processedLog.data.length, logWindowStart + LOG_WINDOW_SIZE);
+                      return (
+                        <div className="flex-none flex items-center gap-3 px-2.5 pt-2 pb-0.5">
+                          <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
+                            WIN: {logWindowStart.toLocaleString()} - {windowEnd.toLocaleString()}
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={maxWindowStart}
+                            step={step}
+                            value={logWindowStart}
+                            disabled={!canScrub}
+                            onChange={(e) => setLogWindowStart(Number(e.target.value))}
+                            title={canScrub
+                              ? 'Scroll the window through the log — the chart and the rows move together'
+                              : 'The whole log fits in one window'}
+                            className={`flex-1 min-w-[60px] h-1 bg-slate-700 rounded-lg appearance-none transition-colors ${canScrub
+                              ? 'cursor-pointer accent-blue-500 hover:accent-blue-400'
+                              : 'cursor-not-allowed accent-slate-600 opacity-50'}`}
+                          />
+                          <span className="text-[9px] text-slate-600 font-mono whitespace-nowrap">/ {processedLog.validCount.toLocaleString()}</span>
+                          {/* doubleClick is off so click-to-select stays unambiguous, which leaves no
+                              built-in way out of a zoom. This is it. */}
+                          <button
+                            onClick={() => setChartFitToken(t => t + 1)}
+                            className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors whitespace-nowrap"
+                            title="Undo the chart zoom and fit the window"
+                          >
+                            Fit
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               )}

@@ -19,9 +19,19 @@ interface Props {
 const FACTOR_COLOR = '#9B84E8'; // M-violet (secondary / diagnostic) — matches lineage badges
 
 export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData }) => {
-    const limit = 2000;
-    const displayData = data.slice(0, limit);
-    const truncated = data.length > limit;
+    /**
+     * `data` is already the shared window, so this renders it whole and indexes it directly.
+     *
+     * The cap that used to live here is gone along with the paging that replaced it. Both were ways
+     * of deciding what to show, and this table must not make that decision at all: the window does,
+     * for both views at once. A second, independent limit here is precisely what desynced the chart
+     * from the rows — the chart offered indices this table had never rendered.
+     *
+     * The size bound still holds, one level up: the window is LOG_WINDOW_SIZE points, which is what
+     * keeps the DOM at ~16,000 cells. (Measured: 2,000 rows ≈ 440 ms to build, 10,000 ≈ 2.2 s — and
+     * it is rebuilt on every click, since the selection is a prop.)
+     */
+    const displayData = data;
 
     const effectiveTotal = totalCount ?? data.length;
 
@@ -45,7 +55,13 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
         <div className="h-full flex flex-col bg-slate-900/50">
             <div className="flex px-4 py-2 border-b border-slate-800 justify-between items-center text-xs text-slate-400">
                 <span>Displaying {displayData.length.toLocaleString()} of {effectiveTotal.toLocaleString()} records</span>
-                {truncated && <span className="text-orange-400 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> Truncated for performance</span>}
+                {/* Keyed on the window being partial, not on this table truncating anything — it no
+                    longer does. Says the same thing the chart is showing, because they share it. */}
+                {effectiveTotal > displayData.length && (
+                    <span className="text-orange-400 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" /> Windowed — use the slider or swipe the chart
+                    </span>
+                )}
             </div>
 
             <div className="flex-1 overflow-auto relative">

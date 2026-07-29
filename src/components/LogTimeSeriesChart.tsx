@@ -89,6 +89,18 @@ const BASE_LAYOUT: Partial<Layout> = {
     },
 };
 
+/** Resolved once, at module load, so the pre-paint correction below can call it synchronously.
+ *  Awaiting the dynamic import inside the effect is what deferred the fix past the browser's paint
+ *  and drew the frame twice — once at the stale range, once right. That is what tore.
+ *
+ *  'plotly.js/dist/plotly', not 'plotly.js': the bare specifier resolves to the source build, which
+ *  reaches traces/image and its `require('buffer/')` Node polyfill and fails the Turbopack build.
+ *  This is also the module react-plotly.js itself loads, so nothing is bundled twice. */
+let plotlyModule: { relayout: (gd: HTMLElement, update: Record<string, unknown>) => Promise<unknown> } | null = null;
+if (typeof window !== 'undefined') {
+    void import('plotly.js/dist/plotly').then(m => { plotlyModule = m; });
+}
+
 /** Also module scope, for the same reference-equality reason as BASE_LAYOUT. */
 const PLOT_CONFIG: Partial<Config> = {
     displayModeBar: false,
@@ -113,18 +125,119 @@ interface Props {
     /** True while the DME is recording. Suppresses the transition: the series grows on every flush,
      *  and tweening a lengthening line makes it crawl instead of extend. */
     live?: boolean;
-    /** Bump to drop the user's zoom and re-fit the whole log. Feeds uirevision — see the layout memo
+    /** Bump to drop the user's zoom and re-fit the window. Feeds uirevision — see the layout memo
      *  for why an explicit autorange is not enough on its own. */
     fitToken?: number;
+    /** Scroll the SHARED window by a signed number of points. The same call the slider makes, so a
+     *  horizontal swipe and a slider drag are one operation. Omit and horizontal swipes are ignored. */
+    onPanWindow?: (deltaPoints: number) => void;
+    /** Identifies the log on screen, NOT the window into it. Feeds uirevision: a new log should drop
+     *  the zoom, scrubbing the same log should not. Live logging keeps one key while data grows. */
+    logKey?: string;
 }
 
 /** Wrapped in React.memo so the page's per-sample re-render during a log run stops at this boundary.
  *  Without it the live HUD's state updates would drag a full Plotly pass along ~8 times a second. */
 export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
-    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0,
+    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0, onPanWindow, logKey = 'none',
 }: Props) {
     const lastHoveredIndex = React.useRef<number | null>(null);
+    const wrapperRef = React.useRef<HTMLDivElement>(null);
+    /** First timestamp of the previous window, read only inside the layout effect below. */
+    const prevFirstTimeRef = React.useRef<number | null>(null);
     const presenceSource = presenceData && presenceData.length > 0 ? presenceData : data;
+
+    /**
+     * Two-finger horizontal swipe scrolls the shared data WINDOW. Vertical and pinch keep zooming the
+     * chart's own axis.
+     *
+     * The distinction is the whole point. Panning Plotly's x-range would move this chart and nothing
+     * else, and the row table sitting beside it would go on showing a different slice of the log —
+     * which is exactly the desync that made clicking a point stop jumping to its row. So a horizontal
+     * swipe is routed to the same `panWindow` the slider calls: one window, both views, one gesture.
+     *
+     * Zoom stays chart-local on purpose. It is a magnification of what is already on screen, not a
+     * change of which data is on screen, so there is nothing for the table to follow.
+     *
+     * Plotly reads only `deltaY` — measured, a pure horizontal wheel moves nothing at all while still
+     * being preventDefault'd, so the gesture just dies, and a diagonal swipe zooms even when the
+     * horizontal component clearly dominates. The split therefore has to happen before Plotly's own
+     * handler on the drag layer, hence capture phase. ctrlKey (pinch on every precision trackpad) is
+     * handed straight through.
+     *
+     * Pixels are converted to points against the plotting area so the data tracks the fingers 1:1,
+     * and coalesced onto an animation frame — a swipe emits wheel events far faster than re-slicing a
+     * 2,000-row window and rebuilding the table costs.
+     */
+    React.useEffect(() => {
+        const wrapper = wrapperRef.current;
+        if (!wrapper || !onPanWindow) return;
+        let pendingPx = 0;
+        let frame = 0;
+
+        const apply = () => {
+            frame = 0;
+            const px = pendingPx;
+            pendingPx = 0;
+            // Plotly hangs the resolved layout off the graph div; not in @types/plotly.js because it
+            // is internal, so name only the fields actually read rather than reaching for `any`.
+            type ResolvedLayout = { width?: number; margin?: { l: number; r: number } };
+            const gd = wrapper.querySelector('.js-plotly-plot') as (HTMLElement & { _fullLayout?: ResolvedLayout }) | null;
+            const full = gd?._fullLayout;
+            if (full?.width === undefined || !full.margin) return;
+            const plotWidth = full.width - full.margin.l - full.margin.r;
+            if (!(plotWidth > 0) || data.length === 0) return;
+            // Points per pixel across the visible window — so a swipe moves the data under the
+            // fingers at the rate the eye expects, whatever the window and pane widths are.
+            onPanWindow((px / plotWidth) * data.length);
+        };
+
+        const onWheel = (e: WheelEvent) => {
+            if (e.ctrlKey) return;                               // pinch → let Plotly zoom
+            if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical-dominant → let Plotly zoom
+            e.preventDefault();
+            e.stopPropagation();                                 // Plotly must not also see it
+            pendingPx += e.deltaX;
+            if (!frame) frame = requestAnimationFrame(apply);
+        };
+
+        wrapper.addEventListener('wheel', onWheel, { capture: true, passive: false });
+        return () => {
+            wrapper.removeEventListener('wheel', onWheel, { capture: true });
+            if (frame) cancelAnimationFrame(frame);
+        };
+    }, [onPanWindow, data.length]);
+
+    /**
+     * Carries an active zoom along with the window, in the same frame the new data lands in.
+     *
+     * uirevision is keyed on the log, so Plotly holds the user's range across a scrub — but the data
+     * underneath has moved, and that range would point at time the new window does not cover. Shifting
+     * it by exactly the window's time delta preserves both the magnification and the position within
+     * the window, which is what sliding at a chosen zoom means.
+     *
+     * useLayoutEffect, not useEffect, and with Plotly already resolved: react-plotly.js performs its
+     * Plotly.react in componentDidUpdate, this runs straight after in the same commit, and the browser
+     * paints once — after the correction rather than either side of it. The earlier version awaited a
+     * dynamic import here, which pushed the correction past the paint and showed a stale frame first.
+     *
+     * Keyed on the data, so the slider and the trackpad both get it. Skipped while autoranging:
+     * nothing is zoomed, and Plotly has already fitted the new window.
+     */
+    React.useLayoutEffect(() => {
+        const first = data.length > 0 ? data[0].time : null;
+        const prev = prevFirstTimeRef.current;
+        prevFirstTimeRef.current = first;
+        if (prev === null || first === null || first === prev || !plotlyModule) return;
+
+        type ZoomAxis = { range?: [number, number]; autorange?: boolean | string };
+        const gd = wrapperRef.current?.querySelector('.js-plotly-plot') as (HTMLElement & { _fullLayout?: { xaxis?: ZoomAxis } }) | null;
+        const ax = gd?._fullLayout?.xaxis;
+        if (!gd || !ax?.range || ax.autorange) return;
+
+        const dt = first - prev;
+        void plotlyModule.relayout(gd, { 'xaxis.range': [ax.range[0] + dt, ax.range[1] + dt] });
+    }, [data]);
 
     /** Always five traces, in a fixed order, with the axis each one belongs to already assigned.
      *
@@ -201,14 +314,16 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
      *  scroll wheel last set. That is what made the old scrub slider look dead: the data underneath
      *  changed on every step while the axis stayed pinned where the zoom left it.
      *
-     *  uirevision then decides when that revert happens. It holds steady while the same log is on
-     *  screen — including as it grows during a live run, since the first timestamp does not move — so
-     *  a zoom survives re-renders. It changes when a different log loads, or when the FIT button
-     *  bumps its token, and either of those re-fits the view. */
+     *  uirevision is keyed on the LOG, not on the window. Keying it on the window's first timestamp
+     *  meant every scrub counted as "something else is on screen now" and threw the zoom away — you
+     *  could not scroll along a log at a chosen magnification, which is the normal way to read one.
+     *  Holding it steady across scrubs keeps the zoom, and the effect below carries the view along
+     *  with the window so the preserved range still points at data. It changes when a different log
+     *  loads, or when FIT bumps its token, and either of those re-fits. */
     const layout = useMemo((): Partial<Layout> => ({
         ...BASE_LAYOUT,
         xaxis: { ...BASE_LAYOUT.xaxis, autorange: true },
-        uirevision: `${data.length > 0 ? data[0].time : 'init'}:${fitToken}`,
+        uirevision: `${logKey}:${fitToken}`,
         transition: (!live && data.length <= TRANSITION_MAX_POINTS) ? TOGGLE_TRANSITION : undefined,
         shapes: selectedIndex !== undefined && selectedIndex !== null && data[selectedIndex] ? [
             {
@@ -228,10 +343,11 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 },
             },
         ] : [],
-    }), [data, selectedIndex, live, fitToken]);
+    }), [data, selectedIndex, live, fitToken, logKey]);
 
     return (
         <div
+            ref={wrapperRef}
             className="w-full h-full min-h-[300px]"
             onClick={(e) => {
                 if (onPointClick) {
