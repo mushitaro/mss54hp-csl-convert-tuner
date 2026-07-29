@@ -687,18 +687,50 @@ Sampled byte-arrival gaps show the mechanism plainly. At a 1 ms timer: 134 gaps 
 packet per byte, since a byte takes 1.146 ms) with a single 101 ms gap where the DME was thinking. At
 16 ms: `16, 0, 16, 0, …` — one packet per timer tick carrying ~14 bytes.
 
-**So the only remaining lever is baud, and the arithmetic says which one.** Turnaround does not scale
-with the bit rate, so at 38400 a chunk becomes ~35 ms of wire + ~52 ms of DME ≈ 90 ms → a ~48 s read,
-**2.2× not 4×**. At 125000 it would be ~11 + 52 ≈ 63 ms → ~34 s. Past 38400 the ECU's own latency
-dominates and the returns collapse. **38400 captures most of what is available**, which makes "why does
-38400 die part-way" the whole remaining question rather than one of several.
+**So the only remaining lever is baud** — and the next session established that there is no lever
+there either: the DME implements exactly 9600 / 38400 / 125000, 38400 dies within 17 chunks every
+time, and 125000 needs a flash-erasing procedure to reach. See "CLOSED" below.
 
-### Open
+### CLOSED (2026-07-29, second vehicle session): 9600 is the only rate this DME implements
 
-Why 38400 fails 3–10% into a read. The first attempt to measure it produced nothing: `read()` published
-the timing only on its success path, so three 38400 runs saved byte-identical copies of the preceding
-9600 report. Fixed — a failed read now yields a report carrying `completed: false`, the error verbatim,
-and the chunk it stopped at.
+**The ECU rejects anything outside 9600 / 38400 / 125000.** Asked for 19200 it answered **DS2 status
+0xB0, PARAMETER_ERROR** — validating the value against a fixed list and refusing. Seven rates had been
+offered here (10400/14400/19200/28800 below 38400, 57600/76800/115200 above) on the reasoning that the
+0x91 payload encodes an arbitrary 24-bit value. It does; the DME does not accept one. Expressible and
+implemented are different things, and only the first had ever been checked. Removed.
+
+That also closes a much older loose end. 57600 was reported from the car long ago as "no faster than
+9600, and no message appeared" — true, and for exactly this reason: silently refused, silently fell
+back. Those rates were deleted once on that impression and restored on the argument that an impression
+cannot separate a refused switch from an unhelpful one. It cannot; the impression was right anyway.
+The report now records `requestedBaud` and `switchOutcome`, so a refused switch is a fact in the file
+instead of a colour on a notice line.
+
+**Correction: 38400 does NOT double the DME's turnaround.** That claim, recorded above from the first
+38400 session, was an artifact of comparing 38400's first-17-chunk median against 9600's whole-read
+median. The ECU has a warm-up. In a completed 9600 read the sampled chunks show:
+
+| sampled chunks | longest gap (= turnaround) |
+|---|---|
+| 0–4 (head) | 103.7 / 118.7 / 102.1 / 117.6 / 121.0 ms |
+| 269–273 (middle) | **39.2 / 43.0 / 41.9 / 38.5 / 42.1 ms** |
+| median over all 538 | 53.1 ms |
+
+So the settled turnaround is ~40 ms and the head of a read is ~110 ms; 53 ms is the blend. Every 38400
+attempt died within 17 chunks — entirely inside the warm-up — and its 111–116 ms is indistinguishable
+from 9600's 102–121 ms at the same position. **The gap experiment was therefore testing a phenomenon
+that does not exist**, which is why 0/5/10/20/40 ms changed neither the turnaround (104–121 ms
+throughout) nor the death position (chunk 0/1/7/9/17).
+
+What 38400 actually does: the switch is accepted, the wire genuinely runs at 38400 (36.0–36.8 ms
+measured against a theoretical 36.1), and then the ECU stops answering — zero bytes, not a corrupted
+frame. Death at chunk 0/1/7/9/17 across five runs is what a roughly 10%-per-chunk failure probability
+looks like, i.e. a link that is marginal at that rate rather than one that breaks at a specific point.
+
+**Measured baseline, same day, same car:** 9600 completes in **122.9 s**, twice, identically. (The
+106.5 s quoted earlier was reconstructed from medians and understated it; `elapsedMs` is now measured.)
+A 20 ms gap costs 13.5 s of that, as arithmetic demands. **This is the floor, and there is nothing
+above it to reach.**
 
 **The one measurement that collapses the 38400 question** is already in our own error text: the latched
 `pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.

@@ -344,86 +344,68 @@ function ds2BaudPayload(baudRate: number): Uint8Array {
     return new Uint8Array([(baudRate >>> 16) & 0xFF, (baudRate >>> 8) & 0xFF, baudRate & 0xFF, 0x19]);
 }
 
+/**
+ * The three rates the MSS54 actually implements — the same three the reference hardcodes, which is
+ * not a coincidence and not an arbitrary limitation of that tool.
+ *
+ * Ten rates were offered here for a while, on the reasoning that the 0x91 payload encodes the rate as
+ * a plain 24-bit value and therefore "admits any rate". It does. The DME does not: asked for 19200 on
+ * a real car it answered **DS2 status 0xB0, PARAMETER_ERROR** — the ECU validating the value against
+ * a fixed list and saying no. Expressible and implemented are different things, and only one of them
+ * was ever checked.
+ *
+ * That result also closed a much older loose end. 57600 was reported from the car long ago as "no
+ * faster than 9600, and no message appeared", which was true and for this exact reason: the switch was
+ * silently refused and the read fell back to 9600. Those rates were once deleted on that impression,
+ * then restored on the grounds that an impression cannot separate a refused switch from an unhelpful
+ * one. It cannot — but the impression was right, and it took recording `switchOutcome` to prove why.
+ */
 export const Ds2BaudRate = {
     Baud9600: { baudRate: 9600, payload: ds2BaudPayload(9600) },        // 0x002580
-    // Between 9600 and 38400 — the range nobody had looked at, because the reference defines only
-    // 9600/38400/125000 and this file anchored on that list. The car's own numbers say this is where
-    // the optimum lives; see DS2_SELECTABLE_BAUDS.
-    Baud10400: { baudRate: 10400, payload: ds2BaudPayload(10400) },     // 0x0028A0 — the ISO 9141-2 /
-                                                                       //   KWP2000 K-line rate, i.e.
-                                                                       //   the one this wiring was
-                                                                       //   designed around
-    Baud14400: { baudRate: 14400, payload: ds2BaudPayload(14400) },     // 0x003840
-    Baud19200: { baudRate: 19200, payload: ds2BaudPayload(19200) },     // 0x004B00
-    Baud28800: { baudRate: 28800, payload: ds2BaudPayload(28800) },     // 0x007080
     Baud38400: { baudRate: 38400, payload: ds2BaudPayload(38400) },     // 0x009600
-    Baud57600: { baudRate: 57600, payload: ds2BaudPayload(57600) },     // 0x00E100
-    Baud76800: { baudRate: 76800, payload: ds2BaudPayload(76800) },     // 0x012C00
-    Baud115200: { baudRate: 115200, payload: ds2BaudPayload(115200) },  // 0x01C200
     Baud125000: { baudRate: 125000, payload: ds2BaudPayload(125000) },  // 0x01E848
 } as const satisfies Record<string, Ds2BaudRateSpec>;
 
 /**
- * Rates the 0x91 switch may be asked for.
+ * Rates the 0x91 switch may be asked for. **9600 is the only one that works on this car**, and the
+ * measurements behind that are worth keeping, because two of them corrected earlier conclusions here.
  *
- * **The useful range is between 9600 and 38400, and it went unexamined for a long time because this
- * file anchored on the reference's list of three.** The car's own numbers say why. The DME's
- * turnaround — the silence between our last request byte and its first response byte — does NOT scale
- * with the bit rate: it is 53.5 ms at 9600, so each doubling of baud returns less than the last. Worse,
- * at 38400 it does not even hold still; it degrades to 115 ms and the ECU then stops answering
- * entirely a few percent into a read. Per chunk, at a fixed 53.5 ms of turnaround:
+ * - **9600** — the default, and no switch is sent at all. Measured 122.9 s for the 64 KiB read,
+ *   reproducibly. That is the floor.
+ * - **38400** — the switch IS accepted and the wire genuinely runs at 38400 (measured response time
+ *   36.0-36.8 ms against a theoretical 36.1). But every attempt died inside the first 17 of 538
+ *   chunks, with the ECU silent — zero bytes, not a corrupted frame — and an inter-telegram gap of up
+ *   to 40 ms changed neither the survival nor anything else.
+ * - **125000** — the reference's programming rate. The DME ACKs and then every exchange times out. In
+ *   the reference it is only ever reached after a "fast entry" procedure that erases flash on both
+ *   processors, which is not a thing to do for a read.
  *
- *   9600  144.4 ms wire -> 197.9 total -> 106.5 s   1.00x
- *   10400 133.3         -> 186.8       -> 100.5 s   1.06x
- *   14400  96.2         -> 149.8       ->  80.6 s   1.32x
- *   19200  72.2         -> 125.7       ->  67.6 s   1.57x
- *   28800  48.1         -> 101.6       ->  54.7 s   1.95x
- *   38400  36.1         ->  89.6       ->  48.2 s   2.21x   <- if turnaround held, which it does not
+ * **Correction to an earlier claim in this file: 38400 does NOT double the DME's turnaround.** That
+ * was an artifact of comparing 38400's first-17-chunk median against 9600's whole-read median. The
+ * ECU has a warm-up — at 9600 the head of a read shows ~110 ms of turnaround and the settled middle
+ * shows ~40 ms, which is what blends to the 53 ms median. Sampled at the same point in the read, 9600
+ * and 38400 are indistinguishable (102-121 ms vs 111-116 ms). 38400 simply never survived long enough
+ * to reach the settled region. The gap experiment was therefore testing a phenomenon that did not
+ * exist, which is why it found nothing.
  *
- * With 38400's MEASURED 115.2 ms turnaround it is 151.3 ms a chunk, i.e. 81.4 s and only 1.31x — so
- * **19200 would beat the 38400 we actually have**, at half the load on a twenty-year-old ECU. That is
- * the case for the middle of the range, not a consolation prize.
- *
- * The encoding is proven generic: the 38400 switch was accepted on the car and the measured wire time
- * matched its theoretical 36.1 ms exactly, so the DME honours an arbitrary 24-bit rate, not just the
- * three the reference hardcodes. 10400 is included because it is the ISO 9141-2 / KWP2000 K-line rate
- * — the one this wiring was designed around — even though the arithmetic says it is only worth 1.06x.
- *
- * 125000 is the reference's programming rate and reproducibly FAILS here (the DME ACKs, then every
- * exchange times out). 57600 / 76800 / 115200 are ours too, and given how the returns fall off above
- * 28800 they are now of academic interest only.
- *
- * Do not read the reference as endorsing 38400: `Ds2BaudRate.Baud38400` exists there but has ZERO call
- * sites, and every switch it actually performs goes to 125000 from inside a programming session. See
- * §9 of docs/implementation-notes.md.
- *
- * Asking for an unsupported rate is safe: the DME rejects it and trySwitchBaud leaves the port alone.
+ * Asking for an unsupported rate is safe: the DME answers 0xB0 and trySwitchBaud leaves the port
+ * alone — but the read then runs at 9600, so check `switchOutcome` before believing a rate ran.
  */
-export type Ds2SupportedBaud = 9600 | 10400 | 14400 | 19200 | 28800 | 38400 | 57600 | 76800 | 115200 | 125000;
+export type Ds2SupportedBaud = 9600 | 38400 | 125000;
 
 /**
  * Every selectable rate, slowest first — the single source the UI's selector renders from, so a
  * rate can never exist in the switch table but be unreachable (or vice versa).
  *
- * None of these except 9600 / 38400 / 125000 exist in the reference. The three above 38400 were briefly
- * deleted on the strength of "it didn't feel any faster" and then restored: a subjective impression
- * cannot tell a rejected switch (falls back to 9600, silently) from an accepted one that simply didn't
- * help. The link now reports which rate a read actually ran at, so that question is answered by
- * measurement instead of by inference — which is also how the four between 9600 and 38400 got here.
+ * Deliberately exactly the reference's three. Seven others were offered here at various points —
+ * 10400/14400/19200/28800 below 38400, and 57600/76800/115200 above it — on the reasoning that the
+ * payload encodes an arbitrary 24-bit rate. Removed once the ECU was actually asked: see Ds2BaudRate.
  */
-export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] =
-    [9600, 10400, 14400, 19200, 28800, 38400, 57600, 76800, 115200, 125000];
+export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 125000];
 
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
-        case 10400: return Ds2BaudRate.Baud10400;
-        case 14400: return Ds2BaudRate.Baud14400;
-        case 19200: return Ds2BaudRate.Baud19200;
-        case 28800: return Ds2BaudRate.Baud28800;
         case 38400: return Ds2BaudRate.Baud38400;
-        case 57600: return Ds2BaudRate.Baud57600;
-        case 76800: return Ds2BaudRate.Baud76800;
-        case 115200: return Ds2BaudRate.Baud115200;
         case 125000: return Ds2BaudRate.Baud125000;
         default: return Ds2BaudRate.Baud9600;
     }

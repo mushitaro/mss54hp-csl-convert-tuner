@@ -1777,16 +1777,10 @@ export default function Home() {
                         <label
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
-                          title={'Bulk-read baud rate.\n\n'
-                            + 'The DME\'s own turnaround does not scale with baud — 53ms at 9600 — so each doubling returns less than the last, and at 38400 it degrades to 115ms and the ECU stops answering a few percent in.\n\n'
-                            + 'Predicted full-read time at a fixed 53ms turnaround:\n'
-                            + '  9600  106s (1.00x, proven, sends no switch at all)\n'
-                            + '  10400 100s (1.06x, the ISO 9141-2 K-line rate)\n'
-                            + '  14400  81s (1.32x)\n'
-                            + '  19200  68s (1.57x)\n'
-                            + '  28800  55s (1.95x)\n'
-                            + '  38400  48s (2.21x) — but measured 81s, because its turnaround doubles\n\n'
-                            + 'So 19200 would beat the 38400 we actually have, at half the load. 57600 and up are of academic interest; 125000 fails outright.\n\n'
+                          title={'Bulk-read baud rate. These are the only three the DME implements — asked for anything else it answers 0xB0 PARAMETER_ERROR and the read silently falls back to 9600.\n\n'
+                            + '9600 — the default. Sends no switch at all. Measured 122.9s for the 64KB read, reproducibly. This is the floor.\n\n'
+                            + '38400 — the switch is accepted and the wire really does run at 38400, but every attempt died inside the first 17 of 538 chunks with the ECU silent. An inter-telegram gap up to 40ms did not help.\n\n'
+                            + '125000 — the DME ACKs, then every exchange times out. The reference only reaches it after a flash-erasing "fast entry" procedure.\n\n'
                             + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover.'}
                         >
                           READ
