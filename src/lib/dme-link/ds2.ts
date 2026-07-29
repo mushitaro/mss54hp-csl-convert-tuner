@@ -393,6 +393,28 @@ export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     }
 }
 
+/**
+ * Pause between consecutive DS2 telegrams, in milliseconds. Zero is the current, proven behaviour.
+ *
+ * BMW's own stacks do NOT run at zero. EDIABAS enforces a "regen time" from the SGBD's comm-parameter
+ * block before every telegram (`EdInterfaceObd.TransDs2` spins until `ParRegenTime` has elapsed since
+ * the last response), and BMW Scanner 1.4.0 ships `Delay=20` / `Delay2=40` in its `bmwscan.ini`. Only
+ * the reference C# tool and this app send the next request the instant the previous response lands —
+ * the reference declares a `CommandDelay` hook and never assigns it.
+ *
+ * That did not look like it mattered until 38400 was measured on the car: the wire time per chunk fell
+ * to exactly its theoretical 36.1 ms, but the DME's own turnaround ROSE from 53 ms to 115 ms, and the
+ * read then died 0.4-2.8% in with the ECU silent (zero bytes, not a corrupted frame). The ECU spending
+ * 72% of every exchange not answering, and eventually not answering at all, is what a device that
+ * cannot keep up looks like. This selector exists to test that: if a gap brings the turnaround back
+ * down, we were overrunning it.
+ *
+ * Applies to the bulk READ path only for now — the write path is destructive and gets this decided by
+ * measurement, not by assumption.
+ */
+export type Ds2CommandDelay = 0 | 5 | 10 | 20 | 40;
+export const DS2_SELECTABLE_DELAYS: readonly Ds2CommandDelay[] = [0, 5, 10, 20, 40];
+
 /** Parsed DS2 write/programming response: [segment, addrHi, addrMid, addrLo, writtenCount, verifyByte]. */
 export interface Ds2WriteResult {
     segment: number;

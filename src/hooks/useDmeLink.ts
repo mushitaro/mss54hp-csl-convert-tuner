@@ -7,7 +7,7 @@ import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serv
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { WebSerialTransport } from '@/lib/dme-link/webSerialTransport';
-import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
+import { Ds2SupportedBaud, Ds2CommandDelay, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
 import { ReadTimingReport, formatTimingTail } from '@/lib/dme-link/transferTiming';
 
 /** What the *link* is doing — and nothing else.
@@ -47,6 +47,13 @@ export function useDmeLink() {
     // on a real vehicle. Everything faster needs a 0x91 switch + local port reopen and stays opt-in —
     // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
+    /**
+     * Pause between bulk-read telegrams. 0 is the proven behaviour and the default; BMW's own stacks
+     * all use a non-zero one (EDIABAS ParRegenTime, BMW Scanner Delay=20/40). Under investigation
+     * because 38400 showed the DME's turnaround doubling and then the ECU going silent — see
+     * Ds2CommandDelay.
+     */
+    const [commandDelayMs, setCommandDelayMs] = useState<Ds2CommandDelay>(0);
     /**
      * Per-chunk transfer timing. Off by default and deliberately opt-in per session, not persisted:
      * it exists to answer where the ~76 ms/chunk of non-wire time goes, and that is an investigation,
@@ -125,7 +132,7 @@ export function useDmeLink() {
         clearError();
         setState('connecting');
         try {
-            const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud });
+            const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud, commandDelayMs });
             // Before connect: identify() already runs exchanges, and arming after them would silently
             // exclude the only telegrams that happen outside a bulk read.
             link.setTimingEnabled?.(diagMode);
@@ -144,7 +151,7 @@ export function useDmeLink() {
             if (cancelled) clearError(); else failWith(e);
             setState('disconnected');
         }
-    }, [mockMode, readBaud, diagMode, clearError, failWith]);
+    }, [mockMode, readBaud, commandDelayMs, diagMode, clearError, failWith]);
 
     /** Applies a DIAG toggle to a link that is already connected, so it takes effect without a
      *  reconnect. connect() applies it to new links. */
@@ -531,6 +538,8 @@ export function useDmeLink() {
         setMockMode,
         readBaud,
         setReadBaud,
+        commandDelayMs,
+        setCommandDelayMs,
         diagMode,
         setDiagnostics,
         lastReadTiming,

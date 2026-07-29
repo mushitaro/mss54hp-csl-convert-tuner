@@ -65,6 +65,13 @@ export interface ReadTimingReport {
     chunks: number;
     /** Bytes requested per read telegram at the time of the read. */
     chunkSize: number;
+    /**
+     * The inter-telegram pause this read ran with. Note it is NOT inside the measured exchange window
+     * — it happens in readRange between exchanges — so `median.turnaround` and `median.total` stay
+     * directly comparable across delay settings. That is the point: the question is whether giving the
+     * DME room changes how long IT takes, not whether adding a wait makes the wall clock longer.
+     */
+    commandDelayMs: number;
     baud: number | null;
     /** The DME's published maximum telegram length, if it was readable. */
     maxTelegramLength: number | null;
@@ -123,6 +130,7 @@ export class TransferTiming {
     private index = 0;
     private retries = 0;
     private chunkSize = 0;
+    private commandDelayMs = 0;
     private baud: number | null = null;
     private maxTelegramLength: number | null = null;
 
@@ -175,7 +183,7 @@ export class TransferTiming {
     }
 
     /** Sizes every lane for a read of `expectedChunks`. Called once, before the first exchange. */
-    begin(expectedChunks: number, chunkSize: number, baud: number | null, maxTelegramLength: number | null): void {
+    begin(expectedChunks: number, chunkSize: number, commandDelayMs: number, baud: number | null, maxTelegramLength: number | null): void {
         if (!this.enabled) return;
         // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
         // a read. Overflow beyond that is dropped by the bounds check in end().
@@ -192,6 +200,7 @@ export class TransferTiming {
         this.index = 0;
         this.retries = 0;
         this.chunkSize = chunkSize;
+        this.commandDelayMs = commandDelayMs;
         this.baud = baud;
         this.maxTelegramLength = maxTelegramLength;
         this.samples = [];
@@ -298,6 +307,7 @@ export class TransferTiming {
             error: error === undefined ? null : (error instanceof Error ? error.message : String(error)),
             chunks: n,
             chunkSize: this.chunkSize,
+            commandDelayMs: this.commandDelayMs,
             baud: this.baud,
             maxTelegramLength: this.maxTelegramLength,
             retries: this.retries,
@@ -331,6 +341,7 @@ export class TransferTiming {
 export function formatTimingTail(r: ReadTimingReport): string {
     const m = r.median;
     return (r.completed ? '' : `DIED@${r.chunks} `) +
+        (r.commandDelayMs ? `gap${r.commandDelayMs} ` : '') +
         `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
         ` wire${Math.round(m.responseWire)}/${r.theoreticalResponseWire ? Math.round(r.theoreticalResponseWire) : '?'}` +
         ` park${Math.round(m.parked)} tot${Math.round(m.total)}` +
