@@ -221,6 +221,18 @@ export function useDmeLink() {
             setState('connected');
             return null;
         } finally {
+            // Publish the timing on BOTH paths, and publish null when there is none. It used to be
+            // captured only on success, so a read that died part-way left the PREVIOUS run's report in
+            // place — and TIMING then silently saved that instead. A 38400 sweep came back as three
+            // byte-identical copies of the preceding 9600 run before this was noticed, costing a whole
+            // vehicle session. A failed read is the case worth measuring, not the one to drop:
+            // `chunks` says how far it got and `error` says what stopped it.
+            //
+            // Assigned unconditionally, including null: the link clears its own report at the start of
+            // every read attempt, so this state always describes the read that just ran or nothing at
+            // all. Keeping a stale report because the new one is missing is the exact failure being
+            // fixed here — silently saving the wrong run is far worse than having nothing to save.
+            setLastReadTiming(linkRef.current?.getLastReadTiming?.() ?? null);
             setTransferProgress(null);
             setTransferPhase(null);
         }

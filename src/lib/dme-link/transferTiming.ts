@@ -50,6 +50,18 @@ export interface ChunkTiming {
 }
 
 export interface ReadTimingReport {
+    /**
+     * Whether the read ran to completion. **A failed read's timing is the most valuable kind**, so
+     * this is recorded rather than the report being discarded: `chunks` then says how far it got and
+     * `error` says what stopped it, which together are the whole diagnosis for a baud rate that dies
+     * part-way. The first version of this instrument only surfaced the report on success, and a
+     * latency sweep came back with three files that were byte-identical copies of the previous run.
+     */
+    completed: boolean;
+    /** The failure that ended the read, verbatim — including the latched pump error name, which is
+     *  what separates a receive overrun from a physical-layer fault from a silent DME. */
+    error: string | null;
+    /** Completed exchanges. On a failed read this is where it stopped. */
     chunks: number;
     /** Bytes requested per read telegram at the time of the read. */
     chunkSize: number;
@@ -147,6 +159,19 @@ export class TransferTiming {
 
     getReport(): ReadTimingReport | null {
         return this.lastReport;
+    }
+
+    /**
+     * Drops any previous report. Called at the very START of a read attempt, before the login and the
+     * baud switch, so that a read failing *before* begin() cannot leave the previous run's numbers
+     * sitting there looking like this one's.
+     *
+     * begin() clears the report too, but only once it is reached. The gap between those two points is
+     * exactly where a refused baud switch or a failed login lives — the failures most likely to be
+     * under investigation. "No report" is an honest answer; last time's report is not.
+     */
+    clearReport(): void {
+        this.lastReport = null;
     }
 
     /** Sizes every lane for a read of `expectedChunks`. Called once, before the first exchange. */
@@ -264,11 +289,13 @@ export class TransferTiming {
 
     /** Folds the lanes into medians. Called once, after the last chunk — the only place that allocates
      *  or formats. */
-    finish(): ReadTimingReport | null {
+    finish(error?: unknown): ReadTimingReport | null {
         if (!this.collecting) return null;
         this.collecting = false;
         const n = this.index;
         const report: ReadTimingReport = {
+            completed: error === undefined,
+            error: error === undefined ? null : (error instanceof Error ? error.message : String(error)),
             chunks: n,
             chunkSize: this.chunkSize,
             baud: this.baud,
@@ -303,7 +330,8 @@ export class TransferTiming {
  */
 export function formatTimingTail(r: ReadTimingReport): string {
     const m = r.median;
-    return `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
+    return (r.completed ? '' : `DIED@${r.chunks} `) +
+        `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
         ` wire${Math.round(m.responseWire)}/${r.theoreticalResponseWire ? Math.round(r.theoreticalResponseWire) : '?'}` +
         ` park${Math.round(m.parked)} tot${Math.round(m.total)}` +
         (r.retries ? ` retry${r.retries}` : '') +

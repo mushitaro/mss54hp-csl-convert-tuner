@@ -569,6 +569,9 @@ export class WebSerialDmeLink implements DmeLink {
     private async readPartialBinInner(onProgress?: TransferProgress): Promise<ArrayBuffer> {
         this.assertConnected();
         this.aborted = false;
+        // Before anything can fail. From here on, "no report" means this read produced none — it can
+        // never mean "here is the previous read's".
+        this.timing.clearReport();
         // Refresh the seed/key unlock before reading program/data memory, mirroring the reference
         // EnsureUnlockedForProgramMemoryReadAsync. The diagnostic session can lapse between connect
         // and the user clicking READ; re-login is a no-op if still unlocked.
@@ -587,6 +590,9 @@ export class WebSerialDmeLink implements DmeLink {
         // become one, but it must not be invisible either.
         this.lastReadBaud = boosted ? this.readBaud : 9600;
         this.hasBoostedThisSession ||= boosted;
+        // Held so the finally can tell finish() whether the read completed. A read that dies part-way
+        // is the case the instrument matters most for — that is the whole 38400 question.
+        let readError: unknown;
         try {
             const { slave, master, readChunkSize } = Mss54HpDataTuneLayout;
             const total = slave.length + master.length;
@@ -602,10 +608,13 @@ export class WebSerialDmeLink implements DmeLink {
             combined.set(masterBytes, slave.length);
             onProgress?.(100, 'reading');
             return combined.buffer;
+        } catch (e) {
+            readError = e;
+            throw e;
         } finally {
             // In the finally so a cancelled or failed read still yields whatever was measured — a read
             // that died at 8% is precisely when the numbers are worth having.
-            this.timing.finish();
+            this.timing.finish(readError);
             if (boosted) {
                 // Always try to hand the session back at 9600. If the DME never really switched, this
                 // request fails too — force the local port back to 9600 anyway so a plain reconnect (or
