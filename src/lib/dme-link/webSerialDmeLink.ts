@@ -790,15 +790,17 @@ export class WebSerialDmeLink implements DmeLink {
         const slaveData = bytes.subarray(0, slave.length);
         const masterData = bytes.subarray(slave.length, total);
 
+        // Every precondition is checked before the DME is touched at all — next to the buffer-length
+        // check, not further down. Refusing after a login is harmless but pointless, and "validate,
+        // then act" is the only ordering that stays obviously correct as this function grows.
+        assertWriteChunkingLegal([slave, master]);
+
         // Refresh the seed/key unlock before the protected write (matches ForceRefreshUnlock in the
         // reference). The DME rejects erase/write with 0xA2 if the session lapsed or RPM/speed != 0.
         // resync, not purge — same reason as READ. This is strictly BEFORE the erase below, so it
         // cannot affect flashing itself; it only stops a stale break from failing the pre-flight.
         await this.resyncTransport();
         await this.login();
-
-        // Last point at which refusing is free. Everything below erases.
-        assertWriteChunkingLegal([slave, master]);
 
         // Erase the data area. The normal flow erases directly (no "pre-clean" prepare — that would
         // consume an extra flash-counter slot). Only on erase failure do we send the prepare (0x0F)
