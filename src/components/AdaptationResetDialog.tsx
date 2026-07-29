@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Eraser, Loader2, X, AlertTriangle } from 'lucide-react';
+import { Eraser, Loader2, AlertTriangle } from 'lucide-react';
 import { AdaptationSnapshot, AdaptationReading } from '@/lib/dme-link/adaptationBlocks';
 import { DmeErrorKind } from '@/lib/dme-link/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
+import { DialogFrame, PhaseStack, PhaseLayer } from './DialogFrame';
 
 interface Props {
     /** dmeLink.readAdaptations — resolves null on failure (the reason lands in `error`). */
@@ -152,24 +153,13 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
     const afterBySymbol = new Map((after?.readings ?? []).map(r => [r.symbol, r.value]));
 
     return (
-        <>
-            <div
-                className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
-                onClick={dismissable ? onClose : undefined}
-            />
-            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
-                <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
-                        <Eraser className="w-3 h-3" />
-                        {t.title}
-                    </h3>
-                    {dismissable && (
-                        <button onClick={onClose} aria-label={t.close} className="text-slate-500 hover:text-slate-300">
-                            <X className="w-4 h-4" />
-                        </button>
-                    )}
-                </div>
-
+        <DialogFrame
+            icon={<Eraser className="w-3 h-3" />}
+            title={t.title}
+            closeLabel={t.close}
+            onClose={dismissable ? onClose : undefined}
+        >
+            <>
                 {phase === 'failed' ? (
                     <div className="space-y-4">
                         <p className="text-[11px] font-mono text-red-400 leading-relaxed">
@@ -194,7 +184,7 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                         </div>
                     </div>
                 ) : !shown ? (
-                    <div className="flex items-center gap-2 py-8 justify-center text-[11px] font-mono text-slate-500">
+                    <div className="flex-1 flex items-center gap-2 justify-center text-[11px] font-mono text-slate-500">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         {t.loading}
                     </div>
@@ -240,8 +230,11 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             </p>
                         </div>
 
-                        <div className="shrink-0 pt-3 mt-3 border-t border-slate-800">
-                            {phase === 'viewing' && (
+                        {/* Stacked, not switched: the confirmation's warning is several lines taller
+                            than the one-line question it replaces, so switching moved the divider —
+                            and the table above it — every time the phase advanced. */}
+                        <PhaseStack className="shrink-0 pt-3 mt-3 border-t border-slate-800">
+                            <PhaseLayer show={phase === 'viewing'}>
                                 <div className="flex justify-between items-center">
                                     <span className="text-[11px] font-mono text-slate-500">{t.confirmQuestion}</span>
                                     <div className="flex gap-4">
@@ -253,9 +246,9 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                                         </button>
                                     </div>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'confirming' && (
+                            <PhaseLayer show={phase === 'confirming'}>
                                 <div className="space-y-2.5">
                                     <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
@@ -270,27 +263,27 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                                         </button>
                                     </div>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'clearing' && (
+                            <PhaseLayer show={phase === 'clearing'}>
                                 <div className="flex items-center gap-2 text-[11px] font-mono text-amber-400">
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     {t.clearing}
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'result' && (
+                            <PhaseLayer show={phase === 'result'}>
                                 <div className="flex justify-between items-center">
                                     <span className="text-[11px] font-mono text-emerald-400">{t.done}</span>
                                     <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
                                     </button>
                                 </div>
-                            )}
-                        </div>
+                            </PhaseLayer>
+                        </PhaseStack>
                     </>
                 )}
-            </div>
-        </>
+            </>
+        </DialogFrame>
     );
 };

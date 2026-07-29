@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Gauge, Loader2, X, AlertTriangle, LifeBuoy } from 'lucide-react';
+import { Gauge, Loader2, AlertTriangle, LifeBuoy } from 'lucide-react';
 import { FlashCounterInfo, FlashCounterRegion, ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD, FLASH_COUNTER_RESET_ENABLED } from '@/lib/dme-link/flashCounter';
 import { TransferPhase, DmeErrorKind } from '@/lib/dme-link/types';
 import { FlashCounterOutcome } from '@/hooks/useDmeLink';
 import { ServiceBlockReport, formatServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { ServiceBackupSummary } from '@/lib/db/serviceBackupRepository';
 import { useDialogLang } from '@/hooks/useDialogLang';
+import { DialogFrame, PhaseStack, PhaseLayer } from './DialogFrame';
 
 interface Props {
     /** dmeLink.readFlashCounter — resolves null on failure (the reason lands in `error`). */
@@ -397,26 +398,15 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
     const afterByName = new Map((after ? regionRows(after) : []).map(r => [r.name, r]));
 
     return (
-        <>
-            <div
-                className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
-                onClick={dismissable ? onClose : undefined}
-            />
-            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
-                <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
-                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
-                        <Gauge className="w-3 h-3" />
-                        {t.title}
-                    </h3>
-                    {dismissable && (
-                        <button onClick={onClose} aria-label={t.close} className="text-slate-500 hover:text-slate-300">
-                            <X className="w-4 h-4" />
-                        </button>
-                    )}
-                </div>
-
+        <DialogFrame
+            icon={<Gauge className="w-3 h-3" />}
+            title={t.title}
+            closeLabel={t.close}
+            onClose={dismissable ? onClose : undefined}
+        >
+            <>
                 {phase === 'inspecting' ? (
-                    <div className="space-y-2 py-6">
+                    <div className="flex-1 flex flex-col justify-center space-y-2">
                         <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
                             <span className="flex items-center gap-2"><Loader2 className="w-3 h-3 animate-spin" />{t.inspecting}</span>
                             {transferProgress !== null && <span className="tabular-nums font-bold">{transferProgress}%</span>}
@@ -531,8 +521,8 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </>
                         )}
 
-                        <div className="shrink-0 pt-3 border-t border-slate-800">
-                            {phase === 'recover' && (
+                        <PhaseStack className="shrink-0 pt-3 border-t border-slate-800">
+                            <PhaseLayer show={phase === 'recover'}>
                                 <div className="flex justify-end gap-4">
                                     <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
@@ -544,9 +534,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     )}
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'restoring' && (
+                            <PhaseLayer show={phase === 'restoring'}>
                                 <div className="space-y-1.5">
                                     <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
@@ -560,9 +550,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     </div>
                                     <p className="text-[10px] font-mono text-slate-600">{t.restoring}</p>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'restored' && (
+                            <PhaseLayer show={phase === 'restored'}>
                                 <div className="space-y-2">
                                     <p className="text-[11px] font-mono text-emerald-400">{t.restored}</p>
                                     <div className="flex justify-between items-center">
@@ -572,8 +562,8 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     </div>
                                 </div>
-                            )}
-                        </div>
+                            </PhaseLayer>
+                        </PhaseStack>
                     </div>
                 ) : phase === 'failed' ? (
                     <div className="space-y-4">
@@ -592,7 +582,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                         </div>
                     </div>
                 ) : !shown ? (
-                    <div className="flex items-center gap-2 py-8 justify-center text-[11px] font-mono text-slate-500">
+                    <div className="flex-1 flex items-center gap-2 justify-center text-[11px] font-mono text-slate-500">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         {t.loading}
                     </div>
@@ -642,8 +632,12 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </p>
                         </div>
 
-                        <div className="shrink-0 pt-3 mt-3 border-t border-slate-800">
-                            {phase === 'viewing' && (
+                        {/* Stacked, not switched. This action area swings from a single-line question
+                            to the confirmation's warning block — measured, 178 px of difference —
+                            and switching between them dragged the counter table up and down with it
+                            at exactly the moment the user is deciding whether to erase. */}
+                        <PhaseStack className="shrink-0 pt-3 mt-3 border-t border-slate-800">
+                            <PhaseLayer show={phase === 'viewing'}>
                                 <div className="flex justify-between items-center">
                                     <span className="text-[11px] font-mono text-slate-500">
                                         {checkingRpm ? t.checkingRpm : t.confirmQuestion}
@@ -660,9 +654,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     </div>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'blocked' && (
+                            <PhaseLayer show={phase === 'blocked'}>
                                 <div className="space-y-2.5">
                                     <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
@@ -682,9 +676,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     </div>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'confirming' && (
+                            <PhaseLayer show={phase === 'confirming'}>
                                 <div className="space-y-2.5">
                                     <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
                                         <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
@@ -710,9 +704,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     </div>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'resetting' && (
+                            <PhaseLayer show={phase === 'resetting'}>
                                 <div className="space-y-1.5">
                                     <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
@@ -728,9 +722,9 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     </div>
                                     <p className="text-[10px] font-mono text-slate-600">{t.resetting}</p>
                                 </div>
-                            )}
+                            </PhaseLayer>
 
-                            {phase === 'result' && (
+                            <PhaseLayer show={phase === 'result'}>
                                 <div className="space-y-2">
                                     <p className="text-[11px] font-mono text-emerald-400">{t.done}</p>
                                     <div className="flex justify-between items-center">
@@ -740,11 +734,11 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         </button>
                                     </div>
                                 </div>
-                            )}
-                        </div>
+                            </PhaseLayer>
+                        </PhaseStack>
                     </>
                 )}
-            </div>
-        </>
+            </>
+        </DialogFrame>
     );
 };
