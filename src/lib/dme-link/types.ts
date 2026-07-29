@@ -146,11 +146,16 @@ export interface DmeLink {
     getMaxTelegramLength?(): number | null;
     /**
      * Per-chunk timing for the last bulk read, or null if timing was off or no read has run.
-     * Populated only while the DIAG flag is on — see setTimingEnabled.
+     * Collection is armed at connect and runs on every read — see setTimingEnabled.
      */
     getLastReadTiming?(): ReadTimingReport | null;
-    /** Turns per-chunk timing collection on or off. Off by default; off costs one boolean compare
-     *  per instrumented call, which is why this is a switch and not a build flag. */
+    /**
+     * Turns per-chunk timing collection on or off.
+     *
+     * There is no user-facing switch behind this any more. It exists because the instrument has to be
+     * inert on the flash-write path, and because a link that never collects is the honest default for
+     * implementations that have no transport to measure (the mock). The caller arms it once at connect.
+     */
     setTimingEnabled?(enabled: boolean): void;
 }
 

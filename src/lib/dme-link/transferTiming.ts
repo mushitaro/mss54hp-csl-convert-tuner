@@ -371,18 +371,11 @@ export class TransferTiming {
     }
 }
 
-/**
- * The compact form for the DME notice line, which is one truncating row read from the driver's seat.
- * Long-form goes in the downloadable JSON; this has to survive at a glance.
+/*
+ * There was a formatTimingTail() here that compressed the medians into the DME notice line
+ * (`rx135 w0.1 ta53 wire141/144 …`). It earned its keep while numbers were being read from the
+ * driver's seat between runs of a sweep. That sweep is over, the notice line's job is the headline
+ * (`9600 baud · 64 KB / 123.2 s · 530 B/s`), and a refused switch is already stated there in full by
+ * the REFUSED branch — so the tail was repeating one thing and burying the rest. TIMING saves the
+ * file; the file has everything.
  */
-export function formatTimingTail(r: ReadTimingReport): string {
-    const m = r.median;
-    return (r.completed ? '' : `DIED@${r.chunks} `) +
-        (r.requestedBaud !== null && r.requestedBaud !== r.baud ? `${r.requestedBaud}→${r.baud} ` : '') +
-        `${(r.elapsedMs / 1000).toFixed(1)}s ` +
-        `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
-        ` wire${Math.round(m.responseWire)}/${r.theoreticalResponseWire ? Math.round(r.theoreticalResponseWire) : '?'}` +
-        ` park${Math.round(m.parked)} tot${Math.round(m.total)}` +
-        (r.retries ? ` retry${r.retries}` : '') +
-        (r.maxTelegramLength !== null ? ` mt${r.maxTelegramLength}` : '');
-}

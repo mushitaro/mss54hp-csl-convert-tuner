@@ -1798,25 +1798,6 @@ export default function Home() {
                             ))}
                           </select>
                         </label>
-                        {/* Same invisible-but-mounted treatment as the baud selector, and for the same
-                            reason: this measures the serial stack, so it means nothing under PRACTICE,
-                            but unmounting it would shift the controls next to it. */}
-                        <label
-                          className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
-                          aria-hidden={dmeLink.mockMode}
-                          title={'Measure where a read\'s time actually goes, per chunk.\n\n'
-                            + 'A 64 KB read at 9600 has a hard floor of ~83 s and measures ~124 s. This splits the difference into DME turnaround, response wire time, and host overhead, and counts how many times the serial stack woke us per chunk.\n\n'
-                            + 'Off by default. When on, the read\'s notice line gains a numeric tail and a TIMING button appears to save the full breakdown as JSON.'}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={dmeLink.diagMode}
-                            disabled={dmeLink.mockMode}
-                            onChange={(e) => dmeLink.setDiagnostics(e.target.checked)}
-                            className="w-3 h-3 accent-amber-500 rounded bg-slate-700 border-none"
-                          />
-                          DIAG
-                        </label>
                       </>
                     ) : (
                       <>
