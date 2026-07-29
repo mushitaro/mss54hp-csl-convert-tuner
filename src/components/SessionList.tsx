@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download } from 'lucide-react';
 import { TuningSession, FlashRecord } from '@/lib/db/schema';
 import { DropZone } from '@/components/DropZone';
+import { dialogText } from '@/lib/dialog-text';
 
 export type NewFromWhich = 'tuned' | 'base';
 
@@ -452,7 +453,7 @@ export const SessionList: React.FC<Props> = ({
                                             </>
                                         )}
                                         <button
-                                            onClick={() => { if (confirm(`Delete "${session.label}"? This cannot be undone.`)) onDelete(session.id); }}
+                                            onClick={() => { if (confirm(dialogText().deleteSession(session.label))) onDelete(session.id); }}
                                             className="ml-1 p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded hover:bg-slate-800"
                                             title="Delete session"
                                         >

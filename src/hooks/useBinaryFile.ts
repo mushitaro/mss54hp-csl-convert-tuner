@@ -4,6 +4,7 @@ import { BinaryPatcher } from '@/lib/binary-engine/patcher';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
 import { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
+import { dialogText } from '@/lib/dialog-text';
 
 function getFormattedDate() {
   const now = new Date();
@@ -92,7 +93,7 @@ export function useBinaryFile() {
       console.log('Parsed Map:', map);
       return map;
     } catch (e: any) {
-      alert('Error parsing binary: ' + e.message);
+      alert(dialogText().parseBinaryFailed(e.message));
       return null;
     }
   };

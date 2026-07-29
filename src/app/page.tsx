@@ -23,6 +23,7 @@ import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/f
 import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
+import { dialogText } from '@/lib/dialog-text';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { sha256Hex } from '@/lib/db/sessionRepository';
@@ -336,7 +337,7 @@ export default function Home() {
 
   const handleClearLog = (e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent triggering file select
-    if (confirm('Are you sure you want to remove the CSV file?')) {
+    if (confirm(dialogText().clearLog)) {
       logFileState.clear();
       veCalc.reset();
       if (activeTab === 'log' || activeTab === 'new' || activeTab === 'diff' || activeTab === 'lambda') {
@@ -356,19 +357,19 @@ export default function Home() {
 
   const handleDownloadSessionBase = async (session: TuningSession) => {
     const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins) { alert('This session has no stored binary.'); return; }
+    if (!bins) { alert(dialogText().noStoredBinary); return; }
     downloadBlob(bins.baseBinaryBuffer, session.baseFileName ?? `${fileSafe(session.label)}_BASE.bin`, MIME_BIN);
   };
 
   const handleDownloadSessionTuned = async (session: TuningSession) => {
     const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins?.tunedBinaryBuffer) { alert('This session has no saved tune yet.'); return; }
+    if (!bins?.tunedBinaryBuffer) { alert(dialogText().noStoredTune); return; }
     downloadBlob(bins.tunedBinaryBuffer, session.binaryFileName ?? `${fileSafe(session.label)}_TUNED.bin`, MIME_BIN);
   };
 
   const handleDownloadSessionLog = async (session: TuningSession) => {
     const points = await sessionDb.loadLog(session.id);
-    if (!points?.length) { alert('This session has no stored log.'); return; }
+    if (!points?.length) { alert(dialogText().noStoredLog); return; }
     downloadBlob(serializeLogFile(points), `${fileSafe(session.label)}_log.csv`, MIME_CSV);
   };
 
@@ -389,7 +390,7 @@ export default function Home() {
    *  session precisely so the earlier flash record keeps pointing at the bytes it actually sent. */
   const handleFinalizeSession = async (session: TuningSession) => {
     const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins?.tunedBinaryBuffer) { alert('This session has no saved tune to finalize.'); return; }
+    if (!bins?.tunedBinaryBuffer) { alert(dialogText().noTuneToFinalize); return; }
     setActiveSessionId(session.id);
     resetDerived();
     const map = await binaryFileState.loadFromBuffer(
@@ -488,7 +489,7 @@ export default function Home() {
   const handleOpenSession = async (session: TuningSession) => {
     if (!session.baseOrigin) { setActiveSessionId(session.id); goToTab('startup'); return; }
     const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins) { alert('This session has no stored binary.'); return; }
+    if (!bins) { alert(dialogText().noStoredBinary); return; }
 
     resetDerived();
     setActiveSessionId(session.id);
@@ -535,7 +536,7 @@ export default function Home() {
 
     // WRITE only appears because the rebuild produced a tune; buildPatchedBuffer(null) does not
     // no-op — it returns the BASE — so an unreconstructed session must not offer it.
-    if (!rebuilt) alert('This session could not be reconstructed from its stored log — flashing is disabled.');
+    if (!rebuilt) alert(dialogText().notReconstructed);
     goToTab('current');
   };
 
@@ -543,7 +544,7 @@ export default function Home() {
   const handleNewFrom = async (session: TuningSession, which: NewFromWhich) => {
     const bins = await sessionDb.loadBinaries(session.id);
     const buffer = which === 'tuned' ? bins?.tunedBinaryBuffer : bins?.baseBinaryBuffer;
-    if (!buffer) { alert(`This session has no ${which.toUpperCase()} binary.`); return; }
+    if (!buffer) { alert(dialogText().noBinaryOfKind(which)); return; }
 
     const created = await handleNewSession();
     if (!created) return;
@@ -589,7 +590,7 @@ export default function Home() {
     if (!newMap) return;
     const target = await ensureDraft();
     if (!target || !binaryBuffer) return;
-    if (!target.baseOrigin) { alert('Set a BASE first (upload a BIN or read from the DME).'); return; }
+    if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
     const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap);
     if (!patchedBuffer) return;
 
@@ -612,11 +613,7 @@ export default function Home() {
     // already uses for the re-tune question. Keeping it loaded is a legitimate answer: save-then-flash
     // is a real sequence, and forcing a reopen would tax it for no safety gain while the user is
     // standing right there.
-    const keepLoaded = confirm(
-      'セッションを保存しました。\n\n' +
-      'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
-      'キャンセル = ワークスペースを閉じてセッション一覧に戻る'
-    );
+    const keepLoaded = confirm(dialogText().saved);
     if (keepLoaded) return;
 
     // resetDerived also clears pendingTabRef, which is what stops a run's end-of-log move from firing
@@ -702,20 +699,7 @@ export default function Home() {
     // diagnostic session. So this connection physically cannot survive into the write — keeping it
     // on screen would just mean WRITE times out after the key cycle. Drop it and say what to do.
     await dmeLink.disconnect();
-    alert(
-      (failure
-        ? '⚠ 通信が途切れたため、データログを中断しました。\n\n' +
-        `理由: ${failure}\n\n` +
-        '※ ここまでに記録したサンプルは保持しています。\n\n'
-        : 'データログを終了しました。\n\n') +
-      'DMEへ書き込む場合は、次の手順で進めてください:\n' +
-      '1. エンジンを停止(キーを OFF)\n' +
-      '2. 再度イグニッションを ON にする(エンジンはかけない)\n' +
-      '3. CONNECTION で接続し直す → WRITE\n\n' +
-      '※ エンジンが回っているとDMEが書き込みを拒否します。\n' +
-      '※ エンジンを止めると通信が切れるため、接続はここで解除しました。\n\n' +
-      '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。'
-    );
+    alert(dialogText().logFinished(failure));
   };
 
   /** startTuning captures onEnd once, when START TUNE is pressed, so it must not close over a stale
@@ -808,19 +792,11 @@ export default function Home() {
     const drift = settingsDrift();
     // Gate: single safety confirmation before flashing the ECU. The DME itself also rejects the
     // write (0xA2) unless the engine is stopped (RPM/speed = 0), but we warn explicitly.
-    const confirmed = confirm(
-      'DMEへ書き込みます。\n\n' +
-      `書き込む内容: ${newMap
-        ? 'チューニング済みマップ'
-        : `⚠ マップは変更しません(パッチのみ) — ${(applyPatch || applyWotDisable) ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
-      (drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${drift.join('\n  ')}\n` : '') +
-      '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
-      '  エンジンが回っているとDMEが書き込みを拒否します。\n' +
-      '⚠ 電源(バッテリー)を安定させてください。書き込みには約4分かかります。\n' +
-      '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n\n' +
-      'チェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
-      '続行しますか？'
-    );
+    const confirmed = confirm(dialogText().writeConfirm({
+      tuned: Boolean(newMap),
+      patchOn: applyPatch || applyWotDisable,
+      drift,
+    }));
     if (!confirmed) return;
 
     const ok = await dmeLink.write(patchedBuffer);
@@ -832,14 +808,8 @@ export default function Home() {
 
       // The key-off power-cycle ends the DME's diagnostic session, so the serial connection goes
       // stale either way. Both branches below say so and then disconnect; they differ in what the
-      // session becomes and where you go next.
-      const KEY_CYCLE =
-        '次の手順で終了してください:\n' +
-        '1. イグニッションキーを OFF にする\n' +
-        '2. そのまま 10秒間 待つ\n' +
-        '3. キーを ON に戻す\n\n' +
-        'DMEが新しいデータで再初期化されます。';
-
+      // session becomes and where you go next. The key-cycle steps themselves live in dialog-text,
+      // quoted into both messages there, so the two cannot drift apart or out of language.
       if (!newMap) {
         // Patch-only flash. Deliberately NOT saveSessionTune and NOT archive:
         //  - saveSessionTune would record a TUNED whose map is just the BASE's, which is precisely
@@ -849,11 +819,7 @@ export default function Home() {
         // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
         if (target) await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: false });
 
-        alert(
-          '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
-          KEY_CYCLE + '\n\n' +
-          'その後 CONNECTION で接続し直すと、START TUNE でデータログを開始できます。'
-        );
+        alert(dialogText().patchWriteDone);
         await dmeLink.disconnect();
 
         // The ECU now holds these bytes, so the workspace has to as well — otherwise patchStatus
@@ -896,18 +862,14 @@ export default function Home() {
       }
 
       // Post-write instruction: the DME must be power-cycled to reinitialize with the new data.
-      alert('✅ 書き込みが完了しました(リードバック検証OK)。\n\n' + KEY_CYCLE);
+      alert(dialogText().writeDone);
 
       await dmeLink.disconnect();
 
       // Re-tune: the next session starts from exactly the bytes now in the ECU. Asked here because
       // this is the moment you decide — otherwise you'd have to find the row and open its New From
       // menu. Same code path, so the BASE is still a copy and still provably the parent's TUNED.
-      if (flashed?.binaryFileName && confirm(
-        'このチューンの続きから、次のセッションを始めますか？\n\n' +
-        'OK    = 新規セッションを作成(BASE = 今書き込んだTUNED)\n' +
-        'キャンセル = セッション一覧に戻る'
-      )) {
+      if (flashed?.binaryFileName && confirm(dialogText().retuneConfirm)) {
         await handleNewFrom(flashed, 'tuned');
         return;
       }
@@ -917,17 +879,7 @@ export default function Home() {
       // notice line and a WRITE button that still looked ready. That is the most consequential moment
       // in the app to stay silent about: writePartialBin erases the data area BEFORE it writes, so a
       // failure part-way through can leave the ECU partially programmed.
-      alert(
-        '❌ 書き込みに失敗しました。\n\n' +
-        `理由: ${dmeLink.error ?? '不明なエラー'}\n\n` +
-        '⚠ DMEのデータ領域は消去済みで、書き込みが途中の可能性があります。\n' +
-        '  この状態でイグニッションを切ったり走行したりしないでください。\n\n' +
-        '対処:\n' +
-        '1. 電源(バッテリー)とケーブルの接続を安定させる\n' +
-        '2. 通信が切れている場合は CONNECTION で接続し直す\n' +
-        '3. 書き込みが成功するまで WRITE をやり直す\n\n' +
-        '※ WRITE は毎回消去からやり直すため、再実行しても安全です。'
-      );
+      alert(dialogText().writeFailed(dmeLink.error));
     }
   };
 
@@ -1052,12 +1004,12 @@ export default function Home() {
     // filter would otherwise all end the same way.
     const vin = dmeLink.identity?.vin;
     if (!vin || vin === 'UNKNOWN' || record.vin !== vin || Boolean(record.mock) !== dmeLink.mockMode) {
-      alert(
-        '❌ このバックアップは書き戻せません。\n\n' +
-        `接続中のDME: ${vin ?? '不明'}${dmeLink.mockMode ? '（PRACTICE）' : ''}\n` +
-        `バックアップ: ${record.vin ?? '不明'}${record.mock ? '（PRACTICE）' : ''}\n\n` +
-        '別の車両、またはPRACTICEで取得したデータです。書き戻すと識別情報が壊れます。'
-      );
+      alert(dialogText().backupMismatch({
+        connectedVin: vin ?? null,
+        connectedMock: dmeLink.mockMode,
+        backupVin: record.vin ?? null,
+        backupMock: Boolean(record.mock),
+      }));
       return null;
     }
     const info = await dmeLink.restoreServiceBlock(record.buffer);
@@ -1080,23 +1032,13 @@ export default function Home() {
     if (!flashBackupRef.current) return;
     flashBackupRef.current = null;
     if (dmeLink.state === 'disconnected') return;
-    alert(
-      'フラッシュカウンターのリセット処理を終了しました。\n\n' +
-      '次の手順で進めてください:\n' +
-      '1. イグニッションキーを OFF にする\n' +
-      '2. そのまま 10秒間 待つ\n' +
-      '3. キーを ON に戻す\n' +
-      '4. CONNECTION で接続し直す\n\n' +
-      'DMEはサービス情報ブロックを書き直した状態で再初期化されます。\n' +
-      '※ 再初期化されるまで、このセッションでの読み書きは行わないでください。\n' +
-      '※ 接続はここで解除しました。'
-    );
+    alert(dialogText().flashDialogClosed);
     await dmeLink.disconnect();
   };
 
   /** Throws away the log just recorded so it can be re-driven, without touching the BASE. */
   const handleDiscardLog = () => {
-    if (!confirm('Discard the log just recorded and start over?')) return;
+    if (!confirm(dialogText().discardLog)) return;
     logFileState.clear();
     veCalc.reset();
     liveSamplesRef.current = [];

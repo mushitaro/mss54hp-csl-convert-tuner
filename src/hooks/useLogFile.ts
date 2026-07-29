@@ -3,6 +3,7 @@ import { parseLogFile } from '@/lib/log-engine/parser';
 import { processLogData } from '@/lib/log-engine/filter';
 import { ProcessedLog, LogDataPoint, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { APP_CONFIG } from '@/config/constants';
+import { dialogText } from '@/lib/dialog-text';
 
 const LOG_WINDOW_SIZE = 2000;
 
@@ -81,7 +82,7 @@ export function useLogFile() {
     const rawData = parseLogFile(text);
 
     if (rawData.length === 0) {
-      alert('No valid data found in CSV.');
+      alert(dialogText().noValidCsvData);
       return null;
     }
 
