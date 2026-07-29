@@ -995,7 +995,13 @@ export default function Home() {
   const handleSaveReadTiming = () => {
     const report = dmeLink.lastReadTiming;
     if (!report) return;
-    downloadBlob(JSON.stringify(report, null, 2), `ReadTiming_${report.baud ?? 'unknown'}baud_${Date.now()}.json`, MIME_JSON);
+    // Every knob that was set, in the name. A sweep produces a folder of these, and `baud` alone does
+    // not separate a gap-0 run from a gap-20 one at the same rate — it is all inside the JSON, but a
+    // directory listing that cannot be read at a glance is how runs get mixed up. The outcome goes in
+    // too, so a failure is obvious without opening anything.
+    const outcome = report.completed ? 'ok' : `died${report.chunks}`;
+    const name = `ReadTiming_${report.baud ?? 'unknown'}baud_gap${report.commandDelayMs}_${outcome}_${Date.now()}.json`;
+    downloadBlob(JSON.stringify(report, null, 2), name, MIME_JSON);
   };
 
   /** Restore candidates for the DME actually on the other end of the cable — never anything else. */

@@ -63,6 +63,17 @@ export interface ReadTimingReport {
     error: string | null;
     /** Completed exchanges. On a failed read this is where it stopped. */
     chunks: number;
+    /**
+     * Real wall clock across the chunk loop, gaps and retries included.
+     *
+     * Necessary because `chunks x median.total` does NOT reproduce it: `total` measures one exchange,
+     * and `commandDelayMs` deliberately sits between exchanges rather than inside one, so any estimate
+     * built from the medians silently omits every gap and every retry settle. When the whole point is
+     * comparing configurations by speed, the headline number has to be measured, not reconstructed.
+     *
+     * Excludes login and the baud switch, which happen before the loop is armed.
+     */
+    elapsedMs: number;
     /** Bytes requested per read telegram at the time of the read. */
     chunkSize: number;
     /**
@@ -128,6 +139,7 @@ export class TransferTiming {
 
     private capacity = 0;
     private index = 0;
+    private tBegin = 0;
     private retries = 0;
     private chunkSize = 0;
     private commandDelayMs = 0;
@@ -206,6 +218,7 @@ export class TransferTiming {
         this.samples = [];
         this.midSampleFrom = Math.max(SAMPLE_HEAD, Math.floor(expectedChunks / 2));
         this.lastReport = null;
+        this.tBegin = performance.now();
         this.collecting = true;
     }
 
@@ -306,6 +319,7 @@ export class TransferTiming {
             completed: error === undefined,
             error: error === undefined ? null : (error instanceof Error ? error.message : String(error)),
             chunks: n,
+            elapsedMs: performance.now() - this.tBegin,
             chunkSize: this.chunkSize,
             commandDelayMs: this.commandDelayMs,
             baud: this.baud,
@@ -342,6 +356,7 @@ export function formatTimingTail(r: ReadTimingReport): string {
     const m = r.median;
     return (r.completed ? '' : `DIED@${r.chunks} `) +
         (r.commandDelayMs ? `gap${r.commandDelayMs} ` : '') +
+        `${(r.elapsedMs / 1000).toFixed(1)}s ` +
         `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
         ` wire${Math.round(m.responseWire)}/${r.theoreticalResponseWire ? Math.round(r.theoreticalResponseWire) : '?'}` +
         ` park${Math.round(m.parked)} tot${Math.round(m.total)}` +
