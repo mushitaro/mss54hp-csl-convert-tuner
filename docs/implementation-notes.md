@@ -642,9 +642,63 @@ mean nothing above 9600 here has precedent.
 64, 32}`, user-selectable. Not implemented here. Worth having as a *diagnostic*: if 38400 completes at
 64 and fails at 122, the cause is burst-length-dependent (buffer or physical layer), not baud-dependent.
 
-### Open, with no current explanation
+### ANSWERED (2026-07-29, real vehicle): the residual is the DME, and 9600 is at its floor
 
-The ~75 ms/chunk overhead at 9600, and why 38400 fails part-way when it previously completed.
+A five-point latency sweep at 9600 with DIAG on. The latency value does not have to be taken on trust —
+`echoLatency` (write → first byte back) reproduces the driver setting directly, which is also the
+instrument validating itself:
+
+| echoLat | timer | rx/chunk | turnaround | responseWire | parked | total | read |
+|---|---|---|---|---|---|---|---|
+| 1.9 ms | ~1 | **135** | 53.5 | 141.7 | 196.8 | **196.9** | 105.9 s |
+| 1.9 ms | ~2 | 98 | 53.2 | 141.8 | 197.7 | 197.8 | 106.4 s |
+| 3.8 ms | 4 | 49 | 63.1 | 140.0 | 199.5 | 199.7 | 107.4 s |
+| 7.8 ms | 8 | 27 | 64.1 | 143.7 | 200.2 | 200.5 | 107.9 s |
+| 15.8 ms | 16 | **14** | 64.3 | 143.8 | 208.1 | **208.2** | 112.0 s |
+
+**The per-wakeup-cost hypothesis is dead, and the prediction recorded above it was wrong.** This
+document predicted that raising the timer would make the read *faster*, by roughly the 126→9 drop in
+wakeups. Wakeups did drop as predicted — 135 → 14, a factor of 9.6 — and the read got **5.7% slower**.
+Per-`reader.read()` cost is not the residual. 1–2 ms is the best setting of the five, marginally, and
+for the opposite reason to the folklore: not because wakeups are cheap, but because the tail latency
+it avoids is the only thing the timer actually controls.
+
+**There is no host-side overhead to remove.** `parked / total = 99.9%` in every run: the read is spent
+waiting for bytes that have not arrived yet. `write` is **0.10 ms**, so WICG/serial#123 write-splitting
+is not happening either — that candidate is also dead.
+
+**The residual has a name: DME turnaround, ~53 ms per exchange.** Last echo byte → first response byte,
+53.5 ms at a 1 ms timer, rising to 64.3 ms at 16 ms — i.e. it tracks the timer with an offset of about
+11 ms, exactly as the tail-latency model says it must, which is a second internal check on the
+instrument. Meanwhile `responseWire` is 141.7 ms against a theoretical 144.4: **the link genuinely runs
+at 9600 and the wire is already at its floor.**
+
+Per chunk, 196.9 ms is roughly 141.7 wire + ~53 DME + ~2 us. (The lanes are independent medians so they
+do not sum exactly.) Across 538 chunks that is ~76 s of wire and ~29 s of ECU think time. **We are
+about 1% of it.** 9600 is finished; nothing on this side can move it.
+
+**The DME publishes `maxTelegramLength = 132`** — read for the first time by anyone here, since the
+reference ships the decoder and never calls it. That means a max read payload of **128 bytes, not 251**.
+So the chunk lever is worth 538 → 512 exchanges: 26 × ~53 ms ≈ 1.4 s out of 106 s, **about 1.3%**. The
+plan to grow the read chunk toward the 251-byte framing limit is dead on arrival — 122 was very nearly
+right, by accident, and the escape hatch is only worth building downward as a reliability tool.
+
+Sampled byte-arrival gaps show the mechanism plainly. At a 1 ms timer: 134 gaps of ~1.0 ms (one USB
+packet per byte, since a byte takes 1.146 ms) with a single 101 ms gap where the DME was thinking. At
+16 ms: `16, 0, 16, 0, …` — one packet per timer tick carrying ~14 bytes.
+
+**So the only remaining lever is baud, and the arithmetic says which one.** Turnaround does not scale
+with the bit rate, so at 38400 a chunk becomes ~35 ms of wire + ~52 ms of DME ≈ 90 ms → a ~48 s read,
+**2.2× not 4×**. At 125000 it would be ~11 + 52 ≈ 63 ms → ~34 s. Past 38400 the ECU's own latency
+dominates and the returns collapse. **38400 captures most of what is available**, which makes "why does
+38400 die part-way" the whole remaining question rather than one of several.
+
+### Open
+
+Why 38400 fails 3–10% into a read. The first attempt to measure it produced nothing: `read()` published
+the timing only on its success path, so three 38400 runs saved byte-identical copies of the preceding
+9600 report. Fixed — a failed read now yields a report carrying `completed: false`, the error verbatim,
+and the chunk it stopped at.
 
 **The one measurement that collapses the 38400 question** is already in our own error text: the latched
 `pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.
