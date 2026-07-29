@@ -1733,6 +1733,21 @@ export default function Home() {
                     <Cpu className="w-3 h-3" /> DME (LIVE)
                   </span>
                   <div className="flex items-center gap-2">
+                    {/* OUTSIDE the connected/disconnected split on purpose. This belongs to the last
+                        READ, not to the link — and the whole point of the measurement is a sweep where
+                        you read, DISCONNECT to change the driver's latency timer, reconnect and read
+                        again. Inside the connected branch it vanished at exactly the moment you needed
+                        it, taking an un-saved run with it. */}
+                    {dmeLink.lastReadTiming && (
+                      <button
+                        onClick={handleSaveReadTiming}
+                        className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors"
+                        title={'Save the last read\'s per-chunk timing as JSON.\n\n'
+                          + 'One read = one report, and the next read overwrites it. Save before reading again.'}
+                      >
+                        Timing
+                      </button>
+                    )}
                     {dmeLink.state === 'disconnected' ? (
                       <>
                         <label className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer" title="Simulate a DME offline — no cable required">
@@ -1795,19 +1810,6 @@ export default function Home() {
                     ) : (
                       <>
                         <span className="text-[9px] text-slate-600 font-mono uppercase">{dmeLink.mockMode ? 'practice' : 'live'} · {dmeLink.state}</span>
-                        {/* Only after a read that actually collected timing. The notice line carries
-                            the medians; this is the full breakdown, including the sampled byte-arrival
-                            gaps that say whether bytes came one per ~1.15 ms or in bursts. Explicit
-                            and separately chosen, like every other export here. */}
-                        {dmeLink.lastReadTiming && (
-                          <button
-                            onClick={handleSaveReadTiming}
-                            className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors"
-                            title="Save the last read's per-chunk timing breakdown as JSON"
-                          >
-                            Timing
-                          </button>
-                        )}
                         <button
                           onClick={dmeLink.disconnect}
                           className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
