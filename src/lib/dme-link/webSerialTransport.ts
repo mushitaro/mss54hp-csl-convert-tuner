@@ -96,12 +96,33 @@ export class WebSerialTransport {
         // even-popcount byte raises a framing error. DS2's own address 0x12 and ACK 0xA0 both have
         // popcount 2, so effectively every frame would fault on its first byte. 8E1 is proven on the car.
         await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
+        await this.deassertControlLines();
         this.writer = this.port.writable!.getWriter();
         this.reader = this.port.readable!.getReader();
         this.buffer = [];
         this.pumpError = null;
         this.pumpActive = true;
         this.startPump();
+    }
+
+    /**
+     * Puts DTR and RTS in a known, de-asserted state — matching the reference tool, which does exactly
+     * this on its COM-port transport (`DtrEnable = false; RtsEnable = false`). We had never touched
+     * them, so they sat at whatever Chromium's open() leaves behind.
+     *
+     * It matters here more than it does there, because of something only this app has to do: Web
+     * Serial cannot change baud on an open port, so a DS2 baud switch means close() + open(). The
+     * reference just assigns `SerialPort.BaudRate` / calls `FT_SetBaudRate` on the still-open handle
+     * and never disturbs the line. Our close/open cycle moves whatever these two lines were doing —
+     * and on some K+DCAN cables they gate the K-line transceiver. Making the state explicit and
+     * identical on both sides of the reopen removes that variable.
+     *
+     * Best-effort: a cable that does not implement the request must not fail the connection.
+     */
+    private async deassertControlLines(): Promise<void> {
+        try {
+            await this.port?.setSignals({ dataTerminalReady: false, requestToSend: false });
+        } catch { /* not all platforms/cables support it; the link works without it today */ }
     }
 
     private startPump(): void {
@@ -158,6 +179,8 @@ export class WebSerialTransport {
         try { this.writer?.releaseLock(); } catch { }
         await port.close();
         await port.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
+        // Same state as open() left, so crossing this reopen does not move the control lines.
+        await this.deassertControlLines();
         this.writer = port.writable!.getWriter();
         this.reader = port.readable!.getReader();
         this.buffer = [];

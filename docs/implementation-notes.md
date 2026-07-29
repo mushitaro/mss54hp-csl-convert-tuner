@@ -752,6 +752,34 @@ looks like, i.e. a link that is marginal at that rate rather than one that break
 A 20 ms gap costs 13.5 s of that, as arithmetic demands. **This is the floor, and there is nothing
 above it to reach.**
 
+### Two things only this app has to do, and what was done about them
+
+Comparing the baud-switch path against the reference turned up one structural difference that is
+forced on us and one that simply had not been noticed.
+
+**Forced: we close and reopen the serial port to change baud.** The reference calls
+`transport.ConfigureAsync(...)` — `SerialPort.BaudRate = …` on VCP, `FT_SetBaudRate` on D2XX — on the
+still-open handle, then purges and waits 200 ms (`ShellSessionService.cs:1323-1346`). It never closes
+the port. Web Serial has no in-place baud change, so `reopen()` must do `close()` + `open()`. **Every
+boosted read therefore begins with a port transition that no other DS2 tool produces**, and 9600 never
+sees it because 9600 sends no switch at all. That matches the failures being exclusive to boosted rates
+and clustered in the first chunks. It cannot be removed, only made less disruptive.
+
+**Not forced: we never touched DTR/RTS.** The reference explicitly de-asserts both
+(`DtrEnable = false; RtsEnable = false`). We left them at whatever Chromium's `open()` leaves, on every
+open *and* every reopen — so the close/open cycle above was also moving two control lines that, on some
+K+DCAN cables, gate the K-line transceiver. Now `deassertControlLines()` sets them explicitly after
+both `open()` and `reopen()`, so crossing a baud switch no longer changes them. Best-effort: a cable
+that rejects `setSignals` must not fail the connection.
+
+**And a 0x91 ACK is now verified rather than trusted.** A positive response means the DME agreed to
+switch; it is not evidence that both ends landed on the same rate. Nothing checked, so a switch that
+did not hold was discovered 2% into a 538-chunk read, as a failure, having thrown the read away. One
+keep-alive (two attempts, ~300 ms) now settles it immediately, and on silence the link drops back to
+9600 and reads there. If the cause is "we moved and the DME did not", that recovers completely — the
+user gets a finished read instead of nothing, and `switchOutcome` records
+`accepted, then the link went silent — fell back to 9600`.
+
 **The one measurement that collapses the 38400 question** is already in our own error text: the latched
 `pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.
 

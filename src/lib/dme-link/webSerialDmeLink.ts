@@ -57,6 +57,10 @@ const CHUNK_RETRY_DELAY_MS = 300;
 // re-sending that would hide failing flash rather than survive a lost message. See
 // writeChunkTelegramWithRetry.
 const WRITE_CHUNK_RETRY_ATTEMPTS = 5;
+// Keep-alive probes sent straight after a baud switch to prove both ends really landed on the new
+// rate. Two, because one miss right after a port close/open is not enough to abandon a boost — and
+// only two, because the whole point is to find out in ~300ms instead of 2% into a 538-chunk read.
+const SWITCH_PROBE_ATTEMPTS = 2;
 // Clearing adaptations writes EEPROM before the DME replies, so the plain read timeout is thin.
 const ADAPT_CLEAR_TIMEOUT_MS = 5000;
 // The DME needs a moment to commit the cleared values before they read back true. The reference2
@@ -318,6 +322,27 @@ export class WebSerialDmeLink implements DmeLink {
      * local serial port to match. Best-effort: if the DME rejects the switch, returns false and the
      * caller stays at the current baud. Mirrors TrySwitchToProgrammingBaudAsync.
      */
+    /**
+     * Asks whether the DME is still talking now that both ends have supposedly moved to a new rate.
+     *
+     * Uses the keep-alive (0x9E) because it is the cheapest telegram in the protocol and the session
+     * already sends it every two seconds, so it cannot disturb anything. Two attempts with a resync
+     * between: one miss straight after a port close/open is not enough evidence to give up a boost
+     * that might be fine.
+     */
+    private async linkRespondsAfterSwitch(): Promise<boolean> {
+        for (let attempt = 1; attempt <= SWITCH_PROBE_ATTEMPTS; attempt++) {
+            try {
+                if (isPositiveResponse(await this.exchange(Ds2Control.KEEP_ALIVE, new Uint8Array(0)))) return true;
+            } catch { /* fall through to the retry */ }
+            if (attempt < SWITCH_PROBE_ATTEMPTS) {
+                await delay(RESYNC_SETTLE_MS);
+                await this.resyncTransport();
+            }
+        }
+        return false;
+    }
+
     private async trySwitchBaud(target: Ds2BaudRateSpec): Promise<boolean> {
         let accepted = false;
         try {
@@ -658,9 +683,28 @@ export class WebSerialDmeLink implements DmeLink {
         // reopen — the proven path), because a boost the hardware doesn't actually follow desyncs the
         // link for the rest of the session.
         this.lastSwitchOutcome = null;
-        const boosted = this.readBaud !== 9600
+        let boosted = this.readBaud !== 9600
             ? await this.trySwitchBaud(ds2BaudSpecFor(this.readBaud))
             : false;
+        // A positive ACK to 0x91 is the DME agreeing to switch. It is NOT evidence that both ends
+        // ended up at the same rate, and until now nothing checked: a switch that did not really hold
+        // was discovered 2% into a 538-chunk read, as a failure, having thrown away the whole read.
+        //
+        // One keep-alive costs ~150 ms and settles it. If the link is silent here, the most likely
+        // reason is that we are at the new rate and the DME is not — in which case dropping the local
+        // port back to 9600 recovers completely, and the user gets a finished read instead of nothing.
+        if (boosted && !(await this.linkRespondsAfterSwitch())) {
+            const wasAccepted = this.lastSwitchOutcome ?? 'accepted';
+            // Ask the DME to come back too, then force the local side regardless. Same order and same
+            // best-effort reasoning as the restore in the finally below.
+            try { await this.trySwitchBaud(Ds2BaudRate.Baud9600); } catch { }
+            try { await this.transport.reopen(Ds2BaudRate.Baud9600.baudRate); } catch { }
+            await this.resyncTransport();
+            boosted = false;
+            // AFTER the restore: trySwitchBaud writes lastSwitchOutcome itself, so setting this first
+            // would have it overwritten by the outcome of the fallback rather than the real one.
+            this.lastSwitchOutcome = `${wasAccepted}, then the link went silent — fell back to 9600`;
+        }
         // Recorded so the UI can state what happened. A refused switch is not an error and must not
         // become one, but it must not be invisible either.
         this.lastReadBaud = boosted ? this.readBaud : 9600;
