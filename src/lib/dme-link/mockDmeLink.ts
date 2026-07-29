@@ -4,9 +4,13 @@ import {
     STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK,
 } from './adaptationBlocks';
 import { FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, analyzeFlashCounter } from './flashCounter';
+import { Mss54HpDataTuneLayout } from './ds2';
 
 const PARTIAL_BIN_LENGTH = 65536;
-const CHUNK_SIZE = 122; // matches the reference implementation's DS2 chunk size
+// Imported, not redeclared: this used to be an independent `const CHUNK_SIZE = 122`, so the mock's
+// chunk count silently stopped matching the real link's the moment either number moved. The mock's
+// only job is to make offline progress behave like the car's, and that needs the same chunk count.
+const CHUNK_SIZE = Mss54HpDataTuneLayout.readChunkSize;
 const ADAPT_SETTLE_MS = 2000; // the real link's post-clear wait — kept so the UI's spinner is real offline
 /** Slots the simulated DME has already burned, per processor. Chosen so a mock reset visibly moves
  *  the header (12/30 -> 1/30) without sitting in the low-slot warning band to begin with. */

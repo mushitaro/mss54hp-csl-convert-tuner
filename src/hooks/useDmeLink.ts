@@ -8,6 +8,7 @@ import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { WebSerialTransport } from '@/lib/dme-link/webSerialTransport';
 import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
+import { ReadTimingReport, formatTimingTail } from '@/lib/dme-link/transferTiming';
 
 /** What the *link* is doing — and nothing else.
  *
@@ -46,6 +47,13 @@ export function useDmeLink() {
     // on a real vehicle. Everything faster needs a 0x91 switch + local port reopen and stays opt-in —
     // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
+    /**
+     * Per-chunk transfer timing. Off by default and deliberately opt-in per session, not persisted:
+     * it exists to answer where the ~76 ms/chunk of non-wire time goes, and that is an investigation,
+     * not a mode anyone should end up in by accident.
+     */
+    const [diagMode, setDiagMode] = useState(false);
+    const [lastReadTiming, setLastReadTiming] = useState<ReadTimingReport | null>(null);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
     /**
@@ -118,6 +126,9 @@ export function useDmeLink() {
         setState('connecting');
         try {
             const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud });
+            // Before connect: identify() already runs exchanges, and arming after them would silently
+            // exclude the only telegrams that happen outside a bulk read.
+            link.setTimingEnabled?.(diagMode);
             const id = await link.connect();
             linkRef.current = link;
             setIdentity(id);
@@ -133,7 +144,14 @@ export function useDmeLink() {
             if (cancelled) clearError(); else failWith(e);
             setState('disconnected');
         }
-    }, [mockMode, readBaud, clearError, failWith]);
+    }, [mockMode, readBaud, diagMode, clearError, failWith]);
+
+    /** Applies a DIAG toggle to a link that is already connected, so it takes effect without a
+     *  reconnect. connect() applies it to new links. */
+    const setDiagnostics = useCallback((enabled: boolean) => {
+        setDiagMode(enabled);
+        linkRef.current?.setTimingEnabled?.(enabled);
+    }, []);
 
     const disconnect = useCallback(async () => {
         pollingRef.current = false;
@@ -183,10 +201,15 @@ export function useDmeLink() {
             const rate = `${Math.round(buffer.byteLength / seconds).toLocaleString()} B/s`;
             const measured = `${(buffer.byteLength / 1024).toFixed(0)} KB / ${seconds.toFixed(1)} s · ${rate}`;
             const refused = actual !== null && actual !== readBaud;
+            // The per-chunk breakdown, when DIAG collected one. Appended rather than replacing the
+            // summary: the summary is what gets read at a glance, the tail is what gets hovered.
+            const timing = linkRef.current.getLastReadTiming?.() ?? null;
+            setLastReadTiming(timing);
+            const tail = timing ? ` | ${formatTimingTail(timing)}` : '';
             setWarningKind(refused ? 'warn' : 'info');
-            setWarning(refused
+            setWarning((refused
                 ? `${readBaud} REFUSED — ran at ${actual} · ${measured}`
-                : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`);
+                : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`) + tail);
             // Idle again. The caller loads these bytes as the BASE, which is what turns the button
             // into START TUNE — it isn't this function's business to say so.
             setState('connected');
@@ -496,6 +519,9 @@ export function useDmeLink() {
         setMockMode,
         readBaud,
         setReadBaud,
+        diagMode,
+        setDiagnostics,
+        lastReadTiming,
         identity,
         error,
         errorKind,

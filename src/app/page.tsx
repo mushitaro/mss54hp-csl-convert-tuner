@@ -22,7 +22,7 @@ import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-l
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
 import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
-import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV } from '@/lib/download';
+import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { sha256Hex } from '@/lib/db/sessionRepository';
@@ -989,6 +989,15 @@ export default function Home() {
     downloadBlob(bytes, `ServiceBlock_${fileSafe(vin && vin !== 'UNKNOWN' ? vin : 'DME')}_${Date.now()}.bin`, MIME_BIN);
   };
 
+  /** Offers the last read's per-chunk timing as a file, same explicit-export rule as the service
+   *  blocks. The notice line only has room for medians; the sampled inter-arrival gaps are the part
+   *  that distinguishes per-byte USB packets from batched ones, and those need a file. */
+  const handleSaveReadTiming = () => {
+    const report = dmeLink.lastReadTiming;
+    if (!report) return;
+    downloadBlob(JSON.stringify(report, null, 2), `ReadTiming_${report.baud ?? 'unknown'}baud_${Date.now()}.json`, MIME_JSON);
+  };
+
   /** Restore candidates for the DME actually on the other end of the cable — never anything else. */
   const handleListFlashBackups = () =>
     listRestorableBackups(dmeLink.identity?.vin, dmeLink.mockMode);
@@ -1763,10 +1772,42 @@ export default function Home() {
                             ))}
                           </select>
                         </label>
+                        {/* Same invisible-but-mounted treatment as the baud selector, and for the same
+                            reason: this measures the serial stack, so it means nothing under PRACTICE,
+                            but unmounting it would shift the controls next to it. */}
+                        <label
+                          className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
+                          aria-hidden={dmeLink.mockMode}
+                          title={'Measure where a read\'s time actually goes, per chunk.\n\n'
+                            + 'A 64 KB read at 9600 has a hard floor of ~83 s and measures ~124 s. This splits the difference into DME turnaround, response wire time, and host overhead, and counts how many times the serial stack woke us per chunk.\n\n'
+                            + 'Off by default. When on, the read\'s notice line gains a numeric tail and a TIMING button appears to save the full breakdown as JSON.'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={dmeLink.diagMode}
+                            disabled={dmeLink.mockMode}
+                            onChange={(e) => dmeLink.setDiagnostics(e.target.checked)}
+                            className="w-3 h-3 accent-amber-500 rounded bg-slate-700 border-none"
+                          />
+                          DIAG
+                        </label>
                       </>
                     ) : (
                       <>
                         <span className="text-[9px] text-slate-600 font-mono uppercase">{dmeLink.mockMode ? 'practice' : 'live'} · {dmeLink.state}</span>
+                        {/* Only after a read that actually collected timing. The notice line carries
+                            the medians; this is the full breakdown, including the sampled byte-arrival
+                            gaps that say whether bytes came one per ~1.15 ms or in bursts. Explicit
+                            and separately chosen, like every other export here. */}
+                        {dmeLink.lastReadTiming && (
+                          <button
+                            onClick={handleSaveReadTiming}
+                            className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors"
+                            title="Save the last read's per-chunk timing breakdown as JSON"
+                          >
+                            Timing
+                          </button>
+                        )}
                         <button
                           onClick={dmeLink.disconnect}
                           className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"

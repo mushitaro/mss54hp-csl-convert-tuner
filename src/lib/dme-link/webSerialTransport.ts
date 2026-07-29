@@ -1,4 +1,5 @@
 import { DmeLinkError } from './types';
+import type { TransferTiming } from './transferTiming';
 
 /**
  * Thin wrapper isolating all navigator.serial calls, mirroring the reference app's IByteTransport
@@ -12,17 +13,25 @@ import { DmeLinkError } from './types';
  * byte, keeping echo/response framing aligned across thousands of exchanges.
  */
 /**
- * Receive buffer requested from the Web Serial implementation, matching the reference app's 4096 on
- * BOTH its transports (FT_SetUSBParameters(4096, 4096) on D2XX, ReadBufferSize = 4096 on the COM
- * port). We were passing no bufferSize at all, which meant the spec default of 255 bytes.
+ * Receive buffer requested from the Web Serial implementation. We were passing no bufferSize at all,
+ * which meant the spec default of 255 bytes.
  *
- * 255 bytes is not slow, it is fragile: it is the amount of receive the main thread may fall behind
- * by before the stream errors with a BufferOverrunError, and that budget is a *time* budget that
- * shrinks with baud — 292 ms at 9600, but only 73 ms at 38400. The read pump shares this thread with
- * React, so one long render inside a transfer overruns at 38400 and is invisible at 9600. That is the
- * shape of the 38400 failure (dies 3-10% in, ~2-6 s, while 9600 completes), so if a 38400 read still
- * fails after this, the latched error name will say BufferOverrunError no longer — check it before
- * assuming the cause moved.
+ * **This is NOT the OS or FTDI driver receive buffer**, and an earlier version of this comment said
+ * it was, by analogy with the reference app's FT_SetUSBParameters(4096, 4096). Chromium's
+ * `serial_port.cc` passes `bufferSize` straight to `mojo::CreateDataPipe` as `capacity_num_bytes` —
+ * it is the ring buffer between the browser process and the renderer, nothing more. On Windows,
+ * `serial_io_handler_win.cc` contains no `SetupComm()` call at all, so the driver's buffers stay at
+ * their Device Manager defaults no matter what we pass here. Raising it cannot add bandwidth.
+ *
+ * What it does buy is room to fall behind: at 255 bytes, reads have been reported to stall outright
+ * on some devices (WICG/serial#164), and the smaller the ring the more often the next hazard bites.
+ *
+ * That hazard is worth stating because it may be one of ours: WICG/serial#123 reports that Chromium
+ * uses this buffer as a circular queue and **splits a write that straddles the boundary into two**.
+ * Our DS2 request frames are 9 bytes. A split write puts a gap mid-frame on a half-duplex K-line,
+ * which comes back as an echo mismatch — and classifyEchoMismatch would most likely score that
+ * 'unclassified'. That makes it a live candidate for the intermittent echo faults in the notes, and
+ * the transfer timer's `write` median is the measurement that tests it: it should be ~0.
  */
 const RX_BUFFER_BYTES = 4096;
 
@@ -45,6 +54,15 @@ export class WebSerialTransport {
      * never re-entered concurrently.
      */
     private waiter: { need: number; wake: () => void } | null = null;
+    /** Optional per-chunk instrument. Null (and every call site optional-chained) so the uninstrumented
+     *  path costs one null check — see transferTiming.ts for why that matters here. */
+    private timing: TransferTiming | null = null;
+
+    /** Attaches the read-timing instrument. The link owns exchange boundaries; the transport owns byte
+     *  arrival, so both have to write into the same object. */
+    setTiming(timing: TransferTiming | null): void {
+        this.timing = timing;
+    }
 
     /** Wakes the parked reader once its byte count is satisfiable — or once it can only fail. */
     private signalWaiter(): void {
@@ -94,6 +112,11 @@ export class WebSerialTransport {
                     const { value, done } = await reader.read();
                     if (done) break;
                     if (value) {
+                        // Timestamped HERE, not in readExact: readExact only ever learns that enough
+                        // bytes exist, never when each arrived. Byte arrival times are the whole point
+                        // — they are what separates "the DME was thinking" from "the bytes were here
+                        // and we were slow to notice".
+                        this.timing?.rx(performance.now());
                         for (let i = 0; i < value.length; i++) this.buffer.push(value[i]);
                         this.signalWaiter();
                     }
@@ -145,7 +168,13 @@ export class WebSerialTransport {
 
     async write(bytes: Uint8Array): Promise<void> {
         if (!this.writer) throw new DmeLinkError('Serial port is not open');
+        // Timed because it should be ~0 and a non-zero median would be a finding: WICG/serial#123
+        // reports that Chromium treats the pipe as a ring and SPLITS a write straddling the boundary.
+        // A split 9-byte request frame puts a gap mid-frame on the K-line, which surfaces as an echo
+        // mismatch — a live candidate for the intermittent echo faults in the notes.
+        this.timing?.writeStart(performance.now());
         await this.writer.write(bytes);
+        this.timing?.writeEnd(performance.now());
     }
 
     /** Discards any buffered received bytes — used to resynchronize after a timeout before retrying. */
@@ -227,6 +256,11 @@ export class WebSerialTransport {
             }
             // Park until the pump says the bytes are here, or the deadline passes — whichever first.
             // The loop still re-checks afterwards, so a spurious wake costs one comparison.
+            //
+            // Parked time is measured because it is the honest accounting of "waiting for the wire"
+            // versus "us being slow": if parked time is close to the total, the bytes genuinely were
+            // not here yet and no host-side change helps.
+            this.timing?.parkStart(performance.now());
             await new Promise<void>(resolve => {
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
@@ -236,6 +270,7 @@ export class WebSerialTransport {
                 }, remaining);
                 this.waiter = { need: length, wake };
             });
+            this.timing?.parkEnd(performance.now());
         }
         return Uint8Array.from(this.buffer.splice(0, length));
     }

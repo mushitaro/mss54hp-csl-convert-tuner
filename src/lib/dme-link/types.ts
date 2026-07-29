@@ -1,6 +1,7 @@
 import { AdaptationSnapshot } from './adaptationBlocks';
 import { FlashCounterInfo } from './flashCounter';
 import { ServiceBlockPointers } from './serviceBlockReport';
+import type { ReadTimingReport } from './transferTiming';
 
 export type { AdaptationSnapshot, FlashCounterInfo };
 
@@ -133,6 +134,24 @@ export interface DmeLink {
      * on a wrong conclusion. Optional: only the real link switches baud at all.
      */
     getLastReadBaud?(): number | null;
+    /**
+     * The DME's own published maximum DS2 telegram length (system address table index 21), or null
+     * if the pointer was absent or unreadable.
+     *
+     * Diagnostic only — nothing branches on it yet. It exists because the 122-byte read chunk every
+     * tool uses is an undocumented default, not a limit: DS2 framing allows 251, BMW's own SGBD uses
+     * 120, and the ECU publishes its real ceiling here. The reference tool ships a decoder for this
+     * value and never calls it, so this number has never been looked at on a car.
+     */
+    getMaxTelegramLength?(): number | null;
+    /**
+     * Per-chunk timing for the last bulk read, or null if timing was off or no read has run.
+     * Populated only while the DIAG flag is on — see setTimingEnabled.
+     */
+    getLastReadTiming?(): ReadTimingReport | null;
+    /** Turns per-chunk timing collection on or off. Off by default; off costs one boolean compare
+     *  per instrumented call, which is why this is a switch and not a build flag. */
+    setTimingEnabled?(enabled: boolean): void;
 }
 
 export class DmeLinkError extends Error {

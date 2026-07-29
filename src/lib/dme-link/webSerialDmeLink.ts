@@ -24,9 +24,17 @@ import {
     analyzeFlashCounter, extractCounterFromServiceBlock, buildResetServiceBlockImage,
     shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED,
 } from './flashCounter';
+import { TransferTiming, ReadTimingReport } from './transferTiming';
 
 // DS2 system-address-table pointer indices (Ds2KnownSystemAddressLengths / IdentifyService)
-const SYSTEM_ADDRESS_INDEX = { DIF: 15, ZIF_BACKUP: 16, BRIF: 18, ZIF: 19, AIF: 20 } as const;
+//
+// MAX_TELEGRAM (21) is the DME's own statement of the largest DS2 telegram it will accept. The
+// reference tool has a decoder for it ("{value[0]} byte max DS2 telegram length") and BMW's SGBD has
+// a job named BLOCKLAENGE_MAX, but the reference NEVER CALLS ITS OWN DECODER — it logs the pointer
+// address and stops. So the 122-byte chunk everyone uses has never been checked against the number
+// the ECU publishes. Treat what we read as an upper bound to probe toward, not as permission: nobody
+// has confirmed this interpretation on a car, which is exactly why we are reading it.
+const SYSTEM_ADDRESS_INDEX = { DIF: 15, ZIF_BACKUP: 16, BRIF: 18, ZIF: 19, AIF: 20, MAX_TELEGRAM: 21 } as const;
 const ZIF_LENGTH = 78;
 
 const RESPONSE_TIMEOUT_MS = 2000;
@@ -101,6 +109,31 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /**
+ * Proves, BEFORE an erase, that every chunk writeBlock is about to emit for these blocks is legal.
+ *
+ * The failure this exists to prevent: every flash path here erases first and writes second, and the
+ * only check on an over-long write lives inside buildWriteMemoryPayload — a throw that would land on
+ * the first chunk, i.e. on an ECU that has already been erased. ds2.ts asserts the constant itself at
+ * module load; this asserts the plan, including the short tail chunk, which the constant alone does
+ * not cover. Both are cheap. Neither may run after an erase has been sent.
+ */
+function assertWriteChunkingLegal(blocks: readonly { address: number; length: number }[]): void {
+    const chunk = Mss54HpDataTuneLayout.writeChunkSize;
+    if (chunk > 123) throw new DmeLinkError(`Refusing to flash: write chunk ${chunk} exceeds the DS2 write cap of 123`);
+    if (chunk <= 0 || chunk % 2 !== 0) throw new DmeLinkError(`Refusing to flash: write chunk ${chunk} is not positive and even`);
+    for (const block of blocks) {
+        if (block.address % 2 !== 0) {
+            throw new DmeLinkError(`Refusing to flash: block base 0x${block.address.toString(16)} is not even`);
+        }
+        // The final chunk is the remainder, and it must be even too or the last write is misaligned.
+        const tail = block.length % chunk;
+        if (tail % 2 !== 0) {
+            throw new DmeLinkError(`Refusing to flash: block of ${block.length} bytes leaves an odd ${tail}-byte tail at chunk ${chunk}`);
+        }
+    }
+}
+
+/**
  * Real DME connection over a K+DCAN-style cable via the Web Serial API, using the BMW DS2
  * protocol. Requires Chrome/Edge desktop and must be initiated from a genuine user gesture
  * (the browser's serial port picker cannot be triggered programmatically).
@@ -153,9 +186,27 @@ export class WebSerialDmeLink implements DmeLink {
     private hasBoostedThisSession = false;
     /** The rate the last bulk read ran at — see DmeLink.getLastReadBaud. */
     private lastReadBaud: number | null = null;
+    /** The DME's published maximum DS2 telegram length, read during identify. Null when the pointer
+     *  is absent or the read failed — "not read" is a different fact from "no limit". */
+    private maxTelegramLength: number | null = null;
+    /** Per-chunk instrument. Always constructed, collects only when armed by a bulk read with DIAG on. */
+    private readonly timing = new TransferTiming();
 
     getLastReadBaud(): number | null {
         return this.lastReadBaud;
+    }
+
+    getMaxTelegramLength(): number | null {
+        return this.maxTelegramLength;
+    }
+
+    getLastReadTiming(): ReadTimingReport | null {
+        return this.timing.getReport();
+    }
+
+    setTimingEnabled(enabled: boolean): void {
+        this.timing.setEnabled(enabled);
+        this.transport.setTiming(enabled ? this.timing : null);
     }
 
     constructor(options?: { readBaud?: Ds2SupportedBaud }) {
@@ -187,12 +238,22 @@ export class WebSerialDmeLink implements DmeLink {
         if (!this.connected) throw new DmeLinkError('Not connected to DME');
     }
 
-    /** Sends a request frame, reads back the mandatory K-line echo, then reads the real response. */
+    /**
+     * Sends a request frame, reads back the mandatory K-line echo, then reads the real response.
+     *
+     * The timing calls here are the only ones on a path shared with the FLASH WRITE. Every one is
+     * void, cannot throw, and is inert outside a bulk read (the instrument only collects between
+     * begin() and finish()) — an instrument must never be able to change what a write does.
+     */
     private async exchange(controlByte: number, payload: Uint8Array, timeoutMs = RESPONSE_TIMEOUT_MS): Promise<Ds2Frame> {
+        this.timing.exchangeStart(performance.now());
         const request = buildDs2Frame(DS2_DEFAULT_ADDRESS, controlByte, payload);
         await this.transport.write(request);
 
         const echo = await this.transport.readExact(request.length, timeoutMs);
+        // Marked before the mismatch check: the echo bytes are on the wire either way, and the
+        // turnaround measurement wants the arrival time of the last of them.
+        this.timing.echoComplete(performance.now());
         if (!arraysEqual(echo, request)) {
             // Report WHICH failure this is rather than leaving it to be guessed. classifyEchoMismatch
             // separates "a stale response was read in the echo's place" (software desync) from "the
@@ -233,6 +294,10 @@ export class WebSerialDmeLink implements DmeLink {
         const full = new Uint8Array(declaredLength);
         full.set(header, 0);
         full.set(rest, 2);
+        // Only a completed exchange is recorded. A chunk that threw above is counted by retry()
+        // instead — mixing a failed exchange into the medians would blend a timeout into the
+        // turnaround figure, which is the one number this whole instrument exists to isolate.
+        this.timing.exchangeEnd(performance.now());
         return parseDs2Frame(full);
     }
 
@@ -306,6 +371,18 @@ export class WebSerialDmeLink implements DmeLink {
                     const programNumber = parseZifProgramNumber(zifBytes);
                     if (programNumber) result.softwareVersion = programNumber;
                 } catch { /* leave UNKNOWN */ }
+            }
+
+            // Index 21 is a POINTER to the value, not the value — same shape as every other entry in
+            // this table. So: resolve the pointer, then read one byte from it. Own try: this is a
+            // diagnostic, and it must never be the reason identify degrades VIN/AIF to UNKNOWN.
+            const maxTelegramAddress = findPointer(entries, SYSTEM_ADDRESS_INDEX.MAX_TELEGRAM);
+            if (maxTelegramAddress !== null) {
+                try {
+                    const raw = await this.readMemoryChunk(Mss54HpDataTuneLayout.readSegment, maxTelegramAddress, 1);
+                    // 0 and 0xFF are "not populated", not "a zero-byte telegram limit".
+                    if (raw.length === 1 && raw[0] !== 0 && raw[0] !== 0xFF) this.maxTelegramLength = raw[0];
+                } catch { /* leave null — "not read" is a different fact from "no limit published" */ }
             }
 
             const aifAddress = findPointer(entries, SYSTEM_ADDRESS_INDEX.AIF);
@@ -396,6 +473,7 @@ export class WebSerialDmeLink implements DmeLink {
                 return await this.readMemoryChunk(segment, address, count);
             } catch (e) {
                 lastError = e;
+                this.timing.retry();
                 if (attempt < CHUNK_RETRY_ATTEMPTS) {
                     // Delay first, THEN resync. Resyncing first lets the DME's late response arrive
                     // into the freshly-cleared buffer and desync the next attempt. purge() alone also
@@ -475,7 +553,7 @@ export class WebSerialDmeLink implements DmeLink {
         let done = 0;
         while (done < length) {
             if (this.aborted) throw new DmeLinkError('Read cancelled');
-            const count = Math.min(Mss54HpDataTuneLayout.chunkSize, length - done);
+            const count = Math.min(Mss54HpDataTuneLayout.readChunkSize, length - done);
             const chunk = await this.readMemoryChunkWithRetry(Mss54HpDataTuneLayout.readSegment, address + done, count);
             out.set(chunk, done);
             done += count;
@@ -510,8 +588,11 @@ export class WebSerialDmeLink implements DmeLink {
         this.lastReadBaud = boosted ? this.readBaud : 9600;
         this.hasBoostedThisSession ||= boosted;
         try {
-            const { slave, master } = Mss54HpDataTuneLayout;
+            const { slave, master, readChunkSize } = Mss54HpDataTuneLayout;
             const total = slave.length + master.length;
+
+            // Arm the instrument for exactly this read. Sized up-front so nothing allocates per chunk.
+            this.timing.begin(Math.ceil(total / readChunkSize), readChunkSize, this.lastReadBaud, this.maxTelegramLength);
 
             const slaveBytes = await this.readRange(slave.address, slave.length, (done) => onProgress?.(Math.round((done / total) * 100), 'reading'));
             const masterBytes = await this.readRange(master.address, master.length, (done) => onProgress?.(Math.round(((slave.length + done) / total) * 100), 'reading'));
@@ -522,6 +603,9 @@ export class WebSerialDmeLink implements DmeLink {
             onProgress?.(100, 'reading');
             return combined.buffer;
         } finally {
+            // In the finally so a cancelled or failed read still yields whatever was measured — a read
+            // that died at 8% is precisely when the numbers are worth having.
+            this.timing.finish();
             if (boosted) {
                 // Always try to hand the session back at 9600. If the DME never really switched, this
                 // request fails too — force the local port back to 9600 anyway so a plain reconnect (or
@@ -536,16 +620,18 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     /**
-     * Writes one data block (slave or master). Chunks are 122 bytes — even-length and starting at an
-     * even address (the block base and 122 are both even), which satisfies the DME's even-aligned
-     * flash-write requirement. Fully-erased (all-0xFF) chunks are skipped: after the erase step those
-     * cells already read 0xFF, so re-writing them is an unnecessary program cycle (matches the
+     * Writes one data block (slave or master). Chunks are `writeChunkSize` (122) — even-length and
+     * starting at an even address, which satisfies the DME's even-aligned flash-write requirement and
+     * is enforced at module load in ds2.ts. Note this is deliberately NOT the read chunk size: the
+     * read side may grow toward the 251-byte DS2 framing limit, the write side is capped at 123 and
+     * so is already at its maximum. Fully-erased (all-0xFF) chunks are skipped: after the erase step
+     * those cells already read 0xFF, so re-writing them is an unnecessary program cycle (matches the
      * reference erase-aware sparse write). Progress reflects position through the block.
      */
     private async writeBlock(address: number, data: Uint8Array, doneBefore: number, grandTotal: number, onProgress?: (writtenSoFar: number, total: number) => void): Promise<void> {
         let offset = 0;
         while (offset < data.length) {
-            const chunkSize = Math.min(Mss54HpDataTuneLayout.chunkSize, data.length - offset);
+            const chunkSize = Math.min(Mss54HpDataTuneLayout.writeChunkSize, data.length - offset);
             const chunk = data.subarray(offset, offset + chunkSize);
             if (!isAllErased(chunk)) {
                 await this.writeMemoryChunk(address + offset, chunk);
@@ -585,6 +671,9 @@ export class WebSerialDmeLink implements DmeLink {
         // cannot affect flashing itself; it only stops a stale break from failing the pre-flight.
         await this.resyncTransport();
         await this.login();
+
+        // Last point at which refusing is free. Everything below erases.
+        assertWriteChunkingLegal([slave, master]);
 
         // Erase the data area. The normal flow erases directly (no "pre-clean" prepare — that would
         // consume an extra flash-counter slot). Only on erase failure do we send the prepare (0x0F)
@@ -765,6 +854,10 @@ export class WebSerialDmeLink implements DmeLink {
     ): Promise<FlashCounterInfo> {
         const { master, slave, counterOffset, prepMarkerOffset } = ServiceBlockLayout;
         const pairTotal = master.length + slave.length;
+
+        // Same guard as the data-area write, and for the same reason: the recycle/erase below is the
+        // point of no return, and this block holds AIF/ZIF/VIN.
+        assertWriteChunkingLegal([master, slave]);
 
         onProgress?.(doneBefore, 'erasing');
         if (masterNeedsPrep) {

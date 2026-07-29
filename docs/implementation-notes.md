@@ -486,7 +486,30 @@ The chip buffers received bytes and hands them to the host when either a 62-byte
 its **latency timer** expires. Default 16 ms. Per DS2 chunk two receives are short of a full packet —
 the 9-byte echo, and the 2-byte tail of the 126-byte response — so the timer is paid roughly twice
 per chunk. The reference sets it to the minimum at open: `FT_SetLatencyTimer(handle, 1)`
-(`FtdiD2xxTransport`), which is also what the community advises.
+(`FtdiD2xxTransport`).
+
+**Correction (2026-07-29): this used to say "which is also what the community advises", as if 1 ms
+were the known-right answer. It is not, and three primary sources say so:**
+
+- FTDI's own **AN_107**: the valid range is 1–255 ms, "although **1 ms is not recommended as this is
+  the same as the USB frame length**".
+- The **D2XX Programmer's Guide** documents `FT_SetLatencyTimer`'s valid range as **2–255, default 16**
+  — so the reference's `FT_SetLatencyTimer(handle, 1)` is outside D2XX's own documented range, even
+  though the silicon accepts it. Parity with the reference is not a target here.
+- The **Linux kernel reverted** an 8-year-old 1 ms default (`ftdi_sio`, Johan Hovold): a status header
+  is sent whenever the timer expires *including when the buffer is empty*, so an idle open port
+  generated a two-byte message every millisecond. Interrupt rate dropped 1 kHz → 62.5 Hz.
+
+At 9600 8E1 a byte takes 1.146 ms, longer than a 1 ms timer, so a 126-byte response is carried by
+**~126 IN transfers at 1 ms versus ~9–10 at 16 ms** — and the 62-byte packet-full trigger never fires
+either way (62 bytes takes 71 ms at this rate). What 1 ms buys is only the *tail*: the last byte hits
+the wire at the same instant regardless, and the timer merely bounds how long it then sits in the
+chip. That is **≤15 ms per transaction, bought with ~14× the USB transactions** — and every one of
+those is a `reader.read()` resolution on the same thread as React.
+
+**2–4 ms is the predicted sweet spot**, and the way to find it is a sweep (1 → 4 → 8 → 16), not a
+single 1→16 flip. A flip that lands slower would be misread as "hypothesis dead" when the real answer
+is "overshot the tail cost".
 
 **Correction to an earlier claim here:** this was described as something Web Serial cannot reach and
 therefore a permanent advantage for native tools. That is wrong. The latency timer is a *driver-level
@@ -567,7 +590,7 @@ ruled out as a source of overhead:
 
 | | Reference | Here |
 |---|---|---|
-| Chunk size | `DefaultChunkSize = 122` | `chunkSize: 122` ✅ |
+| Chunk size | `DefaultChunkSize = 122` | `readChunkSize: 122` — see the correction below |
 | Inter-telegram delay | `CommandDelay = TimeSpan.Zero`, never assigned anywhere | none ✅ |
 | Echo | read back, compared byte-for-byte | same (plus mismatch classification) ✅ |
 | Frame read | 2-byte header, then `len - 2` | same (plus an address guard it lacks) ✅ |
@@ -576,17 +599,37 @@ ruled out as a source of overhead:
 
 Two differences that are *ours to fix*, both now fixed:
 
-1. **`bufferSize` was never passed to `port.open()`** — the Web Serial default is 255 bytes, against
-   4096 on both reference transports. 255 bytes is not slow, it is fragile: it is how far the main
-   thread may fall behind before the stream errors, and that budget is a *time* budget that shrinks
-   with baud — **292 ms at 9600, 73 ms at 38400**. Our read pump shares the thread with React. This is
-   the leading explanation for 38400 dying part-way while 9600 completes, and it explains the baud
-   dependence rather than just coinciding with it. Now `RX_BUFFER_BYTES = 4096`.
+1. **`bufferSize` was never passed to `port.open()`** — the Web Serial default is 255 bytes. Now
+   `RX_BUFFER_BYTES = 4096`. **Demoted, and the original reasoning here was wrong:** `bufferSize` is
+   *not* the OS or FTDI driver receive buffer and does not correspond to `FT_SetUSBParameters`.
+   Chromium passes it to `mojo::CreateDataPipe` as `capacity_num_bytes` — it is the ring between the
+   browser process and the renderer — and `serial_io_handler_win.cc` never calls `SetupComm()`, so the
+   driver's buffers stay at their Device Manager defaults regardless. The "292 ms at 9600 / 73 ms at
+   38400 main-thread stall budget" framing that used to be here does not follow and has been removed.
+   This is a **fragility fix, not a bandwidth fix** (reads have been reported to stall outright at 255,
+   WICG/serial#164), and it is no longer the leading explanation for the 38400 failure.
 2. **The bulk read was the least patient retry path in the codebase** — flat 300 ms × 4 = 1.2 s, where
    the reference gives 4 s and where our own `adaptationExchangeWithRetry` already escalates and
    lengthens after a break, with a comment explaining that a fresh reader just re-latches a disturbed
    line. The bulk read never learned it. Now `hasReadError() ? 400 : 300` × attempt — 4 s after a
    break, matching the reference exactly.
+
+**Correction: 122 is not a limit, and the ✅ above was asserting the wrong thing.** Matching the
+reference is not the same as being right. `Ds2MemoryReader`'s constructor accepts any chunk size up to
+255; 122 is its undocumented *default*, with no stated reason anywhere in the tree. Our own framing
+allows more: `buildDs2Frame` caps a frame at 255 bytes and a read response is
+`[addr][len][status][N][cksum]`, so **N ≤ 251**. BMW's own SGBD job `FLASH_LESEN` uses 120. And the DME
+publishes its real ceiling in the system address table at index 21 — a value the reference ships a
+decoder for (`"{value[0]} byte max DS2 telegram length"`) and **never calls**. We now read it during
+identify and report it; nothing branches on it yet.
+
+Worse, `chunkSize` was a *single* constant shared by the read loop and the write loop. Writes cap at
+123 and that cap is enforced only by a runtime throw inside `buildWriteMemoryPayload` — which fires on
+the first chunk, i.e. **after `writePartialBinInner` has already erased the ECU**. Split into
+`readChunkSize` / `writeChunkSize` with a module-load invariant (≤123, even, even block bases) plus a
+pre-erase `assertWriteChunkingLegal`. Note the write side has nothing to gain either way: flash writes
+need an even length at an even address under a 123 cap, so **122 is already the maximum legal write
+chunk**. Only the read side can grow.
 
 **Correction: the reference does not use 38400.** `Ds2BaudRate.Baud38400` is defined and has **zero
 call sites** in the entire tree; every `TrySwitchToProgrammingBaudAsync` goes to 125000, and always
@@ -606,15 +649,54 @@ The ~75 ms/chunk overhead at 9600, and why 38400 fails part-way when it previous
 **The one measurement that collapses the 38400 question** is already in our own error text: the latched
 `pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.
 
-- `BufferOverrunError` → the 255-byte buffer; the `bufferSize` fix above should end it
+- `BufferOverrunError` → the Mojo pipe ran dry of room; the `bufferSize` fix above should end it
 - `ParityError` / `FramingError` → physical layer (K-line rise time, §12); retry patience and a smaller
   chunk are mitigations, not cures
 - `Timed out waiting for N byte(s) (received M)` with no latched error → the DME stopped answering;
   transport is exonerated, look at the 0x91 switch and the session state instead
 
-If 125000 is ever worth revisiting, the remaining lever is the transport, not the rate: the reference
-programs the FTDI divisor directly through `ftd2xx.dll`, which Web Serial cannot do. That would mean
-a native helper, not a browser change.
+### Instrumentation (2026-07-29)
+
+Rather than keep guessing at the 75 ms, `transferTiming.ts` decomposes it per chunk, behind a **DIAG**
+toggle next to PRACTICE, off by default. It splits: time inside `write()`, echo latency, **DME
+turnaround** (last echo byte → first response byte), response wire time against theory, parked vs
+draining time, and **rx events per chunk** — how many times the serial stack woke us. Medians, not
+means, because one retried chunk carries 300–1600 ms of deliberate settle. The notice line gains a
+short numeric tail; a TIMING button saves the full report, including sampled byte-arrival gaps, as
+JSON.
+
+**rx events per chunk is the decisive number.** ~135 means per-byte-arrival cost is real and the
+latency timer is the lever. ~10 means that hypothesis is dead and the residual is per-exchange or
+DME-side. And if **turnaround** dominates, the residual is the ECU thinking — the reference pays it
+identically and no host-side change here can recover it.
+
+The instrument is built not to measure itself: preallocated `Float64Array` lanes sized once, no
+allocation or string formatting during the transfer, one boolean compare on the disabled path, and
+collection armed only between a read's start and end so it is inert on the flash-write path.
+
+### Out of scope, and why
+
+- **WebUSB + the FTDI vendor protocol.** Technically the closest thing to a D2XX equivalent a browser
+  can reach: the vendor requests for baud divisor, line properties and `SET_LATENCY_TIMER` are all
+  documented and there are (unmaintained) JS implementations. But Chromium claims USB devices on
+  Windows through **WinUSB**, and an FTDI cable is bound to `ftdibus.sys`. Rebinding it with Zadig
+  **removes the COM port**, which breaks INPA / Tool32 / ISTA until it is swapped back. Rejected: the
+  cable has to keep working for everything else.
+- **A local native helper** (WebSocket or native-messaging bridge to `ftd2xx.dll`). The only path to
+  true D2XX parity. Costs a signed installer, per-OS builds, a firewall prompt, and localhost TLS —
+  and FTDI's guidance is that VCP and D2XX cannot be used on one device simultaneously, which would
+  need confirming first. Recorded as the fallback; not planned.
+- **125000 baud.** Not a rate to probe. In the reference it is reachable *only* after a "fast entry"
+  procedure that reads, backs up, and then **erases flash 0x4000–0x5FFF on both processors**, restores
+  the live spans, and verifies — before the 0x91 switch is even sent (`ReadService.TryEnterFastReadModeAsync`).
+  Sending the switch from a plain diagnostic session, as we do, is not the same operation.
+- **A Worker for the read pump — deferred, not rejected.** `navigator.serial` *is* exposed to
+  DedicatedWorker (Chrome 89+, `getPorts()` available; only `requestPort()` is Window-only), so this is
+  buildable. Two constraints if it is ever done: move the **whole link**, not just the transport (one
+  exchange is 1 write + 3 `readExact`, so a remote transport puts main-thread jank back into the
+  per-chunk critical path), and do **not** transfer `port.readable` — transferred streams clone every
+  chunk through a MessagePort, which is strictly worse than today. Gated on the measurement: worth its
+  price only if host overhead is still large after the latency timer is optimal.
 
 ---
 

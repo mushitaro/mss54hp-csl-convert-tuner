@@ -454,5 +454,47 @@ export const Mss54HpDataTuneLayout = {
     writeSegment: Ds2ProgrammingControl.WriteSegment,
     slave: { address: 0xA00000, length: 32768 },
     master: { address: 0x200000, length: 32768 },
-    chunkSize: 122,
+    /**
+     * Bytes per read telegram. Deliberately SEPARATE from writeChunkSize even though both are 122
+     * today, because they are bounded by different things and only one of them can ever grow.
+     *
+     * A read is bounded by DS2 framing alone: buildDs2Frame caps a frame at 255 bytes and a read
+     * response is [addr][len][status][N][cksum], so N <= 251. 122 is not a protocol limit — it is the
+     * reference tool's undocumented default, and BMW's own SGBD job FLASH_LESEN uses 120. The DME
+     * publishes its real maximum in the system address table (see SYSTEM_ADDRESS_INDEX.MAX_TELEGRAM).
+     *
+     * They shared one constant until 2026-07-29. That is a latent brick: writePartialBinInner erases
+     * before it writes, and the only thing stopping an over-long write is a runtime throw inside
+     * buildWriteMemoryPayload — which would fire on the first chunk, i.e. on an already-erased ECU.
+     */
+    readChunkSize: 122,
+    /**
+     * Bytes per write telegram. **122 is already the maximum legal value and cannot be raised.**
+     * The DS2 write count caps at 123 (buildWriteMemoryPayload), and flash programming needs an even
+     * length at an even address — so 122 is the largest even value that fits. Splitting the constants
+     * therefore costs the write path nothing; it only removes the coupling.
+     */
+    writeChunkSize: 122,
 } as const;
+
+/**
+ * Load-time invariant on the write chunk. This exists to turn a mid-flash throw — the failure mode
+ * that lands on a half-erased ECU — into an import-time failure that cannot reach a car.
+ *
+ * Runs at module scope on purpose: `npm run build` prerenders, so a bad constant fails the build.
+ */
+(function assertWriteChunkIsFlashSafe() {
+    const { writeChunkSize, slave, master } = Mss54HpDataTuneLayout;
+    if (writeChunkSize > 123) {
+        throw new Error(`Mss54HpDataTuneLayout.writeChunkSize ${writeChunkSize} exceeds the DS2 write cap of 123`);
+    }
+    if (writeChunkSize <= 0 || writeChunkSize % 2 !== 0) {
+        throw new Error(`Mss54HpDataTuneLayout.writeChunkSize ${writeChunkSize} must be positive and even (flash writes are even-aligned)`);
+    }
+    // An even chunk size only keeps every write even-aligned if the block base is even too.
+    for (const [name, block] of [['slave', slave], ['master', master]] as const) {
+        if (block.address % 2 !== 0) {
+            throw new Error(`Mss54HpDataTuneLayout.${name}.address 0x${block.address.toString(16)} must be even`);
+        }
+    }
+})();

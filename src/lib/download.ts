@@ -13,6 +13,7 @@ export function downloadBlob(data: BlobPart, fileName: string, mimeType: string)
 
 export const MIME_BIN = 'application/octet-stream';
 export const MIME_CSV = 'text/csv';
+export const MIME_JSON = 'application/json';
 
 /** Makes a session label safe for a filename without losing which session it was ("Session #3" ->
  *  "Session_3"). */
