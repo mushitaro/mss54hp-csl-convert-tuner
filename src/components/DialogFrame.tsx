@@ -72,9 +72,33 @@ export const PhaseStack: React.FC<{ children: React.ReactNode; className?: strin
 
 /** One member of a PhaseStack. Inactive layers keep their space but are invisible — which also takes
  *  them out of the tab order and off the accessibility tree, so a hidden phase's buttons cannot be
- *  reached by keyboard the way `opacity-0` would allow. */
+ *  reached by keyboard the way `opacity-0` would allow.
+ *
+ *  A column, full height, so a DialogActions inside it can pin itself to the bottom of the reserved
+ *  region rather than floating wherever its own message happens to end. */
 export const PhaseLayer: React.FC<{ show: boolean; children: React.ReactNode }> = ({ show, children }) => (
-    <div className={`[grid-area:1/1] ${show ? '' : 'invisible'}`} aria-hidden={!show}>
+    <div className={`[grid-area:1/1] h-full flex flex-col ${show ? '' : 'invisible'}`} aria-hidden={!show}>
         {children}
+    </div>
+);
+
+/**
+ * The action row: always the last child of a PhaseLayer, always at the bottom of the reserved region.
+ *
+ * `mt-auto` is the whole point. Reserving the region stopped the panel and the divider from moving,
+ * but each phase still laid its buttons out directly under its own message — so a short phase put
+ * them high and a wordy one put them low. Measured, the flash-counter dialog moved the button 178 px
+ * down between `viewing` and `confirming`: you press RESET, and the confirmation's RUN RESET appears
+ * far below the cursor. On the dialog that erases a car's identity records, "where the last button
+ * was" must not be a place the next one can occupy by accident, and it must not be a place the
+ * pointer has to hunt for either.
+ *
+ * `lead` is the message that shares the row (the question, the completion note). Styling stays at the
+ * call site — it is amber in one phase, emerald in another, and that colour is carrying meaning.
+ */
+export const DialogActions: React.FC<{ lead?: React.ReactNode; children: React.ReactNode }> = ({ lead, children }) => (
+    <div className="mt-auto pt-2 flex justify-between items-center gap-4">
+        <div className="min-w-0 flex-1">{lead}</div>
+        <div className="flex gap-4 shrink-0">{children}</div>
     </div>
 );

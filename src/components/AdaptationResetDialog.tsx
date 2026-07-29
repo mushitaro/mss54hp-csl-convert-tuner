@@ -3,7 +3,7 @@ import { Eraser, Loader2, AlertTriangle } from 'lucide-react';
 import { AdaptationSnapshot, AdaptationReading } from '@/lib/dme-link/adaptationBlocks';
 import { DmeErrorKind } from '@/lib/dme-link/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
-import { DialogFrame, PhaseStack, PhaseLayer } from './DialogFrame';
+import { DialogFrame, PhaseStack, PhaseLayer, DialogActions } from './DialogFrame';
 
 interface Props {
     /** dmeLink.readAdaptations — resolves null on failure (the reason lands in `error`). */
@@ -161,7 +161,9 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
         >
             <>
                 {phase === 'failed' ? (
-                    <div className="space-y-4">
+                    /* Also a column, so its Close/Retry land in the same band as every other phase's
+                       buttons instead of directly under however long the error text ran. */
+                    <div className="flex-1 flex flex-col space-y-4">
                         <p className="text-[11px] font-mono text-red-400 leading-relaxed">
                             {error ?? t.failLead}
                         </p>
@@ -171,7 +173,7 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                         <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
                             {errorKind === 'electrical' ? t.failHintElectrical : t.failHint}
                         </p>
-                        <div className="flex justify-end gap-4 pt-1">
+                        <DialogActions>
                             <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                 {t.close}
                             </button>
@@ -181,7 +183,7 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             <button onClick={retry} className={`text-[11px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
                                 {t.retry}
                             </button>
-                        </div>
+                        </DialogActions>
                     </div>
                 ) : !shown ? (
                     <div className="flex-1 flex items-center gap-2 justify-center text-[11px] font-mono text-slate-500">
@@ -235,50 +237,46 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             and the table above it — every time the phase advanced. */}
                         <PhaseStack className="shrink-0 pt-3 mt-3 border-t border-slate-800">
                             <PhaseLayer show={phase === 'viewing'}>
-                                <div className="flex justify-between items-center">
-                                    <span className="text-[11px] font-mono text-slate-500">{t.confirmQuestion}</span>
-                                    <div className="flex gap-4">
-                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.close}
-                                        </button>
-                                        <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            {t.reset}
-                                        </button>
-                                    </div>
-                                </div>
+                                <DialogActions lead={<span className="text-[11px] font-mono text-slate-500">{t.confirmQuestion}</span>}>
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.close}
+                                    </button>
+                                    <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        {t.reset}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'confirming'}>
-                                <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
-                                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                                        <span>{t.warn}</span>
-                                    </p>
-                                    <div className="flex justify-end gap-4">
-                                        <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.cancel}
-                                        </button>
-                                        <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            {t.runReset}
-                                        </button>
-                                    </div>
-                                </div>
+                                <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
+                                    <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+                                    <span>{t.warn}</span>
+                                </p>
+                                <DialogActions>
+                                    <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.cancel}
+                                    </button>
+                                    <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        {t.runReset}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
 
+                            {/* No buttons, but it still occupies the action band — the progress line
+                                takes the place the buttons had rather than sitting above a gap. */}
                             <PhaseLayer show={phase === 'clearing'}>
-                                <div className="flex items-center gap-2 text-[11px] font-mono text-amber-400">
+                                <div className="mt-auto pt-2 flex items-center gap-2 text-[11px] font-mono text-amber-400">
                                     <Loader2 className="w-3 h-3 animate-spin" />
                                     {t.clearing}
                                 </div>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'result'}>
-                                <div className="flex justify-between items-center">
-                                    <span className="text-[11px] font-mono text-emerald-400">{t.done}</span>
+                                <DialogActions lead={<span className="text-[11px] font-mono text-emerald-400">{t.done}</span>}>
                                     <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
                                     </button>
-                                </div>
+                                </DialogActions>
                             </PhaseLayer>
                         </PhaseStack>
                     </>

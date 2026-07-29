@@ -6,7 +6,7 @@ import { FlashCounterOutcome } from '@/hooks/useDmeLink';
 import { ServiceBlockReport, formatServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { ServiceBackupSummary } from '@/lib/db/serviceBackupRepository';
 import { useDialogLang } from '@/hooks/useDialogLang';
-import { DialogFrame, PhaseStack, PhaseLayer } from './DialogFrame';
+import { DialogFrame, PhaseStack, PhaseLayer, DialogActions } from './DialogFrame';
 
 interface Props {
     /** dmeLink.readFlashCounter — resolves null on failure (the reason lands in `error`). */
@@ -497,7 +497,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                        with the block erased, that table is reporting a healthy 0/30 on data that
                        is not there, and showing it next to a recovery prompt would be actively
                        misleading about what state the ECU is in. */
-                    <div className="space-y-4">
+                    <div className="flex-1 flex flex-col space-y-4">
                         <p className="flex items-start gap-2 text-[12px] font-mono text-amber-400 leading-relaxed">
                             <LifeBuoy className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                             <span className="font-bold">{t.recoverTitle}</span>
@@ -521,9 +521,12 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </>
                         )}
 
-                        <PhaseStack className="shrink-0 pt-3 border-t border-slate-800">
+                        {/* mt-auto, like every other view's action band: this branch replaces the whole
+                            dialog, and its content is short, so without it the recovery buttons would
+                            sit 200-odd px above where the buttons in every other phase are. */}
+                        <PhaseStack className="mt-auto shrink-0 pt-3 border-t border-slate-800">
                             <PhaseLayer show={phase === 'recover'}>
-                                <div className="flex justify-end gap-4">
+                                <DialogActions>
                                     <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                         {t.close}
                                     </button>
@@ -533,11 +536,11 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                             {t.restore}
                                         </button>
                                     )}
-                                </div>
+                                </DialogActions>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'restoring'}>
-                                <div className="space-y-1.5">
+                                <div className="mt-auto pt-2 space-y-1.5">
                                     <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
                                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -553,33 +556,32 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'restored'}>
-                                <div className="space-y-2">
-                                    <p className="text-[11px] font-mono text-emerald-400">{t.restored}</p>
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-[10px] font-mono text-slate-500">{t.restoredNext}</span>
-                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.close}
-                                        </button>
-                                    </div>
-                                </div>
+                                <p className="text-[11px] font-mono text-emerald-400">{t.restored}</p>
+                                <DialogActions lead={<span className="text-[10px] font-mono text-slate-500">{t.restoredNext}</span>}>
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.close}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
                         </PhaseStack>
                     </div>
                 ) : phase === 'failed' ? (
-                    <div className="space-y-4">
+                    /* Also a column, so Close/Retry land in the same band as every other phase's
+                       buttons instead of directly under however long the error text ran. */
+                    <div className="flex-1 flex flex-col space-y-4">
                         <p className="text-[11px] font-mono text-red-400 leading-relaxed">{error ?? t.failLead}</p>
                         <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
                             {errorKind === 'electrical' ? t.failHintElectrical : t.failHint}
                         </p>
                         <p className="text-[10px] font-mono text-amber-400/90 leading-relaxed">{t.failRecovery}</p>
-                        <div className="flex justify-end gap-4 pt-1">
+                        <DialogActions>
                             <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
                                 {t.close}
                             </button>
                             <button onClick={retry} className={`text-[11px] font-bold uppercase tracking-widest transition-colors ${errorKind === 'electrical' ? 'text-slate-500 hover:text-slate-300' : 'text-blue-400 hover:text-blue-300'}`}>
                                 {t.retry}
                             </button>
-                        </div>
+                        </DialogActions>
                     </div>
                 ) : !shown ? (
                     <div className="flex-1 flex items-center gap-2 justify-center text-[11px] font-mono text-slate-500">
@@ -638,44 +640,41 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             at exactly the moment the user is deciding whether to erase. */}
                         <PhaseStack className="shrink-0 pt-3 mt-3 border-t border-slate-800">
                             <PhaseLayer show={phase === 'viewing'}>
-                                <div className="flex justify-between items-center">
+                                <DialogActions lead={
                                     <span className="text-[11px] font-mono text-slate-500">
                                         {checkingRpm ? t.checkingRpm : t.confirmQuestion}
                                     </span>
-                                    <div className="flex gap-4">
-                                        <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
-                                            {t.inspect}
-                                        </button>
-                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.close}
-                                        </button>
-                                        <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            {t.reset}
-                                        </button>
-                                    </div>
-                                </div>
+                                }>
+                                    <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                        {t.inspect}
+                                    </button>
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.close}
+                                    </button>
+                                    <button onClick={() => setPhase('confirming')} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        {t.reset}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'blocked'}>
-                                <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
-                                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                                        <span>{blockedReason}</span>
-                                    </p>
-                                    <div className="flex justify-end gap-4">
-                                        {canInspect && (
-                                            <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
-                                                {t.inspect}
-                                            </button>
-                                        )}
-                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.close}
+                                <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
+                                    <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+                                    <span>{blockedReason}</span>
+                                </p>
+                                <DialogActions>
+                                    {canInspect && (
+                                        <button onClick={() => void runInspect()} title={t.inspectHint} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                            {t.inspect}
                                         </button>
-                                        <button onClick={retry} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
-                                            {t.retry}
-                                        </button>
-                                    </div>
-                                </div>
+                                    )}
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.close}
+                                    </button>
+                                    <button onClick={retry} className="text-[11px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300 transition-colors">
+                                        {t.retry}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'confirming'}>
@@ -695,19 +694,19 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     <p className="text-[10px] font-mono text-amber-400/80 leading-relaxed border-t border-slate-800 pt-2">
                                         {t.warnRecovery}
                                     </p>
-                                    <div className="flex justify-end gap-4">
-                                        <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.cancel}
-                                        </button>
-                                        <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
-                                            {t.runReset}
-                                        </button>
-                                    </div>
                                 </div>
+                                <DialogActions>
+                                    <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.cancel}
+                                    </button>
+                                    <button onClick={() => void handleReset()} className="text-[11px] font-bold uppercase tracking-widest text-red-400 hover:text-red-300 transition-colors">
+                                        {t.runReset}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'resetting'}>
-                                <div className="space-y-1.5">
+                                <div className="mt-auto pt-2 space-y-1.5">
                                     <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-amber-400">
                                         <span className="flex items-center gap-2">
                                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -725,15 +724,12 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'result'}>
-                                <div className="space-y-2">
-                                    <p className="text-[11px] font-mono text-emerald-400">{t.done}</p>
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-[10px] font-mono text-amber-400/90">{t.doneKeyCycle}</span>
-                                        <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
-                                            {t.close}
-                                        </button>
-                                    </div>
-                                </div>
+                                <p className="text-[11px] font-mono text-emerald-400">{t.done}</p>
+                                <DialogActions lead={<span className="text-[10px] font-mono text-amber-400/90">{t.doneKeyCycle}</span>}>
+                                    <button onClick={onClose} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">
+                                        {t.close}
+                                    </button>
+                                </DialogActions>
                             </PhaseLayer>
                         </PhaseStack>
                     </>
