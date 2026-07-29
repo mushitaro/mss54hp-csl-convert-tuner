@@ -780,6 +780,33 @@ keep-alive (two attempts, ~300 ms) now settles it immediately, and on silence th
 user gets a finished read instead of nothing, and `switchOutcome` records
 `accepted, then the link went silent — fell back to 9600`.
 
+**Both were then tested on the car, and neither rescues 38400.** 9600 completed in 123.2 s with the
+control lines de-asserted — identical to the 122.9 s baseline, so the change is safe and free. 38400
+reported `switchOutcome: accepted`, passed the liveness probe, ran at a measured 35.9 ms against a
+theoretical 36.1 — and died at chunk 4. The probe worked exactly as designed and correctly said the
+link was alive, because it was; it is insurance against a switch that never held, not a cure for one
+that holds and then fails.
+
+### FINAL: 9600, ~123 s, and the remaining lever is not software
+
+Six 38400 attempts died at chunks **0, 1, 4, 7, 9, 17** of 538. That is not a specific breaking point;
+it is a roughly 14%-per-chunk failure rate, under which surviving 538 chunks has probability ~0. The
+link genuinely runs at 38400 and then the ECU stops answering — zero bytes, never a corrupted frame.
+
+Ruled out, each by measurement rather than argument: the FTDI latency timer (135 → 14 wakeups per
+chunk changed nothing, and 16 ms was 5.7% *slower*), inter-telegram gap (0/5/10/20/40 ms moved neither
+turnaround nor survival), the receive buffer, DTR/RTS, host-side overhead (`parked/total` 99.9%,
+`write` 0.10 ms), read chunk size (the DME publishes a 132-byte maximum, so 122 → 128 is worth 1.3%),
+and every intermediate baud (0xB0 PARAMETER_ERROR — the ECU implements only 9600/38400/125000).
+
+The per-chunk budget at 9600 is ~141.7 ms of wire against a theoretical 144.4, plus ~40 ms of settled
+DME turnaround (~110 ms during the first few chunks, at either rate). **This app is about 1% of it.**
+
+What remains is physical: §12 documents real breaks and exclusively-1→0 bit corruption on this car *at
+9600*. A link already marginal at 9600 has no headroom at four times the rate. The checklist there —
+engine-off vs running, connector, ground, a different cable — is the only thing left that could change
+the answer, and none of it is code.
+
 **The one measurement that collapses the 38400 question** is already in our own error text: the latched
 `pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.
 
