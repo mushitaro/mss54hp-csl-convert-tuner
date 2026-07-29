@@ -52,6 +52,11 @@ const CHUNK_RETRY_ATTEMPTS = 5;
 // failing chunk; escalating from 300ms reaches 3 s without making the common single-glitch case wait
 // a full second before its first retry.
 const CHUNK_RETRY_DELAY_MS = 300;
+// Attempts for one flash WRITE telegram, matching the reference Ds2MemoryProgrammer's 5. Only the
+// telegram is retried — a DME that answered and reported "verify failed" is not re-asked, because
+// re-sending that would hide failing flash rather than survive a lost message. See
+// writeChunkTelegramWithRetry.
+const WRITE_CHUNK_RETRY_ATTEMPTS = 5;
 // Clearing adaptations writes EEPROM before the DME replies, so the plain read timeout is thin.
 const ADAPT_CLEAR_TIMEOUT_MS = 5000;
 // The DME needs a moment to commit the cleared values before they read back true. The reference2
@@ -512,17 +517,65 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     /**
+     * Sends one write telegram, retrying the TELEGRAM — and only the telegram — on a transport-level
+     * failure. Mirrors the reference `Ds2MemoryProgrammer.WriteChunkWithRetryAsync`.
+     *
+     * This path had no retry at all until now, while the read path next to it has had five attempts
+     * since it was written. That asymmetry is exactly backwards: `writePartialBinInner` erases before
+     * it writes, so a single lost telegram — one break, one timeout — failed the entire flash **on an
+     * already-erased ECU**, with nothing to catch it. `readMemoryChunkWithRetry` was ported from
+     * `Ds2MemoryReader` and its neighbour in `Ds2MemoryProgrammer` was not.
+     *
+     * **Validation deliberately lives in the caller, outside this loop** — the same split the reference
+     * uses (`ValidateWriteResponse` runs on what `WriteChunkWithRetryAsync` returns). A timeout means
+     * the telegram never landed and re-sending it is right. A verify byte of "verify failed" or "cells
+     * not erased" means the DME received it, tried, and could not do it; re-sending that would paper
+     * over failing flash on a twenty-year-old ECU and report success. The reference catches only
+     * `TimeoutException` for the same reason.
+     *
+     * Re-sending is safe: a DS2 write is one telegram, so the DME either processed it or did not, and
+     * re-writing the same bytes to the same address is idempotent. The `nextAddress` check in the
+     * caller catches any desync afterwards.
+     *
+     * No `aborted` check, matching the write loop's own deliberate choice: honouring a cancel between
+     * chunks would abandon a half-programmed ECU.
+     */
+    private async writeChunkTelegramWithRetry(address: number, data: Uint8Array, timeoutMs: number): Promise<Ds2Frame> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= WRITE_CHUNK_RETRY_ATTEMPTS; attempt++) {
+            try {
+                return await this.exchange(
+                    Ds2Control.WRITE_MEMORY,
+                    buildWriteMemoryPayload(Ds2ProgrammingControl.WriteSegment, address, data),
+                    timeoutMs,
+                );
+            } catch (e) {
+                lastError = e;
+                if (attempt < WRITE_CHUNK_RETRY_ATTEMPTS) {
+                    // Same escalation as the read path, and longer after a break, for the same reason:
+                    // re-acquiring the reader does not repair a disturbed line, only silence does.
+                    // resyncTransport only touches the READ side — it clears a latched pump error or
+                    // drops a stale tail — so it sends nothing to the DME and cannot disturb the
+                    // programming session it is running inside.
+                    const base = this.transport.hasReadError() ? BREAK_SETTLE_MS : CHUNK_RETRY_DELAY_MS;
+                    await delay(base * attempt);
+                    await this.resyncTransport();
+                }
+            }
+        }
+        throw lastError instanceof Error ? lastError : new DmeLinkError(String(lastError));
+    }
+
+    /**
      * Writes one data chunk and fully validates the DME's programming response — segment, next
      * address, written count, and the verify byte (which must be 1 = "programming OK"). This is the
      * critical safety check: a positive DS2 status alone does NOT mean the cells were programmed;
      * the verify byte reports "verify failed" / "cells not erased" / etc. (Ds2WriteResponseValidator).
+     *
+     * Everything below this line runs on a telegram that round-tripped, and is NEVER retried.
      */
     private async writeMemoryChunk(address: number, data: Uint8Array, timeoutMs = WRITE_RESPONSE_TIMEOUT_MS): Promise<void> {
-        const frame = await this.exchange(
-            Ds2Control.WRITE_MEMORY,
-            buildWriteMemoryPayload(Ds2ProgrammingControl.WriteSegment, address, data),
-            timeoutMs,
-        );
+        const frame = await this.writeChunkTelegramWithRetry(address, data, timeoutMs);
         if (!isPositiveResponse(frame)) throw new DmeLinkError(`Memory write at 0x${address.toString(16)} rejected by DME`);
         const result = parseWriteResult(frame);
         if (!result) throw new DmeLinkError(`Memory write at 0x${address.toString(16)} returned no verify data`);

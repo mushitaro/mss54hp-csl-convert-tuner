@@ -631,6 +631,26 @@ pre-erase `assertWriteChunkingLegal`. Note the write side has nothing to gain ei
 need an even length at an even address under a 123 cap, so **122 is already the maximum legal write
 chunk**. Only the read side can grow.
 
+**The flash-write path had no retry at all** (fixed 2026-07-29). `readMemoryChunkWithRetry` was ported
+from `Ds2MemoryReader` and its neighbour `Ds2MemoryProgrammer.WriteChunkWithRetryAsync` — 5 attempts,
+1 s, purge — was not, so `writeBlock` called `writeMemoryChunk` bare. Since `writePartialBinInner`
+erases before it writes, **one lost telegram failed the entire flash on an already-erased ECU**, with
+nothing to catch it. The most exposed path in the codebase was the only one without the protection the
+paths around it had.
+
+Now `writeChunkTelegramWithRetry`: 5 attempts, escalating 300 ms (400 after a break) × attempt, with
+`resyncTransport` between — which touches only the read side, so it sends nothing to the DME and
+cannot disturb the programming session it runs inside. **Validation stays outside the retry loop**, the
+same split the reference uses: a timeout means the telegram never landed and re-sending is right, but
+a verify byte of "verify failed" or "cells not erased" means the DME tried and could not, and
+re-asking would hide failing flash behind a success. The reference catches only `TimeoutException` for
+exactly this reason. `sendProgrammingControl` (erase/finalize) is still not retried, also matching.
+
+Verified against the real class with a scripted fake transport (12 assertions): a clean write sends one
+telegram; two lost telegrams then success now completes instead of failing; it gives up after exactly
+5; and verify-failure, DME rejection, and a next-address mismatch each send exactly one telegram and
+are reported rather than masked.
+
 **Correction: the reference does not use 38400.** `Ds2BaudRate.Baud38400` is defined and has **zero
 call sites** in the entire tree; every `TrySwitchToProgrammingBaudAsync` goes to 125000, and always
 from inside a programming session (after an erase or a fast-entry finalize), never from a plain
