@@ -1000,7 +1000,13 @@ export default function Home() {
     // directory listing that cannot be read at a glance is how runs get mixed up. The outcome goes in
     // too, so a failure is obvious without opening anything.
     const outcome = report.completed ? 'ok' : `died${report.chunks}`;
-    const name = `ReadTiming_${report.baud ?? 'unknown'}baud_gap${report.commandDelayMs}_${outcome}_${Date.now()}.json`;
+    // "asked for X, ran at Y" has to be in the name. A refused switch silently falls back to 9600, so
+    // naming the file after the rate it RAN at makes a whole set of attempts look like repeats of the
+    // baseline — which is exactly what happened to four candidate rates tested on a car.
+    const rate = report.requestedBaud !== null && report.requestedBaud !== report.baud
+        ? `${report.requestedBaud}refused-ran${report.baud}`
+        : `${report.baud ?? 'unknown'}baud`;
+    const name = `ReadTiming_${rate}_gap${report.commandDelayMs}_${outcome}_${Date.now()}.json`;
     downloadBlob(JSON.stringify(report, null, 2), name, MIME_JSON);
   };
 

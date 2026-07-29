@@ -83,6 +83,20 @@ export interface ReadTimingReport {
      * DME room changes how long IT takes, not whether adding a wait makes the wall clock longer.
      */
     commandDelayMs: number;
+    /**
+     * The rate the UI ASKED for. Separate from `baud`, which is what the read actually ran at.
+     *
+     * They differ whenever the DME turns a switch down, and that used to leave no trace in the file —
+     * only a colour on the notice line. Four candidate rates were then tested on a car and every
+     * report came back saying 9600, with no way to tell from the data whether the ECU had refused them
+     * or the app had never asked. `switchOutcome` is the other half of that answer.
+     */
+    requestedBaud: number | null;
+    /** 'accepted' / 'rejected (DS2 status 0x..)' / 'failed (...)', or null when no switch was
+     *  attempted. A 0xA2 rejection is the DME saying it does not implement that rate — which is a
+     *  fact about the ECU, not about this app, and worth having in writing. */
+    switchOutcome: string | null;
+    /** The rate the read actually ran at. */
     baud: number | null;
     /** The DME's published maximum telegram length, if it was readable. */
     maxTelegramLength: number | null;
@@ -143,6 +157,8 @@ export class TransferTiming {
     private retries = 0;
     private chunkSize = 0;
     private commandDelayMs = 0;
+    private requestedBaud: number | null = null;
+    private switchOutcome: string | null = null;
     private baud: number | null = null;
     private maxTelegramLength: number | null = null;
 
@@ -194,9 +210,24 @@ export class TransferTiming {
         this.lastReport = null;
     }
 
-    /** Sizes every lane for a read of `expectedChunks`. Called once, before the first exchange. */
-    begin(expectedChunks: number, chunkSize: number, commandDelayMs: number, baud: number | null, maxTelegramLength: number | null): void {
+    /**
+     * Sizes every lane for a read of `expectedChunks`. Called once, before the first exchange.
+     *
+     * Named fields rather than positional: this grew to five settings, two of which are baud rates
+     * that differ only in meaning (asked-for vs actually-ran-at). Getting those the wrong way round
+     * would produce a report that looks entirely plausible and is wrong about the one thing it exists
+     * to record.
+     */
+    begin(expectedChunks: number, info: {
+        chunkSize: number;
+        commandDelayMs: number;
+        requestedBaud: number | null;
+        switchOutcome: string | null;
+        baud: number | null;
+        maxTelegramLength: number | null;
+    }): void {
         if (!this.enabled) return;
+        const { chunkSize, commandDelayMs, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
         // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
         // a read. Overflow beyond that is dropped by the bounds check in end().
         const capacity = expectedChunks + 8;
@@ -213,6 +244,8 @@ export class TransferTiming {
         this.retries = 0;
         this.chunkSize = chunkSize;
         this.commandDelayMs = commandDelayMs;
+        this.requestedBaud = requestedBaud;
+        this.switchOutcome = switchOutcome;
         this.baud = baud;
         this.maxTelegramLength = maxTelegramLength;
         this.samples = [];
@@ -322,6 +355,8 @@ export class TransferTiming {
             elapsedMs: performance.now() - this.tBegin,
             chunkSize: this.chunkSize,
             commandDelayMs: this.commandDelayMs,
+            requestedBaud: this.requestedBaud,
+            switchOutcome: this.switchOutcome,
             baud: this.baud,
             maxTelegramLength: this.maxTelegramLength,
             retries: this.retries,
@@ -355,6 +390,7 @@ export class TransferTiming {
 export function formatTimingTail(r: ReadTimingReport): string {
     const m = r.median;
     return (r.completed ? '' : `DIED@${r.chunks} `) +
+        (r.requestedBaud !== null && r.requestedBaud !== r.baud ? `${r.requestedBaud}→${r.baud} ` : '') +
         (r.commandDelayMs ? `gap${r.commandDelayMs} ` : '') +
         `${(r.elapsedMs / 1000).toFixed(1)}s ` +
         `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +

@@ -192,6 +192,9 @@ export class WebSerialDmeLink implements DmeLink {
     /** The DME's published maximum DS2 telegram length, read during identify. Null when the pointer
      *  is absent or the read failed — "not read" is a different fact from "no limit". */
     private maxTelegramLength: number | null = null;
+    /** What happened to the last 0x91 baud switch: 'accepted', 'rejected (DS2 status 0x..)', or
+     *  'failed (...)'. Null when no switch was attempted, i.e. a plain 9600 read. */
+    private lastSwitchOutcome: string | null = null;
     /** Per-chunk instrument. Always constructed, collects only when armed by a bulk read with DIAG on. */
     private readonly timing = new TransferTiming();
 
@@ -315,7 +318,16 @@ export class WebSerialDmeLink implements DmeLink {
         try {
             const frame = await this.exchange(Ds2Control.REQUEST_BAUD_SWITCH, target.payload, RESPONSE_TIMEOUT_MS);
             accepted = isPositiveResponse(frame);
-        } catch {
+            // Record WHY, not just that it failed. A rate the DME does not implement answers 0xA2
+            // REJECTED, which is a different fact from the request timing out — and until now a
+            // refused switch left no trace in the saved report at all, only a colour on the notice
+            // line. Four candidate rates were tested on a car and the files could not say whether the
+            // ECU had turned them down or the app had never asked.
+            this.lastSwitchOutcome = accepted
+                ? 'accepted'
+                : `rejected (DS2 status 0x${frame.controlOrStatus.toString(16)})`;
+        } catch (e) {
+            this.lastSwitchOutcome = `failed (${e instanceof Error ? e.message : String(e)})`;
             return false; // request itself failed — DME is still at the current baud
         }
         if (!accepted) return false; // DME rejected the switch — still at the current baud
@@ -592,6 +604,7 @@ export class WebSerialDmeLink implements DmeLink {
         // Optional baud boost for the bulk transfer. Skipped entirely at 9600 (no switch, no port
         // reopen — the proven path), because a boost the hardware doesn't actually follow desyncs the
         // link for the rest of the session.
+        this.lastSwitchOutcome = null;
         const boosted = this.readBaud !== 9600
             ? await this.trySwitchBaud(ds2BaudSpecFor(this.readBaud))
             : false;
@@ -607,7 +620,14 @@ export class WebSerialDmeLink implements DmeLink {
             const total = slave.length + master.length;
 
             // Arm the instrument for exactly this read. Sized up-front so nothing allocates per chunk.
-            this.timing.begin(Math.ceil(total / readChunkSize), readChunkSize, this.commandDelayMs, this.lastReadBaud, this.maxTelegramLength);
+            this.timing.begin(Math.ceil(total / readChunkSize), {
+                chunkSize: readChunkSize,
+                commandDelayMs: this.commandDelayMs,
+                requestedBaud: this.readBaud,
+                switchOutcome: this.lastSwitchOutcome,
+                baud: this.lastReadBaud,
+                maxTelegramLength: this.maxTelegramLength,
+            });
 
             const slaveBytes = await this.readRange(slave.address, slave.length, (done) => onProgress?.(Math.round((done / total) * 100), 'reading'));
             const masterBytes = await this.readRange(master.address, master.length, (done) => onProgress?.(Math.round(((slave.length + done) / total) * 100), 'reading'));
