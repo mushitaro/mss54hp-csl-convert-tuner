@@ -1765,11 +1765,16 @@ export default function Home() {
                         <label
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
-                          title={'Bulk-read baud rate.\n'
-                            + '9600 — default, no switch is sent at all. Proven.\n'
-                            + '38400 — proven on a real vehicle.\n'
-                            + '57600 / 76800 / 115200 — untested candidates between the two known points.\n'
-                            + '125000 — the reference tool\'s rate, but it fails here: the DME accepts the switch and then every exchange times out.\n\n'
+                          title={'Bulk-read baud rate.\n\n'
+                            + 'The DME\'s own turnaround does not scale with baud — 53ms at 9600 — so each doubling returns less than the last, and at 38400 it degrades to 115ms and the ECU stops answering a few percent in.\n\n'
+                            + 'Predicted full-read time at a fixed 53ms turnaround:\n'
+                            + '  9600  106s (1.00x, proven, sends no switch at all)\n'
+                            + '  10400 100s (1.06x, the ISO 9141-2 K-line rate)\n'
+                            + '  14400  81s (1.32x)\n'
+                            + '  19200  68s (1.57x)\n'
+                            + '  28800  55s (1.95x)\n'
+                            + '  38400  48s (2.21x) — but measured 81s, because its turnaround doubles\n\n'
+                            + 'So 19200 would beat the 38400 we actually have, at half the load. 57600 and up are of academic interest; 125000 fails outright.\n\n'
                             + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover.'}
                         >
                           READ

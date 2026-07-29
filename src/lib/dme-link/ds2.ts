@@ -346,6 +346,16 @@ function ds2BaudPayload(baudRate: number): Uint8Array {
 
 export const Ds2BaudRate = {
     Baud9600: { baudRate: 9600, payload: ds2BaudPayload(9600) },        // 0x002580
+    // Between 9600 and 38400 — the range nobody had looked at, because the reference defines only
+    // 9600/38400/125000 and this file anchored on that list. The car's own numbers say this is where
+    // the optimum lives; see DS2_SELECTABLE_BAUDS.
+    Baud10400: { baudRate: 10400, payload: ds2BaudPayload(10400) },     // 0x0028A0 — the ISO 9141-2 /
+                                                                       //   KWP2000 K-line rate, i.e.
+                                                                       //   the one this wiring was
+                                                                       //   designed around
+    Baud14400: { baudRate: 14400, payload: ds2BaudPayload(14400) },     // 0x003840
+    Baud19200: { baudRate: 19200, payload: ds2BaudPayload(19200) },     // 0x004B00
+    Baud28800: { baudRate: 28800, payload: ds2BaudPayload(28800) },     // 0x007080
     Baud38400: { baudRate: 38400, payload: ds2BaudPayload(38400) },     // 0x009600
     Baud57600: { baudRate: 57600, payload: ds2BaudPayload(57600) },     // 0x00E100
     Baud76800: { baudRate: 76800, payload: ds2BaudPayload(76800) },     // 0x012C00
@@ -356,34 +366,60 @@ export const Ds2BaudRate = {
 /**
  * Rates the 0x91 switch may be asked for.
  *
- * Only 9600 is reliable. 38400 has completed a read but now dies 3-10% in; 125000 is the reference
- * tool's programming rate and reproducibly FAILS here (the DME ACKs, then every exchange times out).
- * 57600 / 76800 / 115200 are ours, not the reference's — the payload encoding admits any rate, so
- * these are candidates to probe between 38400 and the broken 125000.
+ * **The useful range is between 9600 and 38400, and it went unexamined for a long time because this
+ * file anchored on the reference's list of three.** The car's own numbers say why. The DME's
+ * turnaround — the silence between our last request byte and its first response byte — does NOT scale
+ * with the bit rate: it is 53.5 ms at 9600, so each doubling of baud returns less than the last. Worse,
+ * at 38400 it does not even hold still; it degrades to 115 ms and the ECU then stops answering
+ * entirely a few percent into a read. Per chunk, at a fixed 53.5 ms of turnaround:
+ *
+ *   9600  144.4 ms wire -> 197.9 total -> 106.5 s   1.00x
+ *   10400 133.3         -> 186.8       -> 100.5 s   1.06x
+ *   14400  96.2         -> 149.8       ->  80.6 s   1.32x
+ *   19200  72.2         -> 125.7       ->  67.6 s   1.57x
+ *   28800  48.1         -> 101.6       ->  54.7 s   1.95x
+ *   38400  36.1         ->  89.6       ->  48.2 s   2.21x   <- if turnaround held, which it does not
+ *
+ * With 38400's MEASURED 115.2 ms turnaround it is 151.3 ms a chunk, i.e. 81.4 s and only 1.31x — so
+ * **19200 would beat the 38400 we actually have**, at half the load on a twenty-year-old ECU. That is
+ * the case for the middle of the range, not a consolation prize.
+ *
+ * The encoding is proven generic: the 38400 switch was accepted on the car and the measured wire time
+ * matched its theoretical 36.1 ms exactly, so the DME honours an arbitrary 24-bit rate, not just the
+ * three the reference hardcodes. 10400 is included because it is the ISO 9141-2 / KWP2000 K-line rate
+ * — the one this wiring was designed around — even though the arithmetic says it is only worth 1.06x.
+ *
+ * 125000 is the reference's programming rate and reproducibly FAILS here (the DME ACKs, then every
+ * exchange times out). 57600 / 76800 / 115200 are ours too, and given how the returns fall off above
+ * 28800 they are now of academic interest only.
  *
  * Do not read the reference as endorsing 38400: `Ds2BaudRate.Baud38400` exists there but has ZERO call
  * sites, and every switch it actually performs goes to 125000 from inside a programming session. See
- * §9 of docs/implementation-notes.md, including how the latched pump-error name tells a receive-buffer
- * overrun apart from a physical-layer fault.
+ * §9 of docs/implementation-notes.md.
  *
  * Asking for an unsupported rate is safe: the DME rejects it and trySwitchBaud leaves the port alone.
  */
-export type Ds2SupportedBaud = 9600 | 38400 | 57600 | 76800 | 115200 | 125000;
+export type Ds2SupportedBaud = 9600 | 10400 | 14400 | 19200 | 28800 | 38400 | 57600 | 76800 | 115200 | 125000;
 
 /**
  * Every selectable rate, slowest first — the single source the UI's selector renders from, so a
  * rate can never exist in the switch table but be unreachable (or vice versa).
  *
- * The three between 38400 and 125000 are ours, not the reference's, which defines only 9600 / 38400 /
- * 125000. They were briefly deleted on the strength of "it didn't feel any faster" and then restored:
- * a subjective impression cannot tell a rejected switch (falls back to 9600, silently) from an
- * accepted one that simply didn't help. The link now reports which rate a read actually ran at, so
- * that question is answered by the UI instead of by inference.
+ * None of these except 9600 / 38400 / 125000 exist in the reference. The three above 38400 were briefly
+ * deleted on the strength of "it didn't feel any faster" and then restored: a subjective impression
+ * cannot tell a rejected switch (falls back to 9600, silently) from an accepted one that simply didn't
+ * help. The link now reports which rate a read actually ran at, so that question is answered by
+ * measurement instead of by inference — which is also how the four between 9600 and 38400 got here.
  */
-export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 57600, 76800, 115200, 125000];
+export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] =
+    [9600, 10400, 14400, 19200, 28800, 38400, 57600, 76800, 115200, 125000];
 
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
+        case 10400: return Ds2BaudRate.Baud10400;
+        case 14400: return Ds2BaudRate.Baud14400;
+        case 19200: return Ds2BaudRate.Baud19200;
+        case 28800: return Ds2BaudRate.Baud28800;
         case 38400: return Ds2BaudRate.Baud38400;
         case 57600: return Ds2BaudRate.Baud57600;
         case 76800: return Ds2BaudRate.Baud76800;
