@@ -67,22 +67,14 @@ export interface ReadTimingReport {
      * Real wall clock across the chunk loop, gaps and retries included.
      *
      * Necessary because `chunks x median.total` does NOT reproduce it: `total` measures one exchange,
-     * and `commandDelayMs` deliberately sits between exchanges rather than inside one, so any estimate
-     * built from the medians silently omits every gap and every retry settle. When the whole point is
-     * comparing configurations by speed, the headline number has to be measured, not reconstructed.
+     * and a retry's settle happens between exchanges rather than inside one, so an estimate built from
+     * the medians silently omits it. When the headline number IS the duration, it has to be measured.
      *
      * Excludes login and the baud switch, which happen before the loop is armed.
      */
     elapsedMs: number;
     /** Bytes requested per read telegram at the time of the read. */
     chunkSize: number;
-    /**
-     * The inter-telegram pause this read ran with. Note it is NOT inside the measured exchange window
-     * — it happens in readRange between exchanges — so `median.turnaround` and `median.total` stay
-     * directly comparable across delay settings. That is the point: the question is whether giving the
-     * DME room changes how long IT takes, not whether adding a wait makes the wall clock longer.
-     */
-    commandDelayMs: number;
     /**
      * The rate the UI ASKED for. Separate from `baud`, which is what the read actually ran at.
      *
@@ -156,7 +148,6 @@ export class TransferTiming {
     private tBegin = 0;
     private retries = 0;
     private chunkSize = 0;
-    private commandDelayMs = 0;
     private requestedBaud: number | null = null;
     private switchOutcome: string | null = null;
     private baud: number | null = null;
@@ -220,14 +211,13 @@ export class TransferTiming {
      */
     begin(expectedChunks: number, info: {
         chunkSize: number;
-        commandDelayMs: number;
         requestedBaud: number | null;
         switchOutcome: string | null;
         baud: number | null;
         maxTelegramLength: number | null;
     }): void {
         if (!this.enabled) return;
-        const { chunkSize, commandDelayMs, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
+        const { chunkSize, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
         // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
         // a read. Overflow beyond that is dropped by the bounds check in end().
         const capacity = expectedChunks + 8;
@@ -243,7 +233,6 @@ export class TransferTiming {
         this.index = 0;
         this.retries = 0;
         this.chunkSize = chunkSize;
-        this.commandDelayMs = commandDelayMs;
         this.requestedBaud = requestedBaud;
         this.switchOutcome = switchOutcome;
         this.baud = baud;
@@ -354,7 +343,6 @@ export class TransferTiming {
             chunks: n,
             elapsedMs: performance.now() - this.tBegin,
             chunkSize: this.chunkSize,
-            commandDelayMs: this.commandDelayMs,
             requestedBaud: this.requestedBaud,
             switchOutcome: this.switchOutcome,
             baud: this.baud,
@@ -391,7 +379,6 @@ export function formatTimingTail(r: ReadTimingReport): string {
     const m = r.median;
     return (r.completed ? '' : `DIED@${r.chunks} `) +
         (r.requestedBaud !== null && r.requestedBaud !== r.baud ? `${r.requestedBaud}→${r.baud} ` : '') +
-        (r.commandDelayMs ? `gap${r.commandDelayMs} ` : '') +
         `${(r.elapsedMs / 1000).toFixed(1)}s ` +
         `rx${Math.round(m.rxEvents)} w${m.write.toFixed(1)} ta${Math.round(m.turnaround)}` +
         ` wire${Math.round(m.responseWire)}/${r.theoreticalResponseWire ? Math.round(r.theoreticalResponseWire) : '?'}` +

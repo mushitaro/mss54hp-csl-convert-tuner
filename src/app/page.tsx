@@ -20,7 +20,7 @@ import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
-import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud, DS2_SELECTABLE_DELAYS, Ds2CommandDelay } from '@/lib/dme-link/ds2';
+import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
@@ -1006,7 +1006,7 @@ export default function Home() {
     const rate = report.requestedBaud !== null && report.requestedBaud !== report.baud
         ? `${report.requestedBaud}refused-ran${report.baud}`
         : `${report.baud ?? 'unknown'}baud`;
-    const name = `ReadTiming_${rate}_gap${report.commandDelayMs}_${outcome}_${Date.now()}.json`;
+    const name = `ReadTiming_${rate}_${outcome}_${Date.now()}.json`;
     downloadBlob(JSON.stringify(report, null, 2), name, MIME_JSON);
   };
 
@@ -1795,29 +1795,6 @@ export default function Home() {
                           >
                             {DS2_SELECTABLE_BAUDS.map(baud => (
                               <option key={baud} value={baud}>{baud}</option>
-                            ))}
-                          </select>
-                        </label>
-                        {/* Inter-telegram pause. Same invisible-but-mounted treatment as the baud
-                            selector next to it. */}
-                        <label
-                          className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
-                          aria-hidden={dmeLink.mockMode}
-                          title={'Pause between bulk-read telegrams (EDIABAS calls this the regen time).\n\n'
-                            + '0 — current, proven behaviour: the next request goes out the instant the last response byte lands.\n\n'
-                            + 'BMW\'s own stacks do not run at zero — EDIABAS waits ParRegenTime, and BMW Scanner ships Delay=20/Delay2=40.\n\n'
-                            + 'Under investigation: at 38400 the wire time hits its theoretical floor but the DME\'s own turnaround doubles (53ms to 115ms) and the ECU then goes silent a few percent in. If a gap brings the turnaround back down, we were overrunning it.\n\n'
-                            + 'READ path only. The gap sits between exchanges, not inside one, so the measured turnaround stays comparable across settings.'}
-                        >
-                          GAP
-                          <select
-                            value={dmeLink.commandDelayMs}
-                            disabled={dmeLink.mockMode}
-                            onChange={(e) => dmeLink.setCommandDelayMs(Number(e.target.value) as Ds2CommandDelay)}
-                            className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
-                          >
-                            {DS2_SELECTABLE_DELAYS.map(ms => (
-                              <option key={ms} value={ms}>{ms}</option>
                             ))}
                           </select>
                         </label>

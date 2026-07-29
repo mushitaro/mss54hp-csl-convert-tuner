@@ -183,9 +183,6 @@ export class WebSerialDmeLink implements DmeLink {
      * 57600/76800/115200 are untested candidates between the two. See Ds2SupportedBaud.
      */
     private readonly readBaud: Ds2SupportedBaud;
-    /** Pause between bulk-read telegrams. 0 is the proven behaviour; see Ds2CommandDelay for why the
-     *  rest of the BMW world does not run at zero. READ path only. */
-    private readonly commandDelayMs: number;
     /**
      * Set once a baud boost has actually been accepted, and never cleared. Adaptation reads/clears
      * need a normal 9600 session; readPartialBin does try to hand the session back at 9600, but that
@@ -224,9 +221,8 @@ export class WebSerialDmeLink implements DmeLink {
         this.transport.setTiming(enabled ? this.timing : null);
     }
 
-    constructor(options?: { readBaud?: Ds2SupportedBaud; commandDelayMs?: number }) {
+    constructor(options?: { readBaud?: Ds2SupportedBaud }) {
         this.readBaud = options?.readBaud ?? 9600;
-        this.commandDelayMs = options?.commandDelayMs ?? 0;
     }
 
     abort(): void {
@@ -652,11 +648,6 @@ export class WebSerialDmeLink implements DmeLink {
             out.set(chunk, done);
             done += count;
             onProgress?.(done, length);
-            // Recovery gap between telegrams — EDIABAS's ParRegenTime, which this link has always run
-            // at zero. Measured from the last response byte (we are here immediately after it), which
-            // is where EdiabasLib measures it from too. Skipped after the final chunk: the gap exists
-            // to give the DME room before the NEXT request, and there isn't one.
-            if (this.commandDelayMs > 0 && done < length) await delay(this.commandDelayMs);
         }
         return out;
     }
@@ -719,7 +710,6 @@ export class WebSerialDmeLink implements DmeLink {
             // Arm the instrument for exactly this read. Sized up-front so nothing allocates per chunk.
             this.timing.begin(Math.ceil(total / readChunkSize), {
                 chunkSize: readChunkSize,
-                commandDelayMs: this.commandDelayMs,
                 requestedBaud: this.readBaud,
                 switchOutcome: this.lastSwitchOutcome,
                 baud: this.lastReadBaud,
