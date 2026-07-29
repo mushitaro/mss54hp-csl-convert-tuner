@@ -442,8 +442,10 @@ weakened, not eliminated.)
 path). Everything above it is opt-in. On failure the local port is force-restored to 9600 so a
 reconnect / ignition cycle recovers instead of silently hanging.
 
-**38400 is the highest rate confirmed working**; 125000 does not run. Whether anything between them is
-accepted is still open — the notice above is what will answer it, one read at a time.
+**38400 has completed a read at least once, but currently fails part-way** (see below); 125000 does not
+run at all. Whether anything between them is accepted is still open — the notice above is what will
+answer it, one read at a time. Note that the reference tool never uses anything but 9600 and 125000,
+so nothing above 9600 here has precedent to lean on.
 
 ### Why raising the baud produced no speed-up (2026-07-28)
 
@@ -467,9 +469,16 @@ pump, a late arrival is now served ~2 ms after it lands instead of up to a clamp
 latched break wakes the reader immediately instead of waiting out the full timeout.
 
 **Reads now report their own measured throughput** in the DME notice line
-(`Read 64 KB in 71.2 s (921 B/s). Link ran at 9600 baud.`), in slate for a plain result and amber when
-a switch was refused. Comparing rates is now arithmetic, not impression — which matters, because an
+(`9600 baud · 64 KB / 124.0 s · 530 B/s`), in slate for a plain result and amber with `REFUSED` when a
+switch was rejected. Comparing rates is now arithmetic, not impression — which matters, because an
 impression is what previously led to three rates being deleted on a wrong conclusion.
+
+That line spent one round of testing rendered at `text-[9px]` in `slate-500` and truncated, and was
+reported from the car as "nothing appeared". It was appearing; it could not be read. Now 11px in
+`slate-300`, with the message shortened to `<baud> · <size> / <time> · <rate>` so the numbers survive
+truncation — leading is pinned to the 14px row so the larger font still cannot grow the panel into the
+visualizer, which is the constraint that made it 9px in the first place. A measurement nobody can read
+is not a measurement.
 
 ### The FTDI latency timer — and a correction
 
@@ -510,14 +519,98 @@ really does emit roughly one packet per byte — but it cannot be *the regressio
 regressed: this is simply how it has always run. It remains a plausible contributor to the standing
 40 s gap and is worth testing by raising the timer, but it explains no change over time.
 
+**The test has a predicted direction, and it is the counter-intuitive one.** With the timer already at
+1 ms, the component everyone reaches for first — waiting out the timer at the tail of a short receive —
+costs at most 1 ms × 2 bursts = **~2 ms per chunk, ~1 s per read**. It is already eliminated; it is not
+the 40 s. What 1 ms *does* buy at 9600 is ~126 packet completions per response instead of ~9, each one
+a wakeup that has to cross from the driver through Chromium's serial service into the renderer, where
+D2XX would have accumulated them inside `FT_Read`. So raising the timer to 16 ms should make the read
+**faster**, not slower, and by roughly 126→9 wakeups × 538 chunks. If it does, the 75 ms/chunk is
+per-wakeup cost and the ceiling is the VCP path itself. If it does not move, that hypothesis is dead
+too and the remaining candidate is DME turnaround (P2), which the reference pays identically — see the
+missing baseline below.
+
+**The missing baseline.** Nothing here has ever been compared against the reference tool's own wall
+clock over the same region. Its 512 KiB full read has a ~665 s wire floor (4298 chunks × 154.7 ms); the
+measured duration divided by 4298 is the number that says whether ~75 ms/chunk is our overhead or just
+what an MSS54 costs. Until that exists, this gap is *unattributed*, not *explained*, and the transport
+should not be refactored for it.
+
 **38400 fails differently than assumed.** It is not silent from the moment of the switch — it reads
 successfully for 3–10% of the transfer and then stops answering. That is the signature of the
 intermittent K-line fault in §12 (or of errors accumulating faster at higher rate), not of a DME that
 never moved to the new baud. The earlier note here that it looked "exactly like 125000" was wrong:
 125000 produced zero bytes immediately.
 
-Open, with no current explanation: the ~75 ms/chunk overhead at 9600, and why 38400 now fails
-part-way when it previously completed.
+### What the reference actually does for comms (2026-07-29)
+
+Read late — the flash-counter work ported `Core`, not the transport, and the two open questions above
+were being chased without it. Findings, from `decompiled-source/Transports` and `Core/Ds2Client.cs`:
+
+**The reference has two transports, and only one of them is fast.**
+
+| | `FtdiD2xxTransport` | `SerialPortTransport` |
+|---|---|---|
+| Path | `ftd2xx.dll` direct, no COM port | `System.IO.Ports.SerialPort` (VCP) |
+| Latency timer | `FT_SetLatencyTimer(handle, 1)` at open | **no such call anywhere** |
+| Receive buffer | `FT_SetUSBParameters(4096, 4096)` | `ReadBufferSize = 4096` |
+| Timeouts | `FT_SetTimeouts(1000, 1000)` | `ReadTimeout = ReadTimeout = 1000` |
+| Control lines | untouched | `DtrEnable = false; RtsEnable = false` |
+
+So the reference does not depend on the Device Manager latency setting at all — it programs the chip
+itself, on the D2XX path only. Web Serial can never take that path. A reference benchmark taken over
+D2XX is therefore **not** a like-for-like baseline for this app; one taken over its COM-port transport
+is.
+
+**The DS2 layer, by contrast, is already the same as ours** — this was worth confirming and is now
+ruled out as a source of overhead:
+
+| | Reference | Here |
+|---|---|---|
+| Chunk size | `DefaultChunkSize = 122` | `chunkSize: 122` ✅ |
+| Inter-telegram delay | `CommandDelay = TimeSpan.Zero`, never assigned anywhere | none ✅ |
+| Echo | read back, compared byte-for-byte | same (plus mismatch classification) ✅ |
+| Frame read | 2-byte header, then `len - 2` | same (plus an address guard it lacks) ✅ |
+| Response timeout | 1000 ms, restarted on every partial read | 2000 ms, one deadline per phase |
+| Chunk retry | 5 attempts, flat 1 s + purge | 5 attempts, escalating + resync |
+
+Two differences that are *ours to fix*, both now fixed:
+
+1. **`bufferSize` was never passed to `port.open()`** — the Web Serial default is 255 bytes, against
+   4096 on both reference transports. 255 bytes is not slow, it is fragile: it is how far the main
+   thread may fall behind before the stream errors, and that budget is a *time* budget that shrinks
+   with baud — **292 ms at 9600, 73 ms at 38400**. Our read pump shares the thread with React. This is
+   the leading explanation for 38400 dying part-way while 9600 completes, and it explains the baud
+   dependence rather than just coinciding with it. Now `RX_BUFFER_BYTES = 4096`.
+2. **The bulk read was the least patient retry path in the codebase** — flat 300 ms × 4 = 1.2 s, where
+   the reference gives 4 s and where our own `adaptationExchangeWithRetry` already escalates and
+   lengthens after a break, with a comment explaining that a fresh reader just re-latches a disturbed
+   line. The bulk read never learned it. Now `hasReadError() ? 400 : 300` × attempt — 4 s after a
+   break, matching the reference exactly.
+
+**Correction: the reference does not use 38400.** `Ds2BaudRate.Baud38400` is defined and has **zero
+call sites** in the entire tree; every `TrySwitchToProgrammingBaudAsync` goes to 125000, and always
+from inside a programming session (after an erase or a fast-entry finalize), never from a plain
+diagnostic session as we do. The premise that 38400 was blessed by the reference was wrong — it is an
+unused constant. This does not explain a failure 40 chunks *after* a successful switch, but it does
+mean nothing above 9600 here has precedent.
+
+**The reference also has a reliability escape hatch we lack:** `AllowedDs2MemoryBlockSizes = {122, 96,
+64, 32}`, user-selectable. Not implemented here. Worth having as a *diagnostic*: if 38400 completes at
+64 and fails at 122, the cause is burst-length-dependent (buffer or physical layer), not baud-dependent.
+
+### Open, with no current explanation
+
+The ~75 ms/chunk overhead at 9600, and why 38400 fails part-way when it previously completed.
+
+**The one measurement that collapses the 38400 question** is already in our own error text: the latched
+`pumpError.name`, printed by `readExact` as `Serial read failed: <name> (<message>)`.
+
+- `BufferOverrunError` → the 255-byte buffer; the `bufferSize` fix above should end it
+- `ParityError` / `FramingError` → physical layer (K-line rise time, §12); retry patience and a smaller
+  chunk are mitigations, not cures
+- `Timed out waiting for N byte(s) (received M)` with no latched error → the DME stopped answering;
+  transport is exonerated, look at the 0x91 switch and the session state instead
 
 If 125000 is ever worth revisiting, the remaining lever is the transport, not the rate: the reference
 programs the FTDI divisor directly through `ftd2xx.dll`, which Web Serial cannot do. That would mean

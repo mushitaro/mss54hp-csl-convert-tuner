@@ -39,6 +39,11 @@ const ERASE_TIMEOUT_MS = 65000;
 // Applied to both processors here — a timeout that is too generous only delays a failure.
 const PREP_MARKER_TIMEOUT_MS = 30000;
 const CHUNK_RETRY_ATTEMPTS = 5;
+// Base pause between bulk-read chunk attempts, multiplied by the attempt number (see
+// readMemoryChunkWithRetry). The reference Ds2MemoryReader uses a flat 1 s x 4 = 4 s of settling per
+// failing chunk; escalating from 300ms reaches 3 s without making the common single-glitch case wait
+// a full second before its first retry.
+const CHUNK_RETRY_DELAY_MS = 300;
 // Clearing adaptations writes EEPROM before the DME replies, so the plain read timeout is thin.
 const ADAPT_CLEAR_TIMEOUT_MS = 5000;
 // The DME needs a moment to commit the cleared values before they read back true. The reference2
@@ -396,7 +401,15 @@ export class WebSerialDmeLink implements DmeLink {
                     // into the freshly-cleared buffer and desync the next attempt. purge() alone also
                     // cannot clear a latched break, which is why all five attempts used to burn in
                     // zero time once the line had glitched.
-                    await delay(300);
+                    //
+                    // Escalating, and longer after a break — the same rule adaptationExchangeWithRetry
+                    // already follows, and for the same reason: re-acquiring the reader does not repair
+                    // a disturbed line, only silence does. This path was the one that never learned it.
+                    // A flat 300ms gave a failing chunk 1.2 s of total settling where the reference
+                    // Ds2MemoryReader gives 4 s (1 s x 4); after a break this now matches that exactly
+                    // (400/800/1200/1600), and 3 s otherwise.
+                    const base = this.transport.hasReadError() ? BREAK_SETTLE_MS : CHUNK_RETRY_DELAY_MS;
+                    await delay(base * attempt);
                     await this.resyncTransport();
                 }
             }

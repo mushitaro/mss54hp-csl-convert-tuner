@@ -11,6 +11,21 @@ import { DmeLinkError } from './types';
  * stream — which is exactly what broke bulk (269-chunk) partial-BIN reads. Buffering never drops a
  * byte, keeping echo/response framing aligned across thousands of exchanges.
  */
+/**
+ * Receive buffer requested from the Web Serial implementation, matching the reference app's 4096 on
+ * BOTH its transports (FT_SetUSBParameters(4096, 4096) on D2XX, ReadBufferSize = 4096 on the COM
+ * port). We were passing no bufferSize at all, which meant the spec default of 255 bytes.
+ *
+ * 255 bytes is not slow, it is fragile: it is the amount of receive the main thread may fall behind
+ * by before the stream errors with a BufferOverrunError, and that budget is a *time* budget that
+ * shrinks with baud — 292 ms at 9600, but only 73 ms at 38400. The read pump shares this thread with
+ * React, so one long render inside a transfer overruns at 38400 and is invisible at 9600. That is the
+ * shape of the 38400 failure (dies 3-10% in, ~2-6 s, while 9600 completes), so if a 38400 read still
+ * fails after this, the latched error name will say BufferOverrunError no longer — check it before
+ * assuming the cause moved.
+ */
+const RX_BUFFER_BYTES = 4096;
+
 export class WebSerialTransport {
     private port: SerialPort | null = null;
     private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -62,7 +77,7 @@ export class WebSerialTransport {
         // even-parity; an 8N1 receiver samples the parity bit where the stop bit should be, so every
         // even-popcount byte raises a framing error. DS2's own address 0x12 and ACK 0xA0 both have
         // popcount 2, so effectively every frame would fault on its first byte. 8E1 is proven on the car.
-        await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even' });
+        await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
         this.writer = this.port.writable!.getWriter();
         this.reader = this.port.readable!.getReader();
         this.buffer = [];
@@ -119,7 +134,7 @@ export class WebSerialTransport {
         try { this.reader?.releaseLock(); } catch { }
         try { this.writer?.releaseLock(); } catch { }
         await port.close();
-        await port.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'even' });
+        await port.open({ baudRate, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
         this.writer = port.writable!.getWriter();
         this.reader = port.readable!.getReader();
         this.buffer = [];

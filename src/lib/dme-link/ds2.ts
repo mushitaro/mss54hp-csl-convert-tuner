@@ -356,12 +356,15 @@ export const Ds2BaudRate = {
 /**
  * Rates the 0x91 switch may be asked for.
  *
- * 9600 and 38400 are confirmed on a real vehicle; 125000 is the reference tool's programming rate
- * and reproducibly FAILS here (the DME ACKs, then every exchange times out). 57600 / 76800 / 115200
- * are ours, not the reference's — the payload encoding admits any rate, so these are candidates to
- * probe between the proven 38400 and the broken 125000, on the theory that what breaks is either
- * non-standard rates through the VCP driver or the K-line's RC-limited rise time. See §9 of
- * docs/implementation-notes.md, including how the echo-mismatch analysis tells those two apart.
+ * Only 9600 is reliable. 38400 has completed a read but now dies 3-10% in; 125000 is the reference
+ * tool's programming rate and reproducibly FAILS here (the DME ACKs, then every exchange times out).
+ * 57600 / 76800 / 115200 are ours, not the reference's — the payload encoding admits any rate, so
+ * these are candidates to probe between 38400 and the broken 125000.
+ *
+ * Do not read the reference as endorsing 38400: `Ds2BaudRate.Baud38400` exists there but has ZERO call
+ * sites, and every switch it actually performs goes to 125000 from inside a programming session. See
+ * §9 of docs/implementation-notes.md, including how the latched pump-error name tells a receive-buffer
+ * overrun apart from a physical-layer fault.
  *
  * Asking for an unsupported rate is safe: the DME rejects it and trySwitchBaud leaves the port alone.
  */

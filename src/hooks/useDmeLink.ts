@@ -177,13 +177,16 @@ export function useDmeLink() {
             // deleted on a wrong conclusion — so the read states its own elapsed time and throughput.
             const seconds = (performance.now() - startedAt) / 1000;
             const actual = linkRef.current.getLastReadBaud?.() ?? null;
+            // Kept short on purpose: the notice line is one truncating row, so a sentence-shaped
+            // message loses its tail — which is exactly where the numbers were. Baud comes first
+            // because "which rate did this actually run at" is the question being answered.
             const rate = `${Math.round(buffer.byteLength / seconds).toLocaleString()} B/s`;
-            const measured = `Read ${(buffer.byteLength / 1024).toFixed(0)} KB in ${seconds.toFixed(1)} s (${rate}).`;
+            const measured = `${(buffer.byteLength / 1024).toFixed(0)} KB / ${seconds.toFixed(1)} s · ${rate}`;
             const refused = actual !== null && actual !== readBaud;
             setWarningKind(refused ? 'warn' : 'info');
             setWarning(refused
-                ? `${measured} The DME refused the ${readBaud} baud switch, so this ran at ${actual}.`
-                : `${measured}${actual !== null ? ` Link ran at ${actual} baud.` : ''}`);
+                ? `${readBaud} REFUSED — ran at ${actual} · ${measured}`
+                : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`);
             // Idle again. The caller loads these bytes as the BASE, which is what turns the button
             // into START TUNE — it isn't this function's business to say so.
             setState('connected');

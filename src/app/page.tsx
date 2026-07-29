@@ -1754,12 +1754,17 @@ export default function Home() {
                     const notice = dmeLink.error ?? warning;
                     if (!notice) return null;
                     // Three levels, because a read reporting its own speed is not a warning and
-                    // should not wear the warning colour on every successful transfer.
+                    // should not wear the warning colour on every successful transfer. But "quieter"
+                    // must not mean "unreadable": at 9px/slate-500 the read's own measured baud and
+                    // throughput were invisible from the driver's seat and got reported as "nothing
+                    // appeared" — and a baud rate cannot be judged by feel, which is the whole reason
+                    // this line reports numbers. Leading is pinned to the row height so the larger
+                    // font still cannot grow the panel into the visualizer.
                     const tone = dmeLink.error ? 'text-red-400'
-                      : dmeLink.warning && dmeLink.warningKind === 'info' ? 'text-slate-500'
+                      : dmeLink.warning && dmeLink.warningKind === 'info' ? 'text-slate-300'
                         : 'text-amber-500/80';
                     return (
-                      <p className={`text-[9px] font-mono truncate ${tone}`} title={notice}>
+                      <p className={`text-[11px] leading-[14px] font-mono truncate ${tone}`} title={notice}>
                         {notice}
                       </p>
                     );
