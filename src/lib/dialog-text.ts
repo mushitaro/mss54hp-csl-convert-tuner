@@ -100,7 +100,10 @@ const JA = {
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
         '  エンジンが回っているとDMEが書き込みを拒否します。\n' +
         '⚠ 電源(バッテリー)を安定させてください。書き込みには約4分かかります。\n' +
-        '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n\n' +
+        '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n' +
+        // ブラウザ側のダイアログは文言を指定できないため、理由を説明できるのはここだけである。
+        '  ブラウザのタブを閉じたり、リロードしたりしないでください。\n' +
+        '  (閉じようとすると確認が出ますが、確認を無視すれば離れられてしまいます)\n\n' +
         'チェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
         '続行しますか？',
 
@@ -201,7 +204,9 @@ const EN: NativeDialogText = {
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +
         '  The DME refuses the write while the engine is running.\n' +
         '⚠ Keep the power (battery) stable. The write takes about 4 minutes.\n' +
-        '  Never cut the power or unplug the cable while it is writing.\n\n' +
+        '  Never cut the power or unplug the cable while it is writing.\n' +
+        '  Do not close or reload this browser tab.\n' +
+        '  (Trying to close it asks for confirmation, but confirming still leaves.)\n\n' +
         'The checksum is corrected automatically. The write is verified by reading it back.\n\n' +
         'Continue?',
 

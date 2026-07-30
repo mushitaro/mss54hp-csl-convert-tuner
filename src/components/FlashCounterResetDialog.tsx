@@ -105,7 +105,7 @@ const TEXT = {
         warn: (<>
             リセット中にDMEの電源が切れると、<span className="text-slate-100 font-bold">車両情報（VIN・書き込み履歴）</span>が失われます。
         </>),
-        warnPower: '電源(バッテリー)を安定させ、ケーブルを抜かないでください。所要 約1.5〜2分です。',
+        warnPower: '電源(バッテリー)を安定させ、ケーブルを抜かないでください。ブラウザのタブを閉じたりリロードしたりもしないでください。所要 約1.5〜2分です。',
         warnInterrupted: (<>
             中断した場合は<span className="text-slate-100 font-bold">リセットを再実行しないでください。</span>再実行すると復旧できなくなります。
         </>),
@@ -206,7 +206,7 @@ const TEXT = {
         warn: (<>
             If the DME loses power during the reset, the <span className="text-slate-100 font-bold">vehicle information (VIN and programming history)</span> is lost.
         </>),
-        warnPower: 'Keep the battery stable and do not unplug the cable. Takes about 1.5–2 minutes.',
+        warnPower: 'Keep the battery stable, do not unplug the cable, and do not close or reload this browser tab. Takes about 1.5–2 minutes.',
         warnInterrupted: (<>
             If it is interrupted, <span className="text-slate-100 font-bold">do not run the reset again.</span> Doing so makes it unrecoverable.
         </>),

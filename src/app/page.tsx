@@ -35,6 +35,7 @@ import { useComparison } from '@/hooks/useComparison';
 import { useSessionDb } from '@/hooks/useSessionDb';
 import { useFieldVisibility } from '@/hooks/useFieldVisibility';
 import { useDmeLink } from '@/hooks/useDmeLink';
+import { useUnloadGuard } from '@/hooks/useUnloadGuard';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
 
 type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup' | 'wot';
@@ -210,6 +211,27 @@ export default function Home() {
   const fieldVisibility = useFieldVisibility();
   const dmeLink = useDmeLink();
   const comparison = useComparison(veCalc.newMap, binaryFileState.initialMapData, sessionDb.sessions);
+
+  /**
+   * Make leaving the page deliberate while the DME is being written to, reset, or logged.
+   *
+   * Derived from the link state, never from a flag — see useUnloadGuard for why that distinction is
+   * the whole safety argument. `writing` erases the data area before it writes and `resetting`
+   * covers the flash-counter reset, which erases the VIN and AIF records; interrupting either leaves
+   * the ECU in a state the app cannot put back. `tuning` is here for a cheaper reason: a reload ends
+   * the run, and while the samples now survive it (liveRunRepository) the drive still has to be
+   * repeated. Notably an HMR full reload goes through location.reload(), so this catches that too.
+   *
+   * `reading` is deliberately absent. It is non-destructive — interrupting it costs four minutes and
+   * nothing else — and a guard that fires on harmless operations is one the user learns to dismiss
+   * without reading, which is exactly what must not happen on the two states above.
+   */
+  const unloadGuarded =
+    dmeLink.state === 'writing' || dmeLink.state === 'resetting' || dmeLink.state === 'tuning';
+  // A flash is ~4 minutes and a reset ~2, so ten minutes is a generous ceiling for a bounded
+  // operation that has hung. A data log is a drive: capping it at minutes would drop the guard
+  // mid-run, so it gets a bound that only a genuinely stuck state could ever reach.
+  useUnloadGuard(unloadGuarded, dmeLink.state === 'tuning' ? 6 * 60 * 60_000 : 10 * 60_000);
 
   const [activeTab, setActiveTab] = useState<TabId>('startup');
   /** Bumped by the chart's FIT button. Folded into the plot's uirevision so Plotly drops the
