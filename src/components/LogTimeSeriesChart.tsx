@@ -131,6 +131,11 @@ interface Props {
     /** Scroll the SHARED window by a signed number of points. The same call the slider makes, so a
      *  horizontal swipe and a slider drag are one operation. Omit and horizontal swipes are ignored. */
     onPanWindow?: (deltaPoints: number) => void;
+    /** Whether the window can actually move — i.e. the log is longer than one window. False means
+     *  `onPanWindow` would clamp straight back to 0, and a horizontal swipe pans the zoomed axis
+     *  instead. The chart cannot work this out for itself: it only ever sees the window, which looks
+     *  identical whether it is the whole log or a slice of one. */
+    canPanWindow?: boolean;
     /** Identifies the log on screen, NOT the window into it. Feeds uirevision: a new log should drop
      *  the zoom, scrubbing the same log should not. Live logging keeps one key while data grows. */
     logKey?: string;
@@ -139,7 +144,7 @@ interface Props {
 /** Wrapped in React.memo so the page's per-sample re-render during a log run stops at this boundary.
  *  Without it the live HUD's state updates would drag a full Plotly pass along ~8 times a second. */
 export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
-    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0, onPanWindow, logKey = 'none',
+    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0, onPanWindow, canPanWindow = false, logKey = 'none',
 }: Props) {
     const lastHoveredIndex = React.useRef<number | null>(null);
     const wrapperRef = React.useRef<HTMLDivElement>(null);
@@ -168,10 +173,17 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
      * Pixels are converted to points against the plotting area so the data tracks the fingers 1:1,
      * and coalesced onto an animation frame — a swipe emits wheel events far faster than re-slicing a
      * 2,000-row window and rebuilding the table costs.
+     *
+     * When there is NO window to move — a log that fits inside LOG_WINDOW_SIZE, so `maxWindowStart`
+     * is 0 and panWindow can only ever clamp back to 0 — the swipe pans the zoomed axis instead.
+     * Without that branch the gesture died outright on every short log: panWindow did nothing while
+     * preventDefault had already taken the event away from Plotly, so a zoomed chart could not be
+     * scrolled at all. The fallback is safe precisely because the window is degenerate here: every
+     * row is already on screen in the table, so moving the chart's own range cannot desync the two.
      */
     React.useEffect(() => {
         const wrapper = wrapperRef.current;
-        if (!wrapper || !onPanWindow) return;
+        if (!wrapper) return;
         let pendingPx = 0;
         let frame = 0;
 
@@ -181,15 +193,41 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             pendingPx = 0;
             // Plotly hangs the resolved layout off the graph div; not in @types/plotly.js because it
             // is internal, so name only the fields actually read rather than reaching for `any`.
-            type ResolvedLayout = { width?: number; margin?: { l: number; r: number } };
+            type ResolvedAxis = { range?: [number, number]; autorange?: boolean | string };
+            type ResolvedLayout = { width?: number; margin?: { l: number; r: number }; xaxis?: ResolvedAxis };
             const gd = wrapper.querySelector('.js-plotly-plot') as (HTMLElement & { _fullLayout?: ResolvedLayout }) | null;
             const full = gd?._fullLayout;
-            if (full?.width === undefined || !full.margin) return;
+            if (!gd || full?.width === undefined || !full.margin) return;
             const plotWidth = full.width - full.margin.l - full.margin.r;
             if (!(plotWidth > 0) || data.length === 0) return;
-            // Points per pixel across the visible window — so a swipe moves the data under the
-            // fingers at the rate the eye expects, whatever the window and pane widths are.
-            onPanWindow((px / plotWidth) * data.length);
+
+            if (canPanWindow && onPanWindow) {
+                // Points per pixel across the visible window — so a swipe moves the data under the
+                // fingers at the rate the eye expects, whatever the window and pane widths are.
+                onPanWindow((px / plotWidth) * data.length);
+                return;
+            }
+
+            const ax = full.xaxis;
+            // Not zoomed means the whole log is already visible and there is nowhere to pan to.
+            // Relayouting here would also cancel autorange and silently lock the view.
+            if (!ax?.range || ax.autorange || !plotlyModule) return;
+            const [r0, r1] = ax.range;
+            const first = data[0].time;
+            const last = data[data.length - 1].time;
+            // Zoomed out past the data (Plotly's scroll-zoom allows it): everything is already on
+            // screen, so there is nothing to pan to. Returning is not just an optimisation — the
+            // clamp below would have to shrink the range to fit, which is a silent zoom change made
+            // while the finger is still moving.
+            if (r1 - r0 >= last - first) return;
+            const shift = (px / plotWidth) * (r1 - r0);
+            let lo = r0 + shift;
+            let hi = r1 + shift;
+            // Clamped as a whole, so the magnification survives hitting either end — moving one edge
+            // alone would zoom instead of stopping.
+            if (lo < first) { hi += first - lo; lo = first; }
+            if (hi > last) { lo -= hi - last; hi = last; }
+            void plotlyModule.relayout(gd, { 'xaxis.range': [lo, hi] });
         };
 
         const onWheel = (e: WheelEvent) => {
@@ -206,7 +244,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             wrapper.removeEventListener('wheel', onWheel, { capture: true });
             if (frame) cancelAnimationFrame(frame);
         };
-    }, [onPanWindow, data.length]);
+    }, [onPanWindow, canPanWindow, data]);
 
     /**
      * Carries an active zoom along with the window, in the same frame the new data lands in.

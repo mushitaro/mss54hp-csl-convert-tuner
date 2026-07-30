@@ -1790,6 +1790,7 @@ export default function Home() {
                         live={dmeLink.state === 'tuning'}
                         fitToken={chartFitToken}
                         onPanWindow={panWindow}
+                        canPanWindow={maxWindowStart > 0}
                         logKey={logFileState.logFile?.name ?? 'none'}
                       />
                     </div>

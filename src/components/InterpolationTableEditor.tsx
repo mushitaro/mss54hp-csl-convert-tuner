@@ -1,7 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { InterpolationPoint } from '@/lib/types';
 import { Settings, Save, RotateCcw, Activity } from 'lucide-react';
+import { useDialogLang } from '@/hooks/useDialogLang';
 import { APP_CONFIG } from '@/config/constants';
+
+/** Prose only. RO CORRECTION, Enable Correction, RPM, Factor (Alpha), Reset and Save Config are
+ *  control names — the instrument's vocabulary — and stay in one form on purpose. */
+const TEXT = {
+    ja: {
+        config: 'Alpha-N テーブル設定',
+        locked: '固定 — 保存済みチューンはこのテーブルで作られています。別のテーブルで調整するには新しいセッションを開始してください。',
+    },
+    en: {
+        config: 'Alpha-N Table Config',
+        locked: 'Locked — this is the table this saved tune was built with. Start a new session to tune with a different one.',
+    },
+};
 
 interface Props {
     config: InterpolationPoint[];
@@ -34,6 +48,7 @@ const AlphaIcon = ({ className }: { className?: string }) => (
 
 export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enabled, onToggle, readOnly = false }) => {
     const [isOpen, setIsOpen] = useState(false);
+    const t = TEXT[useDialogLang()];
     const [points, setPoints] = useState<InterpolationPoint[]>(config);
 
     useEffect(() => {
@@ -61,7 +76,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
             <button
                 onClick={() => setIsOpen(!isOpen)}
                 className={`p-2 rounded text-slate-400 hover:text-orange-400 transition-colors ${isOpen ? 'text-orange-400 bg-slate-800' : 'hover:bg-slate-800'}`}
-                title="Alpha-N Table Config"
+                title={t.config}
             >
                 <AlphaIcon className="w-4 h-4" />
             </button>
@@ -80,8 +95,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
 
                             {readOnly && (
                                 <p className="text-[9px] font-mono text-amber-500/80 leading-relaxed">
-                                    Locked — this is the table this saved tune was built with.
-                                    Start a new session to tune with a different one.
+                                    {t.locked}
                                 </p>
                             )}
 

@@ -1,6 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { Settings, X, RefreshCw, Filter } from 'lucide-react';
 import { LogFilterConfig } from '@/lib/types';
+import { useDialogLang } from '@/hooks/useDialogLang';
+
+/**
+ * Only the prose is here. The control names — RAW FILTER, Min Temp, Idle RPM Threshold, Transient
+ * Filter, Max RO Delta — stay as they are: they are the instrument's vocabulary, the same words the
+ * stored TuneSettings and the log columns use, and translating them would break that chain rather
+ * than help. What gets translated is the text that explains something.
+ */
+const TEXT = {
+    ja: {
+        settings: 'フィルター設定',
+        locked: '固定 — 保存済みチューンはこの設定で作られています。別のフィルターで調整するには新しいセッションを開始してください。',
+        idleHint: 'RPMが下限未満 かつ RO≤1.0 の点を除外',
+        tpsHint: 'スロットル開度の変化量(絶対値)',
+        immediate: '変更は即時反映されます',
+    },
+    en: {
+        settings: 'Filter Settings',
+        locked: 'Locked — these are the settings this saved tune was built with. Start a new session to tune with different filters.',
+        idleHint: 'Exclude if RPM < Limit & RO≤1.0',
+        tpsHint: 'Absolute Change in Opening %',
+        immediate: 'Adjustments apply immediately',
+    },
+};
 
 interface Props {
     config: LogFilterConfig;
@@ -13,6 +37,7 @@ interface Props {
 export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
+    const t = TEXT[useDialogLang()];
 
     // Sync local config if prop changes (reset)
     useEffect(() => {
@@ -32,7 +57,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
             <button
                 onClick={() => setIsOpen(!isOpen)}
                 className={`p-2 rounded text-slate-400 hover:text-blue-400 transition-colors ${isOpen ? 'text-blue-400 bg-slate-800' : 'hover:bg-slate-800'}`}
-                title="Filter Settings"
+                title={t.settings}
             >
                 <Filter className="w-4 h-4" />
             </button>
@@ -59,8 +84,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
 
                         {readOnly && (
                             <p className="mb-3 text-[9px] font-mono text-amber-500/80 leading-relaxed">
-                                Locked — these are the settings this saved tune was built with.
-                                Start a new session to tune with different filters.
+                                {t.locked}
                             </p>
                         )}
 
@@ -113,7 +137,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                     onChange={(e) => handleChange('idleRpm', Number(e.target.value))}
                                     className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${localConfig.enableIdle ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
                                 />
-                                <p className="text-[9px] text-slate-600">Exclude if RPM &lt; Limit & RO&le;1.0</p>
+                                <p className="text-[9px] text-slate-600">{t.idleHint}</p>
                             </div>
 
                             {/* Transient Header */}
@@ -172,12 +196,12 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                     onChange={(e) => handleChange('tpsStableThreshold', Number(e.target.value))}
                                     className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
                                 />
-                                <p className="text-[9px] text-slate-600">Absolute Change in Opening %</p>
+                                <p className="text-[9px] text-slate-600">{t.tpsHint}</p>
                             </div>
                         </div>
 
                         <div className="mt-4 pt-3 border-t border-slate-800 text-center">
-                            <span className="text-[10px] text-slate-600">Adjustments apply immediately</span>
+                            <span className="text-[10px] text-slate-600">{t.immediate}</span>
                         </div>
                     </div>
                 </>
