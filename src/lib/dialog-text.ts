@@ -63,6 +63,18 @@ const JA = {
         'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
         'キャンセル = ワークスペースを閉じてセッション一覧に戻る',
 
+    // --- 中断されたデータログの復元 ---
+    recoverRun: (a: { points: number; startedAt: number; ended: boolean; mock: boolean }) =>
+        `保存されていないデータログが残っています。${a.mock ? '(PRACTICE)\n' : '\n'}` +
+        `\n記録開始: ${new Date(a.startedAt).toLocaleString()}\n` +
+        `サンプル数: ${a.points.toLocaleString()} 件\n` +
+        (a.ended
+            ? '\nログは正常に終了しましたが、保存前に画面が閉じられたようです。\n'
+            : '\n記録中に画面が閉じられたようです(リロード・クラッシュ・スリープなど)。\n') +
+        '\nOK        = このログを復元する(BASEも一緒に読み込みます)\n' +
+        'キャンセル = 復元しない(このデータは破棄されます)',
+    recoverFailed: 'データログを復元できませんでした。元のセッションのBINが見つかりません。',
+
     // --- data log ---
     logFinished: (failure: string | null) =>
         (failure
@@ -154,6 +166,17 @@ const EN: NativeDialogText = {
         'Session saved.\n\n' +
         'OK     = keep it loaded (you can WRITE it now)\n' +
         'Cancel = close the workspace and return to the session list',
+
+    recoverRun: (a: { points: number; startedAt: number; ended: boolean; mock: boolean }) =>
+        `An unsaved data log was left behind.${a.mock ? ' (PRACTICE)\n' : '\n'}` +
+        `\nStarted: ${new Date(a.startedAt).toLocaleString()}\n` +
+        `Samples: ${a.points.toLocaleString()}\n` +
+        (a.ended
+            ? '\nThe log finished normally, but the page was closed before it was saved.\n'
+            : '\nThe page went away while it was still recording (reload, crash, or sleep).\n') +
+        '\nOK     = restore this log (the BASE is loaded with it)\n' +
+        'Cancel = do not restore (this data will be discarded)',
+    recoverFailed: 'The data log could not be restored — the original session\'s binary is missing.',
 
     logFinished: (failure: string | null) =>
         (failure

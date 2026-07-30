@@ -22,6 +22,7 @@ import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-l
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
 import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
+import { beginLiveRun, appendLiveChunk, endLiveRun, discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { dialogText } from '@/lib/dialog-text';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
@@ -43,6 +44,10 @@ type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup
  *  4 Hz keeps the digits readable; the value itself is recomputed no faster than that. */
 const HZ_WINDOW_SAMPLES = 24;
 const HZ_PUBLISH_INTERVAL_S = 0.25;
+/** How often a run's samples are appended to the crash-recovery store. Wall clock, not sample time:
+ *  this bounds how much of a DRIVE is at risk, and that is measured in seconds of the user's life,
+ *  not in samples. At the ~10 Hz this link achieves, 5 s is ~50 points — the most a crash can cost. */
+const PERSIST_INTERVAL_MS = 5000;
 
 /** Replaces the tab strip's scrollbar with a fade on whichever edge still has tabs behind it.
  *
@@ -220,6 +225,18 @@ export default function Home() {
 
   const liveSamplesRef = useRef<LogDataPoint[]>([]);
   const lastFlushRef = useRef<number>(0);
+  /** Crash-recovery persistence for the run in progress — see lib/db/liveRunRepository.
+   *
+   *  `liveSamplesRef` is memory only, so until this existed any reload during a run took the whole
+   *  drive with it. Samples accumulate in `persistQueueRef` and are appended to IndexedDB every
+   *  PERSIST_INTERVAL_MS as a new chunk, so the write cost per flush does not grow with the run. */
+  const liveRunIdRef = useRef<string | null>(null);
+  const persistQueueRef = useRef<LogDataPoint[]>([]);
+  const persistSeqRef = useRef<number>(0);
+  const persistAtRef = useRef<number>(0);
+  /** True while an append is in flight, so a slow write cannot have a second one stacked on top of
+   *  it — the queue simply keeps filling and the next tick takes everything at once. */
+  const persistBusyRef = useRef(false);
   /** Live sample-rate readout. Refs, not state, on purpose: setLiveSample below already re-renders on
    *  every sample, so a ref read during render is always current — the same trick the SAMP cell uses
    *  — and adding state here would double the per-sample render cost for a value that changes at 4 Hz.
@@ -540,6 +557,67 @@ export default function Home() {
     goToTab('current');
   };
 
+  /**
+   * Offers back a data log that a previous page left unsaved, once, after the disclaimer is out of
+   * the way and the session list has loaded.
+   *
+   * Both conditions matter. Firing under the disclaimer would stack a second modal on the one that
+   * gates the app, and the restore needs the session list to find the run's BASE — the samples on
+   * their own cannot rebuild a tune, because a log only means anything against the bytes it was
+   * captured with.
+   *
+   * Declining discards it. That is the honest reading of "do not restore", and leaving it would make
+   * the same prompt reappear on every load until something else cleared it.
+   */
+  const recoveryOfferedRef = useRef(false);
+  useEffect(() => {
+    if (disclaimer.open || sessionDb.loading || recoveryOfferedRef.current) return;
+    recoveryOfferedRef.current = true;
+    void (async () => {
+      const run = await findRecoverableRun().catch(() => null);
+      if (!run) return;
+      const accept = confirm(dialogText().recoverRun({
+        points: run.pointCount, startedAt: run.startedAt, ended: run.endedAt !== undefined, mock: run.mock,
+      }));
+      if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
+      await restoreRun(run.runId, run.sessionId);
+    })();
+    // One-shot, guarded by the ref: re-running on every sessions refresh would re-offer a run the
+    // user has already answered for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disclaimer.open, sessionDb.loading]);
+
+  /**
+   * Rebuilds the workspace a lost run was in: its session's BASE, then the recovered samples.
+   *
+   * Mirrors the archived branch of handleOpenSession rather than reusing it, because that one loads
+   * the session's STORED log — and the entire point here is the log that never made it into the
+   * store. The recovery record is deliberately NOT cleared on success: the samples are back in
+   * memory, which is exactly the fragile place they were lost from, so the net stays up until SAVE.
+   */
+  const restoreRun = async (runId: string, sessionId: string) => {
+    const session = sessionDb.sessions.find(s => s.id === sessionId);
+    const bins = session ? await sessionDb.loadBinaries(sessionId) : null;
+    if (!session || !bins) { alert(dialogText().recoverFailed); return; }
+
+    const points = await loadLiveRunPoints(runId).catch(() => [] as LogDataPoint[]);
+    if (points.length === 0) { alert(dialogText().recoverFailed); return; }
+
+    resetDerived();
+    setActiveSessionId(sessionId);
+    const map = await binaryFileState.loadFromBuffer(bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin');
+    if (!map) return;
+
+    liveSamplesRef.current = points;
+    const processed = logFileState.loadRawLog(points, 'recovered-log.csv');
+    if (processed) {
+      runCalculation(map, processed.data);
+      goToTab('new');
+    } else {
+      goToTab('current');
+    }
+  };
+
   /** Starts a new session whose BASE is another session's TUNED (continue) or BASE (retry). */
   const handleNewFrom = async (session: TuningSession, which: NewFromWhich) => {
     const bins = await sessionDb.loadBinaries(session.id);
@@ -603,6 +681,12 @@ export default function Home() {
       log: logFileState.rawLogData,
     });
 
+    // The samples are in the session store now, so the recovery copy has done its job. This is the
+    // ONLY success path that clears it: everything before this point — including a run that has
+    // stopped and is being read on screen — still has the drive in memory alone.
+    void discardLiveRun().catch(() => { /* a stale record only costs one declined offer */ });
+    liveRunIdRef.current = null;
+
     // saveTune archives the session — the record now describes a specific set of bytes. But the
     // workspace does not know that: newMap is still loaded, so idleAction stays 'write' and the hub
     // keeps offering WRITE against a session the DB considers closed. That is the "button says the
@@ -652,6 +736,36 @@ export default function Home() {
     goToTab('current');
   };
 
+  /**
+   * Writes whatever has queued up since the last append to the crash-recovery store.
+   *
+   * Best effort in the strongest sense: this must never throw into the poll loop, never block a
+   * sample, and never fail a run. A drive that is being recorded is worth more than the safety net,
+   * so if the net cannot be written the run carries on without it. On failure the batch is put back
+   * at the front of the queue and retried on the next tick, so a transient error costs nothing.
+   */
+  const persistLiveSamples = async (force: boolean) => {
+    const runId = liveRunIdRef.current;
+    if (!runId || persistBusyRef.current) return;
+    const now = Date.now();
+    if (!force && now - persistAtRef.current < PERSIST_INTERVAL_MS) return;
+    if (persistQueueRef.current.length === 0) return;
+
+    const batch = persistQueueRef.current;
+    persistQueueRef.current = [];
+    persistAtRef.current = now;
+    persistBusyRef.current = true;
+    try {
+      await appendLiveChunk(runId, persistSeqRef.current++, batch);
+    } catch {
+      // Re-queue ahead of anything that arrived meanwhile, so capture order survives the retry.
+      persistQueueRef.current = [...batch, ...persistQueueRef.current];
+      persistSeqRef.current--;
+    } finally {
+      persistBusyRef.current = false;
+    }
+  };
+
   /** Returns whether this call actually derived anything, so the end-of-run tab move can be armed only
    *  when there is a result to move to. The throttled early return reports null, which matters solely
    *  to force=true callers — and finishLog is the only one. */
@@ -689,6 +803,15 @@ export default function Home() {
     finishedRef.current = true;
     const flushed = flushLiveSamples(true);
 
+    // Flush the tail into the recovery store and mark the run stopped — but do NOT discard it. The
+    // samples are still only in memory until SAVE, so a stopped-and-unsaved run is exactly as
+    // fragile as a running one, and this is the window in which the user reads the result and
+    // decides. Awaited so the tail is durable before the blocking alert below.
+    await persistLiveSamples(true);
+    if (liveRunIdRef.current) {
+      try { await endLiveRun(liveRunIdRef.current); } catch { /* the samples are already stored */ }
+    }
+
     // Land on the tune this run produced — and only if it produced one. A run that captured nothing
     // must arm nothing, or the move would sit waiting and later hijack an unrelated navigation.
     // Armed before the disconnect/alert below on purpose: alert blocks, so React commits the move
@@ -714,6 +837,19 @@ export default function Home() {
     liveSamplesRef.current = [];
     lastFlushRef.current = 0;
     finishedRef.current = false;
+    // Open the recovery record. Not awaited: the poll loop starts below and the first samples must
+    // not wait on IndexedDB. They queue up regardless — persistLiveSamples no-ops until the id
+    // lands, and nothing is dropped because the queue is what it reads from.
+    liveRunIdRef.current = null;
+    persistQueueRef.current = [];
+    persistSeqRef.current = 0;
+    persistAtRef.current = Date.now();
+    persistBusyRef.current = false;
+    if (currentSession) {
+      void beginLiveRun({ sessionId: currentSession.id, mock: dmeLink.mockMode })
+        .then(id => { liveRunIdRef.current = id; })
+        .catch(() => { /* no net; the run itself is unaffected */ });
+    }
     hzWindowRef.current = [];
     hzValueRef.current = null;
     hzPublishedAtRef.current = 0;
@@ -735,6 +871,7 @@ export default function Home() {
           coolantTemp: sample.coolantTemp,
         };
         liveSamplesRef.current.push(point);
+        persistQueueRef.current.push(point);
 
         // Trailing window of sample times. There is no poll interval to read — the loop in
         // startTuning awaits pollLiveMeasurement back to back, so the rate IS the DS2 round trip and
@@ -752,6 +889,7 @@ export default function Home() {
 
         setLiveSample(point); // live raw readout, independent of the VE filters
         flushLiveSamples(false);
+        void persistLiveSamples(false); // own throttle, far slower than the 500 ms UI flush
       },
       (failure) => { void finishLogRef.current(failure); },
     );
@@ -1042,6 +1180,10 @@ export default function Home() {
     logFileState.clear();
     veCalc.reset();
     liveSamplesRef.current = [];
+    // Throwing the run away is a decision, so the recovery copy goes too — otherwise the next load
+    // would offer back the very drive the user just chose to redo.
+    void discardLiveRun().catch(() => { });
+    liveRunIdRef.current = null;
     goToTab('current');
   };
 
