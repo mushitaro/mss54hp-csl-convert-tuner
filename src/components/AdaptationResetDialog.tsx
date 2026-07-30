@@ -55,7 +55,12 @@ const TEXT = {
         cancel: 'やめる',
         runReset: 'リセット実行',
         clearing: '学習値をクリア中… DMEの反映を待っています(約2秒)',
-        done: '✅ リセット完了。このまま START TUNE できます。',
+        // Says what happened, not what to do next. It used to end "…so you can START TUNE now",
+        // which was true only while this dialog was reachable exclusively from the pre-START-TUNE
+        // moment. It is now also offered on the STARTUP tab whenever the link is connected — after a
+        // write, after a cancel, or with nothing loaded at all — where naming a next step that the
+        // hub is not offering would just be wrong.
+        done: '✅ リセット完了。DMEの学習値は初期状態に戻りました。',
     },
     en: {
         title: 'RESET ADAPT — DME Adaptations',
@@ -83,7 +88,7 @@ const TEXT = {
         cancel: 'Cancel',
         runReset: 'Run Reset',
         clearing: 'Clearing adaptations… waiting for the DME to apply (~2s).',
-        done: '✅ Reset complete. You can START TUNE now.',
+        done: '✅ Reset complete. The DME is back to its unlearned state.',
     },
 };
 

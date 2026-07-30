@@ -1049,7 +1049,12 @@ export default function Home() {
    *  failed reset. (The reference takes the same view: PreserveBeforeClearSnapshotAsync warns and
    *  carries on rather than aborting the clear.) */
   const handleAdaptationResetComplete = async (before: AdaptationSnapshot, after: AdaptationSnapshot) => {
-    if (!currentSession) return; // unreachable: idleAction === 'tune' already requires a session
+    // No session is now a normal outcome, not an unreachable branch: RESET ADAPT is offered on the
+    // STARTUP tab whenever the link is connected, including with nothing loaded. Returning early is
+    // the correct behaviour and always was — by the time this runs the ECU has already been cleared
+    // and verified, so a missing place to file the record must never present itself as a failed
+    // reset. Same shape and same reasoning as handleFlashCounterResetComplete.
+    if (!currentSession) return;
     try {
       await sessionDb.recordAdaptationReset(currentSession.id, {
         at: Date.now(),
@@ -2165,13 +2170,20 @@ export default function Home() {
                   </button>
                 )}
 
-                {/* Clearing the DME's learned values belongs exactly here: it is only meaningful in
-                    the moment before START TUNE, so the next log is captured from a known base. The
-                    condition is the same one that makes the hub say START TUNE, which is also why
-                    this needs no disabled prop — and why currentSession is guaranteed by the time
-                    the handler runs. Amber rather than the siblings' red: those two discard local
-                    work, this one writes to the ECU. */}
-                {dmeLink.state === 'connected' && idleAction === 'tune' && (
+                {/* Clearing the DME's learned values before START TUNE, so the next log is captured
+                    from a known base — that is the moment it was built for, and on any tab it still
+                    appears exactly when the hub says START TUNE.
+                    PLUS the whole STARTUP tab while connected, which is a separate, real need: after a
+                    WRITE finishes, after cancelling out of something, or when clearing adaptations is
+                    the only reason the cable is plugged in at all. None of those leave a loaded map
+                    and a live session, so `idleAction === 'tune'` hid the button in precisely the
+                    cases where the user came to press it. Scoped to STARTUP on purpose — that tab is
+                    where sessions and the ECU are managed, and the map/tuning tabs stay uncluttered.
+                    `state === 'connected'` is what keeps it safe: it already excludes reading,
+                    tuning, writing and resetting, so this can never fire during an operation.
+                    Amber rather than the siblings' red: those two discard local work, this one writes
+                    to the ECU. */}
+                {dmeLink.state === 'connected' && (idleAction === 'tune' || activeTab === 'startup') && (
                   <button
                     onClick={() => setAdaptDialogOpen(true)}
                     className="whitespace-nowrap flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-amber-400 transition-colors"
