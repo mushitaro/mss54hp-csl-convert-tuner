@@ -288,7 +288,13 @@ export default function Home() {
   // Hub/wing cluster auto-fit: measures real available space vs. the cluster's natural size and
   // returns a transform scale, so it always fits (any viewport) instead of estimating from raw
   // window dimensions.
-  const { outerRef: clusterOuterRef, innerRef: clusterInnerRef, scale: clusterScale, minH: clusterMinH } = useFitScale(0.4);
+  // 0.8, not 0.4. The floor is what the cluster is actually rendered at on a short landscape phone —
+  // it is not a rare worst case there, it is the normal case — and 0.4 put the 80px dial at 32px, the
+  // arming toggles at 14x8 and the label that is the ONLY thing distinguishing READ from WRITE inside
+  // that dial at 3.2px. A floor is a promise about the smallest a control may become; 0.4 was not a
+  // promise anything could be operated at. The shortfall now falls on the visualizer above, which is
+  // the half this panel already declares elastic.
+  const { outerRef: clusterOuterRef, innerRef: clusterInnerRef, scale: clusterScale, minH: clusterMinH } = useFitScale(0.8);
   const tabStrip = useEdgeFade();
   const prevCompactRef = useRef(false);
   const compact = prevCompactRef.current ? clusterScale < 0.88 : clusterScale < 0.78;
@@ -1778,8 +1784,15 @@ export default function Home() {
             {/* 3D Graph (Flex 7) */}
             {/* The visualizer is the elastic half. A 3D map reads fine at any size; the dial and its
                 toggles do not. A fixed 7:3 split had it backwards — it pinned the picture and made
-                the controls absorb every shortfall, squeezing the 80px dial down to 52px. */}
-            <div className="flex-1 min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent">
+                the controls absorb every shortfall, squeezing the 80px dial down to 52px.
+
+                The 140px floor kept doing that job for it on a short viewport. Measured on the
+                phone this is actually used on — 915x412 landscape — the pane had 320px to spend:
+                the visualizer took its 140 and the cluster was left holding 48px against a natural
+                120, so it sat pinned at the 0.4 scale floor and the arming toggles that decide what
+                goes into the ECU rendered at 14x8 px. The floor only lowers where the viewport is
+                genuinely short; a laptop still gets the full 140. */}
+            <div className="flex-1 min-h-[76px] [@media(min-height:560px)]:min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent">
               {/* Live raw telemetry readout — floats over the visualization during logging so it shows
                   the latest DME sample (independent of the VE filters) WITHOUT shifting the inputs /
                   dashboard layout: the panel below is identical whether logging or stopped. */}
