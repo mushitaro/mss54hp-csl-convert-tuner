@@ -135,6 +135,19 @@ const JA = {
         ? 'DMEに接続できません — USB OTGアダプタと、WebUSB対応ブラウザ(Chrome)が必要です。PRACTICEならオフラインで試せます。'
         : 'DMEに接続できません — Chrome/Edgeが必要です(Web Serial API)。PRACTICEならオフラインで試せます。',
 
+    /**
+     * 読み取ったBINのチェックサムが合わなかったときだけ出る。成功時は何も出さない。
+     *
+     * 「ECUが壊れている」と読めないように書くこと。このCRC実装はstock BINと実車読み取りの2回、
+     * 独立に実地確認されているので誤検出の可能性は低いが、それでも原因として遥かに確からしいのは
+     * 通信のほうであり、対処も「読み直す」である。断定はしない。
+     */
+    readChecksumBad: (a: { slave: boolean; master: boolean }): string => {
+        const which = !a.slave && !a.master ? 'SLAVE/MASTER両方' : !a.slave ? 'SLAVE側' : 'MASTER側';
+        return `⚠ 読み取ったBINのチェックサムが合いません(${which}) — 転送が壊れた可能性があります。` +
+            'チューンに使う前にREADをやり直してください。';
+    },
+
     patchWriteDone:
         '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
         KEY_CYCLE_JA + '\n\n' +
@@ -254,6 +267,12 @@ const EN: NativeDialogText = {
     noTransport: (a: { android: boolean }) => a.android
         ? 'Cannot reach a DME — a USB OTG adapter and a WebUSB-capable browser (Chrome) are required. PRACTICE works offline.'
         : 'Cannot reach a DME — Chrome or Edge is required (Web Serial API). PRACTICE works offline.',
+
+    readChecksumBad: (a: { slave: boolean; master: boolean }): string => {
+        const which = !a.slave && !a.master ? 'SLAVE and MASTER' : !a.slave ? 'SLAVE' : 'MASTER';
+        return `⚠ The BIN just read fails its checksum (${which}) — the transfer may be corrupt. ` +
+            'Run READ again before tuning from it.';
+    },
 
     patchWriteDone:
         '✅ The patch write is complete (read-back verified).\n\n' +

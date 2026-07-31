@@ -5,6 +5,7 @@ import {
 } from './adaptationBlocks';
 import { FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, analyzeFlashCounter } from './flashCounter';
 import { Mss54HpDataTuneLayout } from './ds2';
+import { correctDataChecksum } from '@/lib/checksum/dmeDataChecksum';
 
 const PARTIAL_BIN_LENGTH = 65536;
 // Imported, not redeclared: this used to be an independent `const CHUNK_SIZE = 122`, so the mock's
@@ -57,6 +58,12 @@ function buildPlaceholderBin(): ArrayBuffer {
             view.setUint16(offset, 500 + row * 10 + col, false);
         }
     }
+    // Give it checksums that verify, for the same reason the adaptations and flash slots are modelled
+    // as state rather than scripted: PRACTICE must not show a result the car wouldn't. A read now
+    // checks the image against the checksums the DME stores inside it, and a placeholder left with
+    // 0x0000 in both slots would fail that on every offline read — a warning about corrupt bytes,
+    // raised against bytes that were never transferred.
+    correctDataChecksum(buf);
     return buf.buffer;
 }
 
