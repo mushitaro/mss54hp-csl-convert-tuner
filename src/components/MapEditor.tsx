@@ -27,11 +27,13 @@ const COVERAGE_THIN = 10;   // below this: some data, not enough to trust
 const COVERAGE_OK = 30;     // at or above this: enough samples to act on
 
 // One ice blue (#8FD8F2) over the table's slate-900, separated by lightness only —
-// the palette rule in globals.css. Opaque enough to survive direct sunlight: the top
-// band is 13.3:1 against black where the old max-0.3-alpha ramp topped out at 2.0:1.
-// Steps are evenly spaced perceptually (2.4 / 2.2 / 2.4:1 between neighbours).
-const COVERAGE_ALPHA_THIN = 0.35;
-const COVERAGE_ALPHA_OK = 0.62;
+// the palette rule in globals.css. Kept inside the original 0–0.30 alpha range: this
+// is a dark instrument, and a filled cell has to stay a tint on the table rather than
+// become a bright panel sitting on top of it. 0.30 is the ceiling the relative ramp
+// already used, so the brightest cell here is no brighter than the brightest cell was.
+const COVERAGE_ALPHA_THIN = 0.10;
+const COVERAGE_ALPHA_OK = 0.20;
+const COVERAGE_ALPHA_FULL = 0.30;
 
 export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightData, className }) => {
     // Render a scrollable grid
@@ -83,12 +85,13 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                     // with the lean-diff fill below: the guard above means a cell can never
                                     // paint both, and diffData is all-or-nothing for the whole table.
                                     const alpha =
-                                        hits >= COVERAGE_OK ? 1
+                                        hits >= COVERAGE_OK ? COVERAGE_ALPHA_FULL
                                             : hits >= COVERAGE_THIN ? COVERAGE_ALPHA_OK
                                                 : COVERAGE_ALPHA_THIN;
                                     style = { backgroundColor: `rgba(143, 216, 242, ${alpha})` };
-                                    // The two brighter bands need dark text to stay legible on them.
-                                    textColor = hits >= COVERAGE_THIN ? 'text-slate-950' : 'text-slate-300';
+                                    // Every band stays dark enough for the light text the rest of the
+                                    // table uses, so the numbers do not change colour as coverage builds.
+                                    textColor = 'text-slate-300';
                                 }
 
                                 // If diff exists, colorize (Overrides hit map or combines?)
