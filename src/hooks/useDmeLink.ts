@@ -7,6 +7,8 @@ import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serv
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport';
+import { analyzeDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
+import { dialogText } from '@/lib/dialog-text';
 import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
 import { ReadTimingReport } from '@/lib/dme-link/transferTiming';
 
@@ -39,6 +41,27 @@ const KEEP_ALIVE_INTERVAL_MS = 2000;
 export type FlashCounterOutcome =
     | { ok: true; info: FlashCounterInfo }
     | { ok: false; needsRecovery: boolean };
+
+/**
+ * Checks a freshly read image against the checksums the DME stored inside it.
+ *
+ * Returns null when the image is good — including when it cannot be judged. Both "verified" and
+ * "not a 65536-byte data pair" have to answer null, because the only thing the caller does with a
+ * non-null result is tell the user their read is corrupt, and a wrong-length buffer is not evidence
+ * of that. `analyzeDataChecksum` throws on any other length, and a read that came back short has
+ * already failed in some more specific way; letting that throw escape here would replace the real
+ * error with an unhandled one from a check that was only meant to add confidence.
+ */
+function analyzeReadChecksum(buffer: ArrayBuffer): { slave: boolean; master: boolean } | null {
+    if (buffer.byteLength !== DATA_PAIR_LENGTH) return null;
+    try {
+        const [slave, master] = analyzeDataChecksum(new Uint8Array(buffer));
+        if (slave.isValid && master.isValid) return null;
+        return { slave: slave.isValid, master: master.isValid };
+    } catch {
+        return null;
+    }
+}
 
 export function useDmeLink() {
     const [state, setState] = useState<DmeSessionState>('disconnected');
@@ -209,10 +232,28 @@ export function useDmeLink() {
             // a numeric tail, which mattered while the numbers were being read from the driver's seat
             // during a sweep; now that timing is always collected, TIMING saves the file and this row
             // goes back to being the one line a normal read produces.
-            setWarningKind(refused ? 'warn' : 'info');
-            setWarning(refused
-                ? `${readBaud} REFUSED — ran at ${actual} · ${measured}`
-                : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`);
+            // Verify the bytes against the checksums the DME itself stored in them — silently.
+            //
+            // This is the acceptance test the Android transport was actually validated with, and it
+            // is a stronger one than comparing two reads: the CRC-16/ARC values live in the image,
+            // written by the ECU, so a systematic transport fault cannot agree with them the way it
+            // would agree with a second read of its own making. The two slots together cover 65528
+            // of the 65536 bytes; the remaining 8 *are* the slots, which a match verifies.
+            //
+            // Deliberately silent when it passes. The line below is, as the comment above says, the
+            // one line a normal read produces, and it is carrying the measured baud and throughput —
+            // the numbers a rate can actually be judged on. A "CHECKSUM OK" on every read would push
+            // those out of a row that truncates, to say something that is true every time.
+            //
+            // A failure is not that. Reading corrupt bytes, tuning from them and writing them back is
+            // the worst outcome this app has, so that one case takes the line.
+            const checksum = analyzeReadChecksum(buffer);
+            setWarningKind(refused || checksum !== null ? 'warn' : 'info');
+            setWarning(checksum !== null
+                ? dialogText().readChecksumBad(checksum)
+                : refused
+                    ? `${readBaud} REFUSED — ran at ${actual} · ${measured}`
+                    : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`);
             // Idle again. The caller loads these bytes as the BASE, which is what turns the button
             // into START TUNE — it isn't this function's business to say so.
             setState('connected');
