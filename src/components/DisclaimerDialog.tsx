@@ -60,7 +60,11 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="disclaimer-title"
-                className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] max-h-[80vh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200"
+                // Same geometry rule as DialogFrame: capped to the viewport so a portrait phone does
+                // not lose the ACCEPT button off the edge, and dvh so Android's browser chrome does
+                // not sit on top of it. This is the gate to the whole app — if it does not fit, the
+                // app does not open.
+                className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-2rem))] max-h-[85dvh] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200"
             >
                 <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-2 shrink-0">
                     <AlertTriangle className="w-3.5 h-3.5 text-red-400" />

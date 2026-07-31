@@ -1,16 +1,17 @@
 import { DmeLinkError } from './types';
-import type { TransferTiming } from './transferTiming';
+import { BufferedByteTransport } from './bufferedByteTransport';
+import type { ByteTransport } from './byteTransport';
 
 /**
- * Thin wrapper isolating all navigator.serial calls, mirroring the reference app's IByteTransport
- * contract (open/write/read/close over a single serial port).
+ * Thin wrapper isolating all navigator.serial calls — the desktop backend, and the one proven on a
+ * real vehicle.
  *
- * Received bytes are drained by a single background pump into an internal buffer, and readExact()
- * consumes from that buffer. This is deliberate: the Web Serial reader delivers bytes in arbitrary
- * chunk boundaries, so a DS2 echo and the start of its response frequently arrive in the *same*
- * chunk. A naive "read one chunk per readExact" approach drops the surplus and desynchronizes the
- * stream — which is exactly what broke bulk (269-chunk) partial-BIN reads. Buffering never drops a
- * byte, keeping echo/response framing aligned across thousands of exchanges.
+ * The buffering half (the receive buffer, the parked waiter, readExact) lives in
+ * BufferedByteTransport, shared with the WebUSB backend. What stays here is everything that touches
+ * a SerialPort. The reason the buffering exists at all is unchanged: the Web Serial reader delivers
+ * bytes in arbitrary chunk boundaries, so a DS2 echo and the start of its response frequently arrive
+ * in the *same* chunk. A naive "read one chunk per readExact" approach drops the surplus and
+ * desynchronizes the stream — which is exactly what broke bulk (269-chunk) partial-BIN reads.
  */
 /**
  * Receive buffer requested from the Web Serial implementation. We were passing no bufferSize at all,
@@ -32,55 +33,25 @@ import type { TransferTiming } from './transferTiming';
  * which comes back as an echo mismatch — and classifyEchoMismatch would most likely score that
  * 'unclassified'. That makes it a live candidate for the intermittent echo faults in the notes, and
  * the transfer timer's `write` median is the measurement that tests it: it should be ~0.
+ *
+ * Note that the WebUSB backend has no equivalent: there, nothing drains the chip's FIFO except our
+ * own read loop, on the renderer thread. See webUsbFtdiTransport.ts.
  */
 const RX_BUFFER_BYTES = 4096;
 
-export class WebSerialTransport {
+export class WebSerialTransport extends BufferedByteTransport implements ByteTransport {
     private port: SerialPort | null = null;
     private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
-    private buffer: number[] = [];
-    private pumpActive = false;
-    private pumpError: Error | null = null;
+
     /**
-     * A single reader parked in readExact, woken by the pump the moment enough bytes have arrived.
+     * Whether this browser exposes Web Serial at all.
      *
-     * Replaces a `setTimeout(2)` polling loop. Browsers clamp nested timers to ~4 ms, so that loop
-     * could sit on data that had already arrived for up to a full clamp period — three times per DS2
-     * exchange (echo, header, body). At 9600 the wire dominates and it hides; the faster the rate,
-     * the larger that fixed cost looms, which is why raising the baud stopped producing a speed-up.
-     *
-     * One waiter is enough: the transport is serialised by the link's command gate, so readExact is
-     * never re-entered concurrently.
+     * Note what this deliberately does NOT answer: whether the ports it enumerates include USB
+     * serial adapters. Chrome for Android 138+ returns true here and then offers only Bluetooth
+     * RFCOMM ports, so a K+DCAN cable is unreachable despite this being true. That distinction is
+     * made in byteTransport.ts, which is the only caller that needs it.
      */
-    private waiter: { need: number; wake: () => void } | null = null;
-    /** Optional per-chunk instrument. Null (and every call site optional-chained) so the uninstrumented
-     *  path costs one null check — see transferTiming.ts for why that matters here. */
-    private timing: TransferTiming | null = null;
-
-    /** Attaches the read-timing instrument. The link owns exchange boundaries; the transport owns byte
-     *  arrival, so both have to write into the same object. */
-    setTiming(timing: TransferTiming | null): void {
-        this.timing = timing;
-    }
-
-    /** Wakes the parked reader once its byte count is satisfiable — or once it can only fail. */
-    private signalWaiter(): void {
-        const w = this.waiter;
-        if (w && (this.buffer.length >= w.need || this.pumpError)) {
-            this.waiter = null;
-            w.wake();
-        }
-    }
-
-    /** Releases a parked reader unconditionally. Used wherever the pump it is waiting on is about to
-     *  be torn down: after that point no byte can ever arrive to wake it, so leaving it parked would
-     *  cost a full timeout for nothing. */
-    private releaseWaiter(): void {
-        const w = this.waiter;
-        if (w) { this.waiter = null; w.wake(); }
-    }
-
     static isSupported(): boolean {
         return typeof navigator !== 'undefined' && 'serial' in navigator;
     }
@@ -99,7 +70,7 @@ export class WebSerialTransport {
         await this.deassertControlLines();
         this.writer = this.port.writable!.getWriter();
         this.reader = this.port.readable!.getReader();
-        this.buffer = [];
+        this.clearBuffer();
         this.pumpError = null;
         this.pumpActive = true;
         this.startPump();
@@ -117,6 +88,9 @@ export class WebSerialTransport {
      * and on some K+DCAN cables they gate the K-line transceiver. Making the state explicit and
      * identical on both sides of the reopen removes that variable.
      *
+     * (The WebUSB backend does not inherit this problem: it changes baud in place, so the lines are
+     * set once at open and never disturbed again.)
+     *
      * Best-effort: a cable that does not implement the request must not fail the connection.
      */
     private async deassertControlLines(): Promise<void> {
@@ -132,21 +106,10 @@ export class WebSerialTransport {
                 while (this.pumpActive) {
                     const { value, done } = await reader.read();
                     if (done) break;
-                    if (value) {
-                        // Timestamped HERE, not in readExact: readExact only ever learns that enough
-                        // bytes exist, never when each arrived. Byte arrival times are the whole point
-                        // — they are what separates "the DME was thinking" from "the bytes were here
-                        // and we were slow to notice".
-                        this.timing?.rx(performance.now());
-                        for (let i = 0; i < value.length; i++) this.buffer.push(value[i]);
-                        this.signalWaiter();
-                    }
+                    if (value && value.length > 0) this.receive(value);
                 }
             } catch (e: unknown) {
-                this.pumpError = e instanceof Error ? e : new Error(String(e));
-                // A latched error must wake the reader too, or it waits out its whole timeout for
-                // bytes that can no longer arrive — turning a break into a multi-second stall.
-                this.signalWaiter();
+                this.latch(e instanceof Error ? e : new Error(String(e)));
             }
         })();
     }
@@ -161,7 +124,7 @@ export class WebSerialTransport {
         this.reader = null;
         this.writer = null;
         this.port = null;
-        this.buffer = [];
+        this.clearBuffer();
     }
 
     /**
@@ -183,7 +146,7 @@ export class WebSerialTransport {
         await this.deassertControlLines();
         this.writer = port.writable!.getWriter();
         this.reader = port.readable!.getReader();
-        this.buffer = [];
+        this.clearBuffer();
         this.pumpError = null;
         this.pumpActive = true;
         this.startPump();
@@ -198,38 +161,6 @@ export class WebSerialTransport {
         this.timing?.writeStart(performance.now());
         await this.writer.write(bytes);
         this.timing?.writeEnd(performance.now());
-    }
-
-    /** Discards any buffered received bytes — used to resynchronize after a timeout before retrying. */
-    purge(): void {
-        // No waiter can be parked here: purge runs between exchanges, and the link's command gate
-        // makes those strictly sequential. Emptying the buffer under a parked reader would strand it
-        // until its deadline, so if that invariant ever changes this needs a signalWaiter().
-        this.buffer = [];
-    }
-
-    /** How many received bytes are waiting to be consumed. Lets a caller tell whether the line has
-     *  gone quiet (buffer stays empty across a pause) before starting a fresh exchange, rather than
-     *  purging into a stream that is still arriving. */
-    bufferedLength(): number {
-        return this.buffer.length;
-    }
-
-    /** True if the background read pump has latched an error — most often a serial break. Lets a
-     *  caller recover deliberately instead of discovering it as a failed readExact mid-exchange. */
-    hasReadError(): boolean {
-        return this.pumpError !== null;
-    }
-
-    /**
-     * The latched pump error, WITHOUT clearing it, so a caller can name the cause in its own message.
-     *
-     * Deliberately non-consuming: clearing the latch here would make hasReadError() report false, and
-     * resyncTransport() would then purge() instead of recoverRead() — leaving the dead pump unrestarted,
-     * which is strictly worse than not looking at all. Only recoverRead()/open()/reopen() clear it.
-     */
-    peekReadError(): Error | null {
-        return this.pumpError;
     }
 
     /**
@@ -255,46 +186,9 @@ export class WebSerialTransport {
             throw new DmeLinkError('The serial device disconnected — unplug and replug the cable, then reconnect.');
         }
         this.reader = this.port.readable.getReader();
-        this.buffer = [];
+        this.clearBuffer();
         this.pumpError = null;
         this.pumpActive = true;
         this.startPump();
-    }
-
-    /**
-     * Reads exactly `length` bytes, waiting up to `timeoutMs`. Surplus bytes received alongside are
-     * retained in the buffer for the next call — never dropped.
-     */
-    async readExact(length: number, timeoutMs: number): Promise<Uint8Array> {
-        const deadline = Date.now() + timeoutMs;
-        while (this.buffer.length < length) {
-            // Name the error class too: a BreakError/FramingError (recoverable, and the signature of a
-            // disturbed K-line) and a NetworkError (device gone) otherwise read identically.
-            if (this.pumpError) {
-                throw new DmeLinkError(`Serial read failed: ${this.pumpError.name} (${this.pumpError.message})`);
-            }
-            const remaining = deadline - Date.now();
-            if (remaining <= 0) {
-                throw new DmeLinkError(`Timed out waiting for ${length} byte(s) (received ${this.buffer.length})`);
-            }
-            // Park until the pump says the bytes are here, or the deadline passes — whichever first.
-            // The loop still re-checks afterwards, so a spurious wake costs one comparison.
-            //
-            // Parked time is measured because it is the honest accounting of "waiting for the wire"
-            // versus "us being slow": if parked time is close to the total, the bytes genuinely were
-            // not here yet and no host-side change helps.
-            this.timing?.parkStart(performance.now());
-            await new Promise<void>(resolve => {
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
-                timer = setTimeout(() => {
-                    if (this.waiter?.wake === wake) this.waiter = null;
-                    resolve();
-                }, remaining);
-                this.waiter = { need: length, wake };
-            });
-            this.timing?.parkEnd(performance.now());
-        }
-        return Uint8Array.from(this.buffer.splice(0, length));
     }
 }

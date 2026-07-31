@@ -12,6 +12,15 @@ import { useEffect } from 'react';
  * OS shutdown, a crash or a power cut. What it buys is turning an absent-minded Ctrl+R into a choice,
  * during the minutes when that keystroke can leave an ECU half-programmed.
  *
+ * ## Weaker still on Android, and there is nothing to add
+ *
+ * Chrome for Android honours this for a reload and a same-tab navigation, but not dependably for a
+ * tab close, the back gesture, or the OS reclaiming the tab. Do not go looking for a stronger API:
+ * there isn't one. The gap is covered from two other directions instead — `useScreenWakeLock`
+ * removes the commonest way a phone interrupts itself, `useHiddenWitness` records it when something
+ * does, and `dialogText().writeConfirm` states the extra rules plainly on Android before the write
+ * starts. This hook stays exactly as strong as the platform allows and no stronger.
+ *
  * ## Why there is no unlock
  *
  * The obvious shape — a flag set before the operation and cleared after — has a failure mode worse

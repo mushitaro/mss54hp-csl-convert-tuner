@@ -35,7 +35,10 @@ src/lib/dme-link/
                         write-response parsing, baud specs, MSS54HP address layout
   identity.ts           System address table, AIF entries, VIN (packed 6-bit), ZIF program number
   liveValueBlocks.ts    Live measurement block field layouts + decoding
-  webSerialTransport.ts navigator.serial wrapper (open/close/reopen/read/write/purge)
+  byteTransport.ts      ByteTransport contract + platform detection + transport factory
+  bufferedByteTransport.ts  Shared receive buffer, parked waiter, readExact (both backends)
+  webSerialTransport.ts navigator.serial wrapper — desktop backend
+  webUsbFtdiTransport.ts    FTDI vendor protocol over WebUSB — Android backend (§14)
   webSerialDmeLink.ts   Real DME implementation (login, read, write, live polling)
   mockDmeLink.ts        Offline simulator — mirrors the real flow incl. phases, no cable needed
 src/lib/checksum/
@@ -339,6 +342,9 @@ Confirmed against the [WICG Web Serial spec](https://wicg.github.io/serial/):
    `getInfo/open/setSignals/getSignals/close/forget` (+ `readable`/`writable`/`connected`).
    No `reconfigure()`/`setOptions()` → **close + reopen is mandatory**. The native reference changes
    baud in place (`FT_SetBaudRate`) and never closes — this is the fundamental gap.
+   *This constraint is specific to Web Serial.* The WebUSB/FTDI backend added for Android issues
+   `SET_BAUD_RATE` on the open handle exactly as the reference does, so it has no port transition at
+   all — see §14.
 2. **Baud rate is unrestricted**: *"A positive, non-zero value…"*. Non-standard rates like 125000 are
    spec-legal, and FTDI computes the divisor for arbitrary rates. **The Windows COM-port dropdown is
    irrelevant** — it only sets a default for apps that don't specify a rate.
@@ -516,6 +522,22 @@ therefore a permanent advantage for native tools. That is wrong. The latency tim
 property of the device*, set in Device Manager → Port Settings → Advanced → Latency Timer, and it
 applies to whichever application opens the port — Chrome included. The only difference is that D2XX
 programs it itself while the VCP path inherits whatever the driver is configured with.
+
+**On the Android/WebUSB backend it is set to 16 — the chip default — and deliberately not lower.**
+Two reasons, and neither is the tail latency this section was originally about:
+
+1. Android has no Device Manager, so nothing sets it for us: without an explicit
+   `SET_LATENCY_TIMER` the device simply runs at its 16 ms default. The call is there to make the
+   value *stated* rather than inherited, not to lower it.
+2. The 2–4 ms prediction above does not transfer. It assumed Web Serial, where the browser process
+   drains the endpoint into the mojo pipe independently of us. On WebUSB **our own read loop is the
+   only thing draining the endpoint, on the same thread as React** — and the chip emits a 2-byte
+   status packet on every timer expiry whether or not it carries data. So the latency timer sets the
+   renderer's idle wakeup rate: 62.5/s at 16 ms, 1000/s at 1 ms. That is precisely the regression
+   the Linux kernel reverted (quoted above), arriving on the main thread instead of in a driver.
+
+The sweep result stands either way: the timer was measured on the car and changed nothing. 8 is the
+only other value worth trying; 1 is not a candidate.
 
 ### Measured on the car (2026-07-28) — and two dead hypotheses
 
@@ -765,6 +787,12 @@ boosted read therefore begins with a port transition that no other DS2 tool prod
 sees it because 9600 sends no switch at all. That matches the failures being exclusive to boosted rates
 and clustered in the first chunks. It cannot be removed, only made less disruptive.
 
+**Update: on the Android/WebUSB backend it *is* removed.** `SET_BAUD_RATE` goes to the open handle,
+the read loop never stops, and DTR/RTS are never re-driven — the app does exactly what the reference
+does. That makes 38400 free to re-test there. It is **not** a prediction that 38400 will now work:
+the FINAL section below rules out this transition along with everything else host-side, and attributes
+the residue to the physical line. Re-test it because it is cheap, not because it is expected.
+
 **Not forced: we never touched DTR/RTS.** The reference explicitly de-asserts both
 (`DtrEnable = false; RtsEnable = false`). We left them at whatever Chromium's `open()` leaves, on every
 open *and* every reopen — so the close/open cycle above was also moving two control lines that, on some
@@ -837,12 +865,19 @@ collection armed only between a read's start and end so it is inert on the flash
 
 ### Out of scope, and why
 
-- **WebUSB + the FTDI vendor protocol.** Technically the closest thing to a D2XX equivalent a browser
-  can reach: the vendor requests for baud divisor, line properties and `SET_LATENCY_TIMER` are all
-  documented and there are (unmaintained) JS implementations. But Chromium claims USB devices on
-  Windows through **WinUSB**, and an FTDI cable is bound to `ftdibus.sys`. Rebinding it with Zadig
-  **removes the COM port**, which breaks INPA / Tool32 / ISTA until it is swapped back. Rejected: the
-  cable has to keep working for everything else.
+- **WebUSB + the FTDI vendor protocol — rejected on Windows, adopted on Android.** Technically the
+  closest thing to a D2XX equivalent a browser can reach: the vendor requests for baud divisor, line
+  properties and `SET_LATENCY_TIMER` are all documented and there are (unmaintained) JS
+  implementations. On **Windows the rejection stands, unchanged**: Chromium claims USB devices there
+  through **WinUSB**, an FTDI cable is bound to `ftdibus.sys`, and rebinding it with Zadig **removes
+  the COM port**, which breaks INPA / Tool32 / ISTA until it is swapped back. The cable has to keep
+  working for everything else, so desktop keeps Web Serial.
+
+  **None of that reasoning reaches Android**, and that is where it now runs (`webUsbFtdiTransport.ts`).
+  There is no `ftdibus.sys` to displace, no COM port to lose, and no INPA/Tool32/ISTA sharing the
+  cable. It is also not a preference there but the only option: **Chrome for Android 138+ does expose
+  `navigator.serial`, but it enumerates only Bluetooth RFCOMM serial-port emulation** — a USB K+DCAN
+  cable never appears in its picker, so Web Serial is present and useless. See §14.
 - **A local native helper** (WebSocket or native-messaging bridge to `ftd2xx.dll`). The only path to
   true D2XX parity. Costs a signed installer, per-OS builds, a firewall prompt, and localhost TLS —
   and FTDI's guidance is that VCP and D2XX cannot be used on one device simultaneously, which would
@@ -890,8 +925,12 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 - **STFT cross-check**: `la_f_regler` vs Testo *Lambdaintegrator* not validated (§8).
 - **Write baud**: write is always 9600 (the reference boosts to 125000 after erase). Deferred until
   baud switching is proven.
-- **Chromium only**: Web Serial is Chrome/Edge/Opera desktop. The file-upload workflow remains the
-  fallback for other browsers and must keep working.
+- **Chromium only**: Chrome/Edge/Opera on desktop (Web Serial), Chrome on Android (WebUSB, §14). The
+  file-upload workflow remains the fallback for every other browser and must keep working.
+- **The Android backend is unproven on hardware.** Every constant in `webUsbFtdiTransport.ts` is
+  derived and asserted, not measured: no phone, no cable and no car have run it yet. `/usb-check` is
+  the bench probe that answers the open questions, and the first one — whether Chrome for Android
+  can claim the interface at all — gates everything else. Treat ❌ as the status until it is run.
 - **IndexedDB is best-effort storage** — the browser can evict it. File download remains the durable
   artifact.
 - **README is stale**: it still says checksum correction is "not yet included" and that flashing is
@@ -1175,3 +1214,116 @@ it faithfully — and answers `readEngineRpm()` with `0`, since a simulator has 
 is separate from `pollLiveMeasurement` on purpose: the mock's ~800 rpm idle is telemetry-shaped test
 data for the datalog to plot, not a claim that something is turning, and one method could not
 honestly serve both questions.
+
+---
+
+## 14. Android — WebUSB and the FTDI vendor protocol
+
+**Status: written and type-checked, proven on nothing.** No phone, no cable and no car have run a
+byte of it. Read §"Verifying it" below before trusting any of it.
+
+### Why WebUSB and not Web Serial
+
+Chrome for Android 138+ *does* expose `navigator.serial`. It is useless here: it enumerates only
+**Bluetooth RFCOMM serial-port emulation**, so a USB K+DCAN cable never appears in its picker. There
+is no feature test that distinguishes the two — the objects are identical and the difference shows
+up as an empty chooser after the user has already tapped through a permission prompt. That is why
+`detectTransportKind()` (`byteTransport.ts`) asks the platform by name, the only place in the app
+that does. `?transport=webusb` / `?transport=webserial` overrides it, which is how the WebUSB path
+can be driven from a desktop bench rig instead of first-run in a car.
+
+The Windows objection in §"Out of scope" is untouched and still governs desktop.
+
+### Structure
+
+`WebSerialTransport` and `WebUsbFtdiTransport` both implement `ByteTransport` and both extend
+`BufferedByteTransport`, which owns the receive buffer, the single parked waiter and `readExact` —
+lifted verbatim out of the Web Serial transport rather than copied, because those semantics are the
+subtlest thing in this layer and a second copy would drift. `WebSerialDmeLink` holds a
+`ByteTransport`; all 21 of its transport calls are unchanged, and the DS2 layer knows nothing about
+which backend it has.
+
+### The constants, and why each is what it is
+
+| Thing | Value | Why |
+|---|---|---|
+| `SET_DATA` | `0x0208` | 8E1. Same load-bearing reason as the Web Serial `parity: 'even'`: DS2's address `0x12` and ACK `0xA0` both have popcount 2, so an 8N1 receiver faults on effectively every frame. |
+| `SET_MODEM_CTRL` | `0x0300` | DTR and RTS both de-asserted (mask bits 8/9 set, state bits 0/1 clear). Equivalent to `setSignals({dataTerminalReady:false, requestToSend:false})`. On some K+DCAN cables these gate the K-line transceiver, so inverted polarity = a cable that works on desktop and is silent on the phone. |
+| `SET_BAUD_RATE` | 9600 → `0x4138`, 38400 → `0xC04E`, 125000 → `0x0018` (index 0) | 3 MHz base, integer divisor plus a 3-bit fractional code: `d8 = 24e6/baud`, `frac = [0,3,2,4,1,5,6,7][d8 & 7]`, `encoded = (d8>>3) | (frac<<14)`. All three are exact — zero baud error. `0x4138` and `0xC04E` match FTDI's published AN232B-05 table, which is the independent check on the derivation. |
+| `SET_LATENCY_TIMER` | 16 | The chip default, stated rather than inherited (Android has no Device Manager to inherit from). **Not lowered** — see the correction in §"The FTDI latency timer". |
+| `SIO_RESET` purge RX | 2 | libftdi ≤1.4 called this 1; libftdi 1.5 deprecated those names and ships `ftdi_tciflush()` using 2, because the old naming had RX and TX swapped. `/usb-check` step 6 tests both values empirically. |
+
+A **three-entry lookup table, not a general converter**: `DS2_SELECTABLE_BAUDS` is exactly these
+three and §9 records why it will not grow. Three audited constants cannot be subtly wrong. The table
+is **recomputed and asserted at module load**, the same convention `ds2.ts` uses for its chunk sizes
+— with no test runner in this project that is the only mechanism that can fail a wrong constant in
+every environment, including production. A wrong divisor here is a garbled write to an ECU.
+
+Chip family is gated on `deviceVersionMajor ∈ {2,4,6}` (FT232AM/BM/R). The H parts and FT-X use a
+12 MHz base and a different index packing, so they are refused by name rather than silently
+mis-clocked.
+
+### The 2-byte status header — the part most likely to go wrong quietly
+
+Every bulk IN **packet** (not every transfer) is prefixed with two bytes: modem status, then a 16550
+line status. With a multi-packet transfer those headers are **interior**, not merely at offset 0.
+Stripping only the leading pair yields a plausible-looking 64 KB BIN with two bytes of garbage every
+64 — a failure that does not announce itself, which is why the acceptance test is a byte-comparison
+against a desktop read of the same ECU rather than "it looked right".
+
+Line-status bits map onto the **error names Web Serial produces**, because `readExact` prints the
+name and §12's triage table is written against those spellings: BI → `BreakError`, FE →
+`FramingError`, PE → `ParityError`, OE → `BufferOverrunError`, device gone → `NetworkError`.
+Priority BI > FE > PE > OE, since a break implies the framing garbage around it. LSR bits are
+latched-since-last-read, so line status is ignored on exactly one packet after open/reopen/recover —
+otherwise recovery immediately re-latches the fault it just repaired.
+
+### What is better here than on Web Serial
+
+- **Baud changes in place.** One `SET_BAUD_RATE`, no close/open, no restarted pump, no control-line
+  movement. This is the "forced" structural difference §9 says cannot be removed.
+- **`purge()` reaches the chip.** It flushes the FTDI's own FIFO, not just the bytes already handed
+  to us. It stays synchronous (fire-and-forget flush) because `resyncTransport` does not await it
+  and `drainUntilQuiet` reads `bufferedLength()` immediately after.
+- **Stopping the pump needs no cancellation.** The status heartbeat resolves the pending
+  `transferIn` within one latency period, so clearing a flag is enough.
+
+### What is worse, and it is a real hazard
+
+With Web Serial the **browser process** drains the endpoint into a 4096-byte mojo pipe independently
+of the renderer. With WebUSB **our read loop is the only thing draining the FT232R's 256-byte RX
+FIFO, on the same thread as React.** At 9600 that is ~267 ms of headroom; a long main-thread stall
+overruns the chip. The mitigation is that it is *detected* — it arrives as OE, latches a
+`BufferOverrunError`, and the existing retry machinery handles it — rather than silently corrupting
+a read. Exactly one transfer is kept in flight; queueing several is the usual throughput trick and
+they almost certainly complete in order, but "almost certainly" reorders a flash payload.
+
+### Long writes on a phone
+
+`beforeunload` is honoured inconsistently on Chrome for Android, so `useUnloadGuard` is weaker there
+and there is no stronger API to reach for. The gap is covered from three sides instead:
+`useScreenWakeLock` removes the interruption that happens by itself (screen inactivity), 
+`useHiddenWitness` records a backgrounding so a failure can name it instead of looking like a cable
+fault, and `writeConfirm` states the extra rules on Android before the write starts.
+
+### Verifying it
+
+`/usb-check` is a standalone bench probe (it imports nothing from the link layer, so it cannot break
+or be broken by what it validates). Use a **bare FT232R breakout with TX–RX jumpered** — a K+DCAN
+cable will not self-echo on a desk, because its K-line pull-up comes from the vehicle on OBD pin 16.
+
+1. Choose + identify — VID/PID and `bcdDevice` (clone chips are common; §12 already says to check).
+2. **Open + `claimInterface`. This is the question that gates the whole project**: if Android's
+   `ftdi_sio` holds the interface and Chrome cannot detach it, none of the rest matters.
+3. Vendor requests both directions (`GET_LATENCY_TIMER` reads back what was set).
+4. Loopback at all three rates — byte-exactness plus elapsed time against theory, which is what
+   catches a wrong divisor.
+5. TX break (`SET_DATA` bit 14) → the BI bit. The only bench-reachable exercise of break recovery.
+6. RX flush polarity, 2 vs 1, measured rather than assumed.
+7. Five-minute endurance with the screen on / off / app-switched / wake-locked — the empirical
+   answer to "does Android freeze the tab mid-flash".
+
+Then, on the car and in this order: identify at 9600 → a full 64 KB read **byte-compared against a
+desktop Web Serial read of the same ECU** (the acceptance test for the status-header design) → a
+datalog → and only then a write. 38400 is free to re-test once reading is proven, but see §9: the
+residual there was attributed to the physical line, not to the port transition this removes.

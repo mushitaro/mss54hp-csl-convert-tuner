@@ -1,6 +1,6 @@
 import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause, ServiceBlockDump } from './types';
 import { ServiceBlockPointers } from './serviceBlockReport';
-import { WebSerialTransport } from './webSerialTransport';
+import { ByteTransport, createDmeTransport } from './byteTransport';
 import {
     Ds2Frame, Ds2Control, Ds2ProgrammingControl, Ds2BaudRate, Ds2BaudRateSpec, Ds2SupportedBaud, ds2BaudSpecFor,
     Mss54HpDataTuneLayout, DS2_DEFAULT_ADDRESS,
@@ -143,9 +143,15 @@ function assertWriteChunkingLegal(blocks: readonly { address: number; length: nu
 }
 
 /**
- * Real DME connection over a K+DCAN-style cable via the Web Serial API, using the BMW DS2
- * protocol. Requires Chrome/Edge desktop and must be initiated from a genuine user gesture
- * (the browser's serial port picker cannot be triggered programmatically).
+ * Real DME connection over a K+DCAN-style cable, using the BMW DS2 protocol.
+ *
+ * The name is now slightly narrower than the truth: the byte transport underneath is Web Serial on
+ * desktop and the FTDI vendor protocol over WebUSB on Android (see byteTransport.ts). Nothing in
+ * this file knows which — it holds a `ByteTransport` and every one of its calls is the same on both.
+ * The class keeps its name deliberately; renaming a 1400-line file with dense blame buys nothing.
+ *
+ * Must be initiated from a genuine user gesture on either backend: neither the serial port picker
+ * nor the USB device chooser can be triggered programmatically.
  *
  * Read/write addressing for the MSS54HP "DataTune" partial BIN, identity (VIN/AIF/software
  * version) parsing, and the live-measurement block layout are all confirmed against the
@@ -154,7 +160,7 @@ function assertWriteChunkingLegal(blocks: readonly { address: number; length: nu
  * genuine user click that cannot be automated.
  */
 export class WebSerialDmeLink implements DmeLink {
-    private transport = new WebSerialTransport();
+    private readonly transport: ByteTransport;
     private connected = false;
     private aborted = false;
     /**
@@ -221,8 +227,15 @@ export class WebSerialDmeLink implements DmeLink {
         this.transport.setTiming(enabled ? this.timing : null);
     }
 
-    constructor(options?: { readBaud?: Ds2SupportedBaud }) {
+    /**
+     * `transport` exists for the bench harness and for a future byte-level fake; production passes
+     * nothing and gets whatever this browser can reach — Web Serial on desktop, the FTDI vendor
+     * protocol over WebUSB on Android. Deciding it in the factory rather than at the call site keeps
+     * the React layer free of platform knowledge.
+     */
+    constructor(options?: { readBaud?: Ds2SupportedBaud; transport?: ByteTransport }) {
         this.readBaud = options?.readBaud ?? 9600;
+        this.transport = options?.transport ?? createDmeTransport();
     }
 
     abort(): void {

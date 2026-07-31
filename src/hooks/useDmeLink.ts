@@ -6,7 +6,7 @@ import {
 import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
-import { WebSerialTransport } from '@/lib/dme-link/webSerialTransport';
+import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport';
 import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
 import { ReadTimingReport } from '@/lib/dme-link/transferTiming';
 
@@ -93,7 +93,22 @@ export function useDmeLink() {
 
     const clearError = useCallback(() => { setError(null); setErrorKind(null); setWarning(null); }, []);
 
-    const isWebSerialSupported = WebSerialTransport.isSupported();
+    /**
+     * Which backend can reach a DME here — `null` until the browser has actually been asked.
+     *
+     * This used to be `WebSerialTransport.isSupported()` evaluated during render, and that was
+     * wrong twice over. On Android it answers *true* while the port picker offers only Bluetooth
+     * SPP, so a K+DCAN cable is unreachable behind a capability check that says it is fine. And
+     * during the static prerender there is no `navigator.serial`, so it answered *false* and baked
+     * "Web Serial API not available in this browser" straight into the exported HTML — every
+     * desktop visitor saw that for a frame before hydration replaced it.
+     *
+     * Resolving after mount fixes both: nothing is asserted about the browser until a browser is
+     * actually present. It also keeps `dialogText()` out of the prerender, which would otherwise
+     * emit Japanese into HTML that an English client then has to reconcile.
+     */
+    const [transportKind, setTransportKind] = useState<TransportKind | null>(null);
+    useEffect(() => { setTransportKind(detectTransportKind()); }, []);
 
     // Progress fires once per DS2 chunk (hundreds of times per read/write). Throttle the React state
     // update to ~10 Hz so the UI doesn't thrash and slow the transfer. 100% and phase changes always
@@ -527,7 +542,7 @@ export function useDmeLink() {
         warningKind,
         transferProgress,
         transferPhase,
-        isWebSerialSupported,
+        transportKind,
         connect,
         disconnect,
         read,

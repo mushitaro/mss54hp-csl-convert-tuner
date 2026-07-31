@@ -1,5 +1,11 @@
 /**
- * Copy for the browser's native `alert` / `confirm` dialogs, in both display languages.
+ * Copy for the browser's native `alert` / `confirm` dialogs — and for the handful of plain-string
+ * notices rendered outside a React dialog — in both display languages.
+ *
+ * The second case arrived with the notice line on the hub, which had shipped an English-only string
+ * written inline at the call site: exactly the failure the rule below exists to prevent. A plain
+ * string is not JSX, so the component-local TEXT + useDialogLang pattern buys nothing there; it
+ * belongs here.
  *
  * The React dialogs each carry their own TEXT record and pick from it with `useDialogLang`. The
  * native ones had nothing: they were written inline at the call site, so whichever language the
@@ -91,7 +97,7 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[] }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
         'DMEへ書き込みます。\n\n' +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
@@ -103,9 +109,31 @@ const JA = {
         '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n' +
         // ブラウザ側のダイアログは文言を指定できないため、理由を説明できるのはここだけである。
         '  ブラウザのタブを閉じたり、リロードしたりしないでください。\n' +
-        '  (閉じようとすると確認が出ますが、確認を無視すれば離れられてしまいます)\n\n' +
-        'チェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
+        '  (閉じようとすると確認が出ますが、確認を無視すれば離れられてしまいます)\n' +
+        // Android では beforeunload の発火が不確実で、上の「確認が出ます」が当てにならない。
+        // 画面消灯・アプリ切替も接続を落としうるため、防げない分をここで明示する。
+        (a.android
+            ? '⚠ この端末(Android)では次の点にも注意してください:\n' +
+            '  画面を消灯させないでください(書き込み中は自動消灯を抑止しますが、手動での消灯は防げません)。\n' +
+            '  他のアプリに切り替えないでください。\n' +
+            '  OTGケーブルとコネクタが動かないよう固定してください。\n'
+            : '') +
+        '\nチェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
         '続行しますか？',
+
+    /**
+     * Shown on the notice line when no byte transport can reach a DME here.
+     *
+     * Android and desktop fail for entirely different reasons and need different remedies, so this
+     * takes the platform rather than shipping one vague sentence that fits neither: on Android
+     * `navigator.serial` exists but only enumerates Bluetooth SPP, so the answer is WebUSB + OTG,
+     * not "use Chrome" — the user is already in Chrome.
+     */
+    // 戻り値を string と明示しているのは、リテラル型に推論されると EN 側が JA のリテラル和型に
+    // 代入できなくなるため。EN が JA から型付けされている(NativeDialogText)ことによる制約。
+    noTransport: (a: { android: boolean }): string => a.android
+        ? 'DMEに接続できません — USB OTGアダプタと、WebUSB対応ブラウザ(Chrome)が必要です。PRACTICEならオフラインで試せます。'
+        : 'DMEに接続できません — Chrome/Edgeが必要です(Web Serial API)。PRACTICEならオフラインで試せます。',
 
     patchWriteDone:
         '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
@@ -119,9 +147,15 @@ const JA = {
         'OK        = 新規セッションを作成(BASE = 今書き込んだTUNED)\n' +
         'キャンセル = セッション一覧に戻る',
 
-    writeFailed: (reason: string | null) =>
+    writeFailed: (reason: string | null, a?: { wasBackgrounded: boolean }) =>
         '❌ 書き込みに失敗しました。\n\n' +
         `理由: ${reason ?? '不明なエラー'}\n\n` +
+        // 原因を名指しできるならそうする。「ケーブルが悪いのか」を延々調べるのと、
+        // 「バックグラウンドに回ったから」と分かっているのとでは、次にやることが違う。
+        (a?.wasBackgrounded
+            ? '⚠ 書き込み中にこのアプリが画面から外れました(画面消灯またはアプリ切替)。\n' +
+            '  それが原因の可能性が高いです。次回は画面を点けたまま、他のアプリに切り替えずに実行してください。\n\n'
+            : '') +
         '⚠ DMEのデータ領域は消去済みで、書き込みが途中の可能性があります。\n' +
         '  この状態でイグニッションを切ったり走行したりしないでください。\n\n' +
         '対処:\n' +
@@ -195,7 +229,7 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[] }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
         'Writing to the DME.\n\n' +
         `What will be written: ${a.tuned
             ? 'the tuned map'
@@ -206,9 +240,20 @@ const EN: NativeDialogText = {
         '⚠ Keep the power (battery) stable. The write takes about 4 minutes.\n' +
         '  Never cut the power or unplug the cable while it is writing.\n' +
         '  Do not close or reload this browser tab.\n' +
-        '  (Trying to close it asks for confirmation, but confirming still leaves.)\n\n' +
-        'The checksum is corrected automatically. The write is verified by reading it back.\n\n' +
+        '  (Trying to close it asks for confirmation, but confirming still leaves.)\n' +
+        (a.android
+            ? '⚠ On this device (Android), also note:\n' +
+            '  Do not let the screen switch off (auto-off is held back while writing, but a manual\n' +
+            '  press cannot be prevented).\n' +
+            '  Do not switch to another app.\n' +
+            '  Secure the OTG cable and connector so they cannot move.\n'
+            : '') +
+        '\nThe checksum is corrected automatically. The write is verified by reading it back.\n\n' +
         'Continue?',
+
+    noTransport: (a: { android: boolean }) => a.android
+        ? 'Cannot reach a DME — a USB OTG adapter and a WebUSB-capable browser (Chrome) are required. PRACTICE works offline.'
+        : 'Cannot reach a DME — Chrome or Edge is required (Web Serial API). PRACTICE works offline.',
 
     patchWriteDone:
         '✅ The patch write is complete (read-back verified).\n\n' +
@@ -222,9 +267,14 @@ const EN: NativeDialogText = {
         'OK     = create a new session (BASE = the TUNED just written)\n' +
         'Cancel = return to the session list',
 
-    writeFailed: (reason: string | null) =>
+    writeFailed: (reason: string | null, a?: { wasBackgrounded: boolean }) =>
         '❌ The write failed.\n\n' +
         `Reason: ${reason ?? 'unknown error'}\n\n` +
+        (a?.wasBackgrounded
+            ? '⚠ This app left the screen while it was writing (the screen switched off, or you\n' +
+            '  switched apps). That is the most likely cause. Next time, keep the screen on and\n' +
+            '  stay in this app for the whole write.\n\n'
+            : '') +
         "⚠ The DME's data area has already been erased and the write may be incomplete.\n" +
         '  Do not switch the ignition off and do not drive in this state.\n\n' +
         'What to do:\n' +
