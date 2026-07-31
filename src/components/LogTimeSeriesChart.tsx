@@ -239,9 +239,70 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             if (!frame) frame = requestAnimationFrame(apply);
         };
 
+        /**
+         * The same gesture for a finger.
+         *
+         * A touch drag emits no wheel event, so on a touchscreen the handler above never ran — and
+         * because Plotly's dragmode is 'pan', the drag fell through to Plotly and panned the
+         * chart's own x-range. That is precisely the desync this whole effect exists to prevent:
+         * the chart moves, the row table beside it goes on showing a different slice, and clicking
+         * a point stops jumping to its row. So touch was not merely unsupported here, it actively
+         * defeated the protection. Routing pointer drags into the same `apply()` restores the rule
+         * the comment above states — one window, both views, one gesture.
+         *
+         * Horizontal-dominant only, decided once per gesture from the first few pixels, because a
+         * vertical drag on a phone is a page gesture and a diagonal one should not steal it. Sign
+         * is inverted against the wheel: dragging content right moves the window left.
+         *
+         * Pointer events rather than touch events so a stylus and a mouse drag behave identically;
+         * `pointerType === 'mouse'` is skipped because a mouse already has the wheel, and
+         * intercepting its drag would take Plotly's own box-pan away.
+         */
+        let tracking = false;
+        let decided: 'horizontal' | 'vertical' | null = null;
+        let lastX = 0, startX = 0, startY = 0, pointerId = -1;
+
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.pointerType === 'mouse' || !e.isPrimary) return;
+            tracking = true; decided = null; pointerId = e.pointerId;
+            startX = lastX = e.clientX; startY = e.clientY;
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+            if (!tracking || e.pointerId !== pointerId) return;
+            if (decided === null) {
+                const dx = Math.abs(e.clientX - startX), dy = Math.abs(e.clientY - startY);
+                if (dx < 6 && dy < 6) return;          // below the slop threshold, no verdict yet
+                decided = dx > dy ? 'horizontal' : 'vertical';
+                if (decided === 'horizontal') wrapper.setPointerCapture(e.pointerId);
+            }
+            if (decided !== 'horizontal') return;
+            e.preventDefault();
+            e.stopPropagation();
+            pendingPx -= e.clientX - lastX;            // drag right → window left, as the wheel does
+            lastX = e.clientX;
+            if (!frame) frame = requestAnimationFrame(apply);
+        };
+
+        const endPointer = (e: PointerEvent) => {
+            if (e.pointerId !== pointerId) return;
+            if (decided === 'horizontal' && wrapper.hasPointerCapture(e.pointerId)) {
+                wrapper.releasePointerCapture(e.pointerId);
+            }
+            tracking = false; decided = null; pointerId = -1;
+        };
+
         wrapper.addEventListener('wheel', onWheel, { capture: true, passive: false });
+        wrapper.addEventListener('pointerdown', onPointerDown, { capture: true });
+        wrapper.addEventListener('pointermove', onPointerMove, { capture: true, passive: false });
+        wrapper.addEventListener('pointerup', endPointer, { capture: true });
+        wrapper.addEventListener('pointercancel', endPointer, { capture: true });
         return () => {
             wrapper.removeEventListener('wheel', onWheel, { capture: true });
+            wrapper.removeEventListener('pointerdown', onPointerDown, { capture: true });
+            wrapper.removeEventListener('pointermove', onPointerMove, { capture: true });
+            wrapper.removeEventListener('pointerup', endPointer, { capture: true });
+            wrapper.removeEventListener('pointercancel', endPointer, { capture: true });
             if (frame) cancelAnimationFrame(frame);
         };
     }, [onPanWindow, canPanWindow, data]);
@@ -386,7 +447,11 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
     return (
         <div
             ref={wrapperRef}
-            className="w-full h-full min-h-[300px]"
+            // touch-action: pan-y. Without it the browser claims a horizontal drag as a scroll or a
+            // back-navigation gesture before pointermove is ever delivered, so the window pan below
+            // could never start. `pan-y` gives up only the axis this chart does not use, leaving a
+            // vertical swipe as the ordinary page gesture it should be.
+            className="w-full h-full min-h-[300px] touch-pan-y"
             onClick={(e) => {
                 if (onPointClick) {
                     // [FIX] Global Bounds Check first: Ignore clicks in margins (Legend, X-Axis)

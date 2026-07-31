@@ -25,6 +25,7 @@ import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/l
 import { beginLiveRun, appendLiveChunk, endLiveRun, discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { dialogText } from '@/lib/dialog-text';
+import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { sha256Hex } from '@/lib/db/sessionRepository';
@@ -36,6 +37,8 @@ import { useSessionDb } from '@/hooks/useSessionDb';
 import { useFieldVisibility } from '@/hooks/useFieldVisibility';
 import { useDmeLink } from '@/hooks/useDmeLink';
 import { useUnloadGuard } from '@/hooks/useUnloadGuard';
+import { useScreenWakeLock } from '@/hooks/useScreenWakeLock';
+import { useHiddenWitness } from '@/hooks/useHiddenWitness';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
 
 type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup' | 'wot';
@@ -232,6 +235,17 @@ export default function Home() {
   // operation that has hung. A data log is a drive: capping it at minutes would drop the guard
   // mid-run, so it gets a bound that only a genuinely stuck state could ever reach.
   useUnloadGuard(unloadGuarded, dmeLink.state === 'tuning' ? 6 * 60 * 60_000 : 10 * 60_000);
+  /**
+   * The two Android-shaped halves of the same problem, deliberately sharing `unloadGuarded` rather
+   * than deriving their own condition — one definition of "an operation that must not be
+   * interrupted", so a state added there cannot be missed here.
+   *
+   * The wake lock removes the failure that happens by itself (screen inactivity timeout mid-write).
+   * The witness cannot prevent anything; it records whether the page was backgrounded, so a failure
+   * can name that instead of looking like a cable fault. Both are no-ops on desktop.
+   */
+  useScreenWakeLock(unloadGuarded);
+  const wasBackgrounded = useHiddenWitness(unloadGuarded);
 
   const [activeTab, setActiveTab] = useState<TabId>('startup');
   /** Bumped by the chart's FIT button. Folded into the plot's uirevision so Plotly drops the
@@ -956,6 +970,10 @@ export default function Home() {
       tuned: Boolean(newMap),
       patchOn: applyPatch || applyWotDisable,
       drift,
+      // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
+      // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
+      // and the screen or an app switch can take the connection down mid-write.
+      android: isAndroidPlatform(),
     }));
     if (!confirmed) return;
 
@@ -1039,7 +1057,7 @@ export default function Home() {
       // notice line and a WRITE button that still looked ready. That is the most consequential moment
       // in the app to stay silent about: writePartialBin erases the data area BEFORE it writes, so a
       // failure part-way through can leave the ECU partially programmed.
-      alert(dialogText().writeFailed(dmeLink.error));
+      alert(dialogText().writeFailed(dmeLink.error, { wasBackgrounded: wasBackgrounded() }));
     }
   };
 
@@ -1338,7 +1356,12 @@ export default function Home() {
   const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
 
   return (
-    <main className="h-screen flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
+    // 100dvh, not h-screen. This page deliberately never scrolls — everything is sized to fit the
+    // viewport — and on Android `100vh` resolves to the LARGEST viewport, the one with the browser
+    // chrome retracted. With no scrolling to recover it, the bottom of the layout (the action row
+    // that carries WRITE) sits under the URL bar and cannot be reached. `dvh` tracks the viewport
+    // that is actually visible.
+    <main className="h-[100dvh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
       {/* App Header - Ultra Minimal */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md z-10 shrink-0 h-[48px]">
         {/* The ///M stripe as the header's bottom rule, replacing a slate-900 border-b. Absolutely
@@ -1369,10 +1392,16 @@ export default function Home() {
             TUNER
           </h1>
           <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2 β</span>
-          <div className="flex-1 min-w-0 flex items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">
-            <span>VIN <span className="text-slate-300">{dmeLink.identity?.vin ?? '-'}</span></span>
-            <span>AIF <span className="text-slate-300">{dmeLink.identity?.aif ?? '-'}</span></span>
-            <span>SW <span className="text-slate-300">{dmeLink.identity?.softwareVersion ?? '-'}</span></span>
+          {/* VIN/AIF/SW are readouts and may clip; FLASH is a control and may not — it is the only
+              entry to the flash-counter dialog, so clipping it removes a feature rather than a
+              label. Below 900px (where the panes stack, i.e. phones) the three readouts are hidden
+              outright and FLASH keeps its place, instead of all four being squeezed until the
+              button falls off the end of an overflow-hidden row. The identity is still on the
+              status dot's tooltip, and the readouts return the moment there is room. */}
+          <div className="flex-1 min-w-0 flex items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-2 min-[900px]:ml-8 pl-2 min-[900px]:pl-8 border-l border-slate-800">
+            <span className="hidden min-[900px]:inline">VIN <span className="text-slate-300">{dmeLink.identity?.vin ?? '-'}</span></span>
+            <span className="hidden min-[900px]:inline">AIF <span className="text-slate-300">{dmeLink.identity?.aif ?? '-'}</span></span>
+            <span className="hidden min-[900px]:inline">SW <span className="text-slate-300">{dmeLink.identity?.softwareVersion ?? '-'}</span></span>
             {/* The only one of the four that is a control: clicking it opens the reset dialog. The
                 reset has no button of its own anywhere else — it belongs on the number it changes,
                 and the hub's sub-action row is for actions on the workspace and the current run.
@@ -1932,10 +1961,15 @@ export default function Home() {
                 <div className="h-[14px] px-2 flex items-center overflow-hidden">
                   {(() => {
                     // dmeLink.warning first: it describes the operation that just ran, and the
-                    // Web Serial notice only applies while disconnected, so the two never compete.
+                    // transport notice only applies while disconnected, so the two never compete.
+                    //
+                    // `transportKind === 'none'` rather than a negated "supported" flag, because
+                    // null (not yet determined, i.e. the static prerender) must render nothing.
+                    // The old test was a bare boolean that read false during prerender, which put
+                    // an "unsupported browser" line into the exported HTML for every visitor.
                     const warning = dmeLink.warning
-                      ?? (!dmeLink.mockMode && dmeLink.state === 'disconnected' && !dmeLink.isWebSerialSupported
-                        ? 'Web Serial API not available in this browser — use Chrome/Edge, or check PRACTICE to test offline.'
+                      ?? (!dmeLink.mockMode && dmeLink.state === 'disconnected' && dmeLink.transportKind === 'none'
+                        ? dialogText().noTransport({ android: isAndroidPlatform() })
                         : null);
                     const notice = dmeLink.error ?? warning;
                     if (!notice) return null;
@@ -2146,6 +2180,12 @@ export default function Home() {
                   box. Laid out horizontally the content is 31px tall whatever it holds, and the
                   reserved height is untouched so the hub still cannot move. No flex-wrap: a second
                   line would put the height back over budget, which is the bug this fixes. */}
+              {/* The buttons below carry `py-3 -my-3`: the padding grows the touch target to ~40px
+                  while the negative margin cancels its contribution to layout, so the 31px content
+                  height and the 46px budget above are both exactly as measured. Finger-sized targets
+                  matter here more than anywhere else in the app — Discard log throws away a drive
+                  and Reset Adapt writes to the ECU — and on a phone a 15px-tall button between two
+                  siblings 16px away is a coin toss. Do not "simplify" this to plain padding. */}
               <div className="h-[46px] flex-none flex flex-row items-center justify-center gap-x-4">
                 {dmeLink.transferPhase && (
                   <span className={`whitespace-nowrap text-[9px] font-bold tracking-[0.2em] uppercase animate-pulse ${transferStyle.text}`}>
@@ -2165,7 +2205,7 @@ export default function Home() {
                 {processedLog && !isArchived && dmeLink.state !== 'tuning' && dmeLink.state !== 'writing' && (
                   <button
                     onClick={handleDiscardLog}
-                    className="whitespace-nowrap flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
+                    className="whitespace-nowrap flex items-center gap-1.5 py-3 -my-3 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
                   >
                     <RotateCcw className="w-3 h-3" /> Discard log
                   </button>
@@ -2187,7 +2227,7 @@ export default function Home() {
                 {dmeLink.state === 'connected' && (idleAction === 'tune' || activeTab === 'startup') && (
                   <button
                     onClick={() => setAdaptDialogOpen(true)}
-                    className="whitespace-nowrap flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-amber-400 transition-colors"
+                    className="whitespace-nowrap flex items-center gap-1.5 py-3 -my-3 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-amber-400 transition-colors"
                   >
                     <Eraser className="w-3 h-3" /> Reset Adapt
                   </button>
@@ -2203,7 +2243,7 @@ export default function Home() {
                 {dmeLink.state === 'reading' && (
                   <button
                     onClick={dmeLink.cancelRead}
-                    className="whitespace-nowrap flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
+                    className="whitespace-nowrap flex items-center gap-1.5 py-3 -my-3 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"
                   >
                     <Square className="w-3 h-3" /> Cancel Read
                   </button>

@@ -11,12 +11,19 @@ import { X } from 'lucide-react';
  * is at that moment erasing a vehicle's identity records, a dialog that jumps around while it works
  * reads as something going wrong.
  *
- * So the height is stated here, not derived: `min(84vh,560px)`, with the viewport cap kept so a short
+ * So the height is stated here, not derived: `min(84dvh,560px)`, with the viewport cap kept so a short
  * laptop screen still fits. 560 is the tallest arrangement either dialog needs — the twelve-row
  * adaptation table under its confirmation warnings — measured at 0 px of overflow in Japanese and
  * 32 px in English, where the longer labels wrap. Content that outgrows it scrolls inside the body;
  * the frame does not react to it. Both dialogs share the number deliberately: they open from
  * adjacent header buttons, and one box in one place is easier to trust than two that nearly match.
+ *
+ * **The width cap does not weaken any of that.** `min(560px, 100vw-2rem)` still resolves to one
+ * number for the dialog's whole lifetime — the viewport does not change while a dialog is open — so
+ * the box is as fixed as it ever was. What it fixes is a phone: at 560 px flat, every portrait
+ * handset clipped both edges off the dialog, including its buttons. `dvh` rather than `vh` for the
+ * same reason as the app shell: on Android `vh` is the *largest* viewport, so 84vh could reach
+ * under the browser's own chrome.
  */
 interface FrameProps {
     /** Rendered at the title's left, sized by the caller (`w-3 h-3`). */
@@ -39,7 +46,7 @@ export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, onC
             className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
             onClick={onClose}
         />
-        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[560px] h-[min(84vh,560px)] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
+        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-2rem))] h-[min(84dvh,560px)] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
                 <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                     {icon}
