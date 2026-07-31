@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -22,6 +22,25 @@ export const metadata: Metadata = {
   },
 };
 
+/**
+ * Stated rather than inherited from Next's default, so the two things this app depends on are
+ * written down where someone can see them.
+ *
+ * `viewportFit` is deliberately NOT 'cover': it only helps once every edge-touching container also
+ * pads by `env(safe-area-inset-*)`, and nothing here does — turning it on alone moves content UNDER
+ * the notch and the gesture bar rather than away from them. `interactiveWidget` is deliberately left
+ * alone too: shrinking the visual viewport for the keyboard would re-run useFitScale and relayout
+ * the dashboard mid-write.
+ */
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  // The instrument is dark-only. Without this, native controls — the three <select>s, and the option
+  // sheet Chrome for Android opens full-screen — render in the OS's light scheme: a white panel over
+  // a black dashboard, at night, in a car.
+  colorScheme: 'dark',
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -29,7 +48,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-screen`}>{children}</body>
+      {/* `min-h-[100dvh]`, not `min-h-screen`. The page itself is sized to `100dvh` and never
+          scrolls; leaving 100vh on the body meant that on Android, with the URL bar showing, the
+          body was taller than the page by exactly the height of that bar — so the whole document
+          scrolled, which is the thing the dvh switch inside the page was made to stop. */}
+      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-[100dvh]`}>{children}</body>
     </html>
   );
 }

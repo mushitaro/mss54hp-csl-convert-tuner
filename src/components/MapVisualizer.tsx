@@ -1,9 +1,10 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import dynamic from 'next/dynamic';
 import { VEMap } from '@/lib/types';
 import { Layout, Data } from 'plotly.js';
+import { RotateCcw } from 'lucide-react';
 
 // Dynamic import for Plotly to avoid SSR issues
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as any;
@@ -65,6 +66,10 @@ interface Props {
 }
 
 export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxisLabel = 'RF %', scale = 'magnitude', deviationMidpoint = 0 }) => {
+    // Bumped by the reset button to remount Plotly, which is what re-applies `scene.camera`
+    // below. Plotly keeps the camera in its own internal state after the first render.
+    const [cameraNonce, setCameraNonce] = useState(0);
+
     // Plotly expects [x, y, z].
     // Surface plot format: z is Data[y][x], x, y are axes.
 
@@ -101,14 +106,32 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
     };
 
     return (
-        <div className="w-full h-full relative">
+        // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene
+        // claims every touch for the turntable otherwise, which on a phone means the surface is a
+        // dead zone you cannot scroll past. The 2D chart already declares the same thing.
+        <div className="w-full h-full relative touch-pan-y">
             <Plot
+                key={cameraNonce}
                 data={data}
                 layout={layout}
                 useResizeHandler={true}
                 className="w-full h-full"
                 config={{ responsive: true, displayModeBar: false }}
             />
+            {/* The way back. The modebar is off — it is desktop furniture and its buttons are far
+                below any touch size — so a turntable drag was one-way: the initial eye above is
+                applied on mount and never again, and one accidental swipe left the map at an angle
+                with no control anywhere to undo it. Remounting Plotly is what restores the camera;
+                `uirevision` would preserve the user's rotation, which is the opposite of the ask. */}
+            <button
+                type="button"
+                onClick={() => setCameraNonce(n => n + 1)}
+                title="Reset the 3D view"
+                aria-label="Reset the 3D view"
+                className="absolute top-1 right-1 z-10 p-2 text-slate-600 hover:text-slate-300 transition-colors cursor-pointer"
+            >
+                <RotateCcw className="w-3.5 h-3.5" />
+            </button>
         </div>
     );
 };

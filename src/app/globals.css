@@ -3,6 +3,14 @@
 :root {
   --background: #000000;
   --foreground: #F2F2F5;
+
+  /* Dark-only instrument, said in CSS as well as in the viewport meta layout.tsx emits. The meta
+     tells the browser what to paint its own surfaces; this property is the one that cascades into
+     form controls, and the app has three native <select>s. Without it Chrome for Android opens
+     their option lists as a full-screen white sheet — the <option> elements carry bg-slate-900
+     classes, but mobile UAs ignore author styling on those entirely. A white sheet is what the
+     driver would get, at night, mid-session. */
+  color-scheme: dark;
 }
 
 @theme inline {
