@@ -24,6 +24,22 @@ Last updated: 2026-07 (after the first successful real-vehicle write).
 Everything runs at **9600 baud**. A full read takes **~124 s** (measured 2026-07-28; the "~70 s" this
 line used to claim is not reproducible — see §9). A full write is ~4 min.
 
+The table above is the **desktop / Web Serial** transport. The Android / WebUSB-FTDI transport (§14)
+shares every layer above the bytes, so what needs separate verification is only the transport itself:
+
+| Capability (Android, WebUSB + FTDI) | Status |
+|---|---|
+| `claimInterface` on Chrome for Android | ✅ Verified on a real phone — the gating unknown |
+| Identity read | ✅ Verified on real DME |
+| Partial BIN read (65536 B) | ✅ Verified — **65528/65536 bytes checked against the ECU's own stored checksums**, 126.5 s / 518 B/s |
+| Live polling + datalog | ✅ Verified on real DME (544 samples) |
+| Reconnect after key cycle | ✅ Verified on real DME |
+| Partial BIN write (flash) | ❌ **Never run over WebUSB** |
+| Break recovery (BI bit) | ❌ Untested |
+| `SIO_RESET` receive-flush polarity (2 vs 1) | ❌ Untested — 2 is the libftdi 1.5 value, assumed |
+| Backgrounding / screen-off endurance | ❌ Untested |
+| Baud boost to 38400 | ❌ Untested on this transport (now cheap: no port transition) |
+
 ---
 
 ## 2. Module map
@@ -927,10 +943,10 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
   baud switching is proven.
 - **Chromium only**: Chrome/Edge/Opera on desktop (Web Serial), Chrome on Android (WebUSB, §14). The
   file-upload workflow remains the fallback for every other browser and must keep working.
-- **The Android backend is unproven on hardware.** Every constant in `webUsbFtdiTransport.ts` is
-  derived and asserted, not measured: no phone, no cable and no car have run it yet. `/usb-check` is
-  the bench probe that answers the open questions, and the first one — whether Chrome for Android
-  can claim the interface at all — gates everything else. Treat ❌ as the status until it is run.
+- **The Android backend's WRITE path is unproven.** Reading is now measured on the car and the image
+  verifies against the ECU's own checksums (§14), but no erase/write/verify cycle has ever run over
+  WebUSB. Break recovery, the `SIO_RESET` flush polarity, the backgrounding/endurance behaviour and
+  38400 are also still untested — `/usb-check` is the bench probe for those.
 - **IndexedDB is best-effort storage** — the browser can evict it. File download remains the durable
   artifact.
 - **README is stale**: it still says checksum correction is "not yet included" and that flashing is
@@ -1219,8 +1235,9 @@ honestly serve both questions.
 
 ## 14. Android — WebUSB and the FTDI vendor protocol
 
-**Status: written and type-checked, proven on nothing.** No phone, no cable and no car have run a
-byte of it. Read §"Verifying it" below before trusting any of it.
+**Status (2026-07-31): the read path is proven on the car. The write path is not.** See
+§"What the vehicle run established" below for exactly which parts are now measured and which are
+still untested.
 
 ### Why WebUSB and not Web Serial
 
@@ -1323,7 +1340,40 @@ cable will not self-echo on a desk, because its K-line pull-up comes from the ve
 7. Five-minute endurance with the screen on / off / app-switched / wake-locked — the empirical
    answer to "does Android freeze the tab mid-flash".
 
-Then, on the car and in this order: identify at 9600 → a full 64 KB read **byte-compared against a
-desktop Web Serial read of the same ECU** (the acceptance test for the status-header design) → a
-datalog → and only then a write. 38400 is free to re-test once reading is proven, but see §9: the
-residual there was attributed to the physical line, not to the port transition this removes.
+Then, on the car and in this order: identify at 9600 → a full 64 KB read → a datalog → and only then
+a write. 38400 is free to re-test once reading is proven, but see §9: the residual there was
+attributed to the physical line, not to the port transition this removes.
+
+**On the acceptance test for the read, which turned out to have a better form than planned.** The
+plan was to byte-compare an Android read against a desktop Web Serial read of the same ECU. Do that
+if you like, but it is the weaker test and it is not what was used: **run `analyzeDataChecksum()` on
+the image instead**. Comparing two reads can only show that they agree — a systematic transport
+error would corrupt both identically and still compare equal. The MSS54HP data checksums are
+independent of any read: they are CRC-16/ARC values the ECU itself stored in flash, and between them
+the two slots cover **65528 of the image's 65536 bytes**. The remaining 8 bytes *are* the two
+checksum slots (`0x3FFC-0x3FFF`, `0xBFFC-0xBFFF`), which the match itself verifies. So a valid pair
+of checksums verifies the entire image against an external authority, and the two-bytes-every-64
+failure mode this design most feared cannot survive it.
+
+### What the vehicle run established (2026-07-31)
+
+Chrome for Android, USB OTG, genuine FTDI K+DCAN, engine-off on a real E46 M3:
+
+| | Result |
+|---|---|
+| `claimInterface` | **Passed.** Android's `ftdi_sio` did not hold the device; the gating unknown is answered. |
+| 64 KB read at 9600 | **126.5 s / 518 B/s** — against the desktop's measured ~123 s / 530 B/s, i.e. **2.8% slower**. The transport costs essentially nothing. |
+| Image integrity | **Both data checksums valid**: slave `0x5E62`, master `0xA650`, both with `FFFF` padding. Whole-image verification, per above. |
+| Identity | VIN / AIF / software version parsed; session created. |
+| Live polling / datalog | 544 samples captured, `logFinished` reached. |
+| Reconnect after key cycle | Succeeded; WRITE armed. |
+| Mobile UI | Usable in landscape — dialogs, header and tab strip all reachable. |
+
+The valid checksums retire four of the risks §14 was written around, without needing the bench
+probe: the **9600 divisor `0x4138`** is right (elapsed time matches theory), **`SET_DATA = 0x0208`**
+(8E1) is right (an 8N1 receiver would fault on nearly every frame), **`SET_MODEM_CTRL = 0x0300`** has
+the correct polarity (wrong, and the K-line transceiver never enables — no bytes at all), and the
+**status-header stripping is correct at interior packet boundaries**.
+
+Still untested, and listed in §11: the write path, break recovery, the flush polarity, backgrounding
+endurance, and 38400.
