@@ -13,19 +13,29 @@ interface Props {
     className?: string;
 }
 
+// Coverage bands for the hit heat. These are ABSOLUTE sample counts, deliberately
+// not a fraction of the busiest cell: the question this heat answers is "have I
+// gathered enough here yet", which has a fixed answer per cell. Normalising by the
+// max made the whole map fade as one cell filled up — the map got darker the longer
+// you drove, which is backwards for spotting the gaps you still need to cover.
+//
+// These are a DISPLAY threshold, not a calculation one. calculator.ts only needs
+// weightSum > 0.1, so a cell with a single sample still produces a correction. The
+// bands say how thin the evidence under that correction is, which is exactly the
+// "should I go drive this area more" signal.
+const COVERAGE_THIN = 10;   // below this: some data, not enough to trust
+const COVERAGE_OK = 30;     // at or above this: enough samples to act on
+
+// One ice blue (#8FD8F2) over the table's slate-900, separated by lightness only —
+// the palette rule in globals.css. Opaque enough to survive direct sunlight: the top
+// band is 13.3:1 against black where the old max-0.3-alpha ramp topped out at 2.0:1.
+// Steps are evenly spaced perceptually (2.4 / 2.2 / 2.4:1 between neighbours).
+const COVERAGE_ALPHA_THIN = 0.35;
+const COVERAGE_ALPHA_OK = 0.62;
+
 export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightData, className }) => {
     // Render a scrollable grid
     // Styles: Dark mode table
-
-    // Calculate max hits for heatmap normalization
-    let maxHits = 1;
-    if (hitData) {
-        for (const row of hitData) {
-            for (const val of row) {
-                if (val > maxHits) maxHits = val;
-            }
-        }
-    }
 
     return (
         <div className={clsx('overflow-auto h-full', className)}>
@@ -68,13 +78,17 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                 const hasHits = hits > 0;
 
                                 if (hasHits && (!diffData)) {
-                                    const intensity = Math.min(hits / maxHits, 1.0);
                                     // Ice blue (#8FD8F2) = "the log actually visited this cell", the same
                                     // OK/present role emerald-* now carries. Safe to share the blue family
                                     // with the lean-diff fill below: the guard above means a cell can never
                                     // paint both, and diffData is all-or-nothing for the whole table.
-                                    style = { backgroundColor: `rgba(143, 216, 242, ${intensity * 0.3})` };
-                                    textColor = hits > maxHits * 0.5 ? 'text-emerald-100' : 'text-slate-300';
+                                    const alpha =
+                                        hits >= COVERAGE_OK ? 1
+                                            : hits >= COVERAGE_THIN ? COVERAGE_ALPHA_OK
+                                                : COVERAGE_ALPHA_THIN;
+                                    style = { backgroundColor: `rgba(143, 216, 242, ${alpha})` };
+                                    // The two brighter bands need dark text to stay legible on them.
+                                    textColor = hits >= COVERAGE_THIN ? 'text-slate-950' : 'text-slate-300';
                                 }
 
                                 // If diff exists, colorize (Overrides hit map or combines?)
