@@ -217,7 +217,10 @@ than from assumption, whether the identity records are present and which process
 - **Speed**: DME communication defaults to 9600 baud, where a full read takes **~124 s measured** (530 B/s) — about 40 s more than the wire alone accounts for, and that gap is currently unexplained. Faster rates are selectable but **none is reliable yet**: 38400 has both completed and, more recently, timed out 3–10% into a read; 125000 fails outright (the DME accepts the switch, then answers nothing); 57600 / 76800 / 115200 are unconfirmed. If the DME refuses a rate the read silently falls back to 9600, so every read now reports its own elapsed time, throughput and the rate it actually used — otherwise "refused" and "didn't help" look identical. Writes always run at 9600 regardless.
 - **Browser compatibility**:
   - *File workflow*: any Chromium browser (Chrome / Edge / Opera).
-  - *Direct DME workflow*: **Chrome / Edge / Opera desktop only** — it requires the Web Serial API, which Safari does not support and Firefox does not support out of the box.
+  - *Direct DME workflow, desktop*: **Chrome / Edge / Opera** — it requires the Web Serial API, which Safari does not support and Firefox does not support out of the box.
+  - *Direct DME workflow, Android*: **Chrome, with a USB OTG adapter** — and it is **not yet proven on hardware**, see below. Note that Chrome for Android does expose the Web Serial API, but only for Bluetooth serial-port emulation: a USB K+DCAN cable is invisible to it, so the app talks to the cable through WebUSB and the FTDI vendor protocol instead. Genuine FTDI chips only (FT232AM/BM/R); CH340 and other clone cables are not supported on Android.
+  - *Android status*: written, not validated. No phone, cable or car has run it. There is a bench page at **`/usb-check`** that answers the open questions in order — the first being whether Chrome for Android can claim the FTDI interface at all, which everything else depends on. It needs a bare FT232R breakout with TX and RX jumpered together; a K+DCAN cable cannot self-echo on a desk, because its K-line pull-up comes from the car. Run that before trusting the Android path with an ECU.
+  - *Writing from a phone*: supported, and it asks for more care than the desktop path. A write runs 4+ minutes, and if the screen switches off or you switch apps the connection can drop mid-write. The app holds a screen wake lock while writing and warns you before starting, but Android does not let a web page guarantee any of this. If a write does fail it always restarts from the erase, so re-running it is safe.
 - **Live logging caveat**: live values are decoded from the DME's measurement blocks. RPM, relative opening and coolant temperature are confirmed, but the lambda-controller factor used as the STFT input has **not** been cross-checked against a known-good Testo log. Validate it before relying on live-tuned output.
 
 ## Important Note on Development
@@ -251,7 +254,15 @@ Open [http://localhost:5054](http://localhost:5054) with your browser to see the
 saved sessions — pick one and stay on it.
 
 The DME features need a real K+DCAN cable and a secure context; `localhost` counts as secure, so
-`npm run dev` is enough for hardware testing. A **PRACTICE** toggle in the DME panel simulates a DME
+`npm run dev` is enough for hardware testing.
+
+Testing the Android path against a dev server is the one case where that is not enough: a phone
+reaching your machine at `http://192.168.x.x:5054` is **not** a secure context, so both
+`navigator.usb` and `navigator.serial` are simply undefined there and the app will report that it
+cannot reach a DME. Use `adb reverse tcp:5054 tcp:5054` so the phone sees it as its own `localhost`,
+or test against the deployed HTTPS site. Adding `?transport=webusb` forces the WebUSB backend on any
+platform, which is how the FTDI path can be exercised from a desktop bench rig rather than
+first-run in a car (`?transport=webserial` forces the other way). A **PRACTICE** toggle in the DME panel simulates a DME
 so the whole flow (read → live tune → write, plus the flash-counter reset) can be exercised offline
 without a cable. The simulated DME keeps state, so a reset stays reset across re-reads the way a real
 one would.
