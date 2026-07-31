@@ -101,7 +101,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
 
                             {/* [NEW] Enable Toggle */}
                             <div className={`flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider bg-slate-800/50 p-2 rounded ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
-                                <label className="flex items-center gap-2 cursor-pointer">
+                                <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
                                     <input
                                         type="checkbox"
                                         checked={enabled}

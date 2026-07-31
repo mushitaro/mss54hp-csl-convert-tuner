@@ -1938,7 +1938,7 @@ export default function Home() {
                     )}
                     {dmeLink.state === 'disconnected' ? (
                       <>
-                        <label className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer" title="Simulate a DME offline — no cable required">
+                        <label className="py-3 -my-3 flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer" title="Simulate a DME offline — no cable required">
                           <input
                             type="checkbox"
                             checked={dmeLink.mockMode}
@@ -2051,7 +2051,7 @@ export default function Home() {
                       <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyPatch ? 'text-blue-400' : 'text-slate-500'}`}>
                         PATCH
                       </span>
-                      <label className="relative inline-flex items-center cursor-pointer group">
+                      <label className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group">
                         <input type="checkbox" className="sr-only peer" checked={applyPatch} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyPatch(e.target.checked)} />
                         <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
@@ -2133,7 +2133,7 @@ export default function Home() {
 
                     {/* ROW 1: WOT TH 100 (Close to Ring) */}
                     <div className="h-7 flex items-center gap-3 ml-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
-                      <label className="relative inline-flex items-center cursor-pointer group">
+                      <label className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group">
                         <input type="checkbox" className="sr-only peer" checked={applyWotDisable} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyWotDisable(e.target.checked)} />
                         <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
@@ -2160,7 +2160,7 @@ export default function Home() {
                     {/* ROW 2: WRITE WARMUP (Pushed Away/Far) */}
                     <div className={`h-7 flex items-center gap-4 ml-8 pl-1 shrink-0 transition-opacity ${derivedTablesLocked ? 'opacity-40' : ''}`}>
                       <label
-                        className={`relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
                       >
                         <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWarmup} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWarmup(e.target.checked)} />
@@ -2177,7 +2177,7 @@ export default function Home() {
                     {/* ROW 3: WRITE WOT (Close to Ring) */}
                     <div className={`h-7 flex items-center gap-3 ml-1 transition-opacity shrink-0 ${derivedTablesLocked ? 'opacity-40' : 'opacity-90'}`}>
                       <label
-                        className={`relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
                       >
                         <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWot} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />

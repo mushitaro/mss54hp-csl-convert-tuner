@@ -94,7 +94,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                             {/* Min Temp */}
                             <div className="space-y-1">
                                 <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="flex items-center gap-2 cursor-pointer">
+                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
                                         <input
                                             type="checkbox"
                                             checked={localConfig.enableMinTemp}
@@ -118,7 +118,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                             {/* Idle RPM */}
                             <div className="space-y-1">
                                 <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="flex items-center gap-2 cursor-pointer">
+                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
                                         <input
                                             type="checkbox"
                                             checked={localConfig.enableIdle}
@@ -142,7 +142,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
 
                             {/* Transient Header */}
                             <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
-                                <label className="flex items-center gap-2 cursor-pointer text-[10px] text-slate-500 uppercase tracking-wider font-bold">
+                                <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer text-[10px] text-slate-500 uppercase tracking-wider font-bold">
                                     <input
                                         type="checkbox"
                                         checked={localConfig.enableTransient}

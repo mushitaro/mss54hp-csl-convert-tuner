@@ -87,7 +87,7 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                 </div>
 
                 <div className="shrink-0 pt-3 mt-3 border-t border-slate-800 flex items-center justify-between gap-4">
-                    <label className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-400 uppercase tracking-wider select-none">
+                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer text-[11px] text-slate-400 uppercase tracking-wider select-none">
                         <input
                             type="checkbox"
                             checked={dontShowAgain}

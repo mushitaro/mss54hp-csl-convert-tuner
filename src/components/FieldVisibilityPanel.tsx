@@ -41,7 +41,7 @@ export const FieldVisibilityPanel: React.FC<Props> = ({ visibleFields, onToggle,
                             {TOGGLEABLE_FIELDS.map(key => {
                                 const meta = LOG_FIELD_REGISTRY[key];
                                 return (
-                                    <label key={key} className="flex items-center gap-2 cursor-pointer text-[10px] text-slate-400 uppercase tracking-wider">
+                                    <label key={key} className="py-2 -my-2 flex items-center gap-2 cursor-pointer text-[10px] text-slate-400 uppercase tracking-wider">
                                         <input
                                             type="checkbox"
                                             checked={visibleFields[key]}
