@@ -68,7 +68,7 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
                 <table className="w-full text-right border-collapse text-[10px] font-mono">
                     <thead className="sticky top-0 bg-slate-950 z-10 text-slate-500 font-bold uppercase tracking-wider">
                         <tr>
-                            <th className="py-2 px-3 text-left border-b border-slate-800">Time</th>
+                            <th className="py-2 px-3 text-left border-b border-slate-800 sticky left-0 bg-slate-950">Time</th>
                             <th className="py-2 px-3 border-b border-slate-800">{LOG_FIELD_REGISTRY.rpm.label}</th>
                             <th className="py-2 px-3 border-b border-slate-800 text-slate-400">{LOG_FIELD_REGISTRY.rawLoad.label}</th>
                             {/* Factor: app-computed (Alpha-N by RPM), always shown between Raw and Corrected */}
@@ -92,7 +92,14 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
                                     : 'hover:bg-slate-800/50'
                                     }`}
                             >
-                                <td className={`py-1 px-3 text-left ${selectedIndex === index ? 'text-blue-200' : 'text-slate-500'}`}>{row.time.toFixed(0)}</td>
+                                {/* Sticky, so the row keeps a handle once the table is scrolled sideways —
+                                    with 10+ columns the time was the first thing to leave and every row
+                                    then looked alike. A sticky cell has to be opaque or the columns
+                                    sliding under it show through, which is why the selected state repeats
+                                    here as a flat colour: #02151F is exactly the row's `bg-blue-900/40`
+                                    (#06354E at 40%) resolved over the black table, so the highlight still
+                                    reads across the one column that says which row you picked. */}
+                                <td className={`py-1 px-3 text-left sticky left-0 z-[5] ${selectedIndex === index ? 'bg-[#02151F] text-blue-200' : 'bg-slate-950 text-slate-500'}`}>{row.time.toFixed(0)}</td>
                                 <td className="py-1 px-3 text-slate-300">{LOG_FIELD_REGISTRY.rpm.format(row.rpm)}</td>
                                 <td className="py-1 px-3 text-slate-400">{LOG_FIELD_REGISTRY.rawLoad.format(row.rawLoad)}</td>
                                 <td className="py-1 px-3" style={{ color: FACTOR_COLOR }}>{row.correctionFactor?.toFixed(2) ?? '1.00'}</td>

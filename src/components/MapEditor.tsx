@@ -62,7 +62,7 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                 <tbody>
                     {mapData.yAxis.map((load, rowIdx) => (
                         <tr key={rowIdx} className="hover:bg-slate-800/50">
-                            <td className="p-2 text-slate-300 font-mono border-r border-slate-700 sticky left-0 bg-slate-900 font-bold">
+                            <td className="p-2 text-slate-300 font-mono border-r border-slate-700 sticky left-0 z-[5] bg-slate-900 font-bold">
                                 {load.toFixed(2)}
                             </td>
                             {mapData.data[rowIdx].map((val, colIdx) => {
@@ -70,8 +70,6 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                 const hits = hitData ? hitData[rowIdx][colIdx] : 0;
                                 const weight = weightData ? weightData[rowIdx][colIdx] : 0;
 
-                                // Colorize based on Diff
-                                let bgColor = 'transparent';
                                 let textColor = 'text-slate-400';
                                 let style = {};
 
@@ -128,7 +126,6 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                                         style={style}
                                         className={clsx(
                                             'p-1 border border-slate-800 font-mono transition-colors relative group',
-                                            bgColor,
                                             hasHits ? 'font-bold' : 'opacity-80'
                                         )}
                                         title={`RPM: ${mapData.xAxis[colIdx]}, RO %: ${load}\nRF %: ${val}\nHits: ${hits}\nWeight: ${weight.toFixed(2)}`}

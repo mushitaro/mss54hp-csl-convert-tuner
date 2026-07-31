@@ -484,7 +484,7 @@ export default function Home() {
     { id: 'lambda', label: 'LAMBDA FEEDBACK', enabled: !!correctionMap && !!newMap },
     { id: 'new', label: 'TUNED MAP', enabled: !!newMap },
     { id: 'diff', label: 'DIFFERENCE %', enabled: !!currentMap },
-    { id: 'log', label: 'CORRECTED ROG', enabled: !!processedLog },
+    { id: 'log', label: 'CORRECTED LOG', enabled: !!processedLog },
     { id: 'warmup', label: 'WARMUP (DERIVED / EXP.)', enabled: !!warmupMap },
     { id: 'wot', label: 'WOT (DERIVED / EXP.)', enabled: !!wotMap },
   ];
@@ -1643,7 +1643,7 @@ export default function Home() {
           <div className="flex-1 overflow-auto relative">
             {/* Content */}
             <div className="absolute inset-0 pt-2 pb-2 px-4">
-              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} />}
+              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} weightData={weightMap ?? undefined} />}
               {(activeTab === 'new' && newMap) && (
                 <MapEditor
                   mapData={newMap}
