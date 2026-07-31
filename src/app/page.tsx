@@ -15,6 +15,7 @@ import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
+import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
@@ -300,6 +301,7 @@ export default function Home() {
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
   const [adaptDialogOpen, setAdaptDialogOpen] = useState(false);
   const [flashDialogOpen, setFlashDialogOpen] = useState(false);
+  const [identityDialogOpen, setIdentityDialogOpen] = useState(false);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
 
@@ -1375,8 +1377,20 @@ export default function Home() {
           style={{ background: 'linear-gradient(to right, #0A9BDB 0 33.333%, #9B84E8 33.333% 66.667%, #F11A22 66.667% 100%)' }}
         />
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className={`w-2 h-2 rounded-full ${dmeStatusColor}`} title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}></div>
-          <h1 className="shrink-0 text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
+          {/* The dot is the identity's entry point, not just an LED. `p-4 -m-4` grows the hit box to
+              40px without moving anything: the padding is cancelled by the margin, so the dot still
+              occupies its 8px in the row. It needed a real target anyway — an 8px control is
+              unhittable on a phone — and it needed a destination, because the readouts beside it are
+              hidden below 900px and had nowhere else to be reached from. */}
+          <button
+            type="button"
+            onClick={() => setIdentityDialogOpen(true)}
+            title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}\n\nClick for VIN / AIF / SW.`}
+            className="shrink-0 p-4 -m-4 cursor-pointer"
+          >
+            <span className={`block w-2 h-2 rounded-full ${dmeStatusColor}`} />
+          </button>
+          <h1 className="min-w-0 text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
             {/* The ///M mark, not punctuation — icon.svg has carried the tricolor in the browser tab
                 all along while this rendered slate-600. It is also the one place red can live
                 permanently without costing it any alarm value: a wordmark states no machine state,
@@ -1394,30 +1408,38 @@ export default function Home() {
           <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2 β</span>
           {/* VIN/AIF/SW are readouts and may clip; FLASH is a control and may not — it is the only
               entry to the flash-counter dialog, so clipping it removes a feature rather than a
-              label. Below 900px (where the panes stack, i.e. phones) the three readouts are hidden
-              outright and FLASH keeps its place, instead of all four being squeezed until the
-              button falls off the end of an overflow-hidden row. The identity is still on the
-              status dot's tooltip, and the readouts return the moment there is room. */}
+              label. This strip is overflow-hidden, so what clips is whatever sits at its END:
+              FLASH therefore goes FIRST and the three readouts trail it.
+
+              It used to go last, with a comment claiming that was "on purpose" and a second comment
+              a few lines up asserting the opposite — that FLASH was the one thing that would not
+              clip. Both could not be true, and the one that held was the geometry: on a narrow
+              window FLASH was the first thing to disappear, which is the outcome the ordering was
+              supposed to prevent.
+
+              Below 900px the three readouts are hidden outright rather than squeezed. They are
+              reachable the whole time from the status dot, which now opens DmeIdentityDialog — the
+              earlier claim that they were "still on the status dot's tooltip" was false; that title
+              carries link state and error and has never carried identity. */}
           <div className="flex-1 min-w-0 flex items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-2 min-[900px]:ml-8 pl-2 min-[900px]:pl-8 border-l border-slate-800">
-            <span className="hidden min-[900px]:inline">VIN <span className="text-slate-300">{dmeLink.identity?.vin ?? '-'}</span></span>
-            <span className="hidden min-[900px]:inline">AIF <span className="text-slate-300">{dmeLink.identity?.aif ?? '-'}</span></span>
-            <span className="hidden min-[900px]:inline">SW <span className="text-slate-300">{dmeLink.identity?.softwareVersion ?? '-'}</span></span>
             {/* The only one of the four that is a control: clicking it opens the reset dialog. The
                 reset has no button of its own anywhere else — it belongs on the number it changes,
                 and the hub's sub-action row is for actions on the workspace and the current run.
                 Disabled rather than hidden while disconnected, so the field never moves.
 
-                Last in the strip on purpose: it is overflow-hidden, so whatever sits here is the
-                first thing to clip on a narrow window. */}
+                `shrink-0` so the readouts after it absorb the shortfall instead of this button. */}
             <button
               type="button"
               title={flashTitle}
               disabled={dmeLink.state !== 'connected'}
               onClick={() => setFlashDialogOpen(true)}
-              className="whitespace-nowrap enabled:cursor-pointer enabled:hover:text-slate-300 disabled:cursor-default transition-colors"
+              className="shrink-0 whitespace-nowrap enabled:cursor-pointer enabled:hover:text-slate-300 disabled:cursor-default transition-colors"
             >
               FLASH <span className={flashColor}>{flashText}</span>
             </button>
+            <span className="hidden min-[900px]:inline">VIN <span className="text-slate-300">{dmeLink.identity?.vin ?? '-'}</span></span>
+            <span className="hidden min-[900px]:inline">AIF <span className="text-slate-300">{dmeLink.identity?.aif ?? '-'}</span></span>
+            <span className="hidden min-[900px]:inline">SW <span className="text-slate-300">{dmeLink.identity?.softwareVersion ?? '-'}</span></span>
           </div>
         </div>
 
@@ -2266,6 +2288,14 @@ export default function Home() {
           onResetComplete={handleAdaptationResetComplete}
           error={dmeLink.error}
           errorKind={dmeLink.errorKind}
+        />
+      )}
+
+      {identityDialogOpen && (
+        <DmeIdentityDialog
+          identity={dmeLink.identity}
+          state={dmeLink.state}
+          onClose={() => setIdentityDialogOpen(false)}
         />
       )}
 

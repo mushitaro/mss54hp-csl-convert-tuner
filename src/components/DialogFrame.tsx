@@ -37,16 +37,26 @@ interface FrameProps {
      * to cancel, so the dialog must not appear to offer one.
      */
     onClose?: () => void;
+    /**
+     * Size the box to its content instead of stating 560px, keeping the same value as a cap.
+     *
+     * Only for dialogs that have no phases. The fixed height above exists so a phase change cannot
+     * move the box mid-operation; a single-phase readout has no phase change to be stable against,
+     * and padding five lines of identity out to 560px reads as a dialog that failed to load rather
+     * than one that is deliberately calm. The box is still decided once and cannot move while open,
+     * because the content it measures does not change either.
+     */
+    autoHeight?: boolean;
     children: React.ReactNode;
 }
 
-export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, onClose, children }) => (
+export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, onClose, autoHeight, children }) => (
     <>
         <div
             className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
             onClick={onClose}
         />
-        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-2rem))] h-[min(84dvh,560px)] flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200">
+        <div className={`fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-2rem))] ${autoHeight ? 'max-h-[min(84dvh,560px)]' : 'h-[min(84dvh,560px)]'} flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200`}>
             <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2 shrink-0">
                 <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                     {icon}
