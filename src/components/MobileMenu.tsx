@@ -71,6 +71,17 @@ interface Props {
 
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
 
+/**
+ * One column for every readout in the sheet.
+ *
+ * The width is stated, not fitted. `w-fit` sizes each block to its own longest line, so the session
+ * block resolved to 98px wide and the vehicle block to 164 — both centred, and therefore starting
+ * at two different x. Centred as a group is only half of it: the groups have to agree with each
+ * other, or the eye still has nothing to read down. A single width means one left edge for
+ * everything, with the slack falling either side of it.
+ */
+const READOUT_COLUMN = 'w-[min(15rem,100%)] mx-auto';
+
 const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
     <div className="px-4 py-3 border-b border-slate-900">
         <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-600 mb-2 text-center">{title}</h4>
@@ -80,7 +91,7 @@ const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
     <div className="flex items-baseline gap-3 py-1">
-        <span className="w-10 shrink-0 text-right text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+        <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
         <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
     </div>
 );
@@ -187,7 +198,7 @@ export const MobileMenu: React.FC<Props> = ({
                         <button
                             type="button"
                             onClick={onReload}
-                            className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer transition-colors ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
+                            className={`w-full flex items-center justify-center gap-3 py-3 rounded cursor-pointer transition-colors ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
                         >
                             <RefreshCw className="w-3.5 h-3.5 shrink-0" />
                             <span className="text-[10px] font-bold uppercase tracking-widest">
@@ -198,12 +209,7 @@ export const MobileMenu: React.FC<Props> = ({
 
                     {session && (
                         <Section title="Session">
-                            {/* The block is centred; the lines inside it are not. These three are a
-                                name, an origin badge and a filename — different widths saying
-                                different kinds of thing — so centring each on its own width left no
-                                edge to read down. `w-fit mx-auto` centres the group and lets the
-                                lines share a left edge. */}
-                            <div className="w-fit max-w-full mx-auto">
+                            <div className={READOUT_COLUMN}>
                                 <div className="flex items-center gap-2 mb-2 min-w-0">
                                     <Cable className="w-3 h-3 shrink-0 text-slate-600" />
                                     <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
@@ -222,28 +228,24 @@ export const MobileMenu: React.FC<Props> = ({
                     )}
 
                     <Section title="Vehicle">
-                        {/* Same rule as the session block above: the group is centred, the rows are
-                            not. A fixed, right-aligned label column puts VIN/AIF/SW/FLASH on one
-                            edge and their values on another, so the four read as a column instead of
-                            four separately centred lines. */}
-                        <div className="w-fit max-w-full mx-auto">
+                        <div className={READOUT_COLUMN}>
                             <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
                             <Field label="AIF">{identity?.aif ?? <span className="text-slate-600">—</span>}</Field>
                             <Field label="SW">{identity?.softwareVersion ?? <span className="text-slate-600">—</span>}</Field>
-                            {/* Still a control, and still one step deeper than the number it changes.
-                                Kept on the same two edges as the readouts above it, with the icon
-                                hung outside the label column so it does not shift them. */}
-                            <button
-                                type="button"
-                                {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                                className={`mt-1 w-full flex items-baseline gap-3 py-3 px-2 -mx-2 rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
-                            >
-                                <span className="w-10 shrink-0 flex items-center justify-end gap-1.5 text-[9px] uppercase tracking-widest text-slate-600">
-                                    <Gauge className="w-3 h-3 shrink-0" />Flash
-                                </span>
-                                <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
-                            </button>
                         </div>
+                        {/* Still a control, and still one step deeper than the number it changes —
+                            so it is centred like Reload rather than aligned like the readouts. It is
+                            the one thing in this block you press, and it should not read as a fourth
+                            row of the column above it. */}
+                        <button
+                            type="button"
+                            {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
+                            className={`mt-2 w-full flex items-center justify-center gap-2 py-3 rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                        >
+                            <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
+                            <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
+                            <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
+                        </button>
                     </Section>
 
                 </div>
