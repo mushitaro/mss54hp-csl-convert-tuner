@@ -176,21 +176,48 @@ export const MobileMenu: React.FC<Props> = ({
                     reach a tab meant they were never on screen at the moment you wanted them. Above
                     the scroll, not in it. */}
                 <div className="shrink-0 border-b border-slate-800">
+                    {/* Installed to the home screen there is no reload button, and pull-to-refresh —
+                        which is what used to be one — is off on purpose. So the app carries its own.
+
+                        Top of the sheet, above everything: this drops the link and any unsaved tune,
+                        so it belongs at the point furthest from the thumb — off the sweep entirely,
+                        and past the readouts as well, so reaching it is a decision rather than a
+                        slip. It was one row under the vehicle block, which was too close. */}
+                    <div className="px-4 pt-3 pb-1 border-b border-slate-900">
+                        <button
+                            type="button"
+                            onClick={onReload}
+                            className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer transition-colors ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
+                        >
+                            <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest">
+                                {updateAvailable ? 'Update available — reload' : 'Reload'}
+                            </span>
+                        </button>
+                    </div>
+
                     {session && (
                         <Section title="Session">
-                            <div className="flex items-center justify-center gap-2 mb-2 min-w-0">
-                                <Cable className="w-3 h-3 shrink-0 text-slate-600" />
-                                <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
-                                {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
-                            </div>
-                            {baseOrigin && <div className="mb-1 flex items-center justify-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
-                            {logName && (
-                                <div className="flex items-center justify-center gap-2 min-w-0">
-                                    <span className="text-[9px] uppercase tracking-widest text-slate-600 shrink-0">Log</span>
-                                    <span className="min-w-0 truncate font-mono text-[10px] text-slate-400">{logName}</span>
-                                    {logPoints !== undefined && <span className="shrink-0 font-mono text-[10px] text-slate-600">{logPoints}pts</span>}
+                            {/* The block is centred; the lines inside it are not. These three are a
+                                name, an origin badge and a filename — different widths saying
+                                different kinds of thing — so centring each on its own width left no
+                                edge to read down. `w-fit mx-auto` centres the group and lets the
+                                lines share a left edge. */}
+                            <div className="w-fit max-w-full mx-auto">
+                                <div className="flex items-center gap-2 mb-2 min-w-0">
+                                    <Cable className="w-3 h-3 shrink-0 text-slate-600" />
+                                    <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
+                                    {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
                                 </div>
-                            )}
+                                {baseOrigin && <div className="mb-1 flex items-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
+                                {logName && (
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <span className="text-[9px] uppercase tracking-widest text-slate-600 shrink-0">Log</span>
+                                        <span className="min-w-0 truncate font-mono text-[10px] text-slate-400">{logName}</span>
+                                        {logPoints !== undefined && <span className="shrink-0 font-mono text-[10px] text-slate-600">{logPoints}pts</span>}
+                                    </div>
+                                )}
+                            </div>
                         </Section>
                     )}
 
@@ -210,23 +237,6 @@ export const MobileMenu: React.FC<Props> = ({
                         </button>
                     </Section>
 
-                    {/* Installed to the home screen there is no reload button, and pull-to-refresh —
-                        which is what used to be one — is off on purpose. So the app carries its own.
-                        In the pinned block rather than the lists below: this drops the link and any
-                        unsaved tune, and nothing with that cost belongs on the path a thumb sweeps
-                        through on its way to a tab. */}
-                    <div className="px-4 py-3">
-                        <button
-                            type="button"
-                            onClick={onReload}
-                            className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer transition-colors ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
-                        >
-                            <RefreshCw className="w-3.5 h-3.5 shrink-0" />
-                            <span className="text-[10px] font-bold uppercase tracking-widest">
-                                {updateAvailable ? 'Update available — reload' : 'Reload'}
-                            </span>
-                        </button>
-                    </div>
                 </div>
 
                 {/* Scrolls, without saying so. A 4px bar down the edge of a 360px sheet is noise on
