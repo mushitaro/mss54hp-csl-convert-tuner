@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet } from 'lucide-react';
+import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
 
 /**
@@ -63,6 +63,10 @@ interface Props {
      * release anywhere would then be read as a selection.
      */
     onDragEnd?: () => void;
+    /** Reloads the document. The caller confirms first if there is a live link or unsaved work. */
+    onReload: () => void;
+    /** The server is serving a newer build than the one running. */
+    updateAvailable?: boolean;
 }
 
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
@@ -84,7 +88,7 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
 export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
-    session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd,
+    session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, updateAvailable,
 }) => {
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
@@ -205,6 +209,24 @@ export const MobileMenu: React.FC<Props> = ({
                             <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
                         </button>
                     </Section>
+
+                    {/* Installed to the home screen there is no reload button, and pull-to-refresh —
+                        which is what used to be one — is off on purpose. So the app carries its own.
+                        In the pinned block rather than the lists below: this drops the link and any
+                        unsaved tune, and nothing with that cost belongs on the path a thumb sweeps
+                        through on its way to a tab. */}
+                    <div className="px-4 py-3">
+                        <button
+                            type="button"
+                            onClick={onReload}
+                            className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer transition-colors ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
+                        >
+                            <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest">
+                                {updateAvailable ? 'Update available — reload' : 'Reload'}
+                            </span>
+                        </button>
+                    </div>
                 </div>
 
                 {/* Scrolls, without saying so. A 4px bar down the edge of a 360px sheet is noise on

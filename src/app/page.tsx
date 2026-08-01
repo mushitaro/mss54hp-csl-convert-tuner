@@ -18,6 +18,7 @@ import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
+import { useAppUpdate } from '@/hooks/useAppUpdate';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
@@ -317,6 +318,7 @@ export default function Home() {
    *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
   const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
   const [menuOpen, setMenuOpen] = useState(false);
+  const updateAvailable = useAppUpdate();
   /** Where the press that opened the menu landed, while it is still down — the sheet follows the
    *  finger from there and commits on release. Cleared on pointerup wherever it lands, so a tap
    *  that merely opens the sheet leaves it in ordinary tap-to-choose mode. */
@@ -2432,6 +2434,14 @@ export default function Home() {
           onClose={() => setMenuOpen(false)}
           dragFrom={menuDrag}
           onDragEnd={() => setMenuDrag(null)}
+          updateAvailable={updateAvailable}
+          /* Asks first only when there is something to lose. Disconnected with no log and no
+             unsaved tune, a reload costs nothing and a confirmation would just be a step. */
+          onReload={() => {
+            const busy = dmeLink.state !== 'disconnected' || !!processedLog || !!newMap;
+            if (busy && !confirm(dialogText().reloadBusy)) return;
+            location.reload();
+          }}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed

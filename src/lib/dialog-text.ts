@@ -52,6 +52,8 @@ const KEY_CYCLE_EN =
 const JA = {
     // --- workspace / session housekeeping ---
     clearLog: 'このデータログ(CSV)を破棄しますか？',
+    // 更新はリロードなので、接続中・記録中は失うものがある。何を失うかを具体的に述べてから聞く。
+    reloadBusy: 'アプリを再読み込みします。\n\nDMEとの接続は切断され、記録中のデータログと保存していないチューンは失われます。\n\n続行しますか？',
     discardLog: '今記録したデータログを破棄して、最初からやり直しますか？',
     deleteSession: (label: string) => `「${label}」を削除しますか？この操作は取り消せません。`,
     noStoredBinary: 'このセッションにはBINが保存されていません。',
@@ -200,6 +202,7 @@ type NativeDialogText = typeof JA;
 
 const EN: NativeDialogText = {
     clearLog: 'Discard this data log (CSV)?',
+    reloadBusy: 'Reload the app.\n\nThe DME link will drop, and any log being recorded or tune not yet saved will be lost.\n\nContinue?',
     discardLog: 'Discard the log just recorded and start over?',
     deleteSession: (label: string) => `Delete "${label}"? This cannot be undone.`,
     noStoredBinary: 'This session has no stored binary.',
