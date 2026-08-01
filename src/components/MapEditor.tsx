@@ -35,17 +35,34 @@ const COVERAGE_ALPHA_THIN = 0.10;
 const COVERAGE_ALPHA_OK = 0.20;
 const COVERAGE_ALPHA_FULL = 0.30;
 
-export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightData, className }) => {
+/**
+ * Memoised. Every cell builds a clsx string and an inline style, and there are 480 of them; the
+ * hidden pane still renders (it is `display:none`, not unmounted), so without this every unrelated
+ * state change in the page rebuilt the whole grid twice over.
+ */
+export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapData, diffData, hitData, weightData, className }) {
     // Render a scrollable grid
     // Styles: Dark mode table
 
     return (
         <div className={clsx('overflow-auto h-full', className)}>
-            <table className="w-full text-xs text-right border-collapse bg-slate-900">
+            {/* `table-fixed` with a stated width, not `w-full` with automatic layout.
+                Automatic layout has to measure every cell before it can settle a column, and there
+                are 480 of them — so each time this pane came back from `display:none` the browser
+                re-solved the whole grid. Measured on a 6x-throttled CPU: a single 6.9 s task on the
+                first switch to the map and about 1.3 s on every one after it, which is the whole of
+                the switching lag. Fixed layout reads the widths off the first row and stops.
+                The width is stated rather than left at `w-full` because `table-fixed` would
+                otherwise divide the container between the columns and collapse the horizontal
+                scroll this grid depends on: 20 columns of 50px plus the 64px load axis. */}
+            <table
+                className="table-fixed text-xs text-right border-collapse bg-slate-900"
+                style={{ width: `${mapData.xAxis.length * 50 + 64}px` }}
+            >
                 <thead className="sticky top-0 bg-slate-800 z-10">
                     <tr>
                         <th
-                            className="p-2 text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
+                            className="w-[64px] p-2 text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
                             title="Rows = RO % (load) / Columns = RPM"
                         >
                             <div className="flex items-center justify-center">
@@ -53,7 +70,7 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
                             </div>
                         </th>
                         {mapData.xAxis.map((rpm, i) => (
-                            <th key={i} className="p-2 text-slate-300 font-mono border-b border-slate-700 min-w-[50px]">
+                            <th key={i} className="w-[50px] p-2 text-slate-300 font-mono border-b border-slate-700">
                                 {rpm}
                             </th>
                         ))}
@@ -147,4 +164,4 @@ export const MapEditor: React.FC<Props> = ({ mapData, diffData, hitData, weightD
             </table>
         </div>
     );
-};
+});

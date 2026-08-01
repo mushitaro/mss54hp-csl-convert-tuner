@@ -13,6 +13,16 @@
   color-scheme: dark;
 }
 
+/* No pull-to-refresh, and no rubber-band handing a gesture to the browser.
+   The app never scrolls its own document — everything is sized to the viewport — so a downward
+   swipe that starts on a pane, on the menu's scrim, or on a list already at its top had nothing
+   local to do and went straight to Chrome's reload gesture. On a tool that is mid-session with a
+   DME, reloading is not a harmless refresh: it drops the link, the log in progress and the unsaved
+   tune. `none` rather than `contain` because there is no outer scroll worth chaining to either. */
+html, body {
+  overscroll-behavior: none;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

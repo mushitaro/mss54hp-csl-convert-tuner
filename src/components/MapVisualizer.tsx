@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { VEMap } from '@/lib/types';
 import { Layout, Data } from 'plotly.js';
@@ -65,7 +65,15 @@ interface Props {
     deviationMidpoint?: number;
 }
 
-export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxisLabel = 'RF %', scale = 'magnitude', deviationMidpoint = 0 }) => {
+/**
+ * Memoised, and its Plotly payload with it.
+ *
+ * react-plotly calls `Plotly.react()` whenever it re-renders, and `data`/`layout` were rebuilt as
+ * fresh objects on every pass — so any state change anywhere in the page (opening the menu, moving
+ * a toggle, switching panes) had Plotly diff and redraw a 480-point 3D surface. Measured on a
+ * 6x-throttled CPU that was the bulk of a 4.3 s menu open.
+ */
+export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer({ mapData, title = 'VE Map', zAxisLabel = 'RF %', scale = 'magnitude', deviationMidpoint = 0 }) {
     // Bumped by the reset button to remount Plotly, which is what re-applies `scene.camera`
     // below. Plotly keeps the camera in its own internal state after the first render.
     const [cameraNonce, setCameraNonce] = useState(0);
@@ -75,7 +83,7 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
 
     const isDeviation = scale === 'deviation';
 
-    const data: Data[] = [
+    const data: Data[] = useMemo(() => [
         {
             type: 'surface',
             z: mapData.data, // 2D array [row][col] -> [y][x]
@@ -87,9 +95,9 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
             ...(isDeviation ? { cmid: deviationMidpoint } : {}),
             showscale: false,
         },
-    ];
+    ], [mapData, isDeviation, deviationMidpoint]);
 
-    const layout: Partial<Layout> = {
+    const layout: Partial<Layout> = useMemo(() => ({
         title: { text: title, font: { color: '#F2F2F5' } },
         autosize: true,
         paper_bgcolor: 'rgba(0,0,0,0)',
@@ -103,7 +111,7 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
             }
         },
         margin: { l: 0, r: 0, b: 0, t: 0 }, // Optimized margins
-    };
+    }), [title, zAxisLabel]);
 
     return (
         // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene
@@ -134,4 +142,4 @@ export const MapVisualizer: React.FC<Props> = ({ mapData, title = 'VE Map', zAxi
             </button>
         </div>
     );
-};
+});

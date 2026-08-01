@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic'; // Added dynamic import
 import { DropZone } from '@/components/DropZone';
 import { MapEditor } from '@/components/MapEditor';
@@ -1373,6 +1373,18 @@ export default function Home() {
   // the flags entirely otherwise. Same condition, expressed once, for the disabled state and the
   // effective value. PATCH and WOT TH are not in here: those patch the DME's logic directly and are
   // meaningful on a bare BASE, which is exactly what DOWNLOAD PATCH-ON exports.
+  /** The two views whose map is assembled rather than stored: a base map wearing another map's
+   *  numbers. Built here so their identity is stable — spread inline at the call site they were a
+   *  new object on every render, which is exactly what a memo compares. */
+  const diffVisualMap = useMemo(
+    () => (diffMapForVisualization && (newMap || currentMap))
+      ? { ...(newMap || currentMap)!, data: diffMapForVisualization }
+      : null,
+    [newMap, currentMap, diffMapForVisualization]);
+  const lambdaVisualMap = useMemo(
+    () => (correctionMap && newMap) ? { ...newMap, data: correctionMap } : null,
+    [newMap, correctionMap]);
+
   const derivedTablesLocked = !newMap;
   const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
 
@@ -1521,10 +1533,10 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col min-[900px]:flex-row overflow-hidden">
+      <div className="grid flex-1 min-h-0 min-[900px]:flex min-[900px]:flex-row overflow-hidden">
 
         {/* === LEFT COLUMN (70% desktop / 40% stacked) === */}
-        <div className={`${narrowPane === 'map' ? 'flex flex-1' : 'hidden'} min-[900px]:flex min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[61.8%] flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0`}>
+        <div className={`[grid-area:1/1] flex min-[900px]:[grid-area:auto] ${narrowPane === 'map' ? '' : 'invisible pointer-events-none min-[900px]:visible min-[900px]:pointer-events-auto'} min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[61.8%] flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0`}>
 
           {/* Header Frame (Tabs) - Matches Right Column Header Height */}
           {/* z-30, not z-50. The row has to outrank the right pane (z-20) so the config popovers
@@ -1744,7 +1756,7 @@ export default function Home() {
 
                   <div className="flex-1 overflow-hidden relative">
                     <MapEditor
-                      mapData={{ ...(newMap || currentMap!), data: diffMapForVisualization || [] }} // Fallback to currentMap if newMap null
+                      mapData={diffVisualMap!}
                       diffData={diffMapForVisualization || undefined}
                       hitData={hitMap || undefined}
                       weightData={weightMap || undefined}
@@ -1754,7 +1766,7 @@ export default function Home() {
               )}
               {(activeTab === 'lambda' && correctionMap && newMap) && (
                 <MapEditor
-                  mapData={{ ...newMap, data: correctionMap }}
+                  mapData={lambdaVisualMap!}
                   hitData={hitMap || undefined}
                   weightData={weightMap || undefined}
                 />
@@ -1817,7 +1829,7 @@ export default function Home() {
         </div>
 
         {/* === RIGHT COLUMN (30% desktop / 60% stacked) === */}
-        <div className={`${narrowPane === 'dash' ? 'flex flex-1' : 'hidden'} min-h-0 min-[900px]:flex min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
+        <div className={`[grid-area:1/1] flex min-[900px]:[grid-area:auto] ${narrowPane === 'dash' ? '' : 'invisible pointer-events-none min-[900px]:visible min-[900px]:pointer-events-auto'} min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] hidden min-[900px]:flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
@@ -1878,10 +1890,10 @@ export default function Home() {
                   difference (no change = 0), the VE calculator emits an STFT multiplier (no change =
                   1.0) — so each states its own midpoint rather than letting the scale guess. */}
               {(activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
-                <MapVisualizer mapData={{ ...(newMap || currentMap!), data: diffMapForVisualization }} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
+                <MapVisualizer mapData={diffVisualMap!} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
               )}
               {(activeTab === 'lambda' && correctionMap && newMap) && (
-                <MapVisualizer mapData={{ ...newMap, data: correctionMap }} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
+                <MapVisualizer mapData={lambdaVisualMap!} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
               )}
               {(activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
               {(activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
