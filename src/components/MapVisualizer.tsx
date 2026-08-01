@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { VEMap } from '@/lib/types';
 import { Layout, Data } from 'plotly.js';
 import { RotateCcw } from 'lucide-react';
+import { ChartLoading } from './ChartLoading';
 
 // Dynamic import for Plotly to avoid SSR issues
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as any;
@@ -78,24 +79,65 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
     // below. Plotly keeps the camera in its own internal state after the first render.
     const [cameraNonce, setCameraNonce] = useState(0);
 
+    /**
+     * Paint the placeholder before building the surface, not alongside it.
+     *
+     * Mounting <Plot> blocks the main thread for the whole build — measured at ~1.3 s on a
+     * 4x-throttled phone profile even after the mesh fix below — and if it mounts in the same
+     * commit as the placeholder, the browser never gets a frame in which to show the placeholder.
+     * The screen simply stops, which is what reads as a crash. Two rAFs guarantee one painted
+     * frame of "Rendering…" before the thread goes away.
+     *
+     * Keyed on cameraNonce so the reset button gets the same treatment: it remounts Plotly, which
+     * costs the same rebuild.
+     */
+    const [readyFor, setReadyFor] = useState(-1);
+    const ready = readyFor === cameraNonce;
+    useEffect(() => {
+        let inner = 0;
+        const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setReadyFor(cameraNonce)); });
+        return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
+    }, [cameraNonce]);
+
     // Plotly expects [x, y, z].
     // Surface plot format: z is Data[y][x], x, y are axes.
 
     const isDeviation = scale === 'deviation';
 
+    /**
+     * The surface is built on cell INDICES, not on the axis values, and the values come back as tick
+     * labels below. This is a performance fix with a visual consequence, and both are deliberate.
+     *
+     * Plotly sizes a surface mesh from the spacing of its coordinates: `estimateScale` takes
+     * 1 + arrayLCM(spacings) and clamps at MAX_RESOLUTION. These axes are wildly irregular — RPM
+     * runs 600, 870, 1100, 1300, 1400 … 7900 and RO% runs 0.1, 0.15, 0.2, 0.4 … 100 — so it
+     * returned dataScale 36 x 21 and bilinearly upsampled a 24 x 20 map into a 723 x 507 mesh:
+     * 366,561 vertices for 480 numbers, 764x more than the data has. Measured at 4x CPU throttle,
+     * one update cost 1338-1496 ms with 2511-2643 ms of blocking tasks. On indices the scale is
+     * 8 x 8, the mesh 193 x 161, and an update 169-371 ms.
+     *
+     * The consequence: the RPM and RO% axes are now evenly spaced in the 3D view instead of
+     * proportional to their values. That matches the 2D grid beside it, whose columns have always
+     * been a flat 50px regardless of RPM — and on a map you read cell by cell it is arguably the
+     * more honest picture, since the value-proportional version squeezed the whole low-load half of
+     * the map into a sliver.
+     */
+    const indexX = useMemo(() => mapData.xAxis.map((_, i) => i), [mapData.xAxis]);
+    const indexY = useMemo(() => mapData.yAxis.map((_, i) => i), [mapData.yAxis]);
+
     const data: Data[] = useMemo(() => [
         {
             type: 'surface',
             z: mapData.data, // 2D array [row][col] -> [y][x]
-            x: mapData.xAxis, // Columns
-            y: mapData.yAxis, // Rows
+            x: indexX, // Columns — index, labelled with the RPM below
+            y: indexY, // Rows — index, labelled with the RO % below
             colorscale: isDeviation ? SCALE_DEVIATION : SCALE_MAGNITUDE,
             // cmid pins the neutral color to the value that means "no change" and lets Plotly balance
             // cmin/cmax around it, so one strong outlier cannot slide the whole map off-center.
             ...(isDeviation ? { cmid: deviationMidpoint } : {}),
             showscale: false,
         },
-    ], [mapData, isDeviation, deviationMidpoint]);
+    ], [mapData, indexX, indexY, isDeviation, deviationMidpoint]);
 
     const layout: Partial<Layout> = useMemo(() => ({
         title: { text: title, font: { color: '#F2F2F5' } },
@@ -103,29 +145,41 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         scene: {
-            xaxis: { title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
-            yaxis: { title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            // The real values return here as labels on the index positions, so the axes still read
+            // in RPM and RO % even though the mesh underneath is built on 0..n-1.
+            xaxis: {
+                title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33',
+                tickmode: 'array', tickvals: indexX, ticktext: mapData.xAxis.map(String),
+            },
+            yaxis: {
+                title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33',
+                tickmode: 'array', tickvals: indexY, ticktext: mapData.yAxis.map(v => v.toFixed(2)),
+            },
             zaxis: { title: { text: zAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             camera: {
                 eye: { x: 1.6, y: -1.6, z: 0.6 }
             }
         },
         margin: { l: 0, r: 0, b: 0, t: 0 }, // Optimized margins
-    }), [title, zAxisLabel]);
+    }), [title, zAxisLabel, indexX, indexY, mapData.xAxis, mapData.yAxis]);
 
     return (
         // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene
         // claims every touch for the turntable otherwise, which on a phone means the surface is a
         // dead zone you cannot scroll past. The 2D chart already declares the same thing.
         <div className="w-full h-full relative touch-pan-y">
-            <Plot
-                key={cameraNonce}
-                data={data}
-                layout={layout}
-                useResizeHandler={true}
-                className="w-full h-full"
-                config={{ responsive: true, displayModeBar: false }}
-            />
+            {ready
+                ? (
+                    <Plot
+                        key={cameraNonce}
+                        data={data}
+                        layout={layout}
+                        useResizeHandler={true}
+                        className="w-full h-full"
+                        config={{ responsive: true, displayModeBar: false }}
+                    />
+                )
+                : <ChartLoading />}
             {/* The way back. The modebar is off — it is desktop furniture and its buttons are far
                 below any touch size — so a turntable drag was one-way: the initial eye above is
                 applied on mount and never again, and one accidental swipe left the map at an angle

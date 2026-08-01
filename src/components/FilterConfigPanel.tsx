@@ -72,7 +72,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                     <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
 
                     {/* Popover Panel */}
-                    <div className={`${openUp ? 'fixed inset-x-3 bottom-[60px] max-h-[min(70svh,420px)] overflow-y-auto overscroll-contain' : 'absolute right-0 top-10 w-[280px] max-h-[min(70dvh,420px)] overflow-y-auto overscroll-contain'} bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200`}>
+                    <div className={`${openUp ? 'fixed inset-x-3 bottom-[60px] max-h-[min(calc(100svh-72px),494px)] overflow-y-auto overscroll-contain' : 'absolute right-0 top-10 w-[280px] max-h-[min(70dvh,494px)] overflow-y-auto overscroll-contain'} bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200`}>
                         <div className="flex justify-between items-center mb-4 border-b border-slate-800 pb-2">
                             <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                                 <Filter className="w-3 h-3" />

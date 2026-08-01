@@ -2,11 +2,13 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic'; // Added dynamic import
+import { ChartLoading } from '@/components/ChartLoading';
 import { DropZone } from '@/components/DropZone';
 import { MapEditor } from '@/components/MapEditor';
+
 // Dynamic imports for heavy components
-const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false });
-const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false });
+const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
+const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
@@ -19,6 +21,7 @@ import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate } from '@/hooks/useAppUpdate';
+import { useWideLayout } from '@/hooks/useWideLayout';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
@@ -319,6 +322,13 @@ export default function Home() {
   const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
   const [menuOpen, setMenuOpen] = useState(false);
   const updateAvailable = useAppUpdate();
+  const wideLayout = useWideLayout();
+  /** The dash pane is on screen. Below 900px the two panes share a grid cell and the inactive one is
+   *  only `invisible` — it stays laid out, and a 3D surface mounted inside it goes on rebuilding
+   *  itself where nobody can see it. Measured at 4x CPU throttle: picking a tab from the menu cost
+   *  3.8-4.3 s, of which Plotly was over 96% and every frame of it was behind `visibility: hidden`,
+   *  because selecting a view also switches to the map pane. Gating the mount takes that to ~0.2 s. */
+  const dashOnScreen = wideLayout || narrowPane === 'dash';
   /** Where the press that opened the menu landed, while it is still down — the sheet follows the
    *  finger from there and commits on release. Cleared on pointerup wherever it lands, so a tap
    *  that merely opens the sheet leaves it in ordinary tap-to-choose mode. */
@@ -1886,19 +1896,19 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {(activeTab === 'current' && currentMap) && <MapVisualizer mapData={currentMap} title="" zAxisLabel="RF %" />}
-              {(activeTab === 'new' && newMap) && <MapVisualizer mapData={newMap} title="" zAxisLabel="RF %" />}
+              {dashOnScreen && (activeTab === 'current' && currentMap) && <MapVisualizer mapData={currentMap} title="" zAxisLabel="RF %" />}
+              {dashOnScreen && (activeTab === 'new' && newMap) && <MapVisualizer mapData={newMap} title="" zAxisLabel="RF %" />}
               {/* The two signed maps. Their neutral value differs — useComparison emits a percentage
                   difference (no change = 0), the VE calculator emits an STFT multiplier (no change =
                   1.0) — so each states its own midpoint rather than letting the scale guess. */}
-              {(activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
+              {dashOnScreen && (activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
                 <MapVisualizer mapData={diffVisualMap!} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
               )}
-              {(activeTab === 'lambda' && correctionMap && newMap) && (
+              {dashOnScreen && (activeTab === 'lambda' && correctionMap && newMap) && (
                 <MapVisualizer mapData={lambdaVisualMap!} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
               )}
-              {(activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
-              {(activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
+              {dashOnScreen && (activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
+              {dashOnScreen && (activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
               {(activeTab === 'log' && processedLog) && (
                 <div className="h-full w-full pb-0 relative">
                   {/* Chart Container - Absolute fill; chart flexes, window-scrub slider docked below it

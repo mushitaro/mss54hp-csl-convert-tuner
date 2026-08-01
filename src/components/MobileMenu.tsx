@@ -181,7 +181,7 @@ export const MobileMenu: React.FC<Props> = ({
             {/* Up from the bottom, not in from the side: it opens from a control on the footer, so it
                 comes from where the finger already is. Capped at 85svh so the scrim above stays
                 visible — the way out has to be on screen. */}
-            <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[85svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
+            <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[90svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
                 {/* Pinned. These are what the sheet is consulted for as much as navigated with —
                     which car, which session, how many flashes left — and scrolling them away to
                     reach a tab meant they were never on screen at the moment you wanted them. Above
@@ -264,7 +264,7 @@ export const MobileMenu: React.FC<Props> = ({
                                         type="button"
                                         title={a.hint}
                                         {...row(`action:${a.label}`, () => { a.onClick(); onClose(); })}
-                                        className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer group ${lit(`action:${a.label}`)}`}
+                                        className={`w-full flex items-center justify-center gap-3 py-4 px-2 -mx-2 rounded cursor-pointer group ${lit(`action:${a.label}`)}`}
                                     >
                                         <Icon className="w-3.5 h-3.5 shrink-0 text-slate-600 group-hover:text-blue-400 transition-colors" />
                                         <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 group-hover:text-blue-400 transition-colors">{a.label}</span>
@@ -286,7 +286,7 @@ export const MobileMenu: React.FC<Props> = ({
                                     key={t.id}
                                     type="button"
                                     {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
-                                    className={`text-center py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
+                                    className={`text-center py-4 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
                                         : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default'}`}
                                 >
                                     {t.label}
