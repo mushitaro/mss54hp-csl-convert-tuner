@@ -16,7 +16,8 @@ import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
+import { MobileMenu } from '@/components/MobileMenu';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload, Menu, Table2, Gauge } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -314,6 +315,7 @@ export default function Home() {
    *  got 217px — six of twenty columns and ten of twenty-four rows — while the dashboard held a
    *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
   const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
+  const [menuOpen, setMenuOpen] = useState(false);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
 
@@ -1389,6 +1391,17 @@ export default function Home() {
           style={{ background: 'linear-gradient(to right, #0A9BDB 0 33.333%, #9B84E8 33.333% 66.667%, #F11A22 66.667% 100%)' }}
         />
         <div className="flex items-center gap-3 min-w-0 flex-1">
+          {/* Everything the narrow header cannot hold lives behind this: the tab list, the identity,
+              the flash counter and the session's downloads. Above 900px there is room for all of it
+              in the chrome, so it is not rendered. */}
+          <button
+            type="button"
+            onClick={() => setMenuOpen(true)}
+            aria-label="Open menu"
+            className="min-[900px]:hidden shrink-0 p-3 -m-1 text-slate-400 hover:text-slate-200 cursor-pointer"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
           {/* The dot is the identity's entry point, not just an LED. `p-4 -m-4` grows the hit box to
               40px without moving anything: the padding is cancelled by the margin, so the dot still
               occupies its 8px in the row. It needed a real target anyway — an 8px control is
@@ -1406,7 +1419,7 @@ export default function Home() {
               hands this the larger share — its content is ~300px against the identity strip's ~60 —
               so the strip was resolving to zero width and FLASH went with it. A ceiling, not a
               hidden: the wordmark is how you know which tool has the cable. */}
-          <h1 className="min-w-0 max-w-[38%] min-[900px]:max-w-none text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
+          <h1 className="min-w-0 max-w-[60%] min-[900px]:max-w-none text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
             {/* The ///M mark, not punctuation. It is the one place red can live permanently without
                 costing it any alarm value: a wordmark states no machine state, so it does not
                 compete with the error LED two elements to the left.
@@ -1442,7 +1455,7 @@ export default function Home() {
               reachable the whole time from the status dot, which now opens DmeIdentityDialog — the
               earlier claim that they were "still on the status dot's tooltip" was false; that title
               carries link state and error and has never carried identity. */}
-          <div className="flex-1 min-w-0 flex items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-2 min-[900px]:ml-8 pl-2 min-[900px]:pl-8 border-l border-slate-800">
+          <div className="hidden min-[900px]:flex flex-1 min-w-0 items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">
             {/* The only one of the four that is a control: clicking it opens the reset dialog. The
                 reset has no button of its own anywhere else — it belongs on the number it changes,
                 and the hub's sub-action row is for actions on the workspace and the current run.
@@ -1471,14 +1484,16 @@ export default function Home() {
               The two links beside it go the other way: they are reference material, and on a phone
               they were spending about 138px of a 312px header that the identity strip needed. */}
           <div className="flex min-[900px]:hidden items-center rounded border border-slate-800 overflow-hidden shrink-0">
-            {([['map', 'MAP'], ['dash', 'DASH']] as const).map(([id, label]) => (
+            {([['map', Table2, 'Show the map'], ['dash', Gauge, 'Show the dashboard']] as const).map(([id, Icon, label]) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setNarrowPane(id)}
-                className={`px-3 py-3 text-[10px] font-bold tracking-widest transition-colors cursor-pointer ${narrowPane === id ? 'bg-slate-800 text-blue-400' : 'text-slate-500'}`}
+                aria-label={label}
+                title={label}
+                className={`px-3 py-2.5 transition-colors cursor-pointer ${narrowPane === id ? 'bg-slate-800 text-blue-400' : 'text-slate-500'}`}
               >
-                {label}
+                <Icon className="w-4 h-4" />
               </button>
             ))}
           </div>
@@ -1523,7 +1538,7 @@ export default function Home() {
             <div
               ref={tabStrip.ref}
               style={tabStrip.style}
-              className="no-scrollbar flex space-x-6 h-full mr-auto flex-1 min-w-0 overflow-x-auto overflow-y-hidden"
+              className="no-scrollbar hidden min-[900px]:flex space-x-6 h-full mr-auto flex-1 min-w-0 overflow-x-auto overflow-y-hidden"
             >
               {TABS.map(tab => (
                 <button
@@ -1541,7 +1556,7 @@ export default function Home() {
             </div>
 
             {/* Log Stats & Filter */}
-            <div className="h-full flex items-center border-l border-slate-800 pl-4 ml-4 gap-4">
+            <div className="h-full flex items-center ml-auto border-l-0 min-[900px]:border-l border-slate-800 pl-0 min-[900px]:pl-4 min-[900px]:ml-4 gap-4">
               {processedLog && (
                 <div className="flex flex-col items-end justify-center h-full">
                   <div className="flex items-center gap-2 text-[9px] font-mono leading-none mb-1">
@@ -1577,7 +1592,7 @@ export default function Home() {
               session is open and where its BASE came from stay on screen the whole time you are
               looking at maps — otherwise you'd have to go back to STARTUP to find out. */}
           {currentSession && activeTab !== 'startup' && (
-            <div className="h-[26px] flex-none flex items-center gap-3 px-4 border-b border-slate-900 bg-slate-950/60 text-[10px] min-w-0">
+            <div className="h-[26px] flex-none hidden min-[900px]:flex items-center gap-3 px-4 border-b border-slate-900 bg-slate-950/60 text-[10px] min-w-0">
               <span className="font-bold tracking-widest uppercase text-slate-300 truncate max-w-[220px]" title={currentSession.label}>
                 {currentSession.label}
               </span>
@@ -2086,7 +2101,7 @@ export default function Home() {
                       </span>
                       <label className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group">
                         <input type="checkbox" className="sr-only peer" checked={applyPatch} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyPatch(e.target.checked)} />
-                        <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                     </div>
 
@@ -2168,7 +2183,7 @@ export default function Home() {
                     <div className="h-7 flex items-center gap-3 ml-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
                       <label className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group">
                         <input type="checkbox" className="sr-only peer" checked={applyWotDisable} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyWotDisable(e.target.checked)} />
-                        <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                       <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyWotDisable ? 'text-blue-400' : 'text-slate-500'}`}>
                         WOT TH
@@ -2197,7 +2212,7 @@ export default function Home() {
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
                       >
                         <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWarmup} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWarmup(e.target.checked)} />
-                        <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                       <span
                         className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!derivedTablesLocked && writeWarmup ? 'text-blue-400' : 'text-slate-500'}`}
@@ -2214,7 +2229,7 @@ export default function Home() {
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
                       >
                         <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWot} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />
-                        <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                       <span
                         className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!derivedTablesLocked && writeWot ? 'text-blue-400' : 'text-slate-500'}`}
@@ -2334,6 +2349,56 @@ export default function Home() {
           onResetComplete={handleAdaptationResetComplete}
           error={dmeLink.error}
           errorKind={dmeLink.errorKind}
+        />
+      )}
+
+      {menuOpen && (
+        <MobileMenu
+          onClose={() => setMenuOpen(false)}
+          tabs={TABS}
+          activeTab={activeTab}
+          /* Picking a view is also asking to look at it. Without the second call the tab changed
+             behind whichever pane was already showing, so choosing CURRENT MAP from the dashboard
+             left you on the dashboard with the map loaded out of sight. */
+          onSelectTab={(id) => { goToTab(id as TabId); setNarrowPane('map'); }}
+          identity={dmeLink.identity}
+          linkState={dmeLink.state}
+          flashText={flashText}
+          flashColor={flashColor}
+          flashEnabled={dmeLink.state === 'connected'}
+          onOpenFlash={() => setFlashDialogOpen(true)}
+          session={currentSession ? { label: currentSession.label, archived: isArchived } : null}
+          baseOrigin={currentSession ? (
+            <OriginBadge
+              session={currentSession}
+              parent={currentSession.parentSessionId
+                ? sessionDb.sessions.find(s => s.id === currentSession.parentSessionId)
+                : undefined}
+            />
+          ) : undefined}
+          logName={logFile?.name}
+          logPoints={processedLog?.validCount}
+          /* Assembled here rather than inside the menu so the conditions stay next to the ones the
+             desktop session bar uses — the same guards, not a second copy that can drift from them.
+             DOWNLOAD PATCH-ON / TUNED are one builder split on whether a tune exists, and both stand
+             down during a live run because bytes written mid-run would claim to be a finished one. */
+          actions={[
+            ...(currentSession && binaryBuffer && !newMap && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning'
+              ? [{ label: 'Download Patch-On', kind: 'bin' as const, onClick: handleDownloadBin,
+                   hint: 'The BASE with the PATCH applied and the checksum corrected — the exact bytes WRITE would send right now.' }] : []),
+            ...(currentSession && binaryBuffer && newMap && dmeLink.state !== 'tuning'
+              ? [{ label: 'Download Tuned', kind: 'bin' as const, onClick: handleDownloadBin,
+                   hint: 'The TUNED bytes WRITE would send right now, built live from the current map and toggles.' }] : []),
+            ...(currentSession && newMap && !isArchived && dmeLink.state !== 'tuning'
+              ? [{ label: 'Save to session', kind: 'save' as const, onClick: handleSaveSession,
+                   hint: 'Save this tune to the session — no cable needed' }] : []),
+            ...(currentSession?.baseOrigin
+              ? [{ label: 'Download BASE', kind: 'base' as const, onClick: () => handleDownloadSessionBase(currentSession),
+                   hint: "This session's BASE bytes — what it started from" }] : []),
+            ...(currentSession && logFile
+              ? [{ label: 'Download LOG CSV', kind: 'log' as const, onClick: () => handleDownloadSessionLog(currentSession),
+                   hint: "This session's stored log" }] : []),
+          ]}
         />
       )}
 
