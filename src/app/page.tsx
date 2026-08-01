@@ -17,7 +17,7 @@ import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload, Menu, Table2, Gauge } from 'lucide-react';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload, Menu } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -1371,6 +1371,30 @@ export default function Home() {
   const derivedTablesLocked = !newMap;
   const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
 
+  /** Which pane the narrow layout is showing, wearing the tab row's own clothes: same height,
+   *  same 10px letterspaced label, same 2px underline under the active one. It stands where the
+   *  tabs stood and looks like what stood there, so it reads as navigation rather than as a new
+   *  kind of control. Above 900px both panes are on screen and this is not rendered at all.
+   *
+   *  Rendered in BOTH 44px rows, because each pane owns its own and the pane you are not looking
+   *  at is `hidden` — put it in one and the way back out of the other goes with it. */
+  const narrowPaneTabs = (
+    <div className="flex min-[900px]:hidden space-x-6 h-full shrink-0">
+      {([['map', 'MAP'], ['dash', 'DASH']] as const).map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => setNarrowPane(id)}
+          className={`relative h-full flex items-center shrink-0 whitespace-nowrap text-[10px] font-bold tracking-widest transition-all ${narrowPane === id
+            ? 'text-blue-400 border-b-2 border-blue-400'
+            : 'text-slate-500 hover:text-slate-300 border-b-2 border-transparent'}`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     // 100dvh, not h-screen. This page deliberately never scrolls — everything is sized to fit the
     // viewport — and on Android `100vh` resolves to the LARGEST viewport, the one with the browser
@@ -1478,26 +1502,6 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Which pane the narrow layout is showing. Above 900px both are on screen side by side
-              and this is not rendered at all — it would be a switch with nothing to switch.
-
-              The two links beside it go the other way: they are reference material, and on a phone
-              they were spending about 138px of a 312px header that the identity strip needed. */}
-          <div className="flex min-[900px]:hidden items-center rounded border border-slate-800 overflow-hidden shrink-0">
-            {([['map', Table2, 'Show the map'], ['dash', Gauge, 'Show the dashboard']] as const).map(([id, Icon, label]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setNarrowPane(id)}
-                aria-label={label}
-                title={label}
-                className={`px-3 py-2.5 transition-colors cursor-pointer ${narrowPane === id ? 'bg-slate-800 text-blue-400' : 'text-slate-500'}`}
-              >
-                <Icon className="w-4 h-4" />
-              </button>
-            ))}
-          </div>
-
           {/* GitHub Link */}
           <a
             href="https://github.com/mushitaro/mss54hp-csl-convert-tuner"
@@ -1535,6 +1539,7 @@ export default function Home() {
               crisp on top of a blurred page. Modals now live in their own tier (z-100/110), and the
               layers here read: 10 chrome / 20 panes / 30 this row / 40 popover scrims / 50 popovers. */}
           <div className="h-[44px] flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-30">
+            {narrowPaneTabs}
             <div
               ref={tabStrip.ref}
               style={tabStrip.style}
@@ -1823,7 +1828,8 @@ export default function Home() {
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Visualization & Inputs</span>
+            {narrowPaneTabs}
+            <span className="hidden min-[900px]:inline text-[10px] font-bold text-slate-500 uppercase tracking-widest">Visualization & Inputs</span>
           </div>
 
           {/* CONTENT FLEX CONTAINER (6:4 Split) */}
