@@ -2363,13 +2363,16 @@ export default function Home() {
           {narrowPaneTabs}
           {/* Opens on pointerdown, not click, so the same press can carry on into the sheet and
               pick a row on the way back up. `touch-none` stops the browser claiming the gesture as a
-              scroll before the menu ever sees it. The release is caught here as well as in the sheet
-              because a press that never moves still has to end the drag. */}
+              scroll before the menu ever sees it.
+
+              The release is NOT handled here. The sheet's scrim goes up on this very pointerdown and
+              covers this button, so its own pointerup never arrives — the drag would stay armed
+              after the finger had gone and the next release anywhere would read as a selection.
+              That is what made the button feel unreliable. The sheet ends the drag instead, from a
+              window-level listener that always fires. */}
           <button
             type="button"
-            onPointerDown={(e) => { setMenuOpen(true); setMenuDrag({ x: e.clientX, y: e.clientY }); }}
-            onPointerUp={() => setMenuDrag(null)}
-            onPointerCancel={() => setMenuDrag(null)}
+            onPointerDown={(e) => { e.preventDefault(); setMenuOpen(true); setMenuDrag({ x: e.clientX, y: e.clientY }); }}
             aria-label="Open menu"
             className="absolute left-1/2 -translate-x-1/2 h-[52px] w-[52px] flex items-center justify-center touch-none text-slate-400 hover:text-slate-200 cursor-pointer"
           >
@@ -2416,6 +2419,7 @@ export default function Home() {
         <MobileMenu
           onClose={() => setMenuOpen(false)}
           dragFrom={menuDrag}
+          onDragEnd={() => setMenuDrag(null)}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed

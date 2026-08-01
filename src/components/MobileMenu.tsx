@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
 
@@ -56,28 +56,35 @@ interface Props {
      * that has travelled counts as a sweep.
      */
     dragFrom?: { x: number; y: number } | null;
+    /**
+     * Clears `dragFrom`. It has to be called from in here, not from the button that set it: the
+     * scrim goes up on pointerdown and covers that button immediately, so the button's own
+     * pointerup never fires and the drag state would stay armed after the finger had left. The next
+     * release anywhere would then be read as a selection.
+     */
+    onDragEnd?: () => void;
 }
 
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
 
 const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
     <div className="px-4 py-3 border-b border-slate-900">
-        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-600 mb-2">{title}</h4>
+        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-600 mb-2 text-center">{title}</h4>
         {children}
     </div>
 );
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div className="flex items-baseline gap-3 py-1">
-        <span className="w-16 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
-        <span className="min-w-0 flex-1 font-mono text-[11px] text-slate-300 break-all">{children}</span>
+    <div className="flex items-baseline justify-center gap-3 py-1">
+        <span className="shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+        <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
     </div>
 );
 
 export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
-    session, baseOrigin, logName, logPoints, actions, dragFrom,
+    session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd,
 }) => {
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
@@ -99,6 +106,7 @@ export const MobileMenu: React.FC<Props> = ({
         const up = (e: PointerEvent) => {
             const row = travelled(e) ? at(e) : null;
             setHot(null);
+            onDragEnd?.();
             // Clicking the row rather than looking its handler up: the row already owns the handler
             // for the ordinary tap path, and one way in means the two cannot drift apart.
             // Released without travelling, or without reaching a row, leaves the sheet up — which is
@@ -107,12 +115,12 @@ export const MobileMenu: React.FC<Props> = ({
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up, { once: true });
-        window.addEventListener('pointercancel', () => setHot(null), { once: true });
+        window.addEventListener('pointercancel', () => { setHot(null); onDragEnd?.(); }, { once: true });
         return () => {
             window.removeEventListener('pointermove', move);
             window.removeEventListener('pointerup', up);
         };
-    }, [dragFrom]);
+    }, [dragFrom, onDragEnd]);
 
     /** Marks a row as drag-selectable. The key is only for the highlight; the handler stays on
      *  the element, where the tap path already reads it. */
@@ -125,6 +133,14 @@ export const MobileMenu: React.FC<Props> = ({
 
     const lit = (key: string) => (hot === key ? 'bg-slate-800' : '');
 
+    /** Opens at the bottom of its own scroll. The lists run bottom-up so the rows nearest the thumb
+     *  are the last ones in the document, and scrollTop 0 showed the readouts instead of them. */
+    const scroller = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const el = scroller.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, []);
+
     return (
         <>
             <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={onClose} />
@@ -132,18 +148,18 @@ export const MobileMenu: React.FC<Props> = ({
                 comes from where the finger already is. Capped at 85svh so the scrim above stays
                 visible — the way out has to be on screen. */}
             <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[85svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
-                <div className="flex-1 overflow-y-auto overscroll-contain">
+                <div ref={scroller} className="flex-1 overflow-y-auto overscroll-contain">
                     {/* Readouts first, i.e. furthest from the thumb. Nothing here is a sweep target. */}
                     {session && (
                         <Section title="Session">
-                            <div className="flex items-center gap-2 mb-2 min-w-0">
+                            <div className="flex items-center justify-center gap-2 mb-2 min-w-0">
                                 <Cable className="w-3 h-3 shrink-0 text-slate-600" />
                                 <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
                                 {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
                             </div>
-                            {baseOrigin && <div className="mb-1 flex items-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
+                            {baseOrigin && <div className="mb-1 flex items-center justify-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
                             {logName && (
-                                <div className="flex items-center gap-2 min-w-0">
+                                <div className="flex items-center justify-center gap-2 min-w-0">
                                     <span className="text-[9px] uppercase tracking-widest text-slate-600 shrink-0">Log</span>
                                     <span className="min-w-0 truncate font-mono text-[10px] text-slate-400">{logName}</span>
                                     {logPoints !== undefined && <span className="shrink-0 font-mono text-[10px] text-slate-600">{logPoints}pts</span>}
@@ -160,7 +176,7 @@ export const MobileMenu: React.FC<Props> = ({
                         <button
                             type="button"
                             {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                            className={`mt-1 w-full flex items-center gap-3 py-3 px-2 -mx-2 rounded text-left enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                            className={`mt-1 w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
                         >
                             <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
@@ -179,7 +195,7 @@ export const MobileMenu: React.FC<Props> = ({
                                         type="button"
                                         title={a.hint}
                                         {...row(`action:${a.label}`, () => { a.onClick(); onClose(); })}
-                                        className={`w-full flex items-center gap-3 py-3 px-2 -mx-2 rounded text-left cursor-pointer group ${lit(`action:${a.label}`)}`}
+                                        className={`w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded cursor-pointer group ${lit(`action:${a.label}`)}`}
                                     >
                                         <Icon className="w-3.5 h-3.5 shrink-0 text-slate-600 group-hover:text-blue-400 transition-colors" />
                                         <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 group-hover:text-blue-400 transition-colors">{a.label}</span>
@@ -201,7 +217,7 @@ export const MobileMenu: React.FC<Props> = ({
                                     key={t.id}
                                     type="button"
                                     {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
-                                    className={`text-left py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
+                                    className={`text-center py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
                                         : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default'}`}
                                 >
                                     {t.label}
