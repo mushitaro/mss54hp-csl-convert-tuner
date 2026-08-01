@@ -308,6 +308,12 @@ export default function Home() {
   const [adaptDialogOpen, setAdaptDialogOpen] = useState(false);
   const [flashDialogOpen, setFlashDialogOpen] = useState(false);
   const [identityDialogOpen, setIdentityDialogOpen] = useState(false);
+  /** Which pane the narrow (stacked) layout shows. Inert above 900px, where both are on screen.
+   *  Starts on the map because that is what a stacked layout was failing to show: the two panes
+   *  split 38.2/61.8 regardless of how little height there was, so on a 360x800 phone the VE grid
+   *  got 217px — six of twenty columns and ten of twenty-four rows — while the dashboard held a
+   *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
+  const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
 
@@ -1396,7 +1402,11 @@ export default function Home() {
           >
             <span className={`block w-2 h-2 rounded-full ${dmeStatusColor}`} />
           </button>
-          <h1 className="min-w-0 text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
+          {/* Capped on a narrow header. Dropping `shrink-0` let the ellipsis work, but flexbox still
+              hands this the larger share — its content is ~300px against the identity strip's ~60 —
+              so the strip was resolving to zero width and FLASH went with it. A ceiling, not a
+              hidden: the wordmark is how you know which tool has the cable. */}
+          <h1 className="min-w-0 max-w-[38%] min-[900px]:max-w-none text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
             {/* The ///M mark, not punctuation — icon.svg has carried the tricolor in the browser tab
                 all along while this rendered slate-600. It is also the one place red can live
                 permanently without costing it any alarm value: a wordmark states no machine state,
@@ -1450,12 +1460,30 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Which pane the narrow layout is showing. Above 900px both are on screen side by side
+              and this is not rendered at all — it would be a switch with nothing to switch.
+
+              The two links beside it go the other way: they are reference material, and on a phone
+              they were spending about 138px of a 312px header that the identity strip needed. */}
+          <div className="flex min-[900px]:hidden items-center rounded border border-slate-800 overflow-hidden shrink-0">
+            {([['map', 'MAP'], ['dash', 'DASH']] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setNarrowPane(id)}
+                className={`px-3 py-3 text-[10px] font-bold tracking-widest transition-colors cursor-pointer ${narrowPane === id ? 'bg-slate-800 text-blue-400' : 'text-slate-500'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {/* GitHub Link */}
           <a
             href="https://github.com/mushitaro/mss54hp-csl-convert-tuner"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-slate-500 hover:text-slate-300 transition-colors"
+            className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors"
             title="View on GitHub"
           >
             <Github className="w-5 h-5" />
@@ -1466,7 +1494,7 @@ export default function Home() {
             href="https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-slate-500 hover:text-amber-400 transition-colors flex items-center gap-2 group"
+            className="hidden min-[900px]:flex text-slate-500 hover:text-amber-400 transition-colors items-center gap-2 group"
             title="Methodology Source: NA M3 Forum"
           >
             <BookOpen className="w-4 h-4" />
@@ -1478,7 +1506,7 @@ export default function Home() {
       <div className="flex flex-1 flex-col min-[900px]:flex-row overflow-hidden">
 
         {/* === LEFT COLUMN (70% desktop / 40% stacked) === */}
-        <div className="h-[38.2%] min-[900px]:h-full min-[900px]:w-[61.8%] flex flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0">
+        <div className={`${narrowPane === 'map' ? 'flex flex-1' : 'hidden'} min-[900px]:flex min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[61.8%] flex-col border-b min-[900px]:border-b-0 border-r-0 min-[900px]:border-r border-slate-900 relative bg-slate-950/40 min-h-0`}>
 
           {/* Header Frame (Tabs) - Matches Right Column Header Height */}
           {/* z-30, not z-50. The row has to outrank the right pane (z-20) so the config popovers
@@ -1771,7 +1799,7 @@ export default function Home() {
         </div>
 
         {/* === RIGHT COLUMN (30% desktop / 60% stacked) === */}
-        <div className="flex-1 min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden">
+        <div className={`${narrowPane === 'dash' ? 'flex flex-1' : 'hidden'} min-h-0 min-[900px]:flex min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
