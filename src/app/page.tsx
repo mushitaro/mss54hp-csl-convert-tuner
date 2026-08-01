@@ -17,7 +17,8 @@ import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload, Menu } from 'lucide-react';
+import { MarkIcon } from '@/components/MarkIcon';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -1396,12 +1397,12 @@ export default function Home() {
   );
 
   return (
-    // 100dvh, not h-screen. This page deliberately never scrolls — everything is sized to fit the
+    // 100svh, not h-screen and not dvh. This page deliberately never scrolls — everything is sized to fit the
     // viewport — and on Android `100vh` resolves to the LARGEST viewport, the one with the browser
     // chrome retracted. With no scrolling to recover it, the bottom of the layout (the action row
     // that carries WRITE) sits under the URL bar and cannot be reached. `dvh` tracks the viewport
     // that is actually visible.
-    <main className="h-[100dvh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
+    <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
       {/* App Header - Ultra Minimal */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md z-10 shrink-0 h-[48px]">
         {/* The ///M stripe as the header's bottom rule, replacing a slate-900 border-b. Absolutely
@@ -2362,7 +2363,7 @@ export default function Home() {
             aria-label="Open menu"
             className="absolute left-1/2 -translate-x-1/2 p-3 text-slate-400 hover:text-slate-200 cursor-pointer"
           >
-            <Menu className="w-5 h-5" />
+            <MarkIcon className="w-5 h-[17px]" />
           </button>
           {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
               in the desktop tab row, which is the other instance of them. */}

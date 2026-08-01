@@ -74,11 +74,14 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      {/* `min-h-[100dvh]`, not `min-h-screen`. The page itself is sized to `100dvh` and never
-          scrolls; leaving 100vh on the body meant that on Android, with the URL bar showing, the
-          body was taller than the page by exactly the height of that bar — so the whole document
-          scrolled, which is the thing the dvh switch inside the page was made to stop. */}
-      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-[100dvh]`}>{children}</body>
+      {/* `min-h-[100svh]`, not `min-h-screen`, and matching the page's own `h-[100svh]`. Leaving
+          100vh here meant that on Android, with the URL bar showing, the body was taller than the
+          page by exactly the height of that bar and the whole document scrolled. svh rather than
+          dvh for both: dvh is whatever the viewport is right now and grows when the browser
+          retracts its chrome, so a layout built at the tall value loses the bottom of itself when
+          the bar comes back — on a page with no scroll, permanently. svh is the small value, the
+          one that is true at every moment. */}
+      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-[100svh]`}>{children}</body>
     </html>
   );
 }

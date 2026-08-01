@@ -67,7 +67,10 @@ export const MobileMenu: React.FC<Props> = ({
 }) => (
     <>
         <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={onClose} />
-        <div className="fixed inset-y-0 left-0 z-[95] w-[min(320px,85vw)] flex flex-col bg-slate-900 border-r border-slate-800 min-[900px]:hidden">
+        {/* Up from the bottom, not in from the side: it opens from a control on the footer, so it
+            comes from where the finger already is and lands under it rather than across the screen.
+            Capped at 80svh so the scrim above stays visible — the way out has to be on screen. */}
+        <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[80svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden">
             <div className="h-[48px] shrink-0 flex items-center justify-between px-4 border-b border-slate-800">
                 <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Menu</span>
                 <button onClick={onClose} aria-label="Close menu" className="p-3 -m-3 text-slate-500 hover:text-slate-300">
