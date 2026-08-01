@@ -141,15 +141,37 @@ export const MobileMenu: React.FC<Props> = ({
         if (el) el.scrollTop = el.scrollHeight;
     }, []);
 
+    /**
+     * Ignore the dismissals for a moment after opening.
+     *
+     * On touch, letting go of the button that opened this fires a compatibility `click` at the same
+     * coordinates a beat after `pointerup` — and Close sits at exactly those coordinates, by design.
+     * So press-and-release shut the sheet the instant it appeared. `preventDefault` on the opening
+     * pointerdown does not reliably suppress that click, and the drag path does not need it: it runs
+     * off pointerup and dispatches its own click on the row.
+     *
+     * Only Close and the scrim are gated. A row reached by sweeping is still selectable throughout,
+     * because that path never waits for a browser-generated click.
+     */
+    const [dismissable, setDismissable] = useState(false);
+    useEffect(() => {
+        const t = setTimeout(() => setDismissable(true), 400);
+        return () => clearTimeout(t);
+    }, []);
+    const dismiss = () => { if (dismissable) onClose(); };
+
     return (
         <>
-            <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={onClose} />
+            <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={dismiss} />
             {/* Up from the bottom, not in from the side: it opens from a control on the footer, so it
                 comes from where the finger already is. Capped at 85svh so the scrim above stays
                 visible — the way out has to be on screen. */}
             <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[85svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
-                <div ref={scroller} className="flex-1 overflow-y-auto overscroll-contain">
-                    {/* Readouts first, i.e. furthest from the thumb. Nothing here is a sweep target. */}
+                {/* Pinned. These are what the sheet is consulted for as much as navigated with —
+                    which car, which session, how many flashes left — and scrolling them away to
+                    reach a tab meant they were never on screen at the moment you wanted them. Above
+                    the scroll, not in it. */}
+                <div className="shrink-0 border-b border-slate-800">
                     {session && (
                         <Section title="Session">
                             <div className="flex items-center justify-center gap-2 mb-2 min-w-0">
@@ -183,7 +205,11 @@ export const MobileMenu: React.FC<Props> = ({
                             <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
                         </button>
                     </Section>
+                </div>
 
+                {/* Scrolls, without saying so. A 4px bar down the edge of a 360px sheet is noise on
+                    an instrument, and the list already shows it runs past the fold. */}
+                <div ref={scroller} className="no-scrollbar flex-1 overflow-y-auto overscroll-contain">
                     {actions.length > 0 && (
                         <Section title="Download">
                             {/* Reversed, like VIEW below it: first in the list is nearest the thumb. */}
@@ -233,7 +259,7 @@ export const MobileMenu: React.FC<Props> = ({
                 <div className="h-[52px] shrink-0 flex items-center justify-center border-t border-slate-800">
                     <button
                         type="button"
-                        {...row('close', onClose)}
+                        {...row('close', dismiss)}
                         aria-label="Close menu"
                         className={`h-[52px] w-[52px] flex items-center justify-center rounded text-slate-400 hover:text-slate-200 cursor-pointer ${lit('close')}`}
                     >
