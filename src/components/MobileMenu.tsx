@@ -79,8 +79,8 @@ const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title
 );
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div className="flex items-baseline justify-center gap-3 py-1">
-        <span className="shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+    <div className="flex items-baseline gap-3 py-1">
+        <span className="w-10 shrink-0 text-right text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
         <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
     </div>
 );
@@ -222,19 +222,28 @@ export const MobileMenu: React.FC<Props> = ({
                     )}
 
                     <Section title="Vehicle">
-                        <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
-                        <Field label="AIF">{identity?.aif ?? <span className="text-slate-600">—</span>}</Field>
-                        <Field label="SW">{identity?.softwareVersion ?? <span className="text-slate-600">—</span>}</Field>
-                        {/* Still a control, and still one step deeper than the number it changes. */}
-                        <button
-                            type="button"
-                            {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                            className={`mt-1 w-full flex items-center justify-center gap-3 py-3 px-2 -mx-2 rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
-                        >
-                            <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
-                            <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
-                            <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
-                        </button>
+                        {/* Same rule as the session block above: the group is centred, the rows are
+                            not. A fixed, right-aligned label column puts VIN/AIF/SW/FLASH on one
+                            edge and their values on another, so the four read as a column instead of
+                            four separately centred lines. */}
+                        <div className="w-fit max-w-full mx-auto">
+                            <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
+                            <Field label="AIF">{identity?.aif ?? <span className="text-slate-600">—</span>}</Field>
+                            <Field label="SW">{identity?.softwareVersion ?? <span className="text-slate-600">—</span>}</Field>
+                            {/* Still a control, and still one step deeper than the number it changes.
+                                Kept on the same two edges as the readouts above it, with the icon
+                                hung outside the label column so it does not shift them. */}
+                            <button
+                                type="button"
+                                {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
+                                className={`mt-1 w-full flex items-baseline gap-3 py-3 px-2 -mx-2 rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                            >
+                                <span className="w-10 shrink-0 flex items-center justify-end gap-1.5 text-[9px] uppercase tracking-widest text-slate-600">
+                                    <Gauge className="w-3 h-3 shrink-0" />Flash
+                                </span>
+                                <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
+                            </button>
+                        </div>
                     </Section>
 
                 </div>
