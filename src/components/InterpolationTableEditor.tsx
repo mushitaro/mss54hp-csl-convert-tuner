@@ -25,6 +25,10 @@ interface Props {
     onToggle: (enabled: boolean) => void;
     /** Archived sessions show the table their tune was built with, but must not re-derive it. */
     readOnly?: boolean;
+    /** Open above the trigger instead of below it. The mobile footer sits at the bottom edge, so a
+     *  popover hanging `top-10` off a control down there opens off-screen. */
+    openUp?: boolean;
+
 }
 
 // Custom Alpha Icon component to match Lucide style
@@ -46,7 +50,7 @@ const AlphaIcon = ({ className }: { className?: string }) => (
     </svg>
 );
 
-export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enabled, onToggle, readOnly = false }) => {
+export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enabled, onToggle, readOnly = false , openUp}) => {
     const [isOpen, setIsOpen] = useState(false);
     const t = TEXT[useDialogLang()];
     const [points, setPoints] = useState<InterpolationPoint[]>(config);
@@ -84,7 +88,7 @@ export const InterpolationTableEditor: React.FC<Props> = ({ config, onSave, enab
             {isOpen && (
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-                    <div className="absolute right-0 top-10 w-[320px] bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200">
+                    <div className={`absolute right-0 ${openUp ? 'bottom-10' : 'top-10'} w-[320px] bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200`}>
                         <div className="flex flex-col gap-4 mb-4 border-b border-slate-800 pb-2">
                             <div className="flex justify-between items-center">
                                 <h3 className="text-xs font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">

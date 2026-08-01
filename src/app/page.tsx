@@ -1386,8 +1386,8 @@ export default function Home() {
           type="button"
           onClick={() => setNarrowPane(id)}
           className={`relative h-full flex items-center shrink-0 whitespace-nowrap text-[10px] font-bold tracking-widest transition-all ${narrowPane === id
-            ? 'text-blue-400 border-b-2 border-blue-400'
-            : 'text-slate-500 hover:text-slate-300 border-b-2 border-transparent'}`}
+            ? 'text-blue-400 border-t-2 border-blue-400'
+            : 'text-slate-500 hover:text-slate-300 border-t-2 border-transparent'}`}
         >
           {label}
         </button>
@@ -1415,17 +1415,6 @@ export default function Home() {
           style={{ background: 'linear-gradient(to right, #0A9BDB 0 33.333%, #9B84E8 33.333% 66.667%, #F11A22 66.667% 100%)' }}
         />
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          {/* Everything the narrow header cannot hold lives behind this: the tab list, the identity,
-              the flash counter and the session's downloads. Above 900px there is room for all of it
-              in the chrome, so it is not rendered. */}
-          <button
-            type="button"
-            onClick={() => setMenuOpen(true)}
-            aria-label="Open menu"
-            className="min-[900px]:hidden shrink-0 p-3 -m-1 text-slate-400 hover:text-slate-200 cursor-pointer"
-          >
-            <Menu className="w-5 h-5" />
-          </button>
           {/* The dot is the identity's entry point, not just an LED. `p-4 -m-4` grows the hit box to
               40px without moving anything: the padding is cancelled by the margin, so the dot still
               occupies its 8px in the row. It needed a real target anyway — an 8px control is
@@ -1538,8 +1527,7 @@ export default function Home() {
               panels, which put it ABOVE every dialog's backdrop (z-40) and left the tab bar sitting
               crisp on top of a blurred page. Modals now live in their own tier (z-100/110), and the
               layers here read: 10 chrome / 20 panes / 30 this row / 40 popover scrims / 50 popovers. */}
-          <div className="h-[44px] flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-30">
-            {narrowPaneTabs}
+          <div className="h-[44px] hidden min-[900px]:flex items-center px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none z-30">
             <div
               ref={tabStrip.ref}
               style={tabStrip.style}
@@ -1561,7 +1549,7 @@ export default function Home() {
             </div>
 
             {/* Log Stats & Filter */}
-            <div className="h-full flex items-center ml-auto border-l-0 min-[900px]:border-l border-slate-800 pl-0 min-[900px]:pl-4 min-[900px]:ml-4 gap-4">
+            <div className="h-full hidden min-[900px]:flex items-center ml-auto border-l border-slate-800 pl-4 ml-4 gap-4">
               {processedLog && (
                 <div className="flex flex-col items-end justify-center h-full">
                   <div className="flex items-center gap-2 text-[9px] font-mono leading-none mb-1">
@@ -1827,9 +1815,8 @@ export default function Home() {
         <div className={`${narrowPane === 'dash' ? 'flex flex-1' : 'hidden'} min-h-0 min-[900px]:flex min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
 
           {/* Header Frame - Matches Left Column Height */}
-          <div className="h-[44px] flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
-            {narrowPaneTabs}
-            <span className="hidden min-[900px]:inline text-[10px] font-bold text-slate-500 uppercase tracking-widest">Visualization & Inputs</span>
+          <div className="h-[44px] hidden min-[900px]:flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
+            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Visualization & Inputs</span>
           </div>
 
           {/* CONTENT FLEX CONTAINER (6:4 Split) */}
@@ -2343,6 +2330,62 @@ export default function Home() {
           </div >
         </div >
       </div >
+
+      {/* MOBILE FOOTER — the app's controls for a window that cannot spare a row at the top.
+          Outside both panes on purpose: each pane hides the other below 900px, so anything living
+          inside one of them takes the way back out of the other with it.
+
+          MENU is centred absolutely rather than by flex order, so it stays on the screen's centre
+          line whatever the groups either side of it happen to weigh — the pane labels are two short
+          words today and the config cluster is three icons, and neither is a promise.
+
+          The record counts sit ABOVE the control row rather than below it: below is the screen
+          edge, where Android's gesture bar is, and a 9px readout is not something to put there. */}
+      <div className="min-[900px]:hidden flex-none z-30 border-t border-slate-900 bg-slate-900/50 backdrop-blur-sm">
+        {processedLog && (
+          <div className="h-[16px] flex items-center justify-end gap-4 px-4">
+            <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
+              <span className="text-slate-500">VALID</span>
+              <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
+            </span>
+            <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
+              <span className="text-slate-600">TOTAL</span>
+              <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
+            </span>
+          </div>
+        )}
+        <div className="relative h-[44px] flex items-center px-4">
+          {narrowPaneTabs}
+          <button
+            type="button"
+            onClick={() => setMenuOpen(true)}
+            aria-label="Open menu"
+            className="absolute left-1/2 -translate-x-1/2 p-3 text-slate-400 hover:text-slate-200 cursor-pointer"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
+              in the desktop tab row, which is the other instance of them. */}
+          <div className="ml-auto flex items-center gap-2">
+            <InterpolationTableEditor
+              config={interpolationTable}
+              onSave={handleTableChange}
+              enabled={filterConfig.enableCorrection}
+              onToggle={(enabled) => handleConfigChange({ ...filterConfig, enableCorrection: enabled })}
+              readOnly={isArchived}
+              openUp
+            />
+            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} openUp />
+            <FieldVisibilityPanel
+              visibleFields={fieldVisibility.visibleFields}
+              onToggle={fieldVisibility.toggleField}
+              onShowCoreOnly={fieldVisibility.showCoreOnly}
+              onShowAll={fieldVisibility.showAll}
+              openUp
+            />
+          </div>
+        </div>
+      </div>
 
       {/* Mounted at <main> level, not inside the hub cluster: that cluster is overflow-hidden and
           sits under useFitScale's transform, so a modal rendered within it would be clipped and
