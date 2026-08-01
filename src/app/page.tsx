@@ -317,6 +317,10 @@ export default function Home() {
    *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
   const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
   const [menuOpen, setMenuOpen] = useState(false);
+  /** Where the press that opened the menu landed, while it is still down — the sheet follows the
+   *  finger from there and commits on release. Cleared on pointerup wherever it lands, so a tap
+   *  that merely opens the sheet leaves it in ordinary tap-to-choose mode. */
+  const [menuDrag, setMenuDrag] = useState<{ x: number; y: number } | null>(null);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
 
@@ -2355,15 +2359,21 @@ export default function Home() {
             </span>
           </div>
         )}
-        <div className="relative h-[44px] flex items-center px-4">
+        <div className="relative h-[52px] flex items-center px-4">
           {narrowPaneTabs}
+          {/* Opens on pointerdown, not click, so the same press can carry on into the sheet and
+              pick a row on the way back up. `touch-none` stops the browser claiming the gesture as a
+              scroll before the menu ever sees it. The release is caught here as well as in the sheet
+              because a press that never moves still has to end the drag. */}
           <button
             type="button"
-            onClick={() => setMenuOpen(true)}
+            onPointerDown={(e) => { setMenuOpen(true); setMenuDrag({ x: e.clientX, y: e.clientY }); }}
+            onPointerUp={() => setMenuDrag(null)}
+            onPointerCancel={() => setMenuDrag(null)}
             aria-label="Open menu"
-            className="absolute left-1/2 -translate-x-1/2 p-3 text-slate-400 hover:text-slate-200 cursor-pointer"
+            className="absolute left-1/2 -translate-x-1/2 h-[52px] w-[52px] flex items-center justify-center touch-none text-slate-400 hover:text-slate-200 cursor-pointer"
           >
-            <MarkIcon className="w-5 h-[17px]" />
+            <MarkIcon className="w-8 h-7" />
           </button>
           {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
               in the desktop tab row, which is the other instance of them. */}
@@ -2405,6 +2415,7 @@ export default function Home() {
       {menuOpen && (
         <MobileMenu
           onClose={() => setMenuOpen(false)}
+          dragFrom={menuDrag}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed
