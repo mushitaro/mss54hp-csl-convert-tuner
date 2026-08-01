@@ -1846,7 +1846,7 @@ export default function Home() {
                 120, so it sat pinned at the 0.4 scale floor and the arming toggles that decide what
                 goes into the ECU rendered at 14x8 px. The floor only lowers where the viewport is
                 genuinely short; a laptop still gets the full 140. */}
-            <div className="flex-1 min-h-[76px] [@media(min-height:560px)]:min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent">
+            <div className="flex-1 min-h-[48px] [@media(min-height:560px)]:min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent">
               {/* Live raw telemetry readout — floats over the visualization during logging so it shows
                   the latest DME sample (independent of the VE filters) WITHOUT shifting the inputs /
                   dashboard layout: the panel below is identical whether logging or stopped. */}
@@ -1965,7 +1965,7 @@ export default function Home() {
             {/* flex-initial (0 1 auto): takes the height its controls actually need and never grows.
                 It can still shrink on a genuinely short viewport — that's what useFitScale's floor
                 and overflow-y-auto are for — but it no longer donates room to an empty 3D pane. */}
-            <div className="flex-initial min-h-0 overflow-y-auto px-5 pt-4 pb-5 flex flex-col">
+            <div className="flex-initial min-h-0 overflow-y-auto px-5 pt-2 pb-2 [@media(min-height:560px)]:pt-4 [@media(min-height:560px)]:pb-5 flex flex-col">
 
               {/* Minimal File Inputs - No Icons, Just Text, Hover for action */}
               <div className="space-y-1 mb-4">
