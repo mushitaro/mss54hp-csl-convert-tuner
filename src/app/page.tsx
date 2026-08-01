@@ -1407,12 +1407,17 @@ export default function Home() {
               so the strip was resolving to zero width and FLASH went with it. A ceiling, not a
               hidden: the wordmark is how you know which tool has the cable. */}
           <h1 className="min-w-0 max-w-[38%] min-[900px]:max-w-none text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
-            {/* The ///M mark, not punctuation — icon.svg has carried the tricolor in the browser tab
-                all along while this rendered slate-600. It is also the one place red can live
-                permanently without costing it any alarm value: a wordmark states no machine state,
-                so it does not compete with the error LED two elements to the left.
+            {/* The ///M mark, not punctuation. It is the one place red can live permanently without
+                costing it any alarm value: a wordmark states no machine state, so it does not
+                compete with the error LED two elements to the left.
                 The middle stripe is the legible violet, not the logo navy #2B115A — at 1.33:1 on
-                black that glyph would read as missing rather than dark. */}
+                black that glyph would read as missing rather than dark.
+
+                Coloured HERE and monochrome in the app icon, which is not an inconsistency to fix:
+                the icon is the supplied logo and is read at 48dp against an unknown wallpaper, where
+                three thin coloured stripes lose their separation. This renders at 14px on a surface
+                whose colour we control. (This comment used to say icon.svg "has carried the tricolor
+                in the browser tab all along" — true until the logo landed, and no longer.) */}
             MSS54HP CSL CONVERT{' '}
             <span className="tracking-tight" aria-hidden="true">
               <span className="text-blue-500">/</span>

@@ -17,8 +17,31 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "MSS54HP CSL CONVERT /// TUNER",
   description: "Alpha-N Tuning and Log Analysis Tool for E46 M3 CSL",
+  /**
+   * Added to Home screen, Android picked its own default glyph rather than any of this, because
+   * there was no manifest at all — `icons.icon` alone feeds the browser tab, and the install path
+   * reads the manifest's PNG list instead. An SVG would not have been enough either: the install
+   * prompt wants a 192 and a 512.
+   *
+   * `maskable` is a separate entry rather than a second purpose on the same file. Android crops a
+   * maskable icon to whatever shape the launcher uses and only the central 80% is guaranteed to
+   * survive, so that variant carries the mark smaller; declaring one file as both would have the
+   * launcher crop the full-size version and clip the outer stripes.
+   */
+  manifest: '/manifest.webmanifest',
   icons: {
     icon: '/icon.svg',
+    // iOS reads this and nothing else — it has no manifest support for icons, and it does not
+    // honour transparency, compositing anything transparent onto black.
+    apple: '/apple-touch-icon.png',
+  },
+  appleWebApp: {
+    capable: true,
+    title: 'CSL TUNER',
+    // 'black', not 'black-translucent'. The translucent one pulls content up under the status bar,
+    // which needs env(safe-area-inset-*) on every top-edge container to be survivable — the same
+    // reason viewportFit stays off below.
+    statusBarStyle: 'black',
   },
 };
 
@@ -39,6 +62,9 @@ export const viewport: Viewport = {
   // sheet Chrome for Android opens full-screen — render in the OS's light scheme: a white panel over
   // a black dashboard, at night, in a car.
   colorScheme: 'dark',
+  // Paints Android's status bar to match the instrument once it is launched from the home screen.
+  // Same value as the manifest's theme_color; they are read at different moments and both matter.
+  themeColor: '#000000',
 };
 
 export default function RootLayout({

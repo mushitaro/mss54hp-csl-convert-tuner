@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- M Stripe Blue -->
-  <path d="M2 30 L8 30 L16 2 L10 2 Z" fill="#008AC9" />
-  <!-- M Stripe Navy -->
-  <path d="M10 30 L16 30 L24 2 L18 2 Z" fill="#2B115A" />
-  <!-- M Stripe Red -->
-  <path d="M18 30 L24 30 L32 2 L26 2 Z" fill="#F11A22" />
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#FFFFFF"/>
+  <g transform="translate(56.31999999999999 84.70824096385539) scale(0.3207710843373494)" fill="#111111">
+    <path d="M0,1068 L215,1068 L585,0 L370,0 Z"/>
+    <path d="M330,1068 L545,1068 L915,0 L700,0 Z"/>
+    <path d="M660,1068 L875,1068 L1245,0 L1030,0 Z"/>
+  </g>
 </svg>
