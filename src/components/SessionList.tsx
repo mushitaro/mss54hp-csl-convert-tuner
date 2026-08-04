@@ -192,12 +192,11 @@ export const SessionList: React.FC<Props> = ({
     }
 
     if (sessions.length === 0) {
+        // Just the action. The dashed circle, its icon and "NO SAVED SESSIONS YET" said nothing the
+        // absence of rows did not already say, and at opacity-50 they read as a disabled control
+        // rather than as decoration — a ghost of something you might be able to press.
         return (
-            <div className="h-full flex flex-col items-center justify-center text-slate-700">
-                <div className="w-16 h-16 border-2 border-dashed border-slate-800 rounded-full flex items-center justify-center mb-4 opacity-50">
-                    <Database className="w-6 h-6 opacity-50" />
-                </div>
-                <p className="text-xs font-mono opacity-50 mb-4">NO SAVED SESSIONS YET</p>
+            <div className="h-full flex items-center justify-center">
                 {NewButton}
             </div>
         );
