@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.tsunagi.e46m3.launcher",
+      "sha256_cert_fingerprints": [
+        "8E:52:91:41:EF:09:AB:DB:50:D9:59:30:A2:52:63:15:38:34:AC:3B:38:5C:9F:76:03:B1:5F:E8:BC:FD:B5:80"
+      ]
+    }
+  }
+]
