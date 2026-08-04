@@ -32,28 +32,26 @@ jobs:
 
       # The Android launcher is a Trusted Web Activity on this origin, and
       # Chrome will only believe that if it can fetch
-      # /.well-known/assetlinks.json. The file lives in public/ and a local
-      # `next build` does copy it into out/ — but the first deploy that carried
-      # it still served a 404, so something between here and the CDN drops the
-      # dot-directory. Copying it explicitly costs nothing and does not care
-      # which step was responsible.
-      #
-      # The check is not decoration either: when this file is missing, Chrome
-      # reports nothing at all. It silently shows the browser toolbar, which
-      # looks like a styling problem rather than a missing file, and that is
-      # exactly how the first attempt was lost.
-      - name: Keep the asset link, and fail loudly if it is gone
+      # /.well-known/assetlinks.json. `next build` copies it out of public/ on
+      # its own; this only asserts it, because a missing asset link produces no
+      # error anywhere — Chrome silently shows its toolbar, which reads as the
+      # launcher being styled wrong rather than as a file that never shipped.
+      - name: Check the asset link survived the build
         run: |
-          mkdir -p out/.well-known
-          cp public/.well-known/assetlinks.json out/.well-known/assetlinks.json
           test -s out/.well-known/assetlinks.json
-          echo "assetlinks.json staged:"
           cat out/.well-known/assetlinks.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: ./out
+          # ⚠ Not optional, and not the default. v5 added this input defaulting
+          # to false, which puts `--exclude=.[^/]*` on its tar and drops every
+          # dot-path in the site. Upgrading the workflow to v5 therefore
+          # silently deleted /.well-known from the deploy while the build,
+          # the artifact upload and the deployment all reported success — the
+          # only symptom was a 404 on one URL nothing else asks for.
+          include-hidden-files: true
 
   deploy:
     environment:
