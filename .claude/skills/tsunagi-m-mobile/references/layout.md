@@ -68,6 +68,10 @@ When a floor and a control fight over the same pixels, the control wins. A 3D ch
 min-h-[48px] [@media(min-height:560px)]:min-h-[140px]
 ```
 
+**And when that is still not enough, split the pane rather than shave the number.** Shrinking a floor buys tens of pixels; the budget above is short by hundreds. If one pane is carrying two unrelated things — a picture and a control surface — make them two destinations at narrow widths and leave the wide layout stacked as it was. Measured here: the 3D view went from a 48px strip to 292px of its own at 851×393, and the control panel stopped needing the shaved floor at all. One more entry in the switch is cheaper than either half staying unusable.
+
+A destination with nothing in it is worse than one that is greyed out — disable it when its content does not exist, and bounce off it if the content goes away while you are standing there.
+
 ## Reserved space
 
 The house rule, already stated in several places in the app: **a thing that appears and disappears must not change the size of anything.**

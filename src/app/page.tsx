@@ -319,16 +319,20 @@ export default function Home() {
    *  split 38.2/61.8 regardless of how little height there was, so on a 360x800 phone the VE grid
    *  got 217px — six of twenty columns and ten of twenty-four rows — while the dashboard held a
    *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
-  const [narrowPane, setNarrowPane] = useState<'map' | 'dash'>('map');
+  const [narrowPane, setNarrowPane] = useState<'map' | 'graph' | 'dash'>('map');
   const [menuOpen, setMenuOpen] = useState(false);
   const updateAvailable = useAppUpdate();
   const wideLayout = useWideLayout();
-  /** The dash pane is on screen. Below 900px the two panes share a grid cell and the inactive one is
-   *  only `invisible` — it stays laid out, and a 3D surface mounted inside it goes on rebuilding
-   *  itself where nobody can see it. Measured at 4x CPU throttle: picking a tab from the menu cost
-   *  3.8-4.3 s, of which Plotly was over 96% and every frame of it was behind `visibility: hidden`,
-   *  because selecting a view also switches to the map pane. Gating the mount takes that to ~0.2 s. */
-  const dashOnScreen = wideLayout || narrowPane === 'dash';
+  /** The 3D surface is actually being looked at.
+   *
+   *  Below 900px the panes share a grid cell and the inactive one is only `invisible` — it stays laid
+   *  out, and a surface mounted inside it goes on rebuilding itself where nobody can see it. Measured
+   *  at 4x CPU throttle, that cost 3.8-4.3 s per tab change, of which Plotly was over 96%.
+   *
+   *  Narrow layouts now separate GRAPH from DASH, so this is exact rather than approximate: the
+   *  surface mounts when the graph is the selected destination, or when the wide layout puts it on
+   *  screen above the controls. */
+  const graphOnScreen = wideLayout || narrowPane === 'graph';
   /** Where the press that opened the menu landed, while it is still down — the sheet follows the
    *  finger from there and commits on release. Cleared on pointerup wherever it lands, so a tap
    *  that merely opens the sheet leaves it in ordinary tap-to-choose mode. */
@@ -1397,10 +1401,27 @@ export default function Home() {
     () => (correctionMap && newMap) ? { ...newMap, data: correctionMap } : null,
     [newMap, correctionMap]);
 
+  /** Whether the visualisation box has anything in it for the current view. GRAPH is a destination,
+   *  and a destination that lands on an empty box is worse than one that is greyed out. STARTUP is
+   *  the only view that never has one; the log tab does, it is just 2D. */
+  const graphHasContent = !!(
+    (activeTab === 'current' && currentMap) ||
+    (activeTab === 'new' && newMap) ||
+    (activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) ||
+    (activeTab === 'lambda' && correctionMap && newMap) ||
+    (activeTab === 'warmup' && warmupMap) ||
+    (activeTab === 'wot' && wotMap) ||
+    (activeTab === 'log' && processedLog)
+  );
+
+  useEffect(() => {
+    if (narrowPane === 'graph' && !graphHasContent) setNarrowPane('dash');
+  }, [narrowPane, graphHasContent]);
+
   const derivedTablesLocked = !newMap;
   const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
 
-  /** Which pane the narrow layout is showing, wearing the tab row's own clothes: same height,
+  /** Which destination the narrow layout is showing, wearing the tab row's own clothes: same height,
    *  same 10px letterspaced label, same 2px underline under the active one. It stands where the
    *  tabs stood and looks like what stood there, so it reads as navigation rather than as a new
    *  kind of control. Above 900px both panes are on screen and this is not rendered at all.
@@ -1409,14 +1430,16 @@ export default function Home() {
    *  at is `hidden` — put it in one and the way back out of the other goes with it. */
   const narrowPaneTabs = (
     <div className="flex min-[900px]:hidden space-x-6 h-full shrink-0">
-      {([['map', 'MAP'], ['dash', 'DASH']] as const).map(([id, label]) => (
+      {([['map', 'MAP', true], ['graph', 'GRAPH', graphHasContent], ['dash', 'DASH', true]] as const).map(([id, label, enabled]) => (
         <button
           key={id}
           type="button"
+          disabled={!enabled}
           onClick={() => setNarrowPane(id)}
           className={`relative h-full flex items-center shrink-0 whitespace-nowrap text-[10px] font-bold tracking-widest transition-all ${narrowPane === id
             ? 'text-blue-400 border-t-2 border-blue-400'
-            : 'text-slate-500 hover:text-slate-300 border-t-2 border-transparent'}`}
+            : enabled ? 'text-slate-500 hover:text-slate-300 border-t-2 border-transparent'
+              : 'text-slate-700 border-t-2 border-transparent cursor-default'}`}
         >
           {label}
         </button>
@@ -1841,7 +1864,7 @@ export default function Home() {
         </div>
 
         {/* === RIGHT COLUMN (30% desktop / 60% stacked) === */}
-        <div className={`[grid-area:1/1] flex min-[900px]:[grid-area:auto] ${narrowPane === 'dash' ? '' : 'invisible pointer-events-none min-[900px]:visible min-[900px]:pointer-events-auto'} min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
+        <div className={`[grid-area:1/1] flex min-[900px]:[grid-area:auto] ${narrowPane !== 'map' ? '' : 'invisible pointer-events-none min-[900px]:visible min-[900px]:pointer-events-auto'} min-h-0 min-[900px]:flex-none min-[900px]:h-full min-[900px]:w-[38.2%] flex-col bg-slate-900/20 backdrop-blur-sm relative z-20 overflow-hidden`}>
 
           {/* Header Frame - Matches Left Column Height */}
           <div className="h-[44px] hidden min-[900px]:flex items-center justify-between px-4 border-b border-slate-900 bg-slate-900/50 backdrop-blur-sm flex-none">
@@ -1862,7 +1885,7 @@ export default function Home() {
                 120, so it sat pinned at the 0.4 scale floor and the arming toggles that decide what
                 goes into the ECU rendered at 14x8 px. The floor only lowers where the viewport is
                 genuinely short; a laptop still gets the full 140. */}
-            <div className="flex-1 min-h-[48px] [@media(min-height:560px)]:min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent">
+            <div className={`${narrowPane === 'graph' ? '' : 'hidden'} min-[900px]:block flex-1 min-h-[48px] [@media(min-height:560px)]:min-h-[140px] relative overflow-hidden bg-gradient-to-b from-slate-900/10 to-transparent`}>
               {/* Live raw telemetry readout — floats over the visualization during logging so it shows
                   the latest DME sample (independent of the VE filters) WITHOUT shifting the inputs /
                   dashboard layout: the panel below is identical whether logging or stopped. */}
@@ -1896,19 +1919,19 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {dashOnScreen && (activeTab === 'current' && currentMap) && <MapVisualizer mapData={currentMap} title="" zAxisLabel="RF %" />}
-              {dashOnScreen && (activeTab === 'new' && newMap) && <MapVisualizer mapData={newMap} title="" zAxisLabel="RF %" />}
+              {graphOnScreen && (activeTab === 'current' && currentMap) && <MapVisualizer mapData={currentMap} title="" zAxisLabel="RF %" />}
+              {graphOnScreen && (activeTab === 'new' && newMap) && <MapVisualizer mapData={newMap} title="" zAxisLabel="RF %" />}
               {/* The two signed maps. Their neutral value differs — useComparison emits a percentage
                   difference (no change = 0), the VE calculator emits an STFT multiplier (no change =
                   1.0) — so each states its own midpoint rather than letting the scale guess. */}
-              {dashOnScreen && (activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
+              {graphOnScreen && (activeTab === 'diff' && diffMapForVisualization && (newMap || currentMap)) && (
                 <MapVisualizer mapData={diffVisualMap!} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
               )}
-              {dashOnScreen && (activeTab === 'lambda' && correctionMap && newMap) && (
+              {graphOnScreen && (activeTab === 'lambda' && correctionMap && newMap) && (
                 <MapVisualizer mapData={lambdaVisualMap!} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
               )}
-              {dashOnScreen && (activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
-              {dashOnScreen && (activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
+              {graphOnScreen && (activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
+              {graphOnScreen && (activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
               {(activeTab === 'log' && processedLog) && (
                 <div className="h-full w-full pb-0 relative">
                   {/* Chart Container - Absolute fill; chart flexes, window-scrub slider docked below it
@@ -1981,7 +2004,7 @@ export default function Home() {
             {/* flex-initial (0 1 auto): takes the height its controls actually need and never grows.
                 It can still shrink on a genuinely short viewport — that's what useFitScale's floor
                 and overflow-y-auto are for — but it no longer donates room to an empty 3D pane. */}
-            <div className="flex-initial min-h-0 overflow-y-auto px-5 pt-2 pb-2 [@media(min-height:560px)]:pt-4 [@media(min-height:560px)]:pb-5 flex flex-col">
+            <div className={`${narrowPane === 'graph' ? 'hidden' : 'flex'} min-[900px]:flex flex-initial min-h-0 overflow-y-auto px-5 pt-2 pb-2 [@media(min-height:560px)]:pt-4 [@media(min-height:560px)]:pb-5 flex-col`}>
 
               {/* Minimal File Inputs - No Icons, Just Text, Hover for action */}
               <div className="space-y-1 mb-4">

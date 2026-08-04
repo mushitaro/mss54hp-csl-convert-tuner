@@ -125,6 +125,28 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
     const indexX = useMemo(() => mapData.xAxis.map((_, i) => i), [mapData.xAxis]);
     const indexY = useMemo(() => mapData.yAxis.map((_, i) => i), [mapData.yAxis]);
 
+    /**
+     * Thin the tick labels to about eight per axis.
+     *
+     * Handing Plotly a tickval for every cell means it draws every one of them — 20 RPM values and
+     * 24 load values, rotated and overlapping into an illegible smear. It only became visible once
+     * the graph got a pane of its own; in a 72px strip there was nothing to read either way.
+     *
+     * Plotly's own automatic thinning is not available here: `tickmode: 'array'` is what puts the
+     * real values on index positions in the first place, and it draws exactly what it is given.
+     * Both ends are always kept, so the axis still states its range.
+     */
+    const thin = <T,>(values: readonly T[], target = 8) => {
+        const step = Math.max(1, Math.ceil(values.length / target));
+        const keep: number[] = [];
+        for (let i = 0; i < values.length; i += step) keep.push(i);
+        const last = values.length - 1;
+        if (keep[keep.length - 1] !== last) keep.push(last);
+        return keep;
+    };
+    const tickX = useMemo(() => thin(mapData.xAxis), [mapData.xAxis]);
+    const tickY = useMemo(() => thin(mapData.yAxis), [mapData.yAxis]);
+
     const data: Data[] = useMemo(() => [
         {
             type: 'surface',
@@ -149,11 +171,11 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
             // in RPM and RO % even though the mesh underneath is built on 0..n-1.
             xaxis: {
                 title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33',
-                tickmode: 'array', tickvals: indexX, ticktext: mapData.xAxis.map(String),
+                tickmode: 'array', tickvals: tickX, ticktext: tickX.map(i => String(mapData.xAxis[i])),
             },
             yaxis: {
                 title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33',
-                tickmode: 'array', tickvals: indexY, ticktext: mapData.yAxis.map(v => v.toFixed(2)),
+                tickmode: 'array', tickvals: tickY, ticktext: tickY.map(i => mapData.yAxis[i].toFixed(1)),
             },
             zaxis: { title: { text: zAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             camera: {
@@ -161,7 +183,7 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
             }
         },
         margin: { l: 0, r: 0, b: 0, t: 0 }, // Optimized margins
-    }), [title, zAxisLabel, indexX, indexY, mapData.xAxis, mapData.yAxis]);
+    }), [title, zAxisLabel, tickX, tickY, mapData.xAxis, mapData.yAxis]);
 
     return (
         // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene
