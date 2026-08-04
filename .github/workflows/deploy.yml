@@ -29,6 +29,27 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+
+      # The Android launcher is a Trusted Web Activity on this origin, and
+      # Chrome will only believe that if it can fetch
+      # /.well-known/assetlinks.json. The file lives in public/ and a local
+      # `next build` does copy it into out/ — but the first deploy that carried
+      # it still served a 404, so something between here and the CDN drops the
+      # dot-directory. Copying it explicitly costs nothing and does not care
+      # which step was responsible.
+      #
+      # The check is not decoration either: when this file is missing, Chrome
+      # reports nothing at all. It silently shows the browser toolbar, which
+      # looks like a styling problem rather than a missing file, and that is
+      # exactly how the first attempt was lost.
+      - name: Keep the asset link, and fail loudly if it is gone
+        run: |
+          mkdir -p out/.well-known
+          cp public/.well-known/assetlinks.json out/.well-known/assetlinks.json
+          test -s out/.well-known/assetlinks.json
+          echo "assetlinks.json staged:"
+          cat out/.well-known/assetlinks.json
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
