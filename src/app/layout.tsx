@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { OfflineCache } from "@/components/OfflineCache";
 
 // Two families, split by meaning: Inter for UI chrome, JetBrains Mono for
 // machine data (IDs, RPM, table cells, hashes, timestamps). Both are exposed
@@ -81,7 +82,11 @@ export default function RootLayout({
           retracts its chrome, so a layout built at the tall value loses the bottom of itself when
           the bar comes back — on a page with no scroll, permanently. svh is the small value, the
           one that is true at every moment. */}
-      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-[100svh]`}>{children}</body>
+      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} bg-slate-950 text-slate-100 min-h-[100svh]`}>
+        {/* Renders nothing. Registers the offline cache — see OfflineCache. */}
+        <OfflineCache />
+        {children}
+      </body>
     </html>
   );
 }
