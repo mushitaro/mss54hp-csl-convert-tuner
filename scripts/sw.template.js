@@ -61,17 +61,30 @@ self.addEventListener('activate', (event) => {
 });
 
 /**
- * There is deliberately no `skipWaiting()`.
+ * There is deliberately no *unconditional* `skipWaiting()`.
  *
  * A new worker therefore sits in `waiting` until every page controlled by the
- * old one is gone, which for this app means until the tool is closed. That is
- * the behaviour an offline-first instrument wants: the alternative is swapping
- * the JavaScript underneath somebody who is part-way through editing a map with
- * an ECU on the other end of a cable.
+ * old one is gone. That is the behaviour an offline-first instrument wants: the
+ * alternative is swapping the JavaScript underneath somebody who is part-way
+ * through editing a map with an ECU on the other end of a cable.
  *
- * The visible consequence is that a deploy appears one launch later than it was
- * pushed. Closing the tool and reopening it is the update.
+ * What that reasoning objects to is the swap being *automatic*, and asking is
+ * exactly what the menu's "Update available — reload" row does. So the page can
+ * request the swap, and only then:
+ *
+ *   waiting.postMessage({ type: 'SKIP_WAITING' })
+ *
+ * `activate` already claims every client, so the page hears `controllerchange`
+ * and reloads into the new build — see `reloadForUpdate` in
+ * `src/hooks/useAppUpdate.ts`, which is the only thing that sends this. Nothing
+ * here fires on its own; without that message the worker still waits.
+ *
+ * Left alone, a deploy still appears one launch later than it was pushed.
+ * Closing the tool and reopening it remains an update.
  */
+self.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
 
 self.addEventListener('fetch', (event) => {
     const request = event.request;

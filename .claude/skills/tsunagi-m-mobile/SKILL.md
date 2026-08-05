@@ -36,6 +36,8 @@ Start here, then read the file that matches what you are touching:
 
 **Shell.** `100svh`, never `vh`, and not `dvh` either. The app is sized to fit rather than to scroll, so it wants the smallest viewport the browser will ever show — `dvh` grows when the address bar retracts and the layout loses its own bottom when the bar comes back. `overscroll-behavior: none` on html and body: on a page that never scrolls, a downward swipe goes straight to Chrome's reload, and mid-session that costs the link, the log and the unsaved work.
 
+**A reload button has to actually reload.** Turning pull-to-refresh off removes the only reload an installed app had, so it needs one of its own — and once an offline cache is in front of it, `location.reload()` returns the build already on disk, which is the one the button offered to replace. Ask the waiting worker to take over first, then reload, and let every step fall through to a plain reload on a deadline.
+
 **One pane at a time below 900px.** Two panes sharing a phone is two unusable panes. Put them in one grid cell (`[grid-area:1/1]`) and make the inactive one `invisible`, not `display:none` — it stays laid out, so switching is a paint instead of a full re-solve. Then remember what that implies: **anything mounted in the invisible pane is still running.** Gate expensive children on the pane actually being on screen.
 
 **Chrome lives at the bottom.** The header keeps only what has to be glanceable while driving — link state, which vehicle, which view. Everything else goes behind one control in a footer, centred absolutely so it is in the same place regardless of what sits either side of it.

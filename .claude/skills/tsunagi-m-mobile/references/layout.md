@@ -100,4 +100,24 @@ useSyncExternalStore(subscribe, () => matchMedia('(min-width: 900px)').matches, 
 - **`maskable` is a separate file, not a second purpose on the same one.** Android crops maskable icons to the launcher's shape and guarantees only the central 80%. Give that variant the mark at ~60% of the canvas (its diagonal then clears the circle) against ~72% for the plain one. Declaring one file as both gets the full-size version cropped.
 - **Check `src/app/favicon.ico`.** Next's starter default ships there and is emitted *ahead* of `/icon.svg` with explicit `sizes` and `type`, so browsers prefer it. It is easy to ship someone else's logo for a year without noticing.
 - **`statusBarStyle: 'black'`, not `'black-translucent'`**, and leave `viewportFit` alone, unless every top-edge container pads by `env(safe-area-inset-*)`. Turning either on by itself moves content *under* the notch rather than away from it.
-- **Update detection without a service worker:** fetch the entry document with `cache: 'no-store'` and compare its `<script src>` list against the one this page loaded. Framework builds emit hashed chunk names, so different names mean a different build. Check on mount, on an interval, and on `visibilitychange` — returning to the app is when a stale build matters and when the check is cheapest. Fail silent and read as "no update": this runs in a garage with no signal, and a false alarm about updates while someone is reading an ECU is worse than saying nothing.
+- **Update detection:** fetch the entry document with `cache: 'no-store'` and compare its `<script src>` list against the one this page loaded. Framework builds emit hashed chunk names, so different names mean a different build. No version file to keep in step, and it works with or without a worker. Check on mount, on an interval, and on `visibilitychange` — returning to the app is when a stale build matters and when the check is cheapest. Fail silent and read as "no update": this runs in a garage with no signal, and a false alarm about updates while someone is reading an ECU is worse than saying nothing.
+
+## Offering an update through an offline cache
+
+An offline-first worker and an in-app reload button are each correct on their own and quietly cancel each other out. Cache-first serves the navigation from disk, and an install-time policy of *no* `skipWaiting()` — right, because swapping the JS under someone mid-write is the failure it prevents — leaves the new worker parked in `waiting`. So the row says "Update available — reload", `location.reload()` repaints the same build, and the row still says it. **Measured exactly that: control reload → old build, every time.**
+
+Detection is not what breaks. A precache keyed `/index.html` does not answer a fetch for `/`, so the check still reaches the network. It is the *taking* that breaks, and the button must do more than reload:
+
+```js
+await reg.update();                              // the browser may not have looked yet
+const waiting = reg.waiting ?? awaitInstalled(reg.installing);
+waiting.postMessage({ type: 'SKIP_WAITING' });   // sw: self.skipWaiting() on this message only
+await once(navigator.serviceWorker, 'controllerchange');
+location.reload();
+```
+
+What the no-`skipWaiting` policy objects to is the swap being **automatic**. A button the user pressed is the consent it was missing, so ask for it there and nowhere else — the worker still waits for everybody who did not ask.
+
+**Every step falls through to a plain reload, on one shared deadline.** No network, no worker, an update that turned out not to exist, a `controllerchange` that never arrives — the user asked for a reload and must get one. Verified: no update 1.6s, offline 2.6s, cold start with the network cut still renders.
+
+**Test it against a server that behaves like your host.** `serve` has cleanUrls on, so `/index.html` 301s to `/index`; `cache.add()` follows that and stores a response with `redirected: true`, and a redirected response may not satisfy a navigation. Every reload under the worker then fails with `net::ERR_FAILED` — in the harness only, and it looks exactly like a bug in the worker. Thirty lines of `node:http` that serve the file at its own path with a 200 is the fix. The test that is worth having is the whole loop: serve build A, let the worker claim the page, swap the directory to build B, press the row, and assert on which chunk hash the page ends up running.

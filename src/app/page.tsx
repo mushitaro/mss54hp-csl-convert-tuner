@@ -20,7 +20,7 @@ import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
-import { useAppUpdate } from '@/hooks/useAppUpdate';
+import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout } from '@/hooks/useWideLayout';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
@@ -2473,7 +2473,9 @@ export default function Home() {
           onReload={() => {
             const busy = dmeLink.state !== 'disconnected' || !!processedLog || !!newMap;
             if (busy && !confirm(dialogText().reloadBusy)) return;
-            location.reload();
+            // Not `location.reload()`. With the offline cache in front of it that reloads the build
+            // already on disk, which is the one the row is offering to replace.
+            void reloadForUpdate();
           }}
           tabs={TABS}
           activeTab={activeTab}
