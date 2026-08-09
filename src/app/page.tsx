@@ -19,6 +19,7 @@ import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { MobileMenu } from '@/components/MobileMenu';
+import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
@@ -341,6 +342,22 @@ export default function Home() {
    *  got 217px — six of twenty columns and ten of twenty-four rows — while the dashboard held a
    *  3D chart nobody could read at that size either. One at a time, and each gets all of it. */
   const [narrowPane, setNarrowPane] = useState<'map' | 'graph' | 'dash'>('map');
+  /**
+   * The app's own alert/confirm, for the four messages the browser's cannot show whole.
+   *
+   * A native dialog grows with its text. On the head unit — about 683x400 — the post-log
+   * instructions and the write confirmation are long enough that the buttons land under the fold,
+   * so the one dialog standing between a tap and an ECU write was answered without being read.
+   * `MessageDialog` puts the scroll in the body and keeps the buttons in the frame.
+   *
+   * Promise-shaped because every call site is mid-sequence and the ordering there is deliberate —
+   * `finishLog` disconnects *before* it speaks so a blocking dialog cannot freeze the read pump
+   * behind it. `await ask(...)` reads the same as `confirm(...)` did and preserves that.
+   */
+  const [message, setMessage] = useState<Message | null>(null);
+  const ask = useCallback((m: Omit<Message, 'resolve'>) => new Promise<boolean>(resolve => {
+    setMessage({ ...m, resolve: ok => { setMessage(null); resolve(ok); } });
+  }), []);
   const [menuOpen, setMenuOpen] = useState(false);
   const updateAvailable = useAppUpdate();
   const wideLayout = useWideLayout();
@@ -714,9 +731,14 @@ export default function Home() {
       const run = await findRecoverableRun().catch(() => null);
       if (!run) return;
       if (!resumeRequested) {
-        const accept = confirm(dialogText().recoverRun({
-          points: run.pointCount, startedAt: run.startedAt, ended: run.endedAt !== undefined, mock: run.mock,
-        }));
+        const t = dialogText();
+        const accept = await ask({
+          title: t.titleRecoverRun, icon: <Database className="w-3 h-3" />,
+          body: t.recoverRun({
+            points: run.pointCount, startedAt: run.startedAt, ended: run.endedAt !== undefined, mock: run.mock,
+          }),
+          confirmLabel: t.btnRestore, cancelLabel: t.btnDiscard,
+        });
         if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
       }
       await restoreRun(run.runId, run.sessionId);
@@ -953,15 +975,24 @@ export default function Home() {
 
     // Land on the tune this run produced — and only if it produced one. A run that captured nothing
     // must arm nothing, or the move would sit waiting and later hijack an unrelated navigation.
-    // Armed before the disconnect/alert below on purpose: alert blocks, so React commits the move
-    // behind the dialog and dismissing it reveals TUNED MAP already open.
+    // Armed before the dialog below so React has committed the move by the time it is dismissed,
+    // and TUNED MAP is already open behind it.
     pendingTabRef.current = flushed ? 'new' : null;
 
     // Logging runs with the engine going; writing needs it stopped, and stopping it ends the DME's
     // diagnostic session. So this connection physically cannot survive into the write — keeping it
     // on screen would just mean WRITE times out after the key cycle. Drop it and say what to do.
+    //
+    // Still before the message, though it no longer has to be: `alert` blocked the main thread and
+    // would have frozen the read pump behind the dialog, which is what this ordering was written
+    // for. `ask` renders and awaits instead, so nothing is frozen — but disconnecting first is also
+    // just the truthful order, since the message it shows describes a link that is already gone.
     await dmeLink.disconnect();
-    alert(dialogText().logFinished(failure));
+    const t = dialogText();
+    await ask({
+      title: t.titleLogFinished, icon: <FileSpreadsheet className="w-3 h-3" />,
+      body: t.logFinished(failure), confirmLabel: t.btnOk,
+    });
   };
 
   /** startTuning captures onEnd once, when START TUNE is pressed, so it must not close over a stale
@@ -1069,15 +1100,20 @@ export default function Home() {
     const drift = settingsDrift();
     // Gate: single safety confirmation before flashing the ECU. The DME itself also rejects the
     // write (0xA2) unless the engine is stopped (RPM/speed = 0), but we warn explicitly.
-    const confirmed = confirm(dialogText().writeConfirm({
-      tuned: Boolean(newMap),
-      patchOn: applyPatch || applyWotDisable,
-      drift,
-      // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
-      // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
-      // and the screen or an app switch can take the connection down mid-write.
-      android: isAndroidPlatform(),
-    }));
+    const tWrite = dialogText();
+    const confirmed = await ask({
+      title: tWrite.titleWriteConfirm, icon: <Zap className="w-3 h-3" />,
+      body: tWrite.writeConfirm({
+        tuned: Boolean(newMap),
+        patchOn: applyPatch || applyWotDisable,
+        drift,
+        // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
+        // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
+        // and the screen or an app switch can take the connection down mid-write.
+        android: isAndroidPlatform(),
+      }),
+      confirmLabel: tWrite.btnWrite, cancelLabel: tWrite.btnCancel, danger: true,
+    });
     if (!confirmed) return;
 
     const ok = await dmeLink.write(patchedBuffer);
@@ -1160,7 +1196,12 @@ export default function Home() {
       // notice line and a WRITE button that still looked ready. That is the most consequential moment
       // in the app to stay silent about: writePartialBin erases the data area BEFORE it writes, so a
       // failure part-way through can leave the ECU partially programmed.
-      alert(dialogText().writeFailed(dmeLink.error, { wasBackgrounded: wasBackgrounded() }));
+      const tFail = dialogText();
+      await ask({
+        title: tFail.titleWriteFailed, icon: <AlertCircle className="w-3 h-3" />,
+        body: tFail.writeFailed(dmeLink.error, { wasBackgrounded: wasBackgrounded() }),
+        confirmLabel: tFail.btnOk,
+      });
     }
   };
 
@@ -2635,6 +2676,11 @@ export default function Home() {
           errorKind={dmeLink.errorKind}
         />
       )}
+
+      {/* Above every other dialog in the app (DialogFrame is z-100/110), which is right: the
+          messages routed here are the ones that stop a sequence — a run has ended, a write is about
+          to go out, a write did not. Nothing should be able to paint over them. */}
+      {message && <MessageDialog message={message} closeLabel={dialogText().btnClose} />}
 
       {menuOpen && (
         <MobileMenu

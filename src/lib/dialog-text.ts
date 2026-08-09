@@ -196,6 +196,21 @@ const JA = {
         'DMEはサービス情報ブロックを書き直した状態で再初期化されます。\n' +
         '※ 再初期化されるまで、このセッションでの読み書きは行わないでください。\n' +
         '※ 接続はここで解除しました。',
+
+    // --- 表題とボタン ---
+    // 上の長文のうち4本は、ネイティブの alert/confirm ではなくアプリ内ダイアログ(MessageDialog)で
+    // 出す。683x400 のヘッドユニットではネイティブ側が本文の長さぶんだけ縦に伸び、選択肢が
+    // 折り返しの下に隠れるため。ネイティブはボタン文言を自前で用意するので、ここに無かった。
+    titleLogFinished: 'データログ終了',
+    titleWriteConfirm: 'DMEへ書き込みます',
+    titleWriteFailed: '書き込みに失敗しました',
+    titleRecoverRun: '保存されていないデータログ',
+    btnOk: 'OK',
+    btnCancel: 'キャンセル',
+    btnClose: '閉じる',
+    btnWrite: '書き込む',
+    btnRestore: '復元する',
+    btnDiscard: '破棄する',
 };
 
 type NativeDialogText = typeof JA;
@@ -321,6 +336,18 @@ const EN: NativeDialogText = {
         'The DME reinitializes with the rewritten service block.\n' +
         'Note: do not read or write in this session until it has reinitialized.\n' +
         'Note: the connection was released here.',
+
+    // --- titles and buttons ---
+    titleLogFinished: 'Data log finished',
+    titleWriteConfirm: 'Write to the DME',
+    titleWriteFailed: 'The write failed',
+    titleRecoverRun: 'Unsaved data log',
+    btnOk: 'OK',
+    btnCancel: 'Cancel',
+    btnClose: 'Close',
+    btnWrite: 'Write',
+    btnRestore: 'Restore',
+    btnDiscard: 'Discard',
 };
 
 const TEXT: Record<DialogLang, NativeDialogText> = { ja: JA, en: EN };
