@@ -125,6 +125,18 @@ cover.
 The tint is a threshold for *reading*, not for calculating: a cell with a single sample still produces
 a correction. The bands tell you how thin the evidence under that correction is.
 
+### The 3D view
+
+The surface is drawn on the axes' **real values** — 600 RPM sits at 600 and 7900 at 7900, and the
+same for load — so distance across the picture is engine speed and load, and the shape of the map is
+where its values actually sit relative to one another. The low-load rows are packed close together
+because they *are* close together; that crowding is information, not a rendering fault.
+
+It is drawn from an evenly spaced resampling of the map rather than from the 24 × 20 cells directly.
+That is a rendering detail with no effect on what is shown — the plotting library interpolates
+between cells either way — but choosing the resolution ourselves is what keeps it from building a
+366,561-vertex mesh for 480 numbers, which on a head unit froze the screen for over a minute.
+
 ### Reading a log
 
 The chart and the row table always show the same slice of the log — one window, both views, one set

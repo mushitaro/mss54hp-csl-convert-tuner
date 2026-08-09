@@ -53,6 +53,19 @@ const SCALE_DEVIATION: Array<[number, string]> = [
     [1, '#F87A7F'],    // red-300 — strongest positive
 ];
 
+/**
+ * Samples per axis for the resample above.
+ *
+ * Chosen against Plotly's own arithmetic rather than by eye. On an evenly spaced axis of n points
+ * every `nums[i]` is n-1, so `resDst = 1 + LCM(...) = n`, which must land inside [120, 720] or it is
+ * doubled up / divided down into range. 128 sits just above the 120 floor, so `scale` comes out 1 and
+ * Plotly draws exactly the grid it is given: 128x128 = 16,384 vertices against the 366,561 it built
+ * for itself, and no second interpolation on top of ours.
+ *
+ * It is also far denser than the 24x20 it is drawn from, so the shape is carried, not approximated.
+ */
+const RESAMPLE = 128;
+
 interface Props {
     mapData: VEMap;
     title?: string;
@@ -105,61 +118,76 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
     const isDeviation = scale === 'deviation';
 
     /**
-     * The surface is built on cell INDICES, not on the axis values, and the values come back as tick
-     * labels below. This is a performance fix with a visual consequence, and both are deliberate.
+     * The surface sits at the axes' real values — 600 RPM is at 600, 7900 is at 7900 — resampled onto
+     * an evenly spaced grid spanning the same range.
      *
-     * Plotly sizes a surface mesh from the spacing of its coordinates: `estimateScale` takes
-     * 1 + arrayLCM(spacings) and clamps at MAX_RESOLUTION. These axes are wildly irregular — RPM
-     * runs 600, 870, 1100, 1300, 1400 … 7900 and RO% runs 0.1, 0.15, 0.2, 0.4 … 100 — so it
-     * returned dataScale 36 x 21 and bilinearly upsampled a 24 x 20 map into a 723 x 507 mesh:
-     * 366,561 vertices for 480 numbers, 764x more than the data has. Measured at 4x CPU throttle,
-     * one update cost 1338-1496 ms with 2511-2643 ms of blocking tasks. On indices the scale is
-     * 8 x 8, the mesh 193 x 161, and an update 169-371 ms.
+     * **Why it cannot just be handed the raw axes.** Plotly decides a surface's mesh resolution from
+     * the *regularity* of the coordinate spacing, not from its size (`surface/convert.js`):
      *
-     * The consequence: the RPM and RO% axes are now evenly spaced in the 3D view instead of
-     * proportional to their values. That matches the 2D grid beside it, whose columns have always
-     * been a flat 50px regardless of RPM — and on a map you read cell by cell it is arguably the
-     * more honest picture, since the value-proportional version squeezed the whole low-load half of
-     * the map into a sliver.
+     *     nums[i] = round(totalDist / spacing[i])      // how many times gap i divides the span
+     *     resDst  = 1 + arrayLCM(nums)                 // then clamped to [120, 720]
+     *
+     * With even spacing every `nums[i]` is the same number, the LCM is that number, and `resDst`
+     * lands just above it. With these axes nothing divides anything — RPM runs 600, 870, 1100, 1300,
+     * 1400 … 7900 and RO % runs 0.1, 0.15, 0.2, 0.4 … 100 — so the LCM explodes, `resDst` pins to the
+     * 720 ceiling on both axes, and a 24x20 map is bilinearly upsampled into a 723x507 mesh: 366,561
+     * vertices for 480 numbers. Measured at 4x CPU throttle, that build blocked the main thread for
+     * **75.3 seconds** and never produced a canvas inside a 60 s wait. On a head unit that is a hang.
+     *
+     * So we do the interpolation ourselves, at a resolution we choose, and hand Plotly something it
+     * has no reason to upsample. Plotly was interpolating anyway; this is the same operation with the
+     * output size stated instead of derived, so the picture is the one it always drew.
+     *
+     * An earlier attempt escaped the same problem by building on cell indices, which was cheap but
+     * changed what the axes meant: every column the same width, RPM no longer a distance. That reads
+     * fine as a table and wrong as a surface — the shape of a map *is* where its values sit relative
+     * to one another. Fix the mesh, not the meaning.
      */
-    const indexX = useMemo(() => mapData.xAxis.map((_, i) => i), [mapData.xAxis]);
-    const indexY = useMemo(() => mapData.yAxis.map((_, i) => i), [mapData.yAxis]);
+    const surface = useMemo(() => {
+        const { xAxis, yAxis, data } = mapData;
 
-    /**
-     * Thin the tick labels to about eight per axis.
-     *
-     * Handing Plotly a tickval for every cell means it draws every one of them — 20 RPM values and
-     * 24 load values, rotated and overlapping into an illegible smear. It only became visible once
-     * the graph got a pane of its own; in a 72px strip there was nothing to read either way.
-     *
-     * Plotly's own automatic thinning is not available here: `tickmode: 'array'` is what puts the
-     * real values on index positions in the first place, and it draws exactly what it is given.
-     * Both ends are always kept, so the axis still states its range.
-     */
-    const thin = <T,>(values: readonly T[], target = 8) => {
-        const step = Math.max(1, Math.ceil(values.length / target));
-        const keep: number[] = [];
-        for (let i = 0; i < values.length; i += step) keep.push(i);
-        const last = values.length - 1;
-        if (keep[keep.length - 1] !== last) keep.push(last);
-        return keep;
-    };
-    const tickX = useMemo(() => thin(mapData.xAxis), [mapData.xAxis]);
-    const tickY = useMemo(() => thin(mapData.yAxis), [mapData.yAxis]);
+        /** Evenly spaced samples across a monotonic axis, each carrying where it fell in the source. */
+        const project = (axis: number[], n: number) => {
+            const lo = axis[0], hi = axis[axis.length - 1];
+            const ascending = hi >= lo;
+            const out: Array<{ i: number; f: number; v: number }> = [];
+            let i = 0;
+            for (let k = 0; k < n; k++) {
+                const v = lo + ((hi - lo) * k) / (n - 1);
+                // The scan only ever moves forward, so this is linear over the whole axis, not n log n.
+                while (i < axis.length - 2 && (ascending ? axis[i + 1] < v : axis[i + 1] > v)) i++;
+                const span = axis[i + 1] - axis[i];
+                const f = span === 0 ? 0 : (v - axis[i]) / span;
+                out.push({ i, f: Math.min(1, Math.max(0, f)), v });
+            }
+            return out;
+        };
+
+        const px = project(xAxis, RESAMPLE);
+        const py = project(yAxis, RESAMPLE);
+        const z = py.map(({ i: r, f: fr }) => px.map(({ i: c, f: fc }) => {
+            const row = data[r], next = data[r + 1] ?? row;
+            const z00 = row[c], z01 = row[c + 1] ?? z00;
+            const z10 = next[c] ?? z00, z11 = next[c + 1] ?? z01;
+            return (z00 * (1 - fc) + z01 * fc) * (1 - fr) + (z10 * (1 - fc) + z11 * fc) * fr;
+        }));
+
+        return { x: px.map(p => p.v), y: py.map(p => p.v), z };
+    }, [mapData]);
 
     const data: Data[] = useMemo(() => [
         {
             type: 'surface',
-            z: mapData.data, // 2D array [row][col] -> [y][x]
-            x: indexX, // Columns — index, labelled with the RPM below
-            y: indexY, // Rows — index, labelled with the RO % below
+            z: surface.z, // [y][x], resampled onto the even grid below
+            x: surface.x, // Columns — RPM, at its real value
+            y: surface.y, // Rows — RO %, at its real value
             colorscale: isDeviation ? SCALE_DEVIATION : SCALE_MAGNITUDE,
             // cmid pins the neutral color to the value that means "no change" and lets Plotly balance
             // cmin/cmax around it, so one strong outlier cannot slide the whole map off-center.
             ...(isDeviation ? { cmid: deviationMidpoint } : {}),
             showscale: false,
         },
-    ], [mapData, indexX, indexY, isDeviation, deviationMidpoint]);
+    ], [surface, isDeviation, deviationMidpoint]);
 
     const layout: Partial<Layout> = useMemo(() => ({
         title: { text: title, font: { color: '#F2F2F5' } },
@@ -167,23 +195,20 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         scene: {
-            // The real values return here as labels on the index positions, so the axes still read
-            // in RPM and RO % even though the mesh underneath is built on 0..n-1.
-            xaxis: {
-                title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33',
-                tickmode: 'array', tickvals: tickX, ticktext: tickX.map(i => String(mapData.xAxis[i])),
-            },
-            yaxis: {
-                title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33',
-                tickmode: 'array', tickvals: tickY, ticktext: tickY.map(i => mapData.yAxis[i].toFixed(1)),
-            },
+            // Plotly picks its own ticks, which it can only do because the coordinates are real
+            // numbers with real spacing. The explicit tickvals that used to be here existed solely
+            // to put meaning back onto index positions, and they brought their own problem: forced
+            // to draw every value it was given, Plotly smeared the dense low-load end into an
+            // unreadable pile. Round numbers at sane intervals are the automatic behaviour.
+            xaxis: { title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            yaxis: { title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             zaxis: { title: { text: zAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             camera: {
                 eye: { x: 1.6, y: -1.6, z: 0.6 }
             }
         },
         margin: { l: 0, r: 0, b: 0, t: 0 }, // Optimized margins
-    }), [title, zAxisLabel, tickX, tickY, mapData.xAxis, mapData.yAxis]);
+    }), [title, zAxisLabel]);
 
     return (
         // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene
