@@ -1690,7 +1690,7 @@ export default function Home() {
                   onClick={() => mapZoom.nudge(dir)}
                   disabled={at}
                   aria-label={dir > 0 ? 'Zoom the grid in' : 'Zoom the grid out'}
-                  className={`w-8 py-3 -my-3 flex items-center justify-center text-base leading-none transition-colors ${at ? 'text-slate-700 cursor-default' : 'text-slate-400 hover:text-slate-200 cursor-pointer'}`}
+                  className={`w-10 py-3 -my-3 flex items-center justify-center text-base leading-none transition-colors ${at ? 'text-slate-700 cursor-default' : 'text-slate-400 hover:text-slate-200 cursor-pointer'}`}
                 >
                   {glyph}
                 </button>
