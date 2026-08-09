@@ -11,7 +11,26 @@ interface Props {
     hitData?: number[][]; // Hit counts
     weightData?: number[][]; // [NEW] Cell Weights
     className?: string;
+    /** 1 is the size this grid has always been. See CELL/HEAD below. */
+    zoom?: number;
 }
+
+/**
+ * The grid's natural geometry at zoom 1, in px, and the only place these numbers live.
+ *
+ * Scaled by multiplication rather than by `transform: scale()`, which would be the obvious way and
+ * is the wrong one here: this table's row and column headers are `position: sticky`, and a transform
+ * on an ancestor becomes their containing block — the headers would stop sticking to the scroll port
+ * and start sticking to the table, which is the one thing that makes a 20x24 grid readable on a
+ * phone. Multiplying the widths keeps `table-fixed` intact too, so the 6.9s auto-layout pass this
+ * grid was rescued from stays gone.
+ */
+const CELL = 50;   // per RPM column
+const HEAD = 64;   // the RO % axis down the left
+const FONT = 12;   // text-xs
+const LINE = 16;   // …and its line-height, which has to scale with it or tall text clips
+const PAD_HEAD = 8; // p-2 on the header cells
+const PAD_CELL = 4; // p-1 on the data cells
 
 // Coverage bands for the hit heat. These are ABSOLUTE sample counts, deliberately
 // not a fraction of the busiest cell: the question this heat answers is "have I
@@ -40,9 +59,14 @@ const COVERAGE_ALPHA_FULL = 0.30;
  * hidden pane still renders (it is `display:none`, not unmounted), so without this every unrelated
  * state change in the page rebuilt the whole grid twice over.
  */
-export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapData, diffData, hitData, weightData, className }) {
+export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapData, diffData, hitData, weightData, className, zoom = 1 }) {
     // Render a scrollable grid
     // Styles: Dark mode table
+    const cell = Math.round(CELL * zoom);
+    const head = Math.round(HEAD * zoom);
+    const type = { fontSize: `${(FONT * zoom).toFixed(1)}px`, lineHeight: `${(LINE * zoom).toFixed(1)}px` };
+    const padHead = `${Math.round(PAD_HEAD * zoom)}px`;
+    const padCell = `${Math.round(PAD_CELL * zoom)}px`;
 
     return (
         <div className={clsx('overflow-auto h-full', className)}>
@@ -56,13 +80,14 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                 otherwise divide the container between the columns and collapse the horizontal
                 scroll this grid depends on: 20 columns of 50px plus the 64px load axis. */}
             <table
-                className="table-fixed text-xs text-right border-collapse bg-slate-900"
-                style={{ width: `${mapData.xAxis.length * 50 + 64}px` }}
+                className="table-fixed text-right border-collapse bg-slate-900"
+                style={{ width: `${mapData.xAxis.length * cell + head}px`, ...type }}
             >
                 <thead className="sticky top-0 bg-slate-800 z-10">
                     <tr>
                         <th
-                            className="w-[64px] p-2 text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
+                            className="text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
+                            style={{ width: `${head}px`, padding: padHead }}
                             title="Rows = RO % (load) / Columns = RPM"
                         >
                             <div className="flex items-center justify-center">
@@ -70,7 +95,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                             </div>
                         </th>
                         {mapData.xAxis.map((rpm, i) => (
-                            <th key={i} className="w-[50px] p-2 text-slate-300 font-mono border-b border-slate-700">
+                            <th key={i} className="text-slate-300 font-mono border-b border-slate-700" style={{ width: `${cell}px`, padding: padHead }}>
                                 {rpm}
                             </th>
                         ))}
@@ -79,7 +104,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                 <tbody>
                     {mapData.yAxis.map((load, rowIdx) => (
                         <tr key={rowIdx} className="hover:bg-slate-800/50">
-                            <td className="p-2 text-slate-300 font-mono border-r border-slate-700 sticky left-0 z-[5] bg-slate-900 font-bold">
+                            <td className="text-slate-300 font-mono border-r border-slate-700 sticky left-0 z-[5] bg-slate-900 font-bold" style={{ padding: padHead }}>
                                 {load.toFixed(2)}
                             </td>
                             {mapData.data[rowIdx].map((val, colIdx) => {
@@ -140,9 +165,9 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                                 return (
                                     <td
                                         key={colIdx}
-                                        style={style}
+                                        style={{ ...style, padding: padCell }}
                                         className={clsx(
-                                            'p-1 border border-slate-800 font-mono transition-colors relative group',
+                                            'border border-slate-800 font-mono transition-colors relative group',
                                             hasHits ? 'font-bold' : 'opacity-80'
                                         )}
                                         title={`RPM: ${mapData.xAxis[colIdx]}, RO %: ${load}\nRF %: ${val}\nHits: ${hits}\nWeight: ${weight.toFixed(2)}`}

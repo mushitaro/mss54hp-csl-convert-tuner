@@ -22,6 +22,7 @@ import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
+import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
@@ -344,6 +345,7 @@ export default function Home() {
   const updateAvailable = useAppUpdate();
   const wideLayout = useWideLayout();
   const splitGraph = useSplitGraph();
+  const mapZoom = useMapZoom();
   /** The 3D surface is actually being looked at.
    *
    *  Below 900px the panes share a grid cell and the inactive one is only `invisible` — it stays laid
@@ -1589,6 +1591,35 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Grid size, and the only control in this header that is meant to be used while moving.
+              It lives here because below 900px the rest of this cluster does not render at all, so
+              the right end of the header is empty — and because the alternative, the footer's icon
+              row, is the MAP pane's own controls and already three wide.
+
+              Only while the grid is the thing on screen. It adjusts nothing else, and a control that
+              does nothing where it stands is worse than one that is absent.
+
+              `py-3 -my-3` for the hit box: the header renders its contents at ~16px and this is a
+              touchscreen at arm's length. The padding is cancelled by the margin, so the row still
+              lays out at 16 and nothing in the header moves. Disabled at the ends of the range
+              rather than hidden — a control that vanishes at the limit takes the way back with it. */}
+          {narrowPane === 'map' && (
+            <div className="flex items-center gap-1 min-[900px]:hidden">
+              {([['−', -1, mapZoom.atMin], ['＋', 1, mapZoom.atMax]] as const).map(([glyph, dir, at]) => (
+                <button
+                  key={dir}
+                  type="button"
+                  onClick={() => mapZoom.nudge(dir)}
+                  disabled={at}
+                  aria-label={dir > 0 ? 'Zoom the grid in' : 'Zoom the grid out'}
+                  className={`w-8 py-3 -my-3 flex items-center justify-center text-base leading-none transition-colors ${at ? 'text-slate-700 cursor-default' : 'text-slate-400 hover:text-slate-200 cursor-pointer'}`}
+                >
+                  {glyph}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Privacy policy, on the sibling site. First in the cluster because it is the least of
               the three, and because putting it here leaves the one labelled link anchored to the
               right edge where it already sits.
@@ -1834,12 +1865,13 @@ export default function Home() {
           <div className="flex-1 overflow-auto relative">
             {/* Content */}
             <div className="absolute inset-0 pt-2 pb-2 px-4">
-              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} weightData={weightMap ?? undefined} />}
+              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} weightData={weightMap ?? undefined} zoom={mapZoom.zoom} />}
               {(activeTab === 'new' && newMap) && (
                 <MapEditor
                   mapData={newMap}
                   hitData={hitMap || undefined}
                   weightData={weightMap || undefined}
+                  zoom={mapZoom.zoom}
                 />
               )}
               {(activeTab === 'diff' && mapData) && ( // Changed from diffMap
@@ -1893,6 +1925,7 @@ export default function Home() {
                       diffData={diffMapForVisualization || undefined}
                       hitData={hitMap || undefined}
                       weightData={weightMap || undefined}
+                      zoom={mapZoom.zoom}
                     />
                   </div>
                 </div>
@@ -1902,15 +1935,16 @@ export default function Home() {
                   mapData={lambdaVisualMap!}
                   hitData={hitMap || undefined}
                   weightData={weightMap || undefined}
+                  zoom={mapZoom.zoom}
                 />
               )}
 
               {(activeTab === 'warmup' && warmupMap) && (
-                <MapEditor mapData={warmupMap} />
+                <MapEditor mapData={warmupMap} zoom={mapZoom.zoom} />
               )}
 
               {(activeTab === 'wot' && wotMap) && (
-                <MapEditor mapData={wotMap} />
+                <MapEditor mapData={wotMap} zoom={mapZoom.zoom} />
               )}
 
               {(activeTab === 'log' && processedLog) && (
