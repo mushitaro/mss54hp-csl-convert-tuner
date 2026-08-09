@@ -10,10 +10,17 @@
  *   node probe.mjs --url http://127.0.0.1:8899/
  *   node probe.mjs --url … --setup ./drive-into-state.mjs --tap "button:has-text('DASH')"
  *   node probe.mjs --url … --viewports 851x393 --throttle 4 --tap-selector '[data-menu-key="tab:diff"]'
+ *   node probe.mjs --url … --watch '#graph,#panel,button[aria-label="Open menu"]'
  *
  * --setup takes a module exporting `default async (page) => {}` — use it to dismiss a disclaimer,
  * load fixture data, or otherwise get the app into the state worth measuring. Without it you are
  * measuring an empty app, which is rarely the state that breaks.
+ *
+ * --watch is the one check that is not about a single screen being wrong. Everything else here
+ * reports a defect visible in the state it is looking at; a change that takes away something which
+ * used to be on screen *at the same time* as something else passes all of it cleanly. Name the
+ * boxes that have to coexist and it reports which are up at once, so two runs — this commit and the
+ * one before it — can be compared. That is the regression this harness could not previously see.
  *
  * Requires Playwright. In this environment:
  *   PW=/opt/node22/lib/node_modules/playwright/index.mjs  CHROMIUM=/opt/pw-browsers/chromium
@@ -34,6 +41,7 @@ const VIEWPORTS = (argv.viewports ?? '360x800,851x393,1440x900')
     .split(',').map(v => v.trim().split('x').map(Number));
 const THROTTLE = Number(argv.throttle ?? 0);
 const MIN_TARGET = Number(argv['min-target'] ?? 40);
+const WATCH = typeof argv.watch === 'string' ? argv.watch.split(',').map(s => s.trim()).filter(Boolean) : [];
 
 const setup = argv.setup ? (await import(new URL(argv.setup, `file://${process.cwd()}/`).href)).default : null;
 
@@ -47,7 +55,7 @@ const LONGTASK_INIT = () => {
 };
 
 /** Everything worth knowing about a laid-out page, in one pass. */
-const AUDIT = (minTarget) => {
+const AUDIT = ([minTarget, watch]) => {
     const vw = window.innerWidth, vh = window.innerHeight;
     const de = document.documentElement;
     const rects = [...document.querySelectorAll('*')].map(el => [el, el.getBoundingClientRect()]);
@@ -101,6 +109,16 @@ const AUDIT = (minTarget) => {
             .slice(0, 12)
             .map(([el, r]) => `${describe(el)} ${Math.round(r.width)}x${Math.round(r.height)}`),
 
+        // Not "is this wrong" but "is this still here, and here *with* that". Reported as sizes so
+        // a shrunk box is distinguishable from a gone one — 3D at 431px beside a 268px panel and
+        // 3D at 699px alone are both healthy screens, and only the pair tells you which you have.
+        watched: watch.map(sel => {
+            const el = document.querySelector(sel);
+            const r = el?.getBoundingClientRect();
+            const up = !!r && r.width > 0 && r.height > 0;
+            return { sel, up, size: up ? `${Math.round(r.width)}x${Math.round(r.height)}` : '—' };
+        }),
+
         viewport: `${vw}x${vh}`,
     };
 };
@@ -121,7 +139,7 @@ for (const [w, h] of VIEWPORTS) {
     if (setup) await setup(page);
     await page.waitForTimeout(400);
 
-    const audit = await page.evaluate(AUDIT, MIN_TARGET);
+    const audit = await page.evaluate(AUDIT, [MIN_TARGET, WATCH]);
 
     console.log(`\n━━ ${w}x${h}${THROTTLE ? `  (cpu /${THROTTLE})` : ''} ━━`);
     console.log(`  document scrolls : ${audit.documentScrolls ? `YES  y+${audit.documentOverflowY} x+${audit.documentOverflowX}` : 'no'}`);
@@ -131,6 +149,13 @@ for (const [w, h] of VIEWPORTS) {
         console.log(`  under ${MIN_TARGET}px         :`);
         audit.smallTargets.forEach(l => console.log('      ' + l));
     } else console.log(`  under ${MIN_TARGET}px         : none`);
+
+    if (audit.watched.length) {
+        console.log('  watched          :');
+        audit.watched.forEach(w => console.log(`      ${w.up ? '✓' : '✗'} ${w.sel}  ${w.size}`));
+        const together = audit.watched.filter(w => w.up).map(w => w.sel);
+        console.log(`      on screen together: ${together.length ? together.join(' + ') : 'nothing'}`);
+    }
 
     // Optional: time one interaction and attribute it. Two rAFs so the number includes the paint.
     const target = argv['tap-selector'] ?? argv.tap;

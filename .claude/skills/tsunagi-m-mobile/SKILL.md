@@ -13,7 +13,18 @@ These are conventions from an app that is held in one hand, in a car, sometimes 
 
 Almost every rule below started life as a plausible-sounding guess that turned out to be wrong by a factor of four. A designed 36×20 toggle rendered at 14×8. A "slow menu" was a 3D chart rebuilding behind `visibility: hidden`. A panel "just needing a bit more height" needed 494px against a 420px literal nobody had measured.
 
-`scripts/probe.mjs` is a Playwright harness for exactly this — it takes a URL, a viewport list, and a snippet, and reports real numbers. Use it rather than writing a new one each time. CPU-throttle at rate 4 to approximate a mid-range phone; rate 6 exaggerates.
+`scripts/probe.mjs` is a Playwright harness for exactly this — it takes a URL, a viewport list, and a snippet, and reports real numbers. Use it rather than writing a new one each time. CPU-throttle at rate 4 to approximate a mid-range phone; rate 6 exaggerates. `scripts/serve-like-pages.mjs` serves a static export the way the host does, and `scripts/update-check.mjs` proves an installed app can actually take a new build.
+
+**It only sees the screen in front of it.** A change that removes something which *used to be* on screen alongside something else leaves the probe completely clean — no scroll, no overflow, nothing under 40px. That is the shape of the worst regression in this codebase's history, and `--watch` exists for it: name the boxes that have to coexist and it reports which of them are up at once.
+
+**The "before" number usually has to be built.** A regression argued from the current tree is an opinion; the previous commit is the evidence.
+
+```bash
+git worktree add --detach ../before <sha>
+cp -al node_modules ../before/node_modules   # hardlinks: seconds, and near-zero disk
+```
+
+Copy — do not symlink. Turbopack rejects a symlinked `node_modules` outright (`Symlink node_modules is invalid, it points out of the filesystem root`). Build both, serve them on two ports, run the same probe against each. That is what turned "portrait feels worse" into *431 + 268 together* against *699 one at a time*, which is an argument rather than a feeling.
 
 Two viewports matter more than the rest, and neither is the one people test:
 
@@ -44,7 +55,7 @@ Start here, then read the file that matches what you are touching:
 
 **The menu is swept, not aimed.** It opens from the bottom centre, its lists run bottom-up so the first entry is nearest the thumb, and Close sits on the exact coordinates the press landed on. Press, slide, release — one gesture. Destructive things go at the far end, off the sweep entirely.
 
-**Never put a write-path control behind a menu.** The controls that decide what gets sent to the device stay together and visible: one tap apart, no disclosure, no scrolling. A menu is a place for navigation and readouts.
+**Never put a write-path control behind a menu.** The controls that decide what gets sent to the device stay together and visible: one tap apart, no disclosure, no scrolling. A menu is a place for navigation and readouts. And check the mirror image: the menu is mobile-only chrome, so anything that lives *only* there does not exist above the breakpoint at all — which is how this app ended up with no reload of any kind at 1440×900.
 
 **Size targets by what renders, not by what you wrote.** A scale floor is a promise about the smallest a control may become. If your floor renders the thing that arms a write at 14×8px, the floor is wrong, not the phone.
 

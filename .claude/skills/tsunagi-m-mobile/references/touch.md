@@ -73,6 +73,21 @@ This one is easy to miss in testing: synthetic mouse events do not produce a com
 
 **Anything that writes.** The controls that decide what gets sent to the device — the arming toggles, the start/stop, the write itself — stay together and visible, one tap apart. A control whose state changes what goes into the device does not belong behind something you have to open. This is the rule to push back on if someone asks for a "cleaner" screen.
 
+### And the mirror image: the menu is mobile-only
+
+The sheet hangs off the same breakpoint the footer does, so a control that lives **only** in it does not exist above that line. Not harder to reach — absent. Nothing renders it, and there is no second copy to fall back on.
+
+That is how this app ended up with no reload anywhere at 900px and up: the row was written for the sheet, the sheet is `min-[900px]:hidden`, and installed as a TWA there is no browser chrome to reload from either. It reads as a mobile improvement right up until someone runs it on a head unit.
+
+So every time something moves into the sheet, ask what the wide layout just lost — and check it by measuring, not by reading the JSX, because the JSX looks fine:
+
+```js
+[...document.querySelectorAll('button, a')]
+    .filter(el => /reload|flash|export/i.test(el.textContent) && el.getBoundingClientRect().height > 0)
+```
+
+Run it across the viewport list. An empty result at 1440×900 for something the app cannot work without is the finding.
+
 ## Tap targets
 
 **Size by what renders, not by what you wrote.** Measure the on-screen box.
