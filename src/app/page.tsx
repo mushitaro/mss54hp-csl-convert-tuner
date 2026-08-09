@@ -670,18 +670,55 @@ export default function Home() {
    *
    * Declining discards it. That is the honest reading of "do not restore", and leaving it would make
    * the same prompt reappear on every load until something else cleared it.
+   *
+   * **Unless the launcher says this is a resume, in which case it restores without asking.** Turning
+   * the key off kills the head unit, and the console cold-boots on the way back — Chrome with it, so
+   * this app returns to a first-run screen every time. The data is not lost (IndexedDB survives);
+   * what is lost is the place. The launcher is the only thing that can put this app back in front,
+   * and it knows one fact worth carrying: that the tool was in front when the power went. It says so
+   * with `?resume=1`, and nothing else — no state, no session id, because it has neither.
+   *
+   * The confirmation goes away on that path deliberately. The owner has already watched a three
+   * second countdown on the console and not stopped it; asking again would be the second time the
+   * same question is put, and would turn a resume into a chore. Nothing is destroyed by restoring —
+   * the recovery record is kept until SAVE either way — so there is no decision left to protect.
+   *
+   * Nothing to resume is the normal case, not an error: the launcher knows the app was in front, not
+   * that it had work in progress. Both paths simply fall through to an ordinary start.
    */
+  /**
+   * `?resume=1`, read once on mount and taken off the URL immediately.
+   *
+   * Read here rather than inside the effect below, because that one waits for the disclaimer and the
+   * session list: the flag has to be captured and cleared before anything else can re-navigate, or a
+   * later reload — the update row, a crash, a restore — would read it a second time and resume
+   * again. Held in a ref rather than state: nothing renders differently because of it.
+   *
+   * `history.replaceState` and not a redirect, so no second navigation happens. The query never
+   * reaches the cache in the first place — the service worker resolves any navigation to
+   * `/index.html` outright rather than by request, which is exactly what lets a resume work in a
+   * garage with no signal. That branch must stay as it is.
+   */
+  const resumeRequestedRef = useRef(false);
+  useEffect(() => {
+    resumeRequestedRef.current = new URLSearchParams(location.search).get('resume') === '1';
+    if (resumeRequestedRef.current) history.replaceState(null, '', location.pathname + location.hash);
+  }, []);
+
   const recoveryOfferedRef = useRef(false);
   useEffect(() => {
     if (disclaimer.open || sessionDb.loading || recoveryOfferedRef.current) return;
     recoveryOfferedRef.current = true;
     void (async () => {
+      const resumeRequested = resumeRequestedRef.current;
       const run = await findRecoverableRun().catch(() => null);
       if (!run) return;
-      const accept = confirm(dialogText().recoverRun({
-        points: run.pointCount, startedAt: run.startedAt, ended: run.endedAt !== undefined, mock: run.mock,
-      }));
-      if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
+      if (!resumeRequested) {
+        const accept = confirm(dialogText().recoverRun({
+          points: run.pointCount, startedAt: run.startedAt, ended: run.endedAt !== undefined, mock: run.mock,
+        }));
+        if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
+      }
       await restoreRun(run.runId, run.sessionId);
     })();
     // One-shot, guarded by the ref: re-running on every sessions refresh would re-offer a run the
