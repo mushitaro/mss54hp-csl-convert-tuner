@@ -83,15 +83,17 @@ const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadshee
  */
 const READOUT_COLUMN = 'w-[min(15rem,100%)] mx-auto';
 
+/** Vertical padding is halved on a short viewport — see the pinned block below for what it buys.
+ *  Only the readouts are squeezed; nothing here is a tap target, so nothing loses one. */
 const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-    <div className="px-4 py-3 border-b border-slate-900">
-        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-600 mb-2 text-center">{title}</h4>
+    <div className="px-4 py-3 [@media(max-height:560px)]:py-1.5 border-b border-slate-900">
+        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-600 mb-2 [@media(max-height:560px)]:mb-1 text-center">{title}</h4>
         {children}
     </div>
 );
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div className="flex items-baseline gap-3 py-1">
+    <div className="flex items-baseline gap-3 py-1 [@media(max-height:560px)]:py-0.5">
         <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
         <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
     </div>
@@ -180,14 +182,37 @@ export const MobileMenu: React.FC<Props> = ({
         <>
             <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={dismiss} />
             {/* Up from the bottom, not in from the side: it opens from a control on the footer, so it
-                comes from where the finger already is. Capped at 85svh so the scrim above stays
-                visible — the way out has to be on screen. */}
-            <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[90svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
+                comes from where the finger already is. Capped short of the full height so the scrim
+                above stays visible — the way out has to be on screen. 95 rather than 90 because on a
+                400px viewport the missing 5% is 20px of list, and Close is the real way out anyway. */}
+            <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[95svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
                 {/* Pinned. These are what the sheet is consulted for as much as navigated with —
                     which car, which session, how many flashes left — and scrolling them away to
                     reach a tab meant they were never on screen at the moment you wanted them. Above
-                    the scroll, not in it. */}
-                <div className="shrink-0 border-b border-slate-800">
+                    the scroll, not in it.
+
+                    Pinned, but no longer `shrink-0`. Three bands shared one `max-h` and nothing said
+                    how they divided it, so on the head unit — 683x400, and every band sized in
+                    absolute px — the readouts simply took what they needed and the other two got the
+                    remainder. Connected, that block measured 314px of a 360px sheet: the tab list
+                    was 0px tall and Close hung 8px below the bottom of the screen. The way out of a
+                    sheet cannot be a function of how long a VIN is.
+
+                    So it yields: `min-h-0` is what lets it, and the shrink it already had does the
+                    rest — the readouts and the list end up sharing the squeeze in proportion to what
+                    each of them wanted, and Close, which is `shrink-0`, is never in the negotiation.
+                    Measured at 683x400 connected: 314px -> 109px, the list 0px -> 218px, five of
+                    eight destinations reachable, Close back inside the screen.
+
+                    A `max-h` was tried here first and is deliberately absent: 45% and 42svh produced
+                    byte-identical measurements, because the cap never binds — the flex pass has
+                    already brought this band below it. Leaving a rule in that never fires is worse
+                    than not having one.
+
+                    The readouts stay above the list, which is what pinning them was for; what they
+                    lose is the right to push anything off the screen. Below the fold here they are
+                    one scroll away, and the identity dialog on the status dot is the other route. */}
+                <div className="min-h-0 overflow-y-auto overscroll-contain no-scrollbar border-b border-slate-800">
                     {/* Installed to the home screen there is no reload button, and pull-to-refresh —
                         which is what used to be one — is off on purpose. So the app carries its own.
 
