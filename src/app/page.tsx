@@ -22,7 +22,7 @@ import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -1447,6 +1447,18 @@ export default function Home() {
    *  GRAPH is here only where the pane actually splits. Given the height to stack, the 3D view is
    *  already on screen in the dash pane above the controls, and a third destination would be a tap
    *  charged for something you can see anyway. */
+  /** Asks first only when there is something to lose. Disconnected with no log and no unsaved tune,
+   *  a reload costs nothing and a confirmation would just be a step.
+   *
+   *  Shared by the menu row and the header control, which are the same action reached from the two
+   *  layouts. Not `location.reload()` — with the offline cache in front of it that reloads the build
+   *  already on disk, which is the one being offered as a replacement. */
+  const handleReload = useCallback(() => {
+    const busy = dmeLink.state !== 'disconnected' || !!processedLog || !!newMap;
+    if (busy && !confirm(dialogText().reloadBusy)) return;
+    void reloadForUpdate();
+  }, [dmeLink.state, processedLog, newMap]);
+
   const narrowPaneTabs = (
     <div className="flex min-[900px]:hidden space-x-6 h-full shrink-0">
       {([['map', 'MAP', true, ''], ['graph', 'GRAPH', graphHasContent, SPLIT_ONLY_SHOW], ['dash', 'DASH', true, '']] as const).map(([id, label, enabled, shown]) => (
@@ -1584,6 +1596,38 @@ export default function Home() {
             <BookOpen className="w-4 h-4" />
             <span className="text-[10px] uppercase font-bold tracking-wider whitespace-nowrap">Tuning Source</span>
           </a>
+
+          {/* The wide layout's only reload, and until it existed there was none at all.
+              Pull-to-refresh is off on purpose, the row that replaced it lives in the menu sheet,
+              and the sheet is `min-[900px]:hidden` — so above the breakpoint nothing rendered it.
+              That is not "harder to reach": on the 1024x600 head unit this is installed on, running
+              as a TWA with no browser chrome, there was no way to take an update or to recover from
+              a bad state short of killing the app.
+
+              Last in the row, hard against the corner, for the same reason RELOAD sits at the far
+              end of the menu sheet: it drops the link, the log being recorded and any unsaved tune.
+              `confirm` guards exactly those cases and nothing else.
+
+              The label keeps a stated width so announcing an update cannot move the header — the
+              house rule that a thing which appears and disappears must not resize anything applies
+              to a word changing length just as much as to an element arriving. */}
+          <button
+            type="button"
+            onClick={handleReload}
+            title={updateAvailable
+              ? 'A newer build is on the server — reload to take it'
+              : 'Reload the app'}
+            /* `py-3 -my-3` for the hit box: the head unit this runs on is a touchscreen, and the
+               header's own convention renders these at 16px tall. The padding is cancelled by the
+               margin so the row still lays out at 16 and nothing moves. Vertical only — the gap to
+               the link beside it is 16px, and horizontal padding would consume all of it. */
+            className={`hidden min-[900px]:flex items-center gap-2 shrink-0 py-3 -my-3 transition-colors cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300' : 'text-slate-500 hover:text-slate-300'}`}
+          >
+            <RefreshCw className="w-4 h-4 shrink-0" />
+            <span className="w-[52px] text-left text-[10px] uppercase font-bold tracking-wider whitespace-nowrap">
+              {updateAvailable ? 'Update' : 'Reload'}
+            </span>
+          </button>
         </div>
       </header>
 
@@ -2492,15 +2536,7 @@ export default function Home() {
           dragFrom={menuDrag}
           onDragEnd={() => setMenuDrag(null)}
           updateAvailable={updateAvailable}
-          /* Asks first only when there is something to lose. Disconnected with no log and no
-             unsaved tune, a reload costs nothing and a confirmation would just be a step. */
-          onReload={() => {
-            const busy = dmeLink.state !== 'disconnected' || !!processedLog || !!newMap;
-            if (busy && !confirm(dialogText().reloadBusy)) return;
-            // Not `location.reload()`. With the offline cache in front of it that reloads the build
-            // already on disk, which is the one the row is offering to replace.
-            void reloadForUpdate();
-          }}
+          onReload={handleReload}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed

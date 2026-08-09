@@ -84,14 +84,41 @@ async function armed(ctx) {
     return page;
 }
 
+/**
+ * The first *visible* match, not the first match.
+ *
+ * A responsive app routinely carries the same control twice — one for the wide layout and one in a
+ * menu — and the one earlier in the DOM is usually the one that is `hidden` at the size under test.
+ * `.first()` then picks a control nobody can press, the click fails, and every phase below reports
+ * a stale build that has nothing to do with the code being tested.
+ */
+async function firstVisible(page, selector) {
+    const all = page.locator(selector);
+    for (let i = 0; i < await all.count(); i++) {
+        const el = all.nth(i);
+        if (await el.isVisible().catch(() => false)) return el;
+    }
+    return null;
+}
+
+/** Stamped before pressing and gone afterwards iff the document was actually replaced. The URL is
+ *  no evidence — it is identical whether the reload happened or the click missed. */
+const STAMP = () => { window.__beforeReload = true; };
+
 async function press(page) {
     if (argv.open && typeof argv.open === 'string') {
-        await page.locator(argv.open).first().click({ force: true }).catch(() => { });
+        const opener = await firstVisible(page, argv.open);
+        if (!opener) { console.log(`  ! nothing visible matches --open ${argv.open}`); return false; }
+        await opener.click({ force: true }).catch(() => { });
         await page.waitForTimeout(500);
     }
-    await page.locator(TAP).first().click({ force: true }).catch(e => console.log('  ! tap:', e.message.split('\n')[0]));
+    const target = await firstVisible(page, TAP);
+    if (!target) { console.log(`  ! nothing visible matches --tap ${TAP}`); return false; }
+    await page.evaluate(STAMP);
+    await target.click({ force: true }).catch(e => console.log('  ! tap:', e.message.split('\n')[0]));
     await page.waitForLoadState('domcontentloaded').catch(() => { });
     await page.waitForTimeout(2500);
+    return !(await page.evaluate(() => window.__beforeReload === true).catch(() => false));
 }
 
 const ctxOpts = { viewport: { width: W, height: H }, hasTouch: true, isMobile: W < 900 };
@@ -129,8 +156,9 @@ console.log(`\nmarker A ${onlyA}\nmarker B ${onlyB}\n`);
     const ctx = await browser.newContext(ctxOpts);
     const page = await armed(ctx);
     const t0 = Date.now();
-    await press(page);
-    console.log(`no-update  nothing new on the server    → ${page.url() === URL_ ? 'reloaded' : 'LOST THE PAGE'}  ${Date.now() - t0}ms`);
+    const reloaded = await press(page);
+    const alive = await page.evaluate(() => document.body.innerText.length).catch(() => 0);
+    console.log(`no-update  nothing new on the server    → ${reloaded ? (alive > 40 ? 'reloaded' : 'reloaded BLANK') : 'DID NOT RELOAD'}  ${Date.now() - t0}ms`);
     await ctx.close();
 }
 {
@@ -139,9 +167,9 @@ console.log(`\nmarker A ${onlyA}\nmarker B ${onlyB}\n`);
     const page = await armed(ctx);
     await ctx.setOffline(true);
     const t0 = Date.now();
-    await press(page);
+    const reloaded = await press(page);
     const body = await page.evaluate(() => document.body.innerText.length).catch(() => 0);
-    console.log(`offline    network cut                  → ${body > 40 ? 'reloaded from cache' : 'BLANK'}  ${Date.now() - t0}ms`);
+    console.log(`offline    network cut                  → ${!reloaded ? 'DID NOT RELOAD' : body > 40 ? 'reloaded from cache' : 'BLANK'}  ${Date.now() - t0}ms`);
     await ctx.close();
 }
 
