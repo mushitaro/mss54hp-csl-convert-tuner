@@ -17,6 +17,10 @@ Almost every rule below started life as a plausible-sounding guess that turned o
 
 **It only sees the screen in front of it.** A change that removes something which *used to be* on screen alongside something else leaves the probe completely clean — no scroll, no overflow, nothing under 40px. That is the shape of the worst regression in this codebase's history, and `--watch` exists for it: name the boxes that have to coexist and it reports which of them are up at once.
 
+**And it only sees the state the page lands in.** An overlay — the menu sheet, a dialog — does not exist until something opens it, so every other check runs against a screen that does not contain the thing you changed. Two head-unit bugs lived there for a release: a close button 8px below the viewport and a dialog with its buttons under the fold, both of them exactly what `pastFold` reports, neither ever on screen while it was looking. `--tap` now audits a second time and reports what the tap introduced; drive into the state with `--setup` when opening it takes more than one press.
+
+**`count()` is not visibility.** A control hidden by a breakpoint is still in the DOM, so `await locator.count()` returns 1 for something nobody can touch and the click fails with `Element is not visible`. Use `isVisible()` in any script that branches on whether a control exists at this width. Twice in one session.
+
 **The "before" number usually has to be built.** A regression argued from the current tree is an opinion; the previous commit is the evidence.
 
 ```bash
@@ -32,6 +36,8 @@ Two viewports matter more than the rest, and neither is the one people test:
 |---|---|
 | **851×393** | an ordinary phone in landscape. Short, not narrow. Every vertical budget breaks here first |
 | **360×800** | portrait. Where a two-pane layout stops being a layout |
+
+**A device's CSS viewport is not the resolution on its box.** A 1024×600 head unit renders this app at about **683×400**, because density scales it, and a whole commit was written for the wrong side of the breakpoint before anyone checked — a control added "for wide screens" that the device has never once displayed. When you cannot run the probe on the hardware, read the viewport off a photo: which breakpoint-gated chrome is visible tells you which side of the line it is on, and something countable confirms the number. Here the destination row and the menu button are both below 900px, the graph destination needs `max-height: 560px` as well, and the grid showed 12 columns — 64 + 12×50 = 664px of a 683px viewport. Then design against that, not against the spec sheet.
 
 And after any mobile change, **re-check 1440×900 and confirm it did not move**. Say so in the commit with the numbers.
 

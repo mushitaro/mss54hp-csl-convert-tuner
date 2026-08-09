@@ -68,6 +68,16 @@ A grid with no `table-fixed` makes the browser measure every cell before it can 
 
 State the width. `table-fixed` with `w-full` divides the container between the columns and collapses the horizontal scroll the grid depends on.
 
+**And when that grid needs to zoom, multiply the numbers — do not `transform: scale()` it.** Scaling is the obvious way and it breaks the thing that makes a 20×24 grid readable at all: a transform on an ancestor becomes the containing block for `position: sticky`, so the row and column headers stop sticking to the scroll port and start sticking to the table. Multiplying the cell width, the head width, the font size and its line-height keeps the headers pinned *and* keeps `table-fixed` on the fast path — the 6.9s stays gone. Verified at each step after scrolling 200px across and 120px down:
+
+```
+683x400  zoom 0.6  cell 30px  font  7.2px  20/20 columns  sticky ok
+         zoom 1.0  cell 50px  font 12.0px  12    columns  sticky ok
+         zoom 1.6  cell 80px  font 19.2px   7    columns  sticky ok
+```
+
+Scale the line-height with the font or tall glyphs clip: `text-xs` is 12/16, and overriding only `font-size` leaves the 16 behind.
+
 ## What to do with what is left
 
 Some work cannot be made cheap. Mounting a chart still blocks for around a second. **That is fine as long as it does not look like a crash** — and a black rectangle that does not respond looks exactly like one.

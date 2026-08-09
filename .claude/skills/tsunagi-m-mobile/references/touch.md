@@ -43,7 +43,7 @@ It opens from a button at the bottom centre, so everything in it is ordered outw
 ```
 
 - **Lists run bottom-up.** The first tab sits closest to the button and the list climbs away. Reversing the array is the whole implementation.
-- **Readouts pin above the scroll.** They are consulted as much as navigated with, and scrolling them away to reach a tab meant they were never on screen at the moment you wanted them.
+- **Readouts pin above the scroll.** They are consulted as much as navigated with, and scrolling them away to reach a tab meant they were never on screen at the moment you wanted them. **Pinned is a promise about position, not a licence to push the rest off the screen** — connected, these grew to 314px of a 360px sheet and took both the list and the close button with them. `layout.md` has the fix and the numbers.
 - **The scroller opens at its own end**, so the rows worth reaching are the ones you see: `el.scrollTop = el.scrollHeight` on mount.
 - **Close sits on the coordinates the press landed on.** Second tap closes what the first opened, thumb unmoved.
 - **Disabled entries stay listed.** Which view does not exist yet is the same information as which one does.
@@ -100,6 +100,22 @@ The classic failure: a control inside an auto-fit `transform: scale()`. Designed
 - **Anchor pseudo-element knobs to the thing they slide in.** A toggle knob positioned `top-[2px] left-[2px]` resolves against the nearest positioned ancestor — add padding to the wrapping `<label class="relative">` and the knob leaves the pill. Put `relative` on the pill.
 
 Measured, after: arming toggles 14×8 → 42×35, filter rows ~15px tall → 39, dial 32 → 64px.
+
+## A native dialog cannot be told how tall to be
+
+`alert` and `confirm` size themselves to their text. That is fine for a line, and on a short viewport it is a trap for anything longer: the box grows, the buttons go below the fold, and the dialog becomes a thing you scroll to answer — or, more often, answer without reading. On this app the two worst offenders were the instructions shown when a run ends and **the confirmation before writing to the ECU**, which is the last thing between a tap and a flash.
+
+Give the long ones the app's own frame, and get the direction right: **state the frame's height, scroll the body inside it, and keep the buttons part of the frame.** Then the box cannot leave the screen however long the message becomes. `DialogFrame` here is `min(84dvh,560px)` with the body scrolling; on a 400px viewport that caps at 336px with the buttons always inside it.
+
+```
+683x400  recovery dialog   560x270   in viewport   both buttons on screen   body overflow 0
+683x400  end-of-run        560x324   in viewport   button on screen         document no-scroll
+```
+
+- **Keep the short ones native.** "No stored binary" is one line and moving it buys nothing; a wrapper around every notice is its own kind of mess.
+- **Make it a promise, not a callback**, if the call sites are mid-sequence. `await ask(...)` reads the way `confirm(...)` did and preserves an ordering someone chose deliberately.
+- **A confirm must not be dismissable by missing it.** No X, no backdrop click — there is no honest default for "write this to the ECU". An alert can be, since its only exit is the button anyway.
+- **Check what the old blocking behaviour was holding up.** `alert` froze the main thread, and code was written around that — here a disconnect deliberately preceded it so the read pump could not be frozen behind the dialog. An awaited dialog does not block, so the comment explaining the order became wrong. Fix the comment; keep the order if it is independently right.
 
 ## Readout alignment
 

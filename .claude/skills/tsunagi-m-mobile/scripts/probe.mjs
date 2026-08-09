@@ -22,6 +22,13 @@
  * boxes that have to coexist and it reports which are up at once, so two runs — this commit and the
  * one before it — can be compared. That is the regression this harness could not previously see.
  *
+ * --tap now audits twice, and the second one matters as much as the timing. Everything above runs
+ * against the state the page lands in, and an overlay — a menu sheet, a dialog — is not in that
+ * state until something opens it. Two head-unit bugs hid there: a close button 8px off the bottom
+ * of the screen and a dialog with its buttons under the fold, both of them exactly what `pastFold`
+ * reports, neither ever on screen while it was looking. Tap the thing that opens it and the second
+ * audit reports what the tap introduced.
+ *
  * Requires Playwright. In this environment:
  *   PW=/opt/node22/lib/node_modules/playwright/index.mjs  CHROMIUM=/opt/pw-browsers/chromium
  */
@@ -41,6 +48,10 @@ const VIEWPORTS = (argv.viewports ?? '360x800,851x393,1440x900')
     .split(',').map(v => v.trim().split('x').map(Number));
 const THROTTLE = Number(argv.throttle ?? 0);
 const MIN_TARGET = Number(argv['min-target'] ?? 40);
+/** Collect this many per category. Well above any real finding count, so the after-tap diff
+ *  is computed on the whole list; SHOW is what actually reaches the terminal. */
+const CAP = 400;
+const SHOW = 8;
 const WATCH = typeof argv.watch === 'string' ? argv.watch.split(',').map(s => s.trim()).filter(Boolean) : [];
 
 const setup = argv.setup ? (await import(new URL(argv.setup, `file://${process.cwd()}/`).href)).default : null;
@@ -55,7 +66,7 @@ const LONGTASK_INIT = () => {
 };
 
 /** Everything worth knowing about a laid-out page, in one pass. */
-const AUDIT = ([minTarget, watch]) => {
+const AUDIT = ([minTarget, watch, cap]) => {
     const vw = window.innerWidth, vh = window.innerHeight;
     const de = document.documentElement;
     const rects = [...document.querySelectorAll('*')].map(el => [el, el.getBoundingClientRect()]);
@@ -77,13 +88,13 @@ const AUDIT = ([minTarget, watch]) => {
 
         // Anything laid out past the fold is a thing the user cannot reach.
         pastFold: shown.filter(([, r]) => r.bottom > vh + 0.5 && r.top < vh)
-            .slice(0, 8).map(([el, r]) => `${describe(el)} +${Math.round(r.bottom - vh)}px`),
+            .slice(0, cap).map(([el, r]) => `${describe(el)} +${Math.round(r.bottom - vh)}px`),
 
         // Scrollers that are actually scrolling. An action row inside one is a bug, not a feature.
         activeScrollers: [...document.querySelectorAll('*')]
             .filter(el => el.scrollHeight > el.clientHeight + 1 && el.clientHeight > 0
                 && /auto|scroll/.test(getComputedStyle(el).overflowY))
-            .slice(0, 8).map(el => `${describe(el)} over=${el.scrollHeight - el.clientHeight}px`),
+            .slice(0, cap).map(el => `${describe(el)} over=${el.scrollHeight - el.clientHeight}px`),
 
         // ON-SCREEN size, so anything inside a transform: scale() is caught. This is the check that
         // found arming toggles rendering at 14x8 against a designed 36x20.
@@ -106,7 +117,7 @@ const AUDIT = ([minTarget, watch]) => {
                 }
                 return true;
             })
-            .slice(0, 12)
+            .slice(0, cap)
             .map(([el, r]) => `${describe(el)} ${Math.round(r.width)}x${Math.round(r.height)}`),
 
         // Not "is this wrong" but "is this still here, and here *with* that". Reported as sizes so
@@ -139,15 +150,15 @@ for (const [w, h] of VIEWPORTS) {
     if (setup) await setup(page);
     await page.waitForTimeout(400);
 
-    const audit = await page.evaluate(AUDIT, [MIN_TARGET, WATCH]);
+    const audit = await page.evaluate(AUDIT, [MIN_TARGET, WATCH, CAP]);
 
     console.log(`\n━━ ${w}x${h}${THROTTLE ? `  (cpu /${THROTTLE})` : ''} ━━`);
     console.log(`  document scrolls : ${audit.documentScrolls ? `YES  y+${audit.documentOverflowY} x+${audit.documentOverflowX}` : 'no'}`);
-    if (audit.pastFold.length) { console.log('  below the fold   :'); audit.pastFold.forEach(l => console.log('      ' + l)); }
-    if (audit.activeScrollers.length) { console.log('  scrolling        :'); audit.activeScrollers.forEach(l => console.log('      ' + l)); }
+    if (audit.pastFold.length) { console.log('  below the fold   :'); audit.pastFold.slice(0, SHOW).forEach(l => console.log('      ' + l)); }
+    if (audit.activeScrollers.length) { console.log('  scrolling        :'); audit.activeScrollers.slice(0, SHOW).forEach(l => console.log('      ' + l)); }
     if (audit.smallTargets.length) {
         console.log(`  under ${MIN_TARGET}px         :`);
-        audit.smallTargets.forEach(l => console.log('      ' + l));
+        audit.smallTargets.slice(0, SHOW + 4).forEach(l => console.log('      ' + l));
     } else console.log(`  under ${MIN_TARGET}px         : none`);
 
     if (audit.watched.length) {
@@ -168,6 +179,29 @@ for (const [w, h] of VIEWPORTS) {
         const lt = await page.evaluate(() => window.__lt);
         console.log(`  tap ${JSON.stringify(target)} : ${ms}ms   longtasks ${lt.length ? lt.join(', ') + ' ms' : 'none'}`);
         if (lt.some(d => d > 200)) console.log('      ^ attribute this before changing anything — CDP Profiler, self time');
+
+        // The state after the tap is a state too, and nothing used to measure it.
+        //
+        // This is the harness's other blind spot, and it is the one that cost the most. An overlay
+        // does not exist until something opens it, so every check above ran against a screen that
+        // did not contain the thing being changed. Both of the worst findings on the head unit were
+        // this shape: a menu close button 8px below the viewport, and a dialog whose buttons sat
+        // under the fold. `pastFold` reports exactly that — it simply never looked while the sheet
+        // was up. So audit again, and report only what the tap introduced.
+        const after = await page.evaluate(AUDIT, [MIN_TARGET, WATCH, CAP]);
+        const gained = (before, now) => now.filter(x => !before.includes(x));
+        const newFold = gained(audit.pastFold, after.pastFold);
+        const newScroll = gained(audit.activeScrollers, after.activeScrollers);
+        const newSmall = gained(audit.smallTargets, after.smallTargets);
+        const newDocScroll = after.documentScrolls && !audit.documentScrolls;
+
+        if (newDocScroll) console.log(`  after tap, doc scrolls : YES  y+${after.documentOverflowY} x+${after.documentOverflowX}`);
+        if (newFold.length) { console.log('  after tap, below fold  :'); newFold.slice(0, SHOW).forEach(l => console.log('      ' + l)); }
+        if (newScroll.length) { console.log('  after tap, scrolling   :'); newScroll.slice(0, SHOW).forEach(l => console.log('      ' + l)); }
+        if (newSmall.length) { console.log(`  after tap, under ${MIN_TARGET}px  :`); newSmall.slice(0, SHOW).forEach(l => console.log('      ' + l)); }
+        if (!newDocScroll && !newFold.length && !newScroll.length && !newSmall.length) {
+            console.log('  after tap              : nothing new');
+        }
     }
 
     if (errors.length) { console.log('  page errors      :'); errors.forEach(e => console.log('      ' + e)); }
