@@ -943,14 +943,14 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
   baud switching is proven.
 - **Chromium only**: Chrome/Edge/Opera on desktop (Web Serial), Chrome on Android (WebUSB, §14). The
   file-upload workflow remains the fallback for every other browser and must keep working.
-- **The Android backend's WRITE path is unproven.** Reading is now measured on the car and the image
-  verifies against the ECU's own checksums (§14), but no erase/write/verify cycle has ever run over
-  WebUSB. Break recovery, the `SIO_RESET` flush polarity, the backgrounding/endurance behaviour and
-  38400 are also still untested — `/usb-check` is the bench probe for those.
+- **The Android backend's WRITE path is proven** (2026-08-09), from the head unit on the car: the
+  full erase → write → verify cycle completed over WebUSB. That was the last transport-level path
+  carrying no hardware evidence, so reading, live logging and writing are now all measured on the
+  vehicle over both backends. Still untested on this path: break recovery, the `SIO_RESET` flush
+  polarity, backgrounding/endurance across a long write, and 38400 — `/usb-check` is the bench probe
+  for those, and none of them is on the happy path that has now run.
 - **IndexedDB is best-effort storage** — the browser can evict it. File download remains the durable
   artifact.
-- **README is stale**: it still says checksum correction is "not yet included" and that flashing is
-  "still researching". Both are now implemented and hardware-verified.
 - `reference/` is gitignored third-party software — never commit it.
 
 ---

@@ -76,6 +76,9 @@ result and deciding, is exactly where a run is easiest to lose. Declining discar
 
 Confirmed on a real vehicle: a deliberate reload mid-log, then recovered.
 
+On a head unit, where the console cold-boots every time the key cycles, the run can come back without
+being asked for at all — see [Coming back after the ignition goes off](#coming-back-after-the-ignition-goes-off).
+
 ### FLASH — how many writes the DME has left
 
 The DME will only accept a limited number of programming cycles: **30 slots per processor**, tracked
@@ -110,6 +113,18 @@ Two different things, so they are two different controls:
 Tuning sessions (BASE + tuned BIN + the paired log) are stored in the browser and can be reloaded or
 compared from the **STARTUP** tab.
 
+### Knowing where you still need to drive
+
+Cells the log actually visited are tinted on the map, in three bands: **some data**, **enough to act
+on** (10 samples), and **well covered** (30). The bands are absolute sample counts, not a fraction of
+the busiest cell, because the question they answer — *have I gathered enough here yet* — has a fixed
+answer per cell. Scaling them to the busiest cell made the whole map fade as one cell filled up, so
+the map got darker the longer you drove, which is backwards for spotting the gaps you still have to
+cover.
+
+The tint is a threshold for *reading*, not for calculating: a cell with a single sample still produces
+a correction. The bands tell you how thin the evidence under that correction is.
+
 ### Reading a log
 
 The chart and the row table always show the same slice of the log — one window, both views, one set
@@ -130,6 +145,48 @@ Zooming is chart-local, because it changes how magnified the data is rather than
 shown; the table has nothing to follow. Scrolling is not, which is why it moves the shared window
 instead of just this chart's axis.
 
+## On a phone or a head unit
+
+The whole workflow — read, live tune, write — runs on a phone, and on an Android head unit in the
+car. Below 900px the layout is not a shrunken desktop; it is arranged for one hand and short glances.
+
+**One view at a time, chosen from the footer.** `MAP` is the tables, `DASH` is the connection and the
+controls, and `GRAPH` appears as its own destination only when the screen is too short to stack the
+3D view above the panel — on a tall phone in portrait the two stay together, because there is room
+and splitting them would charge a tap for nothing.
+
+**Everything else is behind the ///M button.** Session and vehicle readouts, downloads, the view list
+and reload live in a sheet that opens upward from the footer. It is built to be *swept* rather than
+aimed: press the button, slide to the entry you want, release. The lists run bottom-up so the first
+entry sits nearest your thumb, and Close lands on the exact coordinates the press started on, so a
+second tap closes what the first opened without moving your hand.
+
+The controls that decide what gets written to the DME are never in that sheet. They stay on `DASH`,
+visible, one tap apart.
+
+**`−` / `＋` in the header resize the map grid** while you are on `MAP`. The setting is remembered
+between launches. At the smallest step all 20 RPM columns fit on a head unit screen; at the largest
+the numbers are readable at arm's length.
+
+**Install it to the home screen** and it runs without browser chrome, starts with **no network at
+all**, and keeps working in a garage with no signal. Because there is no address bar there is also no
+pull-to-refresh — deliberately, since a stray downward swipe mid-log would otherwise cost the run —
+so the menu carries its own reload. When a newer build exists that row says **"Update available —
+reload"**, and pressing it actually takes the new build rather than repainting the cached one.
+
+### Coming back after the ignition goes off
+
+On a head unit the console usually cold-boots when the key cycles, which takes the browser with it.
+Nothing is lost — sessions and interrupted runs live in the browser's own storage — but you would
+normally land back on a first-run screen and have to find your way to where you were.
+
+If the app is launched with **`?resume=1`**, it reopens the interrupted run directly and asks nothing.
+That flag is set by the launcher on an Android head unit, which is the only thing that can know the
+tuner was in front when the power went; the app supplies the other half, which is knowing *which*
+session that means. Launched without the flag, nothing changes — you get the usual offer to restore.
+If there is nothing to resume, it simply starts normally, which is the expected case rather than an
+error.
+
 ## Usage
 
 The app is hosted on GitHub Pages, so it can be used immediately without installation:
@@ -144,6 +201,10 @@ the same words the stored settings and the log columns use.
 
 Implementation details (DS2 protocol, checksum algorithm, addresses, verification status) are
 documented in [docs/implementation-notes.md](docs/implementation-notes.md).
+
+The app processes everything in your own browser — BINs, logs and sessions are stored locally and are
+not uploaded anywhere. The [privacy policy](https://m3.tsunagi.app/privacy-policy) is linked from the
+header, from the menu sheet, and from the disclaimer shown on first use.
 
 ## ⚠️ Safety — please read before flashing
 
@@ -202,6 +263,7 @@ than from assumption, whether the identity records are present and which process
 - **Headers**: CSV Header names must match Testo output EXACTLY.
 - **Accuracy**: Calculations have been verified against manual tools at the cell level and confirmed to match perfectly.
 - **Checksums**: **Now implemented.** CRC-16/ARC is recalculated automatically before every BIN download and every DME write — you do **not** need to correct checksums with external tools. The algorithm was verified byte-for-byte against a known-good stock partial BIN.
+- **Every read is checked against the DME's own checksums.** The ECU stores checksums for its data blocks, and between them they cover the whole 64 KB. Each read is verified against those before the bytes are used, so a partial or corrupted read is caught at the point it happens rather than discovered later in a tune built on top of it. This is what makes a read *byte-exact* rather than merely complete.
 - **Flashing**: **Now implemented**, using the BMW DS2 protocol over a K+DCAN (FTDI) cable, and verified on a real vehicle. Each written chunk is validated against the DME's programming verify byte, and the whole region is read back and compared byte-for-byte before the write is reported successful.
 - **Adaptation reset**: Clears the DME's learned lambda trim (2 factors + 2 offsets), knock adaptation (6 cylinders), and VANOS adaptation (intake/exhaust) — 12 values, decoded and displayed before and after the clear. This is a **scoped** clear (DS2 service 0x43, mask 0x47), not a diagnostic tool's full "Clear All": throttle/pedal/EGAS, SMG clutch, detected-equipment and crank-wheel adaptations are left untouched, since the CSL's SMG-II clutch adaptation would otherwise need a full re-adaptation procedure to recover. Both the DS2 frame bytes and the field layout were verified against a decompiled reference tool. A snapshot of the values immediately before and after the clear is saved with the session. Not yet cross-checked against a real DME's actual post-clear values (only that the clear command and read-back path are correct) — verify the results look sane before relying on them.
 - **Flash counter**: Read at connect from the DME's boot field — a run of 2-byte markers, 30 slots per processor, decoded with the same scan the reference tool uses. Resetting it erases and rewrites the 8 KB service block on **both** processors (the block also carrying the AIF, ZIF and VIN records), then reads all 16 KB back and compares byte-for-byte. The pre-erase block is stored in a separate browser database first, and the reset aborts if that fails. Three guards refuse to start: engine not stopped, a boot field still mid-programming, or a block found already erased by an earlier interrupted attempt — that last one matters because an erased block reads as a healthy `0/30 available` on the counter alone, so a naive retry would write the hole back and verify it. An interrupted reset is recovered by writing the saved block back (**Recover**, offered in place of a retry). A cleared counter reads `1/30`, not `0/30`: `0x0000` is the "consumed, keep looking" sentinel the scan walks over. **Confirmed on a real vehicle** (2026-07-28): the counter reads and the reset completes. A read-only inspection of both service blocks is also available and is the right first step on any DME with an unclear history.
@@ -219,8 +281,8 @@ than from assumption, whether the identity records are present and which process
   - *File workflow*: any Chromium browser (Chrome / Edge / Opera).
   - *Direct DME workflow, desktop*: **Chrome / Edge / Opera** — it requires the Web Serial API, which Safari does not support and Firefox does not support out of the box.
   - *Direct DME workflow, Android*: **Chrome, with a USB OTG adapter.** Note that Chrome for Android does expose the Web Serial API, but only for Bluetooth serial-port emulation: a USB K+DCAN cable is invisible to it, so the app talks to the cable through WebUSB and the FTDI vendor protocol instead. Genuine FTDI chips only (FT232AM/BM/R); CH340 and other clone cables are not supported on Android.
-  - *Android status*: **reading is proven on the car; writing is not.** A full 64 KB read took **126.5 s at 518 B/s**, against ~123 s / 530 B/s on desktop — 2.8% slower, so the transport costs essentially nothing. The image verified against **both of the ECU's own stored data checksums**, which together cover the whole 64 KB, so the read is byte-exact rather than merely plausible. Identity, live logging and reconnect after a key cycle all work, and the UI is usable on a phone in landscape. **What has never run on Android: the erase/write/verify cycle**, plus break recovery, the receive-flush polarity, backgrounding endurance and 38400. There is a bench page at **`/usb-check`** for those; it needs a bare FT232R breakout with TX and RX jumpered together, since a K+DCAN cable cannot self-echo on a desk (its K-line pull-up comes from the car).
-  - *Writing from a phone*: supported, and it asks for more care than the desktop path. A write runs 4+ minutes, and if the screen switches off or you switch apps the connection can drop mid-write. The app holds a screen wake lock while writing and warns you before starting, but Android does not let a web page guarantee any of this. If a write does fail it always restarts from the erase, so re-running it is safe.
+  - *Android status*: **read, live log and write are all proven on the car.** A full 64 KB read took **126.5 s at 518 B/s**, against ~123 s / 530 B/s on desktop — 2.8% slower, so the transport costs essentially nothing. The image verified against **both of the ECU's own stored data checksums**, which together cover the whole 64 KB, so the read is byte-exact rather than merely plausible. The erase → write → verify cycle completed from a head unit on **2026-08-09**, which was the last path in this app carrying no hardware evidence. Still untested on Android specifically: break recovery, the receive-flush polarity, backgrounding endurance across a long write, and 38400 — none of them on the path that has now run. There is a bench page at **`/usb-check`** for those; it needs a bare FT232R breakout with TX and RX jumpered together, since a K+DCAN cable cannot self-echo on a desk (its K-line pull-up comes from the car).
+  - *Writing from a phone*: proven, and it asks for more care than the desktop path. A write runs 4+ minutes, and if the screen switches off or you switch apps the connection can drop mid-write. The app holds a screen wake lock while writing and warns you before starting, but Android does not let a web page guarantee any of this. If a write does fail it always restarts from the erase, so re-running it is safe.
 - **Live logging caveat**: live values are decoded from the DME's measurement blocks. RPM, relative opening and coolant temperature are confirmed, but the lambda-controller factor used as the STFT input has **not** been cross-checked against a known-good Testo log. Validate it before relying on live-tuned output.
 
 ## Important Note on Development
