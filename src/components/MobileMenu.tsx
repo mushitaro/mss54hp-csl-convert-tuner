@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw } from 'lucide-react';
+import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
+import { PRIVACY_POLICY_URL } from '@/config/links';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -253,6 +254,28 @@ export const MobileMenu: React.FC<Props> = ({
                 {/* Scrolls, without saying so. A 4px bar down the edge of a 360px sheet is noise on
                     an instrument, and the list already shows it runs past the fold. */}
                 <div ref={scroller} className="no-scrollbar flex-1 overflow-y-auto overscroll-contain">
+                    {/* The furthest thing from the thumb in the sheet, and the only one not about
+                        the car. The scroller opens at its own bottom, so this sits off screen until
+                        someone deliberately scrolls up for it — which is the whole placement
+                        argument: a legal link has to be reachable, not visible.
+
+                        Deliberately NOT wired through `row()`, exactly like Reload above. With no
+                        `data-menu-key` the sweep's hit test returns null over this row, so a finger
+                        travelling up the sheet can pass across it and let go without opening
+                        anything. Do not add one.
+
+                        `_blank` is not decoration: a same-tab navigation would drop the serial link
+                        and take an unsaved run with it. */}
+                    <a
+                        href={PRIVACY_POLICY_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-2 py-4 border-b border-slate-900 text-slate-600 hover:text-slate-400 transition-colors"
+                    >
+                        <Shield className="w-2.5 h-2.5 shrink-0" />
+                        <span className="text-[9px] font-bold uppercase tracking-widest">Privacy Policy</span>
+                    </a>
+
                     {actions.length > 0 && (
                         <Section title="Download">
                             {/* Reversed, like VIEW below it: first in the list is nearest the thumb. */}

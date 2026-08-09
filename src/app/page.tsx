@@ -22,7 +22,8 @@ import { MobileMenu } from '@/components/MobileMenu';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
+import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -1535,7 +1536,7 @@ export default function Home() {
             </span>{' '}
             TUNER
           </h1>
-          <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2 β</span>
+          <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2.1.1 β</span>
           {/* VIN/AIF/SW are readouts and may clip; FLASH is a control and may not — it is the only
               entry to the flash-counter dialog, so clipping it removes a feature rather than a
               label. This strip is overflow-hidden, so what clips is whatever sits at its END:
@@ -1574,6 +1575,26 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Privacy policy, on the sibling site. First in the cluster because it is the least of
+              the three, and because putting it here leaves the one labelled link anchored to the
+              right edge where it already sits.
+
+              Hover goes to neutral slate, NOT to an accent like the Tuning Source link below. This
+              states no machine state, so it has no business borrowing a semantic colour — the same
+              reason the GitHub link beside it is neutral.
+
+              `_blank` is not decoration: a same-tab navigation would drop the serial link and take
+              an unsaved run with it. */}
+          <a
+            href={PRIVACY_POLICY_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors"
+            title="Privacy Policy"
+          >
+            <Shield className="w-5 h-5" />
+          </a>
+
           {/* GitHub Link */}
           <a
             href="https://github.com/mushitaro/mss54hp-csl-convert-tuner"

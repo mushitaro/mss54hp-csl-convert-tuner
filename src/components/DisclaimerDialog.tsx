@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
 import { useDialogLang } from '@/hooks/useDialogLang';
+import { PRIVACY_POLICY_URL } from '@/config/links';
 
 interface Props {
     /** 「同意して続ける」を押した時に呼ばれる。dontShowAgain が真なら次回以降は非表示にする。 */
@@ -20,6 +21,7 @@ const TEXT = {
             <><span className="text-slate-100 font-bold">バッテリー電圧と通信が安定した環境</span>で作業してください。書き込み中の中断は DME を破損させる恐れがあります。</>,
         ],
         agreeNote: '「同意して続ける」を押した場合、上記に同意したものとみなします。',
+        privacy: 'プライバシーポリシー',
         dontShow: '今後表示しない',
         agree: '同意して続ける',
     },
@@ -34,6 +36,7 @@ const TEXT = {
             <>Work only with <span className="text-slate-100 font-bold">stable battery voltage and a stable connection</span>. Interrupting a write can damage the DME.</>,
         ],
         agreeNote: 'Clicking "Agree & Continue" is taken as your acceptance of the above.',
+        privacy: 'Privacy Policy',
         dontShow: "Don't show again",
         agree: 'Agree & Continue',
     },
@@ -84,6 +87,21 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                         ))}
                     </ul>
                     <p className="text-[11px] text-slate-500">{t.agreeNote}</p>
+                    {/* リンク名だけを置き、「同意したものとみなします」の類は書き足さない。この
+                        ダイアログの同意対象はあくまで上の免責 5 項目であり、ポリシーへの同意まで
+                        黙って増やさないため。読みたい人のための導線であって、同意の一部ではない。
+                        別タブで開くのは、書き込み中や収録中にここへ来た場合に現在のタブを
+                        遷移させないため。 */}
+                    <p>
+                        <a
+                            href={PRIVACY_POLICY_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[11px] text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
+                        >
+                            {t.privacy}
+                        </a>
+                    </p>
                 </div>
 
                 <div className="shrink-0 pt-3 mt-3 border-t border-slate-800 flex items-center justify-between gap-4">
