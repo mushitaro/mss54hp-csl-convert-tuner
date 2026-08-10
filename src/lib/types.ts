@@ -75,6 +75,27 @@ export interface LogFilterConfig {
      *  at KL_TI_KATS_DELTA_ML = 0.0195/s and has up to 0.3496 of travel (K_TI_F_KATS_MAX), so it
      *  needs ~18 s to reach 1.0 again — and lambda stays open for all of it. Default 20. */
     katsTailSec?: number;
+
+    /**
+     * Correct the logged trim by the measured rf_korr before it reaches the VE map — karter16's
+     * "Option 2". Default TRUE.
+     *
+     * It lives on the filter config rather than somewhere calculator-shaped because it is part of
+     * "how this log becomes a map", it has to be persisted with the session for the tune to be
+     * reproducible, and TuneSettings already carries filterConfig whole.
+     *
+     * What it decides is what the Alpha-N table is FOR. With it on, the table holds the filling at
+     * NOMINAL exhaust temperature and rf_korr adds the cold-exhaust enrichment on top — so a map
+     * tuned on a cold-exhaust drive stays valid once things heat up. With it off, the table holds
+     * the filling at whatever rf_korr the log happened to be taken under, which is only right if
+     * BMW's density model exactly matches this engine.
+     *
+     * The two disagree by up to 37 % where KF_RF_KORR_DRREL peaks (~2350 rpm), and they fail in
+     * opposite directions: on is rich-safe, off can leave the map lean under load once the exhaust
+     * comes up to temperature. That asymmetry is why this defaults on — see
+     * docs/ecu-logic/60-tuning-logic.md §6.
+     */
+    applyRfKorr?: boolean;
 }
 
 export interface InterpolationPoint {

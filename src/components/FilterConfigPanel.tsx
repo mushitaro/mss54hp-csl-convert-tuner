@@ -17,6 +17,8 @@ const TEXT = {
         tpsHint: 'スロットル開度の変化量(絶対値)',
         immediate: '変更は即時反映されます',
         katsHint: '排気温が上限を超えると触媒保護増量が入り、DMEはλ制御を停止します。凍結したトリム値をVE計算に取り込まないよう、その区間と復帰後20秒を除外します。EGTを含まないログでは何も起きません。',
+        korrOn: 'ON: テーブルは「公称排気温での充填」を持ちます。排気が冷えたログで作ったマップが、温まった後も正しいままになります（推奨）。',
+        korrOff: 'OFF: テーブルは「ログを取った時の rf_korr での充填」を持ちます。BMWの密度モデルがこのエンジンに合っている場合のみ正しく、合っていないと排気が温まった時にリーン側に外れます。',
     },
     en: {
         settings: 'Filter Settings',
@@ -25,6 +27,8 @@ const TEXT = {
         tpsHint: 'Absolute Change in Opening %',
         immediate: 'Adjustments apply immediately',
         katsHint: 'Above this EGT the DME adds cat-protection fuel and switches lambda control off, freezing the trim. Those samples and the 20 s it takes the enrichment to unwind are dropped so a frozen trim never reaches the VE map. Does nothing on a log without EGT.',
+        korrOn: 'ON: the table holds filling at NOMINAL exhaust temperature, so a map tuned on a cold-exhaust drive stays right once things heat up (recommended).',
+        korrOff: 'OFF: the table holds filling at the rf_korr the log was taken under. Only correct if BMW\'s density model matches this engine; if it does not, the map goes lean under load once the exhaust warms up.',
     },
 };
 
@@ -176,6 +180,30 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                     className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${(localConfig.enableOpenLoopExclusion ?? true) ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
                                 />
                                 <p className="text-[9px] text-slate-600">{t.katsHint}</p>
+                            </div>
+
+                            {/* RF KORR — not a filter, but it belongs to "how this log becomes a
+                                map" and has to travel with the session for the tune to be
+                                reproducible. Defaults ON: the two settings fail in opposite
+                                directions and only OFF can leave the map lean under load. */}
+                            <div className="space-y-1">
+                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
+                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={localConfig.applyRfKorr ?? true}
+                                            onChange={(e) => handleChange('applyRfKorr', e.target.checked)}
+                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
+                                        />
+                                        <span>Apply RF KORR</span>
+                                    </label>
+                                    <span className={`${(localConfig.applyRfKorr ?? true) ? 'text-slate-300' : 'text-red-400'}`}>
+                                        {(localConfig.applyRfKorr ?? true) ? 'NOMINAL' : 'AS-LOGGED'}
+                                    </span>
+                                </div>
+                                <p className="text-[9px] text-slate-600">
+                                    {(localConfig.applyRfKorr ?? true) ? t.korrOn : t.korrOff}
+                                </p>
                             </div>
 
                             {/* Transient Header */}

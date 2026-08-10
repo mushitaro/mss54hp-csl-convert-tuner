@@ -426,8 +426,15 @@ export default function Home() {
   // Runs the VE calculation and refreshes the comparison defaults. Does NOT change the active tab —
   // tab navigation is decided by the caller, so re-running the calc (e.g. on a filter tweak) leaves
   // the user where they are.
+  /** VE-calculation options derived from the session's settings. One place, because six call sites
+   *  reach the calculator and a map built with a different rf_korr treatment than the one the
+   *  session records would be unreproducible. Default on — see LogFilterConfig.applyRfKorr. */
+  const veCalcOptions = useMemo(
+    () => ({ applyRfKorr: filterConfig.applyRfKorr ?? true }),
+    [filterConfig.applyRfKorr]);
+
   const runCalculation = (map: NonNullable<typeof currentMap>, data: any[]) => {
-    veCalc.runCalculation(map, data);
+    veCalc.runCalculation(map, data, veCalcOptions);
     comparison.applyDefaultsAfterCalculation();
   };
 
@@ -680,7 +687,7 @@ export default function Home() {
           session.tuneSettings?.interpolationTable,
         );
         if (processed) {
-          veCalc.runCalculation(map, processed.data);
+          veCalc.runCalculation(map, processed.data, veCalcOptions);
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -953,7 +960,7 @@ export default function Home() {
     lastFlushRef.current = now;
     const processed = logFileState.loadRawLog([...liveSamplesRef.current], 'live-session.csv');
     if (processed && currentMap) {
-      veCalc.runCalculation(currentMap, processed.data);
+      veCalc.runCalculation(currentMap, processed.data, veCalcOptions);
       return processed;
     }
     return null;

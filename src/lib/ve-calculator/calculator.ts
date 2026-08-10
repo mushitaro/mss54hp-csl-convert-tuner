@@ -19,23 +19,26 @@ interface GridCell {
 export interface VeCalcOptions {
     /**
      * Fold the measured rf_korr into the correction: New = Old * STFT * rf_korr.
+     * This is karter16's "Option 2", and the caller should normally pass it TRUE.
      *
-     * OFF BY DEFAULT, and that default is the safe one. The correction this app consumes is
-     * `stft` = la_f_regler, the DME's OWN lambda integrator — not an independent wideband. In the
-     * 0401 calibration KF_LA_TV (the deliberate lambda-shift table) is all zeros, so whenever the
-     * loop is closed it centres on lambda 1.0; and the RF-based loop shut-off is calibrated out
-     * (KL_LA_N = 1.5 at every rpm, unreachable), so the loop stays closed right up to full load —
-     * and the app's own WOT-threshold patch pushes full load out of reach too. That means the
-     * integrator has ALREADY cancelled rf_korr in exactly the cells this map is built from, and
-     * New = Old * STFT is self-consistent on its own.
+     * What it decides is what kf_rf_soll is FOR, and the two answers differ by up to 37 % where
+     * KF_RF_KORR_DRREL peaks:
      *
-     * Multiplying anyway is only correct if BMW's density model does NOT match this engine — i.e.
-     * if rf_korr is a fuelling bias rather than a real air-density effect. That is a real
-     * possibility on non-CSL cams and headers, but it cannot be decided from one log: it needs
-     * logs taken at different tabg_delta, compared. `rfKorrMap` / `rfKorrSpreadMap` exist so that
-     * comparison can be made from the data instead of assumed. Turning this on when the model IS
-     * accurate bakes the enrichment into the table and the DME then applies rf_korr on top of it —
-     * up to +37% rich around 2350 rpm.
+     *   ON  — the table holds filling at NOMINAL exhaust temperature; rf_korr adds the
+     *         cold-exhaust enrichment on top. A map tuned on a cold-exhaust drive is still right
+     *         once the exhaust heats up and rf_korr falls back to 1.0.
+     *   OFF — the table holds filling at whatever rf_korr the log was taken under. Self-consistent
+     *         at that condition, and correct at every condition IF BMW's density model exactly
+     *         matches this engine — because then rf_korr cancels out of the derivation.
+     *
+     * They fail in opposite directions, and that is the whole argument: OFF, on a log taken with a
+     * cold exhaust, writes a table that goes LEAN under load once things warm up. ON is rich-safe.
+     * On an S54 that asymmetry is not a close call, which is why the config default is on.
+     *
+     * Whether the model actually matches cannot be settled from one log. It needs the same cell
+     * sampled at different tabg_delta, and then STFT read against rf_korr: flat means the model
+     * matches, sloped means it does not. `rfKorrMap` / `rfKorrSpreadMap` are what make that
+     * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
      */
     applyRfKorr?: boolean;
 }
@@ -66,7 +69,9 @@ export class VECalculator {
     } {
         const rows = this.loadAxis.length;
         const cols = this.rpmAxis.length;
-        const applyRfKorr = options.applyRfKorr === true;
+        // Defaults ON, matching LogFilterConfig.applyRfKorr. A caller that forgets to pass options
+        // must land on the rich-safe behaviour, not the one that can write a lean map.
+        const applyRfKorr = options.applyRfKorr !== false;
 
         // Initialize accumulation grid
         const grid: GridCell[][] = Array(rows)

@@ -217,7 +217,8 @@ LLR_N_SOLL   = LFR_N_N_SOLL          ← ECU の他の場所はこれを見る�
 `K_LA_GRENZ_INI` / `K_LAS_R_FETT` / `K_LAS_R_MAGER`（455 / 510 / 400 mV）を中心に **λ 1.0 を狙う**。
 
 > この「閉ループなら λ 1.0 を狙う」「RF による遮断は無効」の 2 点が、
-> `20-egt-correction.md` §7.2 で `rf_korr` を掛けない根拠になっている。
+> `20-egt-correction.md` §7.2 と `60-tuning-logic.md` §6 で、
+> 測った `rf_korr` をどう使うかを決める根拠になっている。
 
 ---
 
