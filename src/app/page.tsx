@@ -430,8 +430,14 @@ export default function Home() {
    *  reach the calculator and a map built with a different rf_korr treatment than the one the
    *  session records would be unreproducible. Default on — see LogFilterConfig.applyRfKorr. */
   const veCalcOptions = useMemo(
-    () => ({ applyRfKorr: filterConfig.applyRfKorr ?? true }),
-    [filterConfig.applyRfKorr]);
+    () => ({
+      applyRfKorr: filterConfig.applyRfKorr ?? true,
+      // rf_korr is only recoverable from RF/rf_soll while the DME has MAP compensation off; with
+      // it on, RF also carries rf_p_saug_i and the ratio is a different quantity. Read from the
+      // binary rather than from the toggle, because what matters is what the ECU actually holds.
+      mapCompensationOff: patchStatus?.mapOff === true,
+    }),
+    [filterConfig.applyRfKorr, patchStatus?.mapOff]);
 
   const runCalculation = (map: NonNullable<typeof currentMap>, data: any[]) => {
     veCalc.runCalculation(map, data, veCalcOptions);

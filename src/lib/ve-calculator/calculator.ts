@@ -41,6 +41,13 @@ export interface VeCalcOptions {
      * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
      */
     applyRfKorr?: boolean;
+
+    /**
+     * Whether the DME had MAP compensation disabled (k_rf_cfg = 0x02) while this log was taken.
+     * Precondition for measuring rf_korr at all — see annotateRfKorr. Defaults false, so a caller
+     * that cannot establish it gets the pre-existing behaviour rather than a mislabelled ratio.
+     */
+    mapCompensationOff?: boolean;
 }
 
 export class VECalculator {
@@ -202,11 +209,19 @@ export class VECalculator {
      * So dividing the DME's own RF by our interpolation of the same table recovers the multiplier
      * directly — no need to model TABG or read KF_RF_KORR_DRREL.
      *
-     * With MAP compensation ON the DME adds rf_p_saug_i on top, and the ratio is then rf_korr
-     * PLUS the MAP integrator's contribution. It is still a useful diagnostic, but it is no longer
-     * rf_korr alone; callers should say so in the UI rather than pretend otherwise.
+     * With MAP compensation ON the DME adds rf_p_saug_i on top, so the ratio would be rf_korr PLUS
+     * the MAP integrator's contribution — a different quantity wearing the same name. Rather than
+     * report that as rf_korr, `mapCompensationOff = false` leaves rfKorr undefined on every row,
+     * which makes the correction fall back to STFT alone. Normal workflow satisfies the condition:
+     * this app's own PATCH writes k_rf_cfg = 0x02, and the workspace is reloaded from the patched
+     * buffer after a patch write, so patchStatus.mapOff tracks what the ECU actually holds.
      */
-    public annotateRfKorr(currentMap: VEMap, logData: LogDataPoint[]): LogDataPoint[] {
+    public annotateRfKorr(
+        currentMap: VEMap,
+        logData: LogDataPoint[],
+        mapCompensationOff: boolean,
+    ): LogDataPoint[] {
+        if (!mapCompensationOff) return logData;
         return logData.map(point => {
             if (point.rf === undefined) return point;
 

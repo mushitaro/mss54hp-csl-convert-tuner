@@ -235,8 +235,14 @@ PATCH ON（`k_rf_cfg = 0x02`）では `RF = rf_soll × rf_korr` が厳密に成�
   rf_korr = (RF_ds2 / 100) / kf_rf_soll(N, aq_rel_rf)
 ```
 
-で直接測れる（`VECalculator.annotateRfKorr()`）。TABG モデルもテーブル引きも不要。
+で直接測れる（`VECalculator.annotateRfKorr()`）。TABG モデルもテーブル引きも不要で、
+**Pt200 排気温センサが付いていなくても成立する**（センサの状態は DME が出した `RF` に既に織り込まれている）。
+
 MAP 補正が ON のときは `rf_p_saug_i` の寄与が混ざるため、**この比は `rf_korr` 単独ではない**。
+そのため実装は `patchStatus.mapOff`（BIN の `k_rf_cfg` から判定）を見て、
+**MAP 補正が切れていないログでは `rfKorr` を未定義のままにする**。
+結果として補正は掛からず、従来どおり `× STFT` だけになる。
+通常のワークフローでは PATCH が `k_rf_cfg = 0x02` を書くのでこの条件は満たされる。
 
 DS2 selection 3 のオフセット（`decomp/master/030b84.txt` `case 0x1c` から導出。
 payload オフセット = 配列インデックス − 3）:
