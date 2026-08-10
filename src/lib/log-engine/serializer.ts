@@ -21,6 +21,12 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     const hasBank1 = points.some(p => p.lambda1 !== undefined);
     const hasBank2 = points.some(p => p.lambda2 !== undefined);
     const hasTemp = points.some(p => p.coolantTemp !== undefined);
+    // The two EGT-correction channels. Without these the session-log download would silently drop
+    // the only two columns the rf_korr work depends on, and a re-import could never re-derive it.
+    // They come from the live DS2 link rather than from a file, so this is the ONLY way they reach
+    // a CSV at all.
+    const hasRf = points.some(p => p.rf !== undefined);
+    const hasEgt = points.some(p => p.exhaustTemp !== undefined);
 
     const rows = points.map(p => {
         const row: Record<string, number | string> = {
@@ -31,6 +37,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasBank1) row[M.STFT_1] = p.lambda1 ?? '';
         if (hasBank2) row[M.STFT_2] = p.lambda2 ?? '';
         if (hasTemp) row[M.COOLANT_TEMP] = p.coolantTemp ?? '';
+        if (hasRf) row[M.RF] = p.rf ?? '';
+        if (hasEgt) row[M.EXHAUST_TEMP] = p.exhaustTemp ?? '';
         return row;
     });
 

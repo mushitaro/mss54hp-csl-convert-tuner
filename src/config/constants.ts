@@ -83,7 +83,56 @@ export const APP_CONFIG = {
         LAMBDA_2: 'Lambda 2', // [NEW]
         COOLANT_TEMP: 'Kuehlmitteltemperatur', // Guessing/Safety, or fallback
         // User only provided Lambdaintegrator 1, so we handle missing 2 in code.
+        // Header names the WRITER uses live above; the READER accepts any of CSV_ALIASES below.
+        EXHAUST_TEMP: 'Abgastemperatur',
+        RF: 'relative Fuellung',
     },
+
+    /**
+     * Header names the log READER will accept, lowercased, first match wins.
+     *
+     * ### ADD A NEWLY-DISCOVERED CSV HEADER NAME HERE — nowhere else.
+     *
+     * The parser used to carry one header per field plus an ad-hoc `temp1/temp2/temp3` chain for
+     * coolant, which is why coolant was the only field that tolerated a second spelling. Those
+     * three spellings are reproduced verbatim below, so behaviour is unchanged for every log that
+     * parsed before this table existed.
+     *
+     * `rf` and `exhaustTemp` are the two channels the EGT correction work depends on. Their real
+     * Testo header names are NOT yet known — they have to be read off the car — so they ship empty.
+     * An empty alias list simply never matches, which is the same as the column being absent, and
+     * every downstream consumer already treats those two as optional.
+     */
+    CSV_ALIASES: {
+        time: ['time', 'zeit'],
+        rpm: ['rpm', 'drehzahl'],
+        rawLoad: ['relativer oeffnungsquerschnitt'],
+        stft1: ['lambdaintegrator 1'],
+        stft2: ['lambdaintegrator 2'],
+        coolantTemp: ['kuehlmitteltemperatur', 'motor temp.', 'coolant temp'],
+        // Seeded with the names the SERIALIZER writes, so a log exported by this app re-imports to
+        // what it was exported from — that round trip is the only way these two channels reach a
+        // CSV today, since they come from the live DS2 link rather than from a file.
+        // TODO(on-car): add the real Testo header names alongside. One entry each, nothing else.
+        rf: ['relative fuellung'] as string[],
+        exhaustTemp: ['abgastemperatur'] as string[],
+    },
+
+    /**
+     * Below this median, a log's RF column is read as a FRACTION and multiplied by 100.
+     *
+     * The DS2 channel is a percentage (80.0 means 80 % filling) and `annotateRfKorr` divides by
+     * 100 to compare it against the dimensionless Alpha-N table. A CSV exporter may equally well
+     * write 0.80. Both conventions are plausible and the difference is a factor of 100, which is
+     * not a subtle wrongness — it makes every measured rf_korr absurd. 3 sits far from both
+     * populations: a real percentage under load is 55–110, a real fraction is 0.55–1.10.
+     *
+     * Same shape of decision as `medianStep` in log-engine/filter.ts, which tells a seconds log
+     * from a milliseconds one; median rather than mean for the same reason, and the threshold sits
+     * in the wide empty gap between the two populations rather than near either.
+     */
+    CSV_RF_FRACTION_THRESHOLD: 3,
+
     CSV_DELIMITER: ';', // Explicitly set for this format
 
     CONSTANTS: {
