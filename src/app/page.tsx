@@ -28,6 +28,7 @@ import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
+import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
@@ -428,7 +429,19 @@ export default function Home() {
   // the user where they are.
   /** VE-calculation options derived from the session's settings. One place, because six call sites
    *  reach the calculator and a map built with a different rf_korr treatment than the one the
-   *  session records would be unreproducible. Default on — see LogFilterConfig.applyRfKorr. */
+   *  session records would be unreproducible. Default on — see LogFilterConfig.applyRfKorr.
+   *
+   *  Takes the config as an ARGUMENT rather than reading the state directly, because two of those
+   *  call sites are async handlers that have just asked for a different config to be loaded.
+   *  `loadRawLog(…, session.tuneSettings.filterConfig)` schedules a setState; the handler keeps
+   *  running in the render scope it was created in, so a memo over `filterConfig` still holds the
+   *  PREVIOUS session's value there. Rebuilding an archived session that way silently applies the
+   *  wrong rf_korr treatment, and the sha256 reproduction check then fails against bytes that were
+   *  built correctly the first time. The `loadFromBuffer` call in the same handler already passes
+   *  its stored settings explicitly for exactly this reason. */
+  const veCalcOptionsFor = (config: LogFilterConfig): VeCalcOptions => ({
+    applyRfKorr: config.applyRfKorr ?? true,
+  });
   const veCalcOptions = useMemo(
     () => ({ applyRfKorr: filterConfig.applyRfKorr ?? true }),
     [filterConfig.applyRfKorr]);
@@ -687,7 +700,10 @@ export default function Home() {
           session.tuneSettings?.interpolationTable,
         );
         if (processed) {
-          veCalc.runCalculation(map, processed.data, veCalcOptions);
+          // The STORED config, not the memo — see veCalcOptionsFor. `loadRawLog` above only
+          // scheduled the state change; this scope still sees the outgoing session's settings.
+          veCalc.runCalculation(map, processed.data,
+            veCalcOptionsFor(session.tuneSettings?.filterConfig ?? filterConfig));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
