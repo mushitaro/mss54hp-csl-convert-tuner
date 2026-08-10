@@ -1,5 +1,6 @@
 import { APP_CONFIG, EXPERIMENTAL_CONFIG } from '@/config/constants';
 import { VEMap } from '@/lib/types';
+import { EcuItemDef, EcuItemValue, EcuNumericDef } from '@/lib/ecu-items/types';
 
 export class BinaryParser {
     protected buffer: ArrayBuffer;
@@ -32,6 +33,73 @@ export class BinaryParser {
     public getUint16(offset: number): number {
         this.validateOffset(offset, 2);
         return this.view.getUint16(offset, false); // Big Endian (Correct for data)
+    }
+
+    /** Signed variants. The catalog needs them: TABG's diagnostic limits are int16 (-50 °C), and
+     *  reading those unsigned would show 65486. */
+    public getInt8(offset: number): number {
+        this.validateOffset(offset, 1);
+        return this.view.getInt8(offset);
+    }
+
+    public getInt16(offset: number): number {
+        this.validateOffset(offset, 2);
+        return this.view.getInt16(offset, false); // Big Endian
+    }
+
+    /** One contiguous run of same-width numbers — a constant, an axis, or a value grid. */
+    private readRun(def: EcuNumericDef, count: number): number[] {
+        const step = def.bits / 8;
+        const out: number[] = new Array(count);
+        for (let i = 0; i < count; i++) {
+            const at = def.address + i * step;
+            out[i] = def.bits === 8
+                ? (def.signed ? this.getInt8(at) : this.getUint8(at))
+                : (def.signed ? this.getInt16(at) : this.getUint16(at));
+        }
+        return out;
+    }
+
+    /**
+     * Decodes one catalog item. Read-only by design — see lib/ecu-items/types.ts.
+     *
+     * Addresses are used as file offsets with no translation, exactly like every other read in this
+     * class: the XDF address IS the partial-BIN offset. The 2-byte block size header that precedes
+     * a KL/KF block sits at `x.address - 2` and is deliberately not part of any run here.
+     */
+    public readItem(def: EcuItemDef): EcuItemValue {
+        switch (def.kind) {
+            case 'constant': {
+                const raw = this.readRun(def, 1)[0];
+                return { kind: 'constant', symbol: def.symbol, raw, value: def.scaling.toPhysical(raw) };
+            }
+            case 'curve': {
+                const raw = this.readRun(def.values, def.values.n);
+                return {
+                    kind: 'curve', symbol: def.symbol,
+                    x: this.readRun(def.x, def.x.n).map(def.x.scaling.toPhysical),
+                    values: raw.map(def.values.scaling.toPhysical),
+                    raw,
+                };
+            }
+            case 'map': {
+                const flat = this.readRun(def.values, def.values.rows * def.values.cols);
+                const raw: number[][] = [];
+                const values: number[][] = [];
+                for (let r = 0; r < def.values.rows; r++) {
+                    // Row-major, y-major — the same layout getVETable assumes.
+                    const rowRaw = flat.slice(r * def.values.cols, (r + 1) * def.values.cols);
+                    raw.push(rowRaw);
+                    values.push(rowRaw.map(def.values.scaling.toPhysical));
+                }
+                return {
+                    kind: 'map', symbol: def.symbol,
+                    x: this.readRun(def.x, def.x.n).map(def.x.scaling.toPhysical),
+                    y: this.readRun(def.y, def.y.n).map(def.y.scaling.toPhysical),
+                    values, raw,
+                };
+            }
+        }
     }
 
     /**

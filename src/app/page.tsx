@@ -10,6 +10,7 @@ import { MapEditor } from '@/components/MapEditor';
 const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
 const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
+import { EcuItemPanel } from '@/components/EcuItemPanel';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
@@ -1848,6 +1849,7 @@ export default function Home() {
                   readOnly={isArchived}
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} />
+                <EcuItemPanel buffer={binaryBuffer} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2670,6 +2672,7 @@ export default function Home() {
               openUp
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} openUp />
+            <EcuItemPanel buffer={binaryBuffer} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}
