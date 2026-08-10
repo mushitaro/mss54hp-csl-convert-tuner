@@ -5,6 +5,11 @@ expensive to re-derive, and records exactly what has and has not been proven on 
 
 Last updated: 2026-07 (after the first successful real-vehicle write).
 
+> **Companion:** `docs/ecu-logic/` documents the other side of the wire — what the 0401 DME itself
+> is doing (load path, EGT correction, idle control, the FRA bug, binary lineage). This file is
+> about *our* implementation; that one is about the ECU. Start at
+> `docs/ecu-logic/00-glossary.md`.
+
 ---
 
 ## 1. Verification status
@@ -321,11 +326,26 @@ payload**. Physical value = `add + raw * scale`.
 | Offset | Symbol | Field | Format | Scale | Add |
 |---|---|---|---|---|---|
 | 0 | `n` | **RPM** | u16 BE | 1.0 | 0 |
-| 8 | `rf` | relative filling (%) | u16 BE | 0.1 | 0 |
+| 2 | `LLR_N_SOLL` | idle speed target (rpm) | u16 BE | 1.0 | 0 |
+| 4 / 6 | `ML` / `TL` | air mass / load signal | u16 BE | — | — |
+| 8 | `rf` | **relative filling (%)** — AFTER the EGT correction | u16 BE | 0.1 | 0 |
+| 10 | `tan` | intake air temp (°C) | u8 | 1.0 | −48 |
 | 11 | `tmot` | **coolant temp (°C)** | u8 | 1.0 | **−48** |
+| 12 | `toel` | oil temp (°C) | u8 | 1.0 | −48 |
+| 14 | `tabg` | **exhaust gas temp (°C)** | **i8** | **16.0** | 0 |
+| 15 | `t_umg` | ambient temp (°C) | u8 | 1.0 | −48 |
 | 16 | `ub` | battery voltage (V) | u8 | 0.1 | 0 |
 | 20 | `aq_rel` | **relative opening (%)** | u16 BE | 0.46511627906976744 | 0 |
 | 27 / 29 | `wdk1` / `wdk2` | throttle position (%) | i16 BE | 0.1 | 0 |
+
+`rf` and `tabg` are decoded by `liveValueBlocks.ts`; the rest of the added rows are listed because
+they are in the same response and cost nothing to add later. Their offsets come from the 0401
+disassembly (`ds2_handler` `case 0x1c`, payload offset = array index − 3) — see
+`docs/ecu-logic/20-egt-correction.md` §7.1, including the one unresolved inconsistency in that
+derivation and the on-car check that settles it.
+
+`tabg` is the DME's `TABG >> 4` as a **signed** byte, i.e. 16 °C per count over a −55…1250 °C
+sensor range. It is a gating and monitoring channel, not a precision measurement.
 
 `aq_rel` is the **same physical quantity** as the Testo CSV's *"relativer Oeffnungsquerschnitt"* —
 i.e. our `rawLoad`. That mapping is what makes live tuning feed the existing VE pipeline unchanged.
