@@ -1185,6 +1185,11 @@ export class WebSerialDmeLink implements DmeLink {
             stft1,
             stft2,
             coolantTemp: std.coolantTemp ?? undefined,
+            // Same 35-byte response, no extra round trip. Both are `?? undefined` for the same
+            // reason coolantTemp is: decodeField returns null on a short block, and a null there
+            // must stay distinguishable from a genuine 0 °C / 0 % reading.
+            rf: std.rf ?? undefined,
+            exhaustTemp: std.exhaustTemp ?? undefined,
         };
     }
 

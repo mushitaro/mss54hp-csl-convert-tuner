@@ -26,6 +26,26 @@ export const processLogData = (
     // Helper: Get data point at index safely
     const getAt = (idx: number) => (idx >= 0 && idx < rawData.length) ? rawData[idx] : null;
 
+    // --- Cat-protection (open-loop) exclusion setup ---------------------------------------------
+    // `time` is NOT one unit across sources: the live DS2 logger emits seconds
+    // ((performance.now() - startTime) / 1000) while a Testo CSV's first column is milliseconds.
+    // Discriminate on the median sample interval rather than on total span — live polling runs at
+    // ~6-7 Hz (delta ~0.15) and a Testo log at ~150-250 (ms), which is a 30x separation that holds
+    // for a log of any length. Guessing wrong here would either disable the exclusion or swallow
+    // the whole log, so it is worth measuring.
+    const secondsPerTimeUnit = medianStep(rawData) >= 5 ? 0.001 : 1;
+
+    const katsOn = cfg.katsTabgOn ?? 850;
+    // Derived from katsOn rather than fixed at 840, and clamped below it. The stock calibration
+    // puts K_TI_KATS_TABG_AUS 10 °C under K_TI_KATS_TABG_EIN, and that ordering has to survive the
+    // user dragging the threshold: an "off" above the "on" would make the release condition arm
+    // the filter, which is the opposite of what the control says it does.
+    const katsOff = Math.min(cfg.katsTabgOff ?? (katsOn - 10), katsOn);
+    const katsTail = cfg.katsTailSec ?? 20;
+    const katsExclusionOn = (cfg.enableOpenLoopExclusion ?? true);
+    // Time of the last sample seen at or above the arming threshold; -Infinity = never armed.
+    let lastKatsHotTime = -Infinity;
+
     // Use custom table or default
     const interpTable = customTable || APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
 
@@ -53,6 +73,30 @@ export const processLogData = (
         if (cfg.enableIdle && current.rawLoad <= 1.0 && current.rpm < cfg.idleRpm) {
             droppedCount++;
             continue;
+        }
+
+        // 2b. Cat-protection / open-loop filter.
+        // The VE correction reads `stft` = la_f_regler, the DME's own lambda INTEGRATOR. Once the
+        // cat-protection factor ti_f_kats leaves 1.0 the DME deactivates lambda control outright
+        // (FR 4.01 §1.2.4), so the integrator freezes and the samples say nothing about mixture —
+        // but they are collected at high load, exactly where they carry the most weight. Worse,
+        // the enrichment itself is up to +35% (K_TI_F_KATS_MAX = 1.3496), so a frozen trim recorded
+        // over an enriched region will pull the map the wrong way.
+        //
+        // The window has to outlive the threshold crossing: ti_f_kats unwinds at
+        // KL_TI_KATS_DELTA_ML = 0.0195/s, so falling from the 1.3496 ceiling back to 1.0 takes
+        // ~18 s, and lambda stays open for all of it. Hence arm at katsTabgOn and hold until TABG
+        // is back under katsTabgOff AND katsTail seconds have passed.
+        //
+        // No EGT channel in the log (any Testo CSV, and any live log from before this shipped)
+        // means this never engages — the condition below is simply never true.
+        if (katsExclusionOn && current.exhaustTemp !== undefined) {
+            if (current.exhaustTemp >= katsOn) lastKatsHotTime = current.time;
+            const secondsSinceHot = (current.time - lastKatsHotTime) * secondsPerTimeUnit;
+            if (current.exhaustTemp >= katsOff || secondsSinceHot < katsTail) {
+                droppedCount++;
+                continue;
+            }
         }
 
         // 3. Transient Filter
@@ -106,6 +150,24 @@ export const processLogData = (
         droppedCount,
     };
 };
+
+/**
+ * Median gap between consecutive timestamps, used only to tell a seconds log from a milliseconds
+ * one. Median rather than mean because a live run can contain a multi-second stall (a K-line
+ * retry, a dropped block) that would drag an average across the decision boundary. Sampled rather
+ * than exhaustive: 200 gaps settle the unit question and keep this O(1) on a long drive.
+ */
+function medianStep(data: LogDataPoint[]): number {
+    const steps: number[] = [];
+    const limit = Math.min(data.length, 201);
+    for (let i = 1; i < limit; i++) {
+        const d = data[i].time - data[i - 1].time;
+        if (d > 0) steps.push(d);
+    }
+    if (steps.length === 0) return 0;
+    steps.sort((a, b) => a - b);
+    return steps[Math.floor(steps.length / 2)];
+}
 
 function interpolateFactor(rpm: number, table: InterpolationPoint[]): number {
     // Table is sorted by RPM? Yes (0, 900, 1100...)

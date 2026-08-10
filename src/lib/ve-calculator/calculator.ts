@@ -5,6 +5,39 @@ interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
     weightSum: number;       // Sum(Weight)
     rawCount: number;        // Count of samples (integer)
+
+    // rf_korr is tracked on its own weight because it is present on fewer samples than STFT is:
+    // a Testo CSV has no RF channel at all, and even on a live log a sample whose Alpha-N
+    // interpolation comes out 0 yields no ratio. Dividing by `weightSum` would silently understate
+    // the mean on any cell with a mixed set.
+    sumRfKorrWeighted: number;
+    weightSumRfKorr: number;
+    minRfKorr: number;
+    maxRfKorr: number;
+}
+
+export interface VeCalcOptions {
+    /**
+     * Fold the measured rf_korr into the correction: New = Old * STFT * rf_korr.
+     *
+     * OFF BY DEFAULT, and that default is the safe one. The correction this app consumes is
+     * `stft` = la_f_regler, the DME's OWN lambda integrator — not an independent wideband. In the
+     * 0401 calibration KF_LA_TV (the deliberate lambda-shift table) is all zeros, so whenever the
+     * loop is closed it centres on lambda 1.0; and the RF-based loop shut-off is calibrated out
+     * (KL_LA_N = 1.5 at every rpm, unreachable), so the loop stays closed right up to full load —
+     * and the app's own WOT-threshold patch pushes full load out of reach too. That means the
+     * integrator has ALREADY cancelled rf_korr in exactly the cells this map is built from, and
+     * New = Old * STFT is self-consistent on its own.
+     *
+     * Multiplying anyway is only correct if BMW's density model does NOT match this engine — i.e.
+     * if rf_korr is a fuelling bias rather than a real air-density effect. That is a real
+     * possibility on non-CSL cams and headers, but it cannot be decided from one log: it needs
+     * logs taken at different tabg_delta, compared. `rfKorrMap` / `rfKorrSpreadMap` exist so that
+     * comparison can be made from the data instead of assumed. Turning this on when the model IS
+     * accurate bakes the enrichment into the table and the DME then applies rf_korr on top of it —
+     * up to +37% rich around 2350 rpm.
+     */
+    applyRfKorr?: boolean;
 }
 
 export class VECalculator {
@@ -25,10 +58,15 @@ export class VECalculator {
      */
     public calculateNewVEMap(
         currentMap: VEMap,
-        logData: LogDataPoint[]
-    ): { newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][]; weightMap: number[][] } {
+        logData: LogDataPoint[],
+        options: VeCalcOptions = {}
+    ): {
+        newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
+        weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
+    } {
         const rows = this.loadAxis.length;
         const cols = this.rpmAxis.length;
+        const applyRfKorr = options.applyRfKorr === true;
 
         // Initialize accumulation grid
         const grid: GridCell[][] = Array(rows)
@@ -36,7 +74,11 @@ export class VECalculator {
             .map(() =>
                 Array(cols)
                     .fill(null)
-                    .map(() => ({ sumStftWeighted: 0, weightSum: 0, rawCount: 0 }))
+                    .map(() => ({
+                        sumStftWeighted: 0, weightSum: 0, rawCount: 0,
+                        sumRfKorrWeighted: 0, weightSumRfKorr: 0,
+                        minRfKorr: Infinity, maxRfKorr: -Infinity,
+                    }))
             );
 
         // 1. Binning / Aggregation (Weighted)
@@ -52,8 +94,11 @@ export class VECalculator {
 
             if (!rpmInfo || !loadInfo) continue;
 
+            const rfKorr = point.rfKorr;
+            const correction = (applyRfKorr && rfKorr !== undefined) ? avgStft * rfKorr : avgStft;
+
             // Distribute to up to 4 neighbors
-            this.distributeWeight(grid, rows, cols, rpmInfo, loadInfo, avgStft);
+            this.distributeWeight(grid, rows, cols, rpmInfo, loadInfo, correction, rfKorr);
         }
 
         // 2. Calculation
@@ -62,6 +107,8 @@ export class VECalculator {
         const hitMap: number[][] = [];
         const correctionMap: number[][] = [];
         const weightMap: number[][] = [];
+        const rfKorrMap: number[][] = [];
+        const rfKorrSpreadMap: number[][] = [];
 
         for (let r = 0; r < rows; r++) {
             const newRow: number[] = [];
@@ -69,10 +116,23 @@ export class VECalculator {
             const hitRow: number[] = [];
             const correctionRow: number[] = [];
             const weightRow: number[] = [];
+            const rfKorrRow: number[] = [];
+            const rfKorrSpreadRow: number[] = [];
 
             for (let c = 0; c < cols; c++) {
                 const cell = grid[r][c];
                 const oldVal = currentMap.data[r][c];
+
+                // 1.0 / 0.0 mean "this cell was built from samples that carried no rf_korr" — the
+                // same reading as "the correction was inactive", which is what the DME does when
+                // the gate is shut. Callers that need to tell the two apart use rawCount.
+                if (cell.weightSumRfKorr > 0) {
+                    rfKorrRow.push(cell.sumRfKorrWeighted / cell.weightSumRfKorr);
+                    rfKorrSpreadRow.push(cell.maxRfKorr - cell.minRfKorr);
+                } else {
+                    rfKorrRow.push(1.0);
+                    rfKorrSpreadRow.push(0);
+                }
 
                 // Check sufficient weight data
                 if (cell.weightSum > 0.1) {
@@ -109,6 +169,8 @@ export class VECalculator {
             hitMap.push(hitRow);
             correctionMap.push(correctionRow);
             weightMap.push(weightRow);
+            rfKorrMap.push(rfKorrRow);
+            rfKorrSpreadMap.push(rfKorrSpreadRow);
         }
 
         return {
@@ -120,8 +182,38 @@ export class VECalculator {
             diffMap,
             hitMap, // Returns Integer Hits
             correctionMap,
-            weightMap // Returns Weight Sum
+            weightMap, // Returns Weight Sum
+            rfKorrMap, // Weighted-mean rf_korr the cell's samples were taken under
+            rfKorrSpreadMap // max-min rf_korr across those samples
         };
+    }
+
+    /**
+     * Measures rf_korr, the EGT density correction the DME applied, for every sample that carries
+     * an RF reading, and returns a copy of the log with `rfKorr` filled in.
+     *
+     * With MAP compensation off (k_rf_cfg = 0x02, which is what this app's PATCH writes) the DME's
+     * load path is exactly RF = (rf_soll * rf_korr) >> 10, where rf_soll is the Alpha-N lookup.
+     * So dividing the DME's own RF by our interpolation of the same table recovers the multiplier
+     * directly — no need to model TABG or read KF_RF_KORR_DRREL.
+     *
+     * With MAP compensation ON the DME adds rf_p_saug_i on top, and the ratio is then rf_korr
+     * PLUS the MAP integrator's contribution. It is still a useful diagnostic, but it is no longer
+     * rf_korr alone; callers should say so in the UI rather than pretend otherwise.
+     */
+    public annotateRfKorr(currentMap: VEMap, logData: LogDataPoint[]): LogDataPoint[] {
+        return logData.map(point => {
+            if (point.rf === undefined) return point;
+
+            const loadVal = point.correctedLoad ?? point.rawLoad;
+            const rfSoll = this.interpolateMap(currentMap, point.rpm, loadVal);
+            // rfSoll is dimensionless (the table stores raw/1000, 1.0 = 100% fill); the DS2 RF
+            // channel is a percentage. A zero or negative lookup means the operating point sits
+            // outside anything the table describes, and a ratio there would be noise.
+            if (!(rfSoll > 0)) return point;
+
+            return { ...point, rfKorr: (point.rf / 100) / rfSoll };
+        });
     }
 
     private findBoundingIndices(value: number, axis: number[]): { idx1: number; idx2: number; w1: number; w2: number } | null {
@@ -151,7 +243,8 @@ export class VECalculator {
         cols: number,
         rpm: { idx1: number; idx2: number; w1: number; w2: number },
         load: { idx1: number; idx2: number; w1: number; w2: number },
-        val: number
+        val: number,
+        rfKorr?: number
     ) {
         // 4 corners:
         // (r1, c1) weight: load.w1 * rpm.w1
@@ -161,9 +254,17 @@ export class VECalculator {
 
         const add = (r: number, c: number, w: number) => {
             if (r >= 0 && r < rows && c >= 0 && c < cols && w > 0) {
-                grid[r][c].sumStftWeighted += val * w; // Accumulate Weighted Value
-                grid[r][c].weightSum += w;             // Accumulate Weight
-                grid[r][c].rawCount++;                 // Increment Raw Count (Integer)
+                const cell = grid[r][c];
+                cell.sumStftWeighted += val * w; // Accumulate Weighted Value
+                cell.weightSum += w;             // Accumulate Weight
+                cell.rawCount++;                 // Increment Raw Count (Integer)
+
+                if (rfKorr !== undefined) {
+                    cell.sumRfKorrWeighted += rfKorr * w;
+                    cell.weightSumRfKorr += w;
+                    if (rfKorr < cell.minRfKorr) cell.minRfKorr = rfKorr;
+                    if (rfKorr > cell.maxRfKorr) cell.maxRfKorr = rfKorr;
+                }
             }
         };
 

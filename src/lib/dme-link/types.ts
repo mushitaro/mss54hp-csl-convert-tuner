@@ -29,12 +29,18 @@ export interface DmeIdentity {
 /** A single live-telemetry sample, using the same field names as LogDataPoint so it can feed
  * straight into the existing log-processing/VE-calculation pipeline. */
 export interface LiveMeasurement {
+    /** Seconds since the run started. Note the Testo CSV path uses milliseconds for the same
+     *  field name on LogDataPoint — log-engine/filter.ts detects which it is holding. */
     time: number;
     rpm: number;
     rawLoad: number;
     stft1: number;
     stft2: number;
     coolantTemp?: number;
+    /** RF — the DME's relative filling AFTER the EGT correction. Same block as rpm/rawLoad. */
+    rf?: number;
+    /** TABG — exhaust gas temperature, 16 °C resolution. Same block as rpm/rawLoad. */
+    exhaustTemp?: number;
 }
 
 /** Which stage a long transfer is in. Surfaced in the UI so a slow-but-working stage (notably the

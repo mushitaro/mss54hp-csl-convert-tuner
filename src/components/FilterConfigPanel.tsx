@@ -16,6 +16,7 @@ const TEXT = {
         idleHint: 'RPMが下限未満 かつ RO≤1.0 の点を除外',
         tpsHint: 'スロットル開度の変化量(絶対値)',
         immediate: '変更は即時反映されます',
+        katsHint: '排気温が上限を超えると触媒保護増量が入り、DMEはλ制御を停止します。凍結したトリム値をVE計算に取り込まないよう、その区間と復帰後20秒を除外します。EGTを含まないログでは何も起きません。',
     },
     en: {
         settings: 'Filter Settings',
@@ -23,6 +24,7 @@ const TEXT = {
         idleHint: 'Exclude if RPM < Limit & RO≤1.0',
         tpsHint: 'Absolute Change in Opening %',
         immediate: 'Adjustments apply immediately',
+        katsHint: 'Above this EGT the DME adds cat-protection fuel and switches lambda control off, freezing the trim. Those samples and the 20 s it takes the enrichment to unwind are dropped so a frozen trim never reaches the VE map. Does nothing on a log without EGT.',
     },
 };
 
@@ -142,6 +144,38 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                     className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${localConfig.enableIdle ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
                                 />
                                 <p className="text-[9px] text-slate-600">{t.idleHint}</p>
+                            </div>
+
+                            {/* Cat Protect — open-loop exclusion. Defaults ON (`?? true` in the
+                                filter), so a session saved before this field existed behaves the
+                                same as a new one rather than silently keeping frozen-trim rows. */}
+                            <div className="space-y-1">
+                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
+                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={localConfig.enableOpenLoopExclusion ?? true}
+                                            onChange={(e) => handleChange('enableOpenLoopExclusion', e.target.checked)}
+                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
+                                        />
+                                        <span>Cat Protect EGT</span>
+                                    </label>
+                                    <span className={`${(localConfig.enableOpenLoopExclusion ?? true) ? 'text-slate-300' : 'text-slate-600'}`}>
+                                        {localConfig.katsTabgOn ?? 850} °C
+                                    </span>
+                                </div>
+                                <input
+                                    type="range"
+                                    // 700 °C is well below anything that arms the enrichment;
+                                    // 950 is above the sensor's useful working range here. The
+                                    // stock K_TI_KATS_TABG_EIN sits at 850, mid-scale.
+                                    min="700" max="950" step="10"
+                                    disabled={!(localConfig.enableOpenLoopExclusion ?? true)}
+                                    value={localConfig.katsTabgOn ?? 850}
+                                    onChange={(e) => handleChange('katsTabgOn', Number(e.target.value))}
+                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${(localConfig.enableOpenLoopExclusion ?? true) ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
+                                />
+                                <p className="text-[9px] text-slate-600">{t.katsHint}</p>
                             </div>
 
                             {/* Transient Header */}

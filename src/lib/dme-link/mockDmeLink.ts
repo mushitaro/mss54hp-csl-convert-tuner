@@ -198,6 +198,11 @@ export class MockDmeLink implements DmeLink {
         const stft1 = 1.0 + stftWobble + (Math.random() - 0.5) * 0.01;
         const stft2 = 1.0 - stftWobble + (Math.random() - 0.5) * 0.01;
         const coolantTemp = 85 + Math.sin(t * 0.05) * 1.5;
+        // Idle-consistent: ~10% relative filling, and an EGT that respects the DME's 16 °C
+        // quantisation so the mock exercises the same coarse channel the car sends. Kept well
+        // under K_TI_KATS_TABG_EIN (850 °C) so the mock does not trip the cat-protection filter.
+        const rf = 10 + Math.sin(t * 0.7) * 0.6;
+        const exhaustTemp = Math.round((360 + Math.sin(t * 0.11) * 40) / 16) * 16;
 
         return {
             time: t,
@@ -206,6 +211,8 @@ export class MockDmeLink implements DmeLink {
             stft1,
             stft2,
             coolantTemp,
+            rf,
+            exhaustTemp,
         };
     }
 

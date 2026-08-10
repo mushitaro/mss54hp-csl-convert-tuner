@@ -7,7 +7,11 @@ import { LogDataPoint } from '@/lib/types';
  * interpolation table by RPM (see log-engine/filter.ts), not a channel that is logged or read from
  * the DME. It is rendered as a fixed computed column by LogDataTable rather than a toggleable field.
  */
-export type FieldKey = 'rpm' | 'rawLoad' | 'correctedLoad' | 'lambda1' | 'lambda2' | 'coolantTemp';
+export type FieldKey =
+    | 'rpm' | 'rawLoad' | 'correctedLoad' | 'lambda1' | 'lambda2' | 'coolantTemp'
+    // Read out of the same DS2 block as rpm/tmot/aq_rel, so they cost nothing extra to log.
+    // `rfKorr` is the one derived member of the set — see calculator.ts for how it is measured.
+    | 'exhaustTemp' | 'rf' | 'rfKorr';
 
 export interface FieldMeta {
     key: FieldKey;
@@ -51,6 +55,25 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         // so it can hold the warm end of the M-red ramp without competing with a plotted series.
         relevance: 'optional', color: '#F87A7F', // M-red 300 (8.1:1)
     },
+    exhaustTemp: {
+        // The DME sends this at 16 °C per count, so a decimal place would be a lie about precision.
+        key: 'exhaustTemp', label: 'EGT', unit: '°C', format: v => v.toFixed(0),
+        // Shares y1 with RPM: both are large-magnitude, and keeping EGT off the lambda axis stops
+        // it flattening the ~1.0 traces that matter most there.
+        relevance: 'optional', chartAxis: 'y1', color: '#F64A50', // M-red 400 — hotter step than Temp's 300
+    },
+    rf: {
+        key: 'rf', label: 'RF', unit: '%', format: v => v.toFixed(1),
+        // Blue like the other fill/load channels, one step lighter than correctedLoad's 500 so the
+        // pair reads as "same family, this one is the DME's own number".
+        relevance: 'optional', chartAxis: 'y3', color: '#6CCBEF', // M-blue 300
+    },
+    rfKorr: {
+        key: 'rfKorr', label: 'RF KORR', unit: '', format: v => v.toFixed(3),
+        // Violet = derived diagnostic, per globals.css. One step darker than the Factor column's
+        // #9B84E8 so the two never collide in the same table row.
+        relevance: 'optional', chartAxis: 'y2', color: '#7E63DB', // M-violet (amber-600 alias)
+    },
 };
 
 export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as FieldKey[])
@@ -58,6 +81,9 @@ export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as
 
 export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     rpm: true, rawLoad: true, correctedLoad: true, lambda1: true, lambda2: true, coolantTemp: true,
+    // On by default: the whole point of reading them is that the EGT correction is invisible
+    // otherwise. They still only appear when the log actually carries them (isFieldPresent).
+    exhaustTemp: true, rf: true, rfKorr: true,
 };
 
 /**
@@ -67,5 +93,18 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
  */
 export function isFieldPresent(key: FieldKey, data: LogDataPoint[]): boolean {
     if (LOG_FIELD_REGISTRY[key].relevance === 'core') return true;
-    return data.length > 0 && data[0][key] !== undefined;
+    // Scan rather than test row 0 alone. `rfKorr` is derived per row and is legitimately absent on
+    // some of them (an Alpha-N interpolation of 0 leaves it undefined), so a row-0 test would hide
+    // a column the log really does carry. Capped because this runs on the full unfiltered log:
+    // 2000 rows is the same window LogTimeSeriesChart plots, and a channel that appears only after
+    // that is a broken log, not a column worth revealing.
+    // rfKorr is measured during the VE calculation, so it is absent from the RAW log this is
+    // normally asked about. Its real precondition is the channel it is derived from: if the log
+    // carries rf, the column belongs — and the rows will fill in as soon as a calculation runs.
+    const probe: FieldKey = key === 'rfKorr' ? 'rf' : key;
+    const limit = Math.min(data.length, 2000);
+    for (let i = 0; i < limit; i++) {
+        if (data[i][probe] !== undefined) return true;
+    }
+    return false;
 }

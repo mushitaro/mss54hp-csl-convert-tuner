@@ -353,6 +353,9 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
 
         const showLambda1 = !!visibleFields.lambda1 && isFieldPresent('lambda1', presenceSource);
         const showLambda2 = !!visibleFields.lambda2 && isFieldPresent('lambda2', presenceSource);
+        const showEgt = !!visibleFields.exhaustTemp && isFieldPresent('exhaustTemp', presenceSource);
+        const showRf = !!visibleFields.rf && isFieldPresent('rf', presenceSource);
+        const showRfKorr = !!visibleFields.rfKorr && isFieldPresent('rfKorr', presenceSource);
 
         return [
             {
@@ -402,8 +405,50 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 yaxis: 'y2',
                 visible: showLambda2,
             },
+            {
+                // EGT rides y1 with RPM. Its own axis would be a fourth scale on a chart that
+                // already carries three, and the two are the same order of magnitude, so the
+                // shared axis costs nothing readable.
+                x: times,
+                y: points.map(d => d.exhaustTemp) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.exhaustTemp.label,
+                line: { color: LOG_FIELD_REGISTRY.exhaustTemp.color, width: 1.5 },
+                yaxis: 'y',
+                visible: showEgt,
+            },
+            {
+                // RF next to the two load traces it belongs with: rawLoad is what the throttle is
+                // doing, RF is what the DME concluded the cylinder actually got.
+                x: times,
+                y: points.map(d => d.rf) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rf.label,
+                line: { color: LOG_FIELD_REGISTRY.rf.color, width: 1.5, dash: 'dashdot' },
+                yaxis: 'y3',
+                visible: showRf,
+            },
+            {
+                // rf_korr sits on the lambda axis because it lives in the same 1.0-centred range,
+                // and because reading it against the trim is the whole point: a trim that dips
+                // exactly where rf_korr rises is the loop cancelling the enrichment.
+                x: times,
+                y: points.map(d => d.rfKorr) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rfKorr.label,
+                line: { color: LOG_FIELD_REGISTRY.rfKorr.color, width: 2, dash: 'dot' },
+                yaxis: 'y2',
+                visible: showRfKorr,
+            },
         ];
-    }, [data, presenceSource, visibleFields.lambda1, visibleFields.lambda2]);
+    }, [
+        data, presenceSource,
+        visibleFields.lambda1, visibleFields.lambda2,
+        visibleFields.exhaustTemp, visibleFields.rf, visibleFields.rfKorr,
+    ]);
 
     /** Zoom persistence, and the way out of it.
      *

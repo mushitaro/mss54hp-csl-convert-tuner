@@ -393,6 +393,22 @@ export default function Home() {
     selectedLogIndex, setSelectedLogIndex, windowedLogData, LOG_WINDOW_SIZE,
   } = logFileState;
 
+  /** The rows the table and the chart both render. Normally this is the log-engine's own window,
+   *  but once a VE calculation has run there is a better copy of the same rows: the annotated one,
+   *  which carries the measured rf_korr. Showing that copy is what makes the RF KORR column agree
+   *  with the map that was just built from it.
+   *
+   *  The length guard is load-bearing. `annotatedLog` is only valid for the log it was computed
+   *  from; after a log is reloaded or refiltered without re-running the calculation it is stale,
+   *  and slicing a stale array by this window would put the wrong rf_korr next to every row. */
+  const displayedLogWindow = useMemo(() => {
+    const annotated = veCalc.annotatedLog;
+    if (annotated && processedLog && annotated.length === processedLog.data.length) {
+      return annotated.slice(logWindowStart, logWindowStart + LOG_WINDOW_SIZE);
+    }
+    return windowedLogData;
+  }, [veCalc.annotatedLog, processedLog, logWindowStart, windowedLogData, LOG_WINDOW_SIZE]);
+
   /** The selection is stored against the WHOLE log; both log views index their own window. Converting
    *  in one place is what lets a selection survive a scrub instead of being reset by it — outside the
    *  window the relative index simply misses, which both views already render as "nothing selected"
@@ -1039,6 +1055,8 @@ export default function Home() {
           lambda1: sample.stft1,
           lambda2: sample.stft2,
           coolantTemp: sample.coolantTemp,
+          rf: sample.rf,
+          exhaustTemp: sample.exhaustTemp,
         };
         liveSamplesRef.current.push(point);
         persistQueueRef.current.push(point);
@@ -2028,7 +2046,7 @@ export default function Home() {
               {(activeTab === 'log' && processedLog) && (
                 <div className="h-full w-full pb-0">
                   <LogDataTable
-                    data={windowedLogData}
+                    data={displayedLogWindow}
                     selectedIndex={windowRelativeSelection}
                     onRowClick={selectAbsoluteFromWindow}
                     totalCount={processedLog.data.length}
@@ -2154,7 +2172,7 @@ export default function Home() {
                   <div className="absolute inset-0 flex flex-col">
                     <div className="flex-1 min-h-0">
                       <LogTimeSeriesChart
-                        data={windowedLogData}
+                        data={displayedLogWindow}
                         selectedIndex={windowRelativeSelection}
                         onPointClick={selectAbsoluteFromWindow}
                         visibleFields={fieldVisibility.visibleFields}
