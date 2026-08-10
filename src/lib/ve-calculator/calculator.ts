@@ -41,13 +41,6 @@ export interface VeCalcOptions {
      * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
      */
     applyRfKorr?: boolean;
-
-    /**
-     * Whether the DME had MAP compensation disabled (k_rf_cfg = 0x02) while this log was taken.
-     * Precondition for measuring rf_korr at all — see annotateRfKorr. Defaults false, so a caller
-     * that cannot establish it gets the pre-existing behaviour rather than a mislabelled ratio.
-     */
-    mapCompensationOff?: boolean;
 }
 
 export class VECalculator {
@@ -209,19 +202,17 @@ export class VECalculator {
      * So dividing the DME's own RF by our interpolation of the same table recovers the multiplier
      * directly — no need to model TABG or read KF_RF_KORR_DRREL.
      *
-     * With MAP compensation ON the DME adds rf_p_saug_i on top, so the ratio would be rf_korr PLUS
-     * the MAP integrator's contribution — a different quantity wearing the same name. Rather than
-     * report that as rf_korr, `mapCompensationOff = false` leaves rfKorr undefined on every row,
-     * which makes the correction fall back to STFT alone. Normal workflow satisfies the condition:
-     * this app's own PATCH writes k_rf_cfg = 0x02, and the workspace is reloaded from the patched
-     * buffer after a patch write, so patchStatus.mapOff tracks what the ECU actually holds.
+     * `rf_soll * rf_korr` is what the DME computes either way — MAP compensation only ADDS
+     * rf_p_saug_i on top of it. So the ratio is still rf_korr plus a bounded error, not a
+     * different quantity: rf_p_saug_i is clamped to ±2.5 %RF (k_rf_p_saug_i_min/max @0xE5EE/F0),
+     * and rf_korr only engages above 55–80 %RF, so the worst case is ~±4 % on a signal that runs
+     * to +37 %. Measuring it anyway beats discarding it — not correcting at all is the larger
+     * error, and it is the one that goes lean.
+     *
+     * (Tuning with MAP compensation still on is its own problem — it hides VE error from the
+     * trim — but that invalidates the whole run, not this measurement.)
      */
-    public annotateRfKorr(
-        currentMap: VEMap,
-        logData: LogDataPoint[],
-        mapCompensationOff: boolean,
-    ): LogDataPoint[] {
-        if (!mapCompensationOff) return logData;
+    public annotateRfKorr(currentMap: VEMap, logData: LogDataPoint[]): LogDataPoint[] {
         return logData.map(point => {
             if (point.rf === undefined) return point;
 

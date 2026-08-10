@@ -51,7 +51,7 @@ export function useVeCalculation() {
     const calc = new VECalculator();
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
-    const annotated = calc.annotateRfKorr(map, data, options.mapCompensationOff === true);
+    const annotated = calc.annotateRfKorr(map, data);
     const result = calc.calculateNewVEMap(map, annotated, options);
 
     setAnnotatedLog(annotated);
