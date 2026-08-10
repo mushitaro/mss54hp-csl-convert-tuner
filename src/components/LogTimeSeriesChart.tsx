@@ -356,6 +356,10 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         const showEgt = !!visibleFields.exhaustTemp && isFieldPresent('exhaustTemp', presenceSource);
         const showRf = !!visibleFields.rf && isFieldPresent('rf', presenceSource);
         const showRfKorr = !!visibleFields.rfKorr && isFieldPresent('rfKorr', presenceSource);
+        const showEgtDerived = !!visibleFields.egtFromRfKorr
+            && isFieldPresent('egtFromRfKorr', presenceSource);
+        const showRfKorrDerived = !!visibleFields.rfKorrFromEgt
+            && isFieldPresent('rfKorrFromEgt', presenceSource);
 
         return [
             {
@@ -443,11 +447,45 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 yaxis: 'y2',
                 visible: showRfKorr,
             },
+            // The cross-check pair, appended at the END. Trace order is an index the click handler
+            // and the marker overlay both count on — see the note above — so new traces go here
+            // and nowhere else.
+            //
+            // Each rides its measured counterpart's axis so the residual reads as the gap between
+            // two adjacent lines. Dashed against that counterpart's solid/dotted: the point is to
+            // see them diverge, not to tell them apart at a glance.
+            {
+                x: times,
+                y: points.map(d => d.egtFromRfKorr) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.egtFromRfKorr.label,
+                line: { color: LOG_FIELD_REGISTRY.egtFromRfKorr.color, width: 1.5, dash: 'dash' },
+                yaxis: 'y',
+                // Gaps are the normal case here, not missing data: the correction profile is only
+                // invertible over part of the rpm axis. Plotly breaks the line at each undefined,
+                // which is the honest rendering — connectgaps would draw a straight run across a
+                // region the column has nothing to say about.
+                connectgaps: false,
+                visible: showEgtDerived,
+            },
+            {
+                x: times,
+                y: points.map(d => d.rfKorrFromEgt) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rfKorrFromEgt.label,
+                line: { color: LOG_FIELD_REGISTRY.rfKorrFromEgt.color, width: 1.5, dash: 'dash' },
+                yaxis: 'y2',
+                connectgaps: false,
+                visible: showRfKorrDerived,
+            },
         ];
     }, [
         data, presenceSource,
         visibleFields.lambda1, visibleFields.lambda2,
         visibleFields.exhaustTemp, visibleFields.rf, visibleFields.rfKorr,
+        visibleFields.egtFromRfKorr, visibleFields.rfKorrFromEgt,
     ]);
 
     /** Zoom persistence, and the way out of it.

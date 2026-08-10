@@ -1,5 +1,9 @@
 import { LogDataPoint, VEMap } from '@/lib/types';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WOT_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD, CSL_STOCK_WOT_RPM } from '@/config/constants';
+import {
+    EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, invertRfKorrProfile, rfKorrAt,
+    rfKorrProfileAt, tabgModelAt,
+} from './egtTables';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -41,6 +45,15 @@ export interface VeCalcOptions {
      * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
      */
     applyRfKorr?: boolean;
+
+    /**
+     * The DME's own EGT tables, decoded from the loaded binary. Optional throughout: without them
+     * every derived column is simply absent and the calculation behaves exactly as it did before
+     * they existed. `null` means the binary could not be decoded — treated the same as absent,
+     * deliberately, since the alternative would be to substitute a stock table this binary may
+     * not have. See readEgtTables.
+     */
+    egt?: EgtTables | null;
 }
 
 export class VECalculator {
@@ -211,8 +224,15 @@ export class VECalculator {
      *
      * (Tuning with MAP compensation still on is its own problem — it hides VE error from the
      * trim — but that invalidates the whole run, not this measurement.)
+     *
+     * `egt` is optional and additive. Given the DME's own tables it also fills the cross-check
+     * pair — see LogDataPoint.egtFromRfKorr / rfKorrFromEgt — which is the same rf_korr reached
+     * by karter16's TABG route, so the two can be laid side by side. Without it this behaves
+     * exactly as it did before the tables existed, which is what every no-binary path relies on.
      */
-    public annotateRfKorr(currentMap: VEMap, logData: LogDataPoint[]): LogDataPoint[] {
+    public annotateRfKorr(
+        currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
+    ): LogDataPoint[] {
         return logData.map(point => {
             if (point.rf === undefined) return point;
 
@@ -223,7 +243,37 @@ export class VECalculator {
             // outside anything the table describes, and a ratio there would be noise.
             if (!(rfSoll > 0)) return point;
 
-            return { ...point, rfKorr: (point.rf / 100) / rfSoll };
+            const rfKorr = (point.rf / 100) / rfSoll;
+            const out: LogDataPoint = { ...point, rfKorr, rfSoll };
+            if (!egt) return out;
+
+            // The nominal exhaust temperature BMW measured for this operating point. Both derived
+            // columns hang off it, and the DME's own Y axis for this table is the final RF — which
+            // is the channel we logged, not rf_soll.
+            const model = tabgModelAt(egt, point.rpm, point.rf / 100);
+
+            // (a) rf_korr -> EGT. Sparse: refuses wherever the profile cannot be inverted honestly.
+            //     The sensor's own delta is passed as a hint so the two non-monotone rpm bands
+            //     (1600 / 1900) can still answer when there is a sensor to break the tie — that is
+            //     not circular, because the hint only PICKS among exact roots of the measured k.
+            const hint = point.exhaustTemp === undefined
+                ? undefined : Math.max(0, model - point.exhaustTemp);
+            const deltaInv = invertRfKorrProfile(
+                rfKorrProfileAt(egt, point.rpm), egt.rfKorr.delta, rfKorr,
+                { ...EGT_INVERSION_DEFAULTS, hint },
+            );
+            if (deltaInv !== undefined) out.egtFromRfKorr = model - deltaInv;
+
+            // (b) EGT -> rf_korr. Reproduces the gate rather than ignoring it: below the filling
+            //     floor the DME applies 1.000 regardless of how cold the exhaust is, so 1.000 is
+            //     the right answer there and matching `rfKorr` is a clean pass on both offsets.
+            if (point.exhaustTemp !== undefined) {
+                out.rfKorrFromEgt = gateOpen(egt, point.rpm, rfSoll)
+                    ? rfKorrAt(egt, point.rpm, Math.max(0, model - point.exhaustTemp))
+                    : 1.0;
+            }
+
+            return out;
         });
     }
 

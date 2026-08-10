@@ -29,6 +29,7 @@ import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
+import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
@@ -439,12 +440,28 @@ export default function Home() {
    *  wrong rf_korr treatment, and the sha256 reproduction check then fails against bytes that were
    *  built correctly the first time. The `loadFromBuffer` call in the same handler already passes
    *  its stored settings explicitly for exactly this reason. */
-  const veCalcOptionsFor = (config: LogFilterConfig): VeCalcOptions => ({
+  const veCalcOptionsFor = (config: LogFilterConfig, egt: EgtTables | null): VeCalcOptions => ({
     applyRfKorr: config.applyRfKorr ?? true,
+    egt,
   });
+
+  /** The DME's EGT tables, read out of the BASE that is loaded right now.
+   *
+   *  The BASE is the right source even when a previous session already tuned this table: whatever
+   *  KF_RF_KORR_DRREL these bytes hold is what the DME applied while the log was being recorded,
+   *  and that is exactly what the measurement is against. Nothing this app patches touches
+   *  0xE84A–0xE8FE, so the patch toggles cannot move it either.
+   *
+   *  `null` when there is no binary, or when the bytes do not match what the catalog describes.
+   *  Every consumer treats that as "behave as if these tables were never read". */
+  const egtTables = useMemo(
+    () => (binaryBuffer ? readEgtTables(binaryBuffer) : null),
+    [binaryBuffer]);
+
   const veCalcOptions = useMemo(
-    () => ({ applyRfKorr: filterConfig.applyRfKorr ?? true }),
-    [filterConfig.applyRfKorr]);
+    () => veCalcOptionsFor(filterConfig, egtTables),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filterConfig.applyRfKorr, egtTables]);
 
   const runCalculation = (map: NonNullable<typeof currentMap>, data: any[]) => {
     veCalc.runCalculation(map, data, veCalcOptions);
@@ -700,10 +717,12 @@ export default function Home() {
           session.tuneSettings?.interpolationTable,
         );
         if (processed) {
-          // The STORED config, not the memo — see veCalcOptionsFor. `loadRawLog` above only
-          // scheduled the state change; this scope still sees the outgoing session's settings.
-          veCalc.runCalculation(map, processed.data,
-            veCalcOptionsFor(session.tuneSettings?.filterConfig ?? filterConfig));
+          // The STORED config and THESE bytes, not the memos — see veCalcOptionsFor. Both
+          // `loadRawLog` and `loadFromBuffer` above only scheduled their state changes; this
+          // scope still sees the outgoing session's settings and the previous binary.
+          veCalc.runCalculation(map, processed.data, veCalcOptionsFor(
+            session.tuneSettings?.filterConfig ?? filterConfig,
+            readEgtTables(bins.baseBinaryBuffer)));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -812,7 +831,12 @@ export default function Home() {
     liveSamplesRef.current = points;
     const processed = logFileState.loadRawLog(points, 'recovered-log.csv');
     if (processed) {
-      runCalculation(map, processed.data);
+      // Same stale-scope reason as the archived rebuild: `loadFromBuffer` above only scheduled
+      // the binary swap, so the egtTables memo still describes whatever was loaded before. The
+      // filter config is NOT reloaded here, so the live one is the right one.
+      veCalc.runCalculation(map, processed.data,
+        veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer)));
+      comparison.applyDefaultsAfterCalculation();
       goToTab('new');
     } else {
       goToTab('current');

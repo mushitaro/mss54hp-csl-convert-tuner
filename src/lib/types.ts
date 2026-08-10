@@ -32,6 +32,27 @@ export interface LogDataPoint {
      *  so rf_korr = (rf/100) / kf_rf_soll(rpm, correctedLoad). 1.0 = no correction.
      *  Only populated when `rf` is present AND the Alpha-N interpolation is non-zero. */
     rfKorr?: number;
+    /** rf_soll — this app's interpolation of the Alpha-N table at (rpm, correctedLoad), i.e. the
+     *  denominator `rfKorr` was measured against. Surfaced because it is what decides whether the
+     *  correction's load gate was open, and because a wrong one falsifies rf_korr silently. */
+    rfSoll?: number;
+
+    // --- The EGT cross-check pair ---------------------------------------------------------------
+    // Two independent routes to the same physical quantity. Agreement means DS2 offsets 8 and 14,
+    // the catalog addresses, kf_rf_tabg_modell's interpretation and the RF/rf_soll measurement are
+    // ALL correct at once; disagreement localises the fault. This is karter16's Option 2 (log TABG,
+    // do the maths) running alongside this app's direct measurement (RF / rf_soll).
+
+    /** Exhaust temperature implied by the MEASURED rf_korr: invert KF_RF_KORR_DRREL along Δ, then
+     *  subtract from kf_rf_tabg_modell. Compare against `exhaustTemp`; the residual is in °C.
+     *  Sparse by nature — only ~45 % of the rpm axis has an invertible profile, and k = 1.000
+     *  pins Δ no better than [0, 30] — so most rows are legitimately blank. See egtTables.ts. */
+    egtFromRfKorr?: number;
+    /** rf_korr implied by the MEASURED exhaust temperature: Δ = model − TABG, then look the table
+     *  up. Compare against `rfKorr`; the residual is dimensionless. Populated whenever the log
+     *  carries `exhaustTemp` and `rf`, including where the gate was shut (in which case it is
+     *  1.000, because that is what the DME applied). */
+    rfKorrFromEgt?: number;
 }
 
 export interface ProcessedLog {

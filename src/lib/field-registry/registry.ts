@@ -11,7 +11,11 @@ export type FieldKey =
     | 'rpm' | 'rawLoad' | 'correctedLoad' | 'lambda1' | 'lambda2' | 'coolantTemp'
     // Read out of the same DS2 block as rpm/tmot/aq_rel, so they cost nothing extra to log.
     // `rfKorr` is the one derived member of the set — see calculator.ts for how it is measured.
-    | 'exhaustTemp' | 'rf' | 'rfKorr';
+    | 'exhaustTemp' | 'rf' | 'rfKorr'
+    // The cross-check pair: each of the two measured channels above, re-derived from the OTHER
+    // one through the DME's own tables. Instruments, not data — they exist to be laid against
+    // their measured counterparts, and a residual is what they are for.
+    | 'egtFromRfKorr' | 'rfKorrFromEgt';
 
 export interface FieldMeta {
     key: FieldKey;
@@ -74,6 +78,19 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         // #9B84E8 so the two never collide in the same table row.
         relevance: 'optional', chartAxis: 'y2', color: '#7E63DB', // M-violet (amber-600 alias)
     },
+    // The cross-check pair. Each sits on its measured counterpart's axis, one violet step apart
+    // from it, so a residual reads as a gap between two adjacent lines rather than as two
+    // unrelated traces. Charted dashed — see LogTimeSeriesChart.
+    egtFromRfKorr: {
+        // No decimal, matching EGT: the sensor it is compared against arrives at 16 °C per count,
+        // and claiming more resolution than the reference would misstate what the residual means.
+        key: 'egtFromRfKorr', label: 'EGT (RF KORR)', unit: '°C', format: v => v.toFixed(0),
+        relevance: 'optional', chartAxis: 'y1', color: '#B9A6EE', // M-violet 300
+    },
+    rfKorrFromEgt: {
+        key: 'rfKorrFromEgt', label: 'RF KORR (EGT)', unit: '', format: v => v.toFixed(3),
+        relevance: 'optional', chartAxis: 'y2', color: '#CBBCF2', // M-violet 200
+    },
 };
 
 export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as FieldKey[])
@@ -84,6 +101,18 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     // On by default: the whole point of reading them is that the EGT correction is invisible
     // otherwise. They still only appear when the log actually carries them (isFieldPresent).
     exhaustTemp: true, rf: true, rfKorr: true,
+    // Off by default, unlike the pair above. These are verification instruments rather than
+    // channels: EGT (RF KORR) is blank on most rows by construction (only ~45 % of the rpm axis
+    // has an invertible correction profile), and a mostly-empty column shown by default reads as
+    // a broken feature. Turn them on when checking a log against the DME, not while tuning.
+    egtFromRfKorr: false, rfKorrFromEgt: false,
+};
+
+/** For a derived channel, the logged channel whose presence decides whether the column belongs. */
+const PRESENCE_PROBE: Partial<Record<FieldKey, FieldKey>> = {
+    rfKorr: 'rf',
+    egtFromRfKorr: 'rf',
+    rfKorrFromEgt: 'exhaustTemp',
 };
 
 /**
@@ -98,10 +127,12 @@ export function isFieldPresent(key: FieldKey, data: LogDataPoint[]): boolean {
     // a column the log really does carry. Capped because this runs on the full unfiltered log:
     // 2000 rows is the same window LogTimeSeriesChart plots, and a channel that appears only after
     // that is a broken log, not a column worth revealing.
-    // rfKorr is measured during the VE calculation, so it is absent from the RAW log this is
-    // normally asked about. Its real precondition is the channel it is derived from: if the log
-    // carries rf, the column belongs — and the rows will fill in as soon as a calculation runs.
-    const probe: FieldKey = key === 'rfKorr' ? 'rf' : key;
+    // The derived channels are all measured during the VE calculation, so they are absent from
+    // the RAW log this is normally asked about. Their real precondition is the channel each is
+    // derived from: if the log carries that, the column belongs, and the rows fill in as soon as
+    // a calculation runs. rfKorrFromEgt probes exhaustTemp rather than rf because the sensor is
+    // the scarce half of that pair — rf alone cannot produce it.
+    const probe = PRESENCE_PROBE[key] ?? key;
     const limit = Math.min(data.length, 2000);
     for (let i = 0; i < limit; i++) {
         if (data[i][probe] !== undefined) return true;
