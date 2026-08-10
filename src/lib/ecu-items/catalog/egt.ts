@@ -73,6 +73,22 @@ export const EGT_ITEMS: EcuItemDef[] = [
         },
     },
     {
+        kind: 'curve', symbol: 'kl_aq_rel_rf_fakt', address: 0xE058, bank: 'master',
+        category: 'load', label: 'AQ_REL FACTOR',
+        description: {
+            en: 'The DME\'s own AQ_REL -> aq_rel_rf factor, applied as a DIVISOR, so a value below '
+                + '1.0 makes aq_rel_rf larger than AQ_REL. This app reproduces it with the Alpha-N '
+                + 'interpolation table; if the two disagree, every load-axis lookup is off — '
+                + 'including the rf_soll that rf_korr is measured against. Worth comparing.',
+            ja: 'DME 自身の AQ_REL → aq_rel_rf 変換係数。**除数**として使われるため、'
+                + '1.0 未満の値は aq_rel_rf を AQ_REL より大きくする。'
+                + '本アプリは Alpha-N テーブル設定（InterpolationTable）でこれを再現している。'
+                + '両者がずれていると負荷軸の参照すべてがずれ、rf_korr の分母になる rf_soll もずれる。要照合。',
+        },
+        x: { address: 0xE058, n: 12, bits: 16, signed: false, units: 'rpm', label: 'RPM', scaling: IDENTITY },
+        values: { address: 0xE070, n: 12, bits: 16, signed: false, units: '', scaling: divideBy(32768) },
+    },
+    {
         kind: 'constant', symbol: 'k_rf_cfg', address: 0xE5E4, bank: 'master',
         category: 'load', label: 'RF CFG',
         bits: 8, signed: false, units: '', scaling: IDENTITY,

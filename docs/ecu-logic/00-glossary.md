@@ -14,7 +14,11 @@ MSS54HP CSL `0401` の**ECU 側ロジック**を読むための最低限。
 | `30-idle-control.md` | アイドル制御（LFR / LLR / LLS / LLSync）と λ 開ループ条件 |
 | `40-fr-adaptation-bug.md` | `K_FR_T_ADAPT` / `FRA_TIMER` バグと A/C アイドルハンチング |
 | `50-binary-lineage.md` | 素の CSL / Terra / Community Patch v1 の実測バイト差分 |
+| **`60-tuning-logic.md`** | **このアプリのチューニングロジックとデータログ。「DME がこうだから、こう組んだ」** |
 | `90-sources.md` | 出典対応表 |
+
+00〜50 は **DME が何をしているか**、60 は **それを受けてアプリが何をするか**。
+チューニング手順そのものを追いたいなら `60` から読み、必要に応じて 10/20/30 を参照するのが早い。
 
 ---
 

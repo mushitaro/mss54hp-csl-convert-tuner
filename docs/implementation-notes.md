@@ -1,14 +1,39 @@
-# Implementation Notes — DME Link, Checksum & Tuning Pipeline
+# Implementation Notes — DME Link, Checksum & Flashing
 
-Working memo for the live-DME features. Captures the protocol facts and design decisions that are
-expensive to re-derive, and records exactly what has and has not been proven on real hardware.
+Working memo for the **transport and flashing** layers: how this app talks to the DME, how the
+checksum works, and what has and has not been proven on real hardware. Protocol facts and design
+decisions that are expensive to re-derive.
 
 Last updated: 2026-07 (after the first successful real-vehicle write).
 
-> **Companion:** `docs/ecu-logic/` documents the other side of the wire — what the 0401 DME itself
-> is doing (load path, EGT correction, idle control, the FRA bug, binary lineage). This file is
-> about *our* implementation; that one is about the ECU. Start at
+> **This file used to be titled "…& Tuning Pipeline" and never contained one.** The tuning logic —
+> what the log channels mean, why PATCH writes the bytes it writes, how the VE correction is
+> derived, and how the EGT correction is handled — lives in
+> **`docs/ecu-logic/60-tuning-logic.md`**. Start there for anything above the byte layer.
+>
+> The rest of `docs/ecu-logic/` covers the other side of the wire: what the 0401 DME itself does
+> (load path, EGT correction, idle control, the FRA bug, binary lineage), starting at
 > `docs/ecu-logic/00-glossary.md`.
+
+**Where things are in this file.** §9 is 560 lines — 40 % of the document — and is a closed
+investigation kept for its dead-hypothesis log. Its conclusion is in the box at the top of §9;
+you do not need to read the rest unless you are re-opening the baud-rate question.
+
+| § | Topic |
+|---|---|
+| 1 | What is verified on real hardware |
+| 2 | Module map |
+| 3 | DS2 protocol essentials (framing, login, timeouts) |
+| 4 | Partial BIN layout |
+| 5 | **Checksum — CRC-16/ARC**, and the ordering rule every writer must obey |
+| 6 | Write / flashing flow and its safety gates |
+| 7 | Identity (VIN / AIF / software number) |
+| 8 | **Live measurement block layouts** (the log channels) |
+| 9 | Baud rate — *closed*, see the box at its head |
+| 10–11 | UX state machine, known limitations |
+| 12 | K-line instability on the car |
+| 13 | Flash counter read + reset |
+| 14 | Android — WebUSB / FTDI |
 
 ---
 
@@ -371,6 +396,19 @@ if it fails, trim falls back to 1.0 and RPM/RO/temp logging continues rather tha
 ---
 
 ## 9. Web Serial constraints & the baud-rate finding
+
+> **CLOSED. The conclusion, in full:**
+> **9600 is the only rate this DME implements.** 38400 opens and negotiates but the DME does not
+> answer at it; 125000 fails on real hardware. Raising the baud produced no speed-up because the
+> residual time is the DME's own per-block turnaround, not the line rate. A full read is **~124 s**
+> at 9600 and that is at the DME's floor — the remaining lever is not software.
+>
+> Everything below is the investigation that established this, including the hypotheses that turned
+> out to be wrong. It is kept because re-opening this question without it would mean repeating the
+> same dead ends on a car. **You do not need to read it to work on this app.**
+>
+> Sub-sections headed `ANSWERED` / `CLOSED` / `FINAL` / `Current state` are successive restatements
+> of the same conclusion as evidence accumulated; they are not separate findings.
 
 Confirmed against the [WICG Web Serial spec](https://wicg.github.io/serial/):
 
