@@ -1,6 +1,7 @@
 import { BinaryParser } from './parser';
 import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP } from '@/config/constants';
 import { VEMap } from '@/lib/types';
+import type { EcuMapDef } from '@/lib/ecu-items/types';
 import { analyzeDataChecksum, correctDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import type { ChecksumSlotResult } from '@/lib/checksum/dmeDataChecksum';
 
@@ -42,6 +43,16 @@ export class BinaryPatcher extends BinaryParser {
         this.setUint8(APP_CONFIG.MSS54HP.ADDRESS_TEMP_LIMIT, val);
     }
 
+    /**
+     * Largest filling this app will write into the VE table, dimensionless (1.0 = 100 %).
+     *
+     * The storage is uint16 at 1/1000, so anything past 65.535 wraps modulo 65536 and a runaway
+     * cell lands back near zero — a catastrophically LEAN cell produced by an overflow, which is
+     * the worst failure this file could have. 4.0 is far above anything an S54 can reach and far
+     * below the wrap, so it turns a runaway into an obviously-wrong number instead of a quiet one.
+     */
+    private static readonly VE_MAX = 4.0;
+
     public setVETable(map: VEMap): void {
         const config = APP_CONFIG.MSS54HP.VE_TABLE;
 
@@ -50,9 +61,59 @@ export class BinaryPatcher extends BinaryParser {
         for (let row = 0; row < config.SIZE_Y; row++) {
             for (let col = 0; col < config.SIZE_X; col++) {
                 const offset = config.ADDRESS_DATA + (row * config.SIZE_X + col) * 2;
-                const value = map.data[row][col];
                 // User specified Z-axis is z/1000, so we write back value * 1000
+                const value = Math.min(BinaryPatcher.VE_MAX, Math.max(0, map.data[row][col]));
                 this.setUint16(offset, Math.round(value * 1000)); // Ensure integer
+            }
+        }
+    }
+
+    /**
+     * Writes the VALUES of a catalog map. Axes are never touched.
+     *
+     * That restriction is the point rather than an omission: a table's values only mean anything
+     * against the breakpoints they were computed on, and the back-calculated KF_RF_KORR_DRREL is
+     * binned on the Δ axis read out of these very bytes. Moving a breakpoint would silently
+     * re-label every value beside it.
+     *
+     * `bounds` is in physical units and is the caller's statement of what this table may hold —
+     * enforced here, at the last point before bytes, so no path can reach the flash around it.
+     * The raw value is clamped to the storage width as well, because a scaling function is an
+     * arbitrary expression and its inverse need not land inside the field.
+     *
+     * The caller is responsible for running applyChecksumCorrection() afterwards.
+     */
+    public setEcuMapValues(def: EcuMapDef, values: number[][], bounds: { min: number; max: number }): void {
+        const { rows, cols, bits, address, scaling } = def.values;
+        if (values.length !== rows || values.some(r => r.length !== cols)) {
+            throw new Error(
+                `${def.symbol}: expected ${rows}x${cols}, got ${values.length}x${values[0]?.length ?? 0}`);
+        }
+
+        const step = bits / 8;
+        const fieldMax = bits === 8 ? 0xFF : 0xFFFF;
+
+        // Clamp in RAW, not in physical. Clamping the physical value and then rounding leaves the
+        // stored number up to half an LSB outside the bound the caller asked for — 1.40 goes in and
+        // 1.4004 comes back out. Half an LSB does not matter here, but "the bound is respected" is
+        // the kind of claim that should be true rather than nearly true, since it is the last thing
+        // standing between a derived table and the flash.
+        //
+        // Both ends are mapped and then ordered, because a scaling equation is arbitrary: `25.6/x`
+        // is decreasing, so its toRaw sends the physical minimum to the raw MAXIMUM.
+        // Rounded INWARD — ceil the low end, floor the high one — so a bound that falls between
+        // two representable values resolves to the side that stays inside it.
+        const a = scaling.toRaw(bounds.min);
+        const b = scaling.toRaw(bounds.max);
+        const rawLo = Math.max(0, Math.ceil(Math.min(a, b)));
+        const rawHi = Math.max(rawLo, Math.min(fieldMax, Math.floor(Math.max(a, b))));
+
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const physical = Math.min(bounds.max, Math.max(bounds.min, values[r][c]));
+                const raw = Math.min(rawHi, Math.max(rawLo, Math.round(scaling.toRaw(physical))));
+                const at = address + (r * cols + c) * step;
+                if (bits === 8) this.setUint8(at, raw); else this.setUint16(at, raw);
             }
         }
     }

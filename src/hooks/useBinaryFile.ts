@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { BinaryPatcher } from '@/lib/binary-engine/patcher';
+import { findEcuItem } from '@/lib/ecu-items/catalog';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
 import { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
@@ -24,6 +25,22 @@ export type ToggleOverrides = {
   writeWarmup?: boolean;
   writeWot?: boolean;
 };
+
+/** Tables that are not derived from the VE map and so cannot be rebuilt from it. */
+export type PatchExtras = {
+  /** The back-calculated KF_RF_KORR_DRREL, 6 x 12 physical values. Null writes nothing. */
+  tunedRfKorr?: number[][] | null;
+};
+
+/**
+ * What the correction table is allowed to hold, as written.
+ *
+ * The floor is the important one: below 1.000 the table would LEAN the mixture at exactly the
+ * condition BMW chose to enrich, which is the thing 20-egt-correction.md says not to do. The
+ * tuner already clamps to the same range; this repeats it at the byte boundary so no future
+ * caller can route around it.
+ */
+const RF_KORR_WRITE_BOUNDS = { min: 1.0, max: 1.40 };
 
 export function useBinaryFile() {
   const [binaryFile, setBinaryFile] = useState<File | null>(null);
@@ -105,7 +122,11 @@ export function useBinaryFile() {
   // `settings` overrides the live toggle state. Needed because this reads that state through a
   // closure: a caller that restores toggles and rebuilds in the same handler would otherwise hash
   // the pre-restore values and "verify" nothing.
-  const buildPatchedBuffer = (newMap: VEMap | null, settings?: ToggleOverrides): ArrayBuffer | null => {
+  const buildPatchedBuffer = (
+    newMap: VEMap | null,
+    settings?: ToggleOverrides,
+    extras?: PatchExtras,
+  ): ArrayBuffer | null => {
     if (!binaryBuffer) return null;
 
     const usePatch = settings?.applyPatch ?? applyPatch;
@@ -143,6 +164,21 @@ export function useBinaryFile() {
     // [EXPERIMENTAL] WOT Threshold Patch (Independent of Logic Patch)
     patcher.setWOTThreshold(useWotDisable);
 
+    // The back-calculated EGT correction. Threaded in explicitly rather than read off hook state
+    // for the same reason `settings` is: a caller that rebuilds inside one handler would otherwise
+    // hash a value the render has not caught up with.
+    //
+    // Not optional relative to the VE map it was built with. The 'tuned' VE mode divides by this
+    // table, so a map written without it would be read by the DME through the OLD one and come out
+    // lean by k_new/k_old — up to 27 % at the stock peak. page.tsx derives both from a single
+    // value so the pair cannot come apart.
+    if (extras?.tunedRfKorr) {
+      const def = findEcuItem('KF_RF_KORR_DRREL');
+      if (def?.kind === 'map') {
+        patcher.setEcuMapValues(def, extras.tunedRfKorr, RF_KORR_WRITE_BOUNDS);
+      }
+    }
+
     // Recalculate checksum last, after all other patches have been applied
     patcher.applyChecksumCorrection();
 
@@ -175,8 +211,8 @@ export function useBinaryFile() {
     return `${prefix}_${dateStr}_${baseName}${patchSuffix}.bin`;
   };
 
-  const downloadBin = (newMap: VEMap | null) => {
-    const patchedBuffer = buildPatchedBuffer(newMap);
+  const downloadBin = (newMap: VEMap | null, extras?: PatchExtras) => {
+    const patchedBuffer = buildPatchedBuffer(newMap, undefined, extras);
     if (!patchedBuffer) return;
 
     const blob = new Blob([patchedBuffer], { type: 'application/octet-stream' });

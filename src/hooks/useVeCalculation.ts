@@ -64,7 +64,10 @@ export function useVeCalculation() {
       ? tuneRfKorrTable(map, annotated, options.egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD })
       : null;
-    const result = calc.calculateNewVEMap(map, annotated, options);
+    // The tuned table comes from THIS run, not from the caller. It is derived from the same log
+    // the map is about to be built from, so passing it in would mean the caller had to run the
+    // tuner first and the two could describe different drives.
+    const result = calc.calculateNewVEMap(map, annotated, { ...options, tunedRfKorr: rfKorr });
 
     setAnnotatedLog(annotated);
     setTunedRfKorr(rfKorr);

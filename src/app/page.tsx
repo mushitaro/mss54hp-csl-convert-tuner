@@ -28,7 +28,7 @@ import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, resolveRfKorrMode } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
@@ -443,6 +443,7 @@ export default function Home() {
    *  its stored settings explicitly for exactly this reason. */
   const veCalcOptionsFor = (config: LogFilterConfig, egt: EgtTables | null): VeCalcOptions => ({
     applyRfKorr: config.applyRfKorr ?? true,
+    rfKorrMode: resolveRfKorrMode(config),
     egt,
   });
 
@@ -532,8 +533,31 @@ export default function Home() {
     }
   };
 
+  /** Whether TUNED is a legal answer for this session, and why not when it is not.
+   *
+   *  Four conditions, all of which have to hold at once, which is why this lives here rather than
+   *  in the panel: the panel can see the config and nothing else. */
+  const canTuneRfKorr = !!(
+    egtTables                                   // the binary's tables decoded
+    && tunedRfKorr?.acceptable                  // the back-calculation met its own thresholds
+    && !tunedRfKorr.report.sensorMissing        // the log carried an exhaust temperature
+    // ...and the log was recorded with MAP compensation off. With it on, rf_korr carries the
+    // MAP integrator's +/-2.5 %RF on top — tolerable when tuning VE against it, not when pinning
+    // a table whose whole point is a few percent.
+    && (applyPatch || patchStatus?.mapOff)
+  );
+
+  /** The one value that decides both halves of TUNED.
+   *
+   *  Deriving the VE map for a corrected table and NOT writing that table leaves the DME applying
+   *  the old one, so the difference survives intact: up to -27 % at the stock peak, on the lean
+   *  side. Computing this once and threading it into every write path is what makes that state
+   *  unreachable — there is no separate switch to forget. */
+  const rfKorrWrite = (resolveRfKorrMode(filterConfig) === 'tuned' && canTuneRfKorr)
+    ? tunedRfKorr!.tuned : null;
+
   const handleDownloadBin = () => {
-    binaryFileState.downloadBin(newMap);
+    binaryFileState.downloadBin(newMap, { tunedRfKorr: rfKorrWrite });
   };
 
   // --- Session artifact downloads ---------------------------------------------------------------
@@ -899,7 +923,7 @@ export default function Home() {
     const target = await ensureDraft();
     if (!target || !binaryBuffer) return;
     if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
-    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap);
+    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, { tunedRfKorr: rfKorrWrite });
     if (!patchedBuffer) return;
 
     await sessionDb.saveSessionTune({
@@ -1162,7 +1186,7 @@ export default function Home() {
   };
 
   const handleDmeWrite = async () => {
-    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap);
+    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, { tunedRfKorr: rfKorrWrite });
     if (!patchedBuffer) return;
     // Pin the settings that produced these exact bytes. Reading the toggles again after the write
     // would record whatever they say ~4 minutes later, which is not necessarily what went to the ECU.
@@ -1901,7 +1925,7 @@ export default function Home() {
                   onToggle={(enabled) => handleConfigChange({ ...filterConfig, enableCorrection: enabled })}
                   readOnly={isArchived}
                 />
-                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} />
+                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
                 <EcuItemPanel buffer={binaryBuffer} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
@@ -2737,7 +2761,7 @@ export default function Home() {
               readOnly={isArchived}
               openUp
             />
-            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} openUp />
+            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
             <EcuItemPanel buffer={binaryBuffer} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}

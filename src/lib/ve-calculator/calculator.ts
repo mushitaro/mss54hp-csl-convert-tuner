@@ -1,9 +1,10 @@
-import { LogDataPoint, VEMap } from '@/lib/types';
+import { LogDataPoint, VEMap, RfKorrMode, resolveRfKorrMode } from '@/lib/types';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WOT_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD, CSL_STOCK_WOT_RPM } from '@/config/constants';
 import {
-    EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, invertRfKorrProfile, rfKorrAt,
+    EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, interpMap2d, invertRfKorrProfile, rfKorrAt,
     rfKorrProfileAt, tabgModelAt,
 } from './egtTables';
+import type { RfKorrTuneResult } from './rfKorrTuner';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -18,7 +19,34 @@ interface GridCell {
     weightSumRfKorr: number;
     minRfKorr: number;
     maxRfKorr: number;
+
+    // The 'tuned' correction, accumulated alongside rather than instead of the nominal one. Both
+    // are needed at the same time: the guard below compares them, and a cell that fails it falls
+    // back to the nominal value, which has to still be there to fall back to.
+    sumTunedWeighted: number;
+    weightSumTuned: number;
 }
+
+/**
+ * How far the 'tuned' correction may sit from the 'nominal' one before a cell gives up and takes
+ * the nominal value.
+ *
+ * This is the load-bearing bound on the new path. 'nominal' is the behaviour that has shipped and
+ * is known to fail rich; dividing by a measured quantity is new, and a cell whose k_new came from
+ * thin evidence could otherwise move the map a long way on very little. 15 % means the tuned path
+ * can refine the map but can never take it somewhere the existing path would not go.
+ */
+const TUNED_VS_NOMINAL_MAX = 0.15;
+
+/**
+ * Absolute bounds on any per-cell correction, either path.
+ *
+ * A catastrophe net rather than a tuning parameter: outside this range the lambda integrator is
+ * pinned at its own clamp and the samples are not describing mixture any more. Nothing before this
+ * commit could reach it — but nothing before this commit divided.
+ */
+const CORRECTION_MIN = 0.5;
+const CORRECTION_MAX = 2.0;
 
 export interface VeCalcOptions {
     /**
@@ -54,6 +82,14 @@ export interface VeCalcOptions {
      * not have. See readEgtTables.
      */
     egt?: EgtTables | null;
+
+    /** Supersedes `applyRfKorr` when set. See LogFilterConfig.rfKorrMode. */
+    rfKorrMode?: RfKorrMode;
+
+    /** The back-calculated correction table, required by 'tuned' and ignored by the other two
+     *  modes. Absent or not acceptable degrades 'tuned' to 'nominal' per cell — the caller is
+     *  expected to have disabled the option, and a calculation is not where to raise that. */
+    tunedRfKorr?: RfKorrTuneResult | null;
 }
 
 export class VECalculator {
@@ -79,12 +115,19 @@ export class VECalculator {
     ): {
         newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
+        tunedUsedMap: boolean[][];
     } {
         const rows = this.loadAxis.length;
         const cols = this.rpmAxis.length;
-        // Defaults ON, matching LogFilterConfig.applyRfKorr. A caller that forgets to pass options
+        // Defaults to 'nominal', matching LogFilterConfig. A caller that forgets to pass options
         // must land on the rich-safe behaviour, not the one that can write a lean map.
-        const applyRfKorr = options.applyRfKorr !== false;
+        const mode = resolveRfKorrMode(options);
+        const applyRfKorr = mode !== 'as-logged';
+        // 'tuned' needs a table that was actually derived and passed its own evidence thresholds.
+        // Without one it degrades per cell to 'nominal' rather than failing: this is the same
+        // shape of decision as an rf_korr-less log, and the UI gates the option separately.
+        const tuned = mode === 'tuned' && options.tunedRfKorr?.acceptable
+            ? options.tunedRfKorr : null;
 
         // Initialize accumulation grid
         const grid: GridCell[][] = Array(rows)
@@ -96,6 +139,7 @@ export class VECalculator {
                         sumStftWeighted: 0, weightSum: 0, rawCount: 0,
                         sumRfKorrWeighted: 0, weightSumRfKorr: 0,
                         minRfKorr: Infinity, maxRfKorr: -Infinity,
+                        sumTunedWeighted: 0, weightSumTuned: 0,
                     }))
             );
 
@@ -115,8 +159,22 @@ export class VECalculator {
             const rfKorr = point.rfKorr;
             const correction = (applyRfKorr && rfKorr !== undefined) ? avgStft * rfKorr : avgStft;
 
+            // The 'tuned' correction: divide the nominal one by what the CORRECTED table would
+            // have applied at this operating point. What survives is the trim as it would read
+            // with the exhaust at nominal temperature — which is what the VE table should hold.
+            //
+            // Per sample rather than per cell, because Δ varies within a cell and the ratio does
+            // not survive being averaged first. A sample the tuner could not place gets no tuned
+            // value at all, so its cell simply carries less evidence for that path.
+            let tunedCorrection: number | undefined;
+            if (tuned && rfKorr !== undefined) {
+                const kNew = this.tunedRfKorrAt(tuned, point);
+                if (kNew !== undefined && kNew > 0) tunedCorrection = correction / kNew;
+            }
+
             // Distribute to up to 4 neighbors
-            this.distributeWeight(grid, rows, cols, rpmInfo, loadInfo, correction, rfKorr);
+            this.distributeWeight(grid, rows, cols, rpmInfo, loadInfo, correction, rfKorr,
+                tunedCorrection);
         }
 
         // 2. Calculation
@@ -127,6 +185,7 @@ export class VECalculator {
         const weightMap: number[][] = [];
         const rfKorrMap: number[][] = [];
         const rfKorrSpreadMap: number[][] = [];
+        const tunedUsedMap: boolean[][] = [];
 
         for (let r = 0; r < rows; r++) {
             const newRow: number[] = [];
@@ -136,6 +195,7 @@ export class VECalculator {
             const weightRow: number[] = [];
             const rfKorrRow: number[] = [];
             const rfKorrSpreadRow: number[] = [];
+            const tunedUsedRow: boolean[] = [];
 
             for (let c = 0; c < cols; c++) {
                 const cell = grid[r][c];
@@ -156,7 +216,24 @@ export class VECalculator {
                 if (cell.weightSum > 0.1) {
                     // Calculation uses Weighted Average
                     // Avg = Sum(Value * Weight) / Sum(Weight)
-                    const avgCorrection = cell.sumStftWeighted / cell.weightSum;
+                    const nominal = cell.sumStftWeighted / cell.weightSum;
+
+                    // Take the tuned correction only if it stays close to the one that would have
+                    // been used anyway. Thin evidence behind k_new shows up here as a large
+                    // divergence, and a cell that diverges takes the nominal value and says so.
+                    let avgCorrection = nominal;
+                    let usedTuned = false;
+                    if (cell.weightSumTuned > 0.1) {
+                        const candidate = cell.sumTunedWeighted / cell.weightSumTuned;
+                        if (nominal > 0 && Math.abs(candidate / nominal - 1) <= TUNED_VS_NOMINAL_MAX) {
+                            avgCorrection = candidate;
+                            usedTuned = true;
+                        }
+                    }
+                    tunedUsedRow.push(usedTuned);
+
+                    // Last line of defence, both paths. Nothing before the divide could reach it.
+                    avgCorrection = Math.min(CORRECTION_MAX, Math.max(CORRECTION_MIN, avgCorrection));
 
                     // Formula: New = Old * Correction
                     const newVal = oldVal * avgCorrection;
@@ -180,6 +257,7 @@ export class VECalculator {
                     hitRow.push(0);
                     correctionRow.push(1.0); // No correction
                     weightRow.push(0);
+                    tunedUsedRow.push(false);
                 }
             }
             newMapData.push(newRow);
@@ -189,6 +267,7 @@ export class VECalculator {
             weightMap.push(weightRow);
             rfKorrMap.push(rfKorrRow);
             rfKorrSpreadMap.push(rfKorrSpreadRow);
+            tunedUsedMap.push(tunedUsedRow);
         }
 
         return {
@@ -201,6 +280,7 @@ export class VECalculator {
             hitMap, // Returns Integer Hits
             correctionMap,
             weightMap, // Returns Weight Sum
+            tunedUsedMap, // Which cells actually took the 'tuned' correction
             rfKorrMap, // Weighted-mean rf_korr the cell's samples were taken under
             rfKorrSpreadMap // max-min rf_korr across those samples
         };
@@ -230,6 +310,19 @@ export class VECalculator {
      * by karter16's TABG route, so the two can be laid side by side. Without it this behaves
      * exactly as it did before the tables existed, which is what every no-binary path relies on.
      */
+    /**
+     * What the CORRECTED table would have applied at this sample's operating point.
+     *
+     * Reads the tuned grid on its own axes, with the same clamped-bilinear rule the DME uses, so
+     * the number divided out here is the number the DME will multiply back in once these bytes
+     * are flashed. Returns undefined when the sample has no Δ — nothing can be said about it, and
+     * the cell just carries less evidence for the tuned path.
+     */
+    private tunedRfKorrAt(tuned: RfKorrTuneResult, point: LogDataPoint): number | undefined {
+        if (point.tabgDelta === undefined) return undefined;
+        return interpMap2d(tuned.rpm, tuned.delta, tuned.tuned, point.rpm, point.tabgDelta);
+    }
+
     public annotateRfKorr(
         currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
     ): LogDataPoint[] {
@@ -256,8 +349,11 @@ export class VECalculator {
             //     The sensor's own delta is passed as a hint so the two non-monotone rpm bands
             //     (1600 / 1900) can still answer when there is a sensor to break the tie — that is
             //     not circular, because the hint only PICKS among exact roots of the measured k.
+            // The DME's own Y-axis input. Computed once, here, so nothing downstream can arrive at
+            // a different Δ for the same sample.
             const hint = point.exhaustTemp === undefined
                 ? undefined : Math.max(0, model - point.exhaustTemp);
+            if (hint !== undefined) out.tabgDelta = hint;
             const deltaInv = invertRfKorrProfile(
                 rfKorrProfileAt(egt, point.rpm), egt.rfKorr.delta, rfKorr,
                 { ...EGT_INVERSION_DEFAULTS, hint },
@@ -267,9 +363,9 @@ export class VECalculator {
             // (b) EGT -> rf_korr. Reproduces the gate rather than ignoring it: below the filling
             //     floor the DME applies 1.000 regardless of how cold the exhaust is, so 1.000 is
             //     the right answer there and matching `rfKorr` is a clean pass on both offsets.
-            if (point.exhaustTemp !== undefined) {
+            if (hint !== undefined) {
                 out.rfKorrFromEgt = gateOpen(egt, point.rpm, rfSoll)
-                    ? rfKorrAt(egt, point.rpm, Math.max(0, model - point.exhaustTemp))
+                    ? rfKorrAt(egt, point.rpm, hint)
                     : 1.0;
             }
 
@@ -305,7 +401,8 @@ export class VECalculator {
         rpm: { idx1: number; idx2: number; w1: number; w2: number },
         load: { idx1: number; idx2: number; w1: number; w2: number },
         val: number,
-        rfKorr?: number
+        rfKorr?: number,
+        tunedVal?: number
     ) {
         // 4 corners:
         // (r1, c1) weight: load.w1 * rpm.w1
@@ -325,6 +422,14 @@ export class VECalculator {
                     cell.weightSumRfKorr += w;
                     if (rfKorr < cell.minRfKorr) cell.minRfKorr = rfKorr;
                     if (rfKorr > cell.maxRfKorr) cell.maxRfKorr = rfKorr;
+                }
+
+                // Its own weight, like rf_korr's: the tuned correction is available on strictly
+                // fewer samples than the nominal one, and dividing by the shared weightSum would
+                // understate it on any cell holding a mix.
+                if (tunedVal !== undefined) {
+                    cell.sumTunedWeighted += tunedVal * w;
+                    cell.weightSumTuned += w;
                 }
             }
         };

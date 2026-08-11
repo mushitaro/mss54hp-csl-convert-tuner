@@ -259,7 +259,10 @@ export function tuneRfKorrTable(
             continue;
         }
 
-        const delta = Math.max(0, tabgModelAt(egt, p.rpm, p.rf / 100) - p.exhaustTemp);
+        // annotateRfKorr already computed this against the same tables; taking its value rather
+        // than recomputing is what keeps the tuner and the VE calculation on the same Δ.
+        const delta = p.tabgDelta
+            ?? Math.max(0, tabgModelAt(egt, p.rpm, p.rf / 100) - p.exhaustTemp);
         const stft = (p.stft1 + p.stft2) / 2;
         if (!(stft > 0)) { report.samplesNoMeasurement++; continue; }
 

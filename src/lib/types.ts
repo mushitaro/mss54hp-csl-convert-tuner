@@ -43,6 +43,12 @@ export interface LogDataPoint {
     // ALL correct at once; disagreement localises the fault. This is karter16's Option 2 (log TABG,
     // do the maths) running alongside this app's direct measurement (RF / rf_soll).
 
+    /** tabg_delta — `kf_rf_tabg_modell(rpm, RF) − TABG`, clipped at 0, in °C. The DME's own Y-axis
+     *  input to KF_RF_KORR_DRREL. Computed once here so the table tuner and the VE calculation can
+     *  never disagree about which row of that table a sample belongs to. Present only when the log
+     *  carries an exhaust temperature AND the binary's tables could be read. */
+    tabgDelta?: number;
+
     /** Exhaust temperature implied by the MEASURED rf_korr: invert KF_RF_KORR_DRREL along Δ, then
      *  subtract from kf_rf_tabg_modell. Compare against `exhaustTemp`; the residual is in °C.
      *  Sparse by nature — only ~45 % of the rpm axis has an invertible profile, and k = 1.000
@@ -117,6 +123,33 @@ export interface LogFilterConfig {
      * docs/ecu-logic/60-tuning-logic.md §6.
      */
     applyRfKorr?: boolean;
+
+    /**
+     * What to do about rf_korr. Supersedes `applyRfKorr`, which is kept in step for sessions
+     * saved by an older build: `rfKorrMode ?? (applyRfKorr !== false ? 'nominal' : 'as-logged')`.
+     *
+     *   'nominal'    New = Old * STFT * rf_korr. The VE table holds filling at NOMINAL exhaust
+     *                temperature and rf_korr adds the cold-exhaust enrichment on top. Default.
+     *   'as-logged'  New = Old * STFT. The table holds filling at whatever rf_korr the log was
+     *                taken under — correct only if BMW's density model matches this engine.
+     *   'tuned'      New = Old * STFT * rf_korr / k_new, where k_new is the back-calculated
+     *                KF_RF_KORR_DRREL. In the ideal limit this collapses to Old * anchor, the
+     *                trim measured at nominal exhaust temperature.
+     *
+     * ONE setting, not two, and that is deliberate. 'tuned' also writes the derived table into
+     * the binary, and the two halves are only correct together: a VE table built for k_new while
+     * the DME still applies k_old leaves the residual k_new/k_old, which reaches -27 % at the
+     * stock peak (2200-2350 rpm) and goes LEAN. Two independent toggles could express that state;
+     * one setting cannot.
+     */
+    rfKorrMode?: RfKorrMode;
+}
+
+export type RfKorrMode = 'nominal' | 'as-logged' | 'tuned';
+
+/** The one place the legacy boolean is reconciled with the mode. */
+export function resolveRfKorrMode(config: Pick<LogFilterConfig, 'rfKorrMode' | 'applyRfKorr'>): RfKorrMode {
+    return config.rfKorrMode ?? ((config.applyRfKorr ?? true) ? 'nominal' : 'as-logged');
 }
 
 export interface InterpolationPoint {
