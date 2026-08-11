@@ -6,6 +6,7 @@ import {
 import { FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, analyzeFlashCounter } from './flashCounter';
 import { Mss54HpDataTuneLayout } from './ds2';
 import { correctDataChecksum } from '@/lib/checksum/dmeDataChecksum';
+import { MockDrive } from './mockDrive';
 
 const PARTIAL_BIN_LENGTH = 65536;
 // Imported, not redeclared: this used to be an independent `const CHUNK_SIZE = 122`, so the mock's
@@ -47,9 +48,43 @@ const MOCK_LEARNED_VALUES: Record<string, number> = {
     'ka_adap_tz[5]': -1.8,
 };
 
+/**
+ * The image PRACTICE serves when nothing else was supplied: the CSL 0401 Community Patch v1
+ * partial, shipped as a static asset.
+ *
+ * The generated placeholder below cannot rehearse this app any more. It is zero everywhere except
+ * a VE ramp, which means `KF_RF_KORR_DRREL`, `kf_rf_tabg_modell` and `kl_rf_korr_rf_min` are all
+ * zero, `readEgtTables` refuses it, and every EGT-correction feature is simply absent offline —
+ * including the RF KORR tab, which is the thing most in need of rehearsing.
+ *
+ * A real calibration also means PRACTICE shows real numbers: the correction peaks at 1.371 where it
+ * really does, the filling floors are the real 0.55-0.80, and a tune done offline lands in the same
+ * range as one done in the car.
+ *
+ * Community Patch v1 rather than stock: it is the lineage with the FRA timer bug fixed
+ * (`K_FR_T_ADAPT` = 0x0100), so PRACTICE is not rehearsing against a binary with a known defect.
+ * See docs/ecu-logic/50-binary-lineage.md. It carries no vehicle identity — the only string in it
+ * is the calibration ID `211323000401PD31`.
+ */
+const MOCK_BIN_URL = '/mock/csl-0401-community-patch-v1.partial.bin';
+
+async function fetchMockBin(): Promise<ArrayBuffer | null> {
+    try {
+        const response = await fetch(MOCK_BIN_URL, { cache: 'force-cache' });
+        if (!response.ok) return null;
+        const buffer = await response.arrayBuffer();
+        // Wrong length means the asset is not what this expects — a half-written deploy, or a host
+        // answering a 404 with an HTML page. Refusing beats serving a truncated calibration.
+        return buffer.byteLength === PARTIAL_BIN_LENGTH ? buffer : null;
+    } catch {
+        return null;
+    }
+}
+
 function buildPlaceholderBin(): ArrayBuffer {
-    // A plausible-looking (but not real) 65536-byte partial BIN, so the app has something
-    // sensible to parse when no real/stock BIN has been supplied to the mock.
+    // The last resort, when the asset above cannot be fetched (a dev server without it, a stale
+    // offline cache). Enough to parse; not enough to rehearse the EGT work, which is why it is
+    // no longer the default.
     const buf = new Uint8Array(PARTIAL_BIN_LENGTH);
     const view = new DataView(buf.buffer);
     for (let row = 0; row < 24; row++) {
@@ -73,7 +108,12 @@ function buildPlaceholderBin(): ArrayBuffer {
  * than round-tripping through byte-level DS2 frames (those are validated separately in ds2.ts).
  */
 export class MockDmeLink implements DmeLink {
-    private buffer: ArrayBuffer;
+    /** Null until connect() resolves it — the default image is fetched, and the constructor cannot
+     *  await. Every method that touches it runs after assertConnected(). */
+    private buffer: ArrayBuffer | null;
+    /** The simulated drive, computed from `buffer`. See mockDrive.ts for what it models and why. */
+    private drive = new MockDrive();
+    private driveReady = false;
     private connected = false;
     private measurementStartTime = 0;
     private aborted = false;
@@ -116,11 +156,19 @@ export class MockDmeLink implements DmeLink {
         if (initialBuffer && initialBuffer.byteLength !== PARTIAL_BIN_LENGTH) {
             throw new DmeLinkError(`Mock DME expects a ${PARTIAL_BIN_LENGTH}-byte partial BIN, got ${initialBuffer.byteLength} bytes`);
         }
-        this.buffer = initialBuffer ? initialBuffer.slice(0) : buildPlaceholderBin();
+        // A supplied buffer wins — connecting PRACTICE with a BIN already open is asking to
+        // rehearse against THAT calibration. Otherwise the default is fetched in connect(), which
+        // is the first point that is allowed to be async.
+        this.buffer = initialBuffer ? initialBuffer.slice(0) : null;
     }
 
     async connect(): Promise<DmeIdentity> {
         await delay(400); // simulate handshake latency
+        if (!this.buffer) this.buffer = (await fetchMockBin()) ?? buildPlaceholderBin();
+        // Telemetry is computed from whatever bytes this DME is serving, so it has to be told about
+        // them here rather than at construction. A binary without the EGT tables leaves the drive
+        // unloaded and the idle pattern in charge — see pollLiveMeasurement.
+        this.driveReady = this.drive.load(this.buffer);
         this.connected = true;
         this.measurementStartTime = performance.now();
         // A reconnect is an ignition cycle, not a factory reset — but the mock has no engine to
@@ -146,17 +194,25 @@ export class MockDmeLink implements DmeLink {
         if (!this.connected) throw new DmeLinkError('Mock DME is not connected');
     }
 
+    /** The image this DME is serving. Resolved by connect(); reaching it before that is a bug in
+     *  the caller's ordering, not a state to handle, so it says so rather than returning empty
+     *  bytes that would read as a DME full of zeros. */
+    private get image(): ArrayBuffer {
+        if (!this.buffer) throw new DmeLinkError('Mock DME has no image yet — connect() first');
+        return this.buffer;
+    }
+
     async readPartialBin(onProgress?: TransferProgress): Promise<ArrayBuffer> {
         this.assertConnected();
         this.aborted = false;
-        const total = this.buffer.byteLength;
+        const total = this.image.byteLength;
         for (let read = 0; read < total; read += CHUNK_SIZE) {
             if (this.aborted) throw new DmeLinkError('Read cancelled');
             await delay(2);
             onProgress?.(Math.min(100, Math.round(((read + CHUNK_SIZE) / total) * 100)), 'reading');
         }
         onProgress?.(100, 'reading');
-        return this.buffer.slice(0);
+        return this.image.slice(0);
     }
 
     /** Mirrors the real write's stages (erase → write → read-back verify) so the mock is a faithful
@@ -191,6 +247,15 @@ export class MockDmeLink implements DmeLink {
         await delay(20); // simulate a single DS2 request/response round trip
 
         const t = (performance.now() - this.measurementStartTime) / 1000;
+
+        // The simulated drive, computed from this DME's own calibration — see mockDrive.ts. It is
+        // the only mode in which the EGT correction can be rehearsed: the idle pattern below never
+        // reaches the correction's 55-80 %RF gate, so rf_korr in it is 1.000 forever.
+        if (this.driveReady) return this.drive.sample(t);
+
+        // Fallback: the old idle pattern, for a binary with no usable EGT tables (the generated
+        // placeholder, or an image whose bytes do not match the catalog). Telemetry-shaped, and
+        // honest about being nothing more than that.
         // Idle-like pattern: RPM hunts gently around ~800, RO stays low, STFT/lambda hover near 1.0
         const rpm = 800 + Math.sin(t * 1.3) * 15 + (Math.random() - 0.5) * 8;
         const rawLoad = 2.5 + Math.sin(t * 0.7) * 0.8 + (Math.random() - 0.5) * 0.3;
