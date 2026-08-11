@@ -13,6 +13,22 @@ interface Props {
     className?: string;
     /** 1 is the size this grid has always been. See CELL/HEAD below. */
     zoom?: number;
+
+    // --- What the numbers ARE ------------------------------------------------------------------
+    // The grid itself has always been generic over xAxis.length / yAxis.length; only the labels
+    // were pinned to the VE map. Defaults reproduce those strings exactly, so every existing call
+    // site is unchanged. Supplied when the same grid shows a different table — KF_RF_KORR_DRREL is
+    // 12 x 6 on rpm x exhaust-temperature delta, and calling its rows "RO %" would be a lie in the
+    // one place a reader looks to find out what they are seeing.
+    rowLabel?: string;
+    colLabel?: string;
+    valueLabel?: string;
+    rowFormat?: (value: number) => string;
+    valueFormat?: (value: number) => string;
+    /** Per-cell text appended to the cell's tooltip. Used for coverage and rejection reasons. */
+    cellNote?: (row: number, col: number) => string | undefined;
+    /** Cells to render as inert — present, readable, and not part of the result. */
+    mutedCells?: boolean[][];
 }
 
 /**
@@ -59,7 +75,13 @@ const COVERAGE_ALPHA_FULL = 0.30;
  * hidden pane still renders (it is `display:none`, not unmounted), so without this every unrelated
  * state change in the page rebuilt the whole grid twice over.
  */
-export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapData, diffData, hitData, weightData, className, zoom = 1 }) {
+export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
+    mapData, diffData, hitData, weightData, className, zoom = 1,
+    rowLabel = 'RO %', colLabel = 'RPM', valueLabel = 'RF %',
+    rowFormat = (v: number) => v.toFixed(2),
+    valueFormat = (v: number) => v.toFixed(3),
+    cellNote, mutedCells,
+}) {
     // Render a scrollable grid
     // Styles: Dark mode table
     const cell = Math.round(CELL * zoom);
@@ -88,7 +110,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                         <th
                             className="text-slate-400 border-b border-r border-slate-700 sticky left-0 bg-slate-800 z-20 cursor-help"
                             style={{ width: `${head}px`, padding: padHead }}
-                            title="Rows = RO % (load) / Columns = RPM"
+                            title={`Rows = ${rowLabel} / Columns = ${colLabel}`}
                         >
                             <div className="flex items-center justify-center">
                                 <Info className="w-3.5 h-3.5" />
@@ -105,7 +127,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                     {mapData.yAxis.map((load, rowIdx) => (
                         <tr key={rowIdx} className="hover:bg-slate-800/50">
                             <td className="text-slate-300 font-mono border-r border-slate-700 sticky left-0 z-[5] bg-slate-900 font-bold" style={{ padding: padHead }}>
-                                {load.toFixed(2)}
+                                {rowFormat(load)}
                             </td>
                             {mapData.data[rowIdx].map((val, colIdx) => {
                                 const diff = diffData ? diffData[rowIdx][colIdx] : 0;
@@ -162,18 +184,27 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({ mapDat
                                     }
                                 }
 
+                                const muted = mutedCells?.[rowIdx]?.[colIdx] ?? false;
+                                const note = cellNote?.(rowIdx, colIdx);
+
                                 return (
                                     <td
                                         key={colIdx}
                                         style={{ ...style, padding: padCell }}
                                         className={clsx(
                                             'border border-slate-800 font-mono transition-colors relative group',
-                                            hasHits ? 'font-bold' : 'opacity-80'
+                                            hasHits ? 'font-bold' : 'opacity-80',
+                                            // Dimmed, not hidden. A cell that carries a measurement
+                                            // the tune declined to use still has to be readable —
+                                            // that is what tells you WHY it was declined.
+                                            muted && 'opacity-40'
                                         )}
-                                        title={`RPM: ${mapData.xAxis[colIdx]}, RO %: ${load}\nRF %: ${val}\nHits: ${hits}\nWeight: ${weight.toFixed(2)}`}
+                                        title={`${colLabel}: ${mapData.xAxis[colIdx]}, ${rowLabel}: ${load}\n`
+                                            + `${valueLabel}: ${val}\nHits: ${hits}\nWeight: ${weight.toFixed(2)}`
+                                            + (note ? `\n${note}` : '')}
                                     >
                                         <span className={textColor}>
-                                            {diffData ? `${val > 0 ? '+' : ''}${val.toFixed(1)}%` : val.toFixed(3)}
+                                            {diffData ? `${val > 0 ? '+' : ''}${val.toFixed(1)}%` : valueFormat(val)}
                                         </span>
                                         {diff !== 0 && Math.abs(val - diff) > 0.001 && (!diffData) && ( /* Only show small diff tag if val != diff (i.e. not in Diff View) */
                                             <span className="absolute bottom-0 right-0 text-[8px] opacity-70 px-0.5">

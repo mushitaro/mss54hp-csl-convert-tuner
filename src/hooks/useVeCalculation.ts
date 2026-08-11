@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { VECalculator, VeCalcOptions } from '@/lib/ve-calculator/calculator';
+import { tuneRfKorrTable, RfKorrTuneResult } from '@/lib/ve-calculator/rfKorrTuner';
 import { VEMap, LogDataPoint } from '@/lib/types';
-import { MAP_DIMENSIONS, CSL_STOCK_WOT_RPM, CSL_STOCK_WOT_LOAD } from '@/config/constants';
+import { MAP_DIMENSIONS, CSL_STOCK_WOT_RPM, CSL_STOCK_WOT_LOAD, APP_CONFIG } from '@/config/constants';
 
 export function useVeCalculation() {
   const [newMap, setNewMap] = useState<VEMap | null>(null);
@@ -19,6 +20,11 @@ export function useVeCalculation() {
   // The log with `rfKorr` filled in per row — what the table and chart should show, since the
   // measurement needs the Alpha-N map and the log pipeline alone does not have it.
   const [annotatedLog, setAnnotatedLog] = useState<LogDataPoint[] | null>(null);
+
+  // The back-calculated KF_RF_KORR_DRREL. Derived on every run where the binary's tables could be
+  // read and the log carries an exhaust temperature, REGARDLESS of what the session asks to be
+  // done with it: choosing not to act on the result is not a reason to be unable to look at it.
+  const [tunedRfKorr, setTunedRfKorr] = useState<RfKorrTuneResult | null>(null);
 
   // [EXPERIMENTAL]
   const [warmupMap, setWarmupMap] = useState<VEMap | null>(null);
@@ -52,9 +58,16 @@ export function useVeCalculation() {
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
     const annotated = calc.annotateRfKorr(map, data, options.egt);
+    // Between the two: the tuner reads the annotated log and the VE calculation may go on to
+    // consume the tuner's output, so this is the only order in which one pass can serve all three.
+    const rfKorr = options.egt
+      ? tuneRfKorrTable(map, annotated, options.egt,
+        { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD })
+      : null;
     const result = calc.calculateNewVEMap(map, annotated, options);
 
     setAnnotatedLog(annotated);
+    setTunedRfKorr(rfKorr);
     setNewMap(result.newMap);
     setMapData(result.diffMap); // Use mapData for diffMap
     setHitMap(result.hitMap);
@@ -81,6 +94,7 @@ export function useVeCalculation() {
     setRfKorrMap(null);
     setRfKorrSpreadMap(null);
     setAnnotatedLog(null);
+    setTunedRfKorr(null);
   };
 
   return {
@@ -92,6 +106,7 @@ export function useVeCalculation() {
     rfKorrMap,
     rfKorrSpreadMap,
     annotatedLog,
+    tunedRfKorr,
     warmupMap,
     wotMap,
     runCalculation,

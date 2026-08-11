@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic'; // Added dynamic import
 import { ChartLoading } from '@/components/ChartLoading';
 import { DropZone } from '@/components/DropZone';
 import { MapEditor } from '@/components/MapEditor';
+import { RfKorrTable } from '@/components/RfKorrTable';
 
 // Dynamic imports for heavy components
 const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
@@ -54,7 +55,7 @@ import { useScreenWakeLock } from '@/hooks/useScreenWakeLock';
 import { useHiddenWitness } from '@/hooks/useHiddenWitness';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
 
-type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'warmup' | 'wot';
+type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'rfkorr' | 'warmup' | 'wot';
 
 /** Live Hz readout tuning. 24 samples is ~3 s of history on the cable (two DS2 exchanges each) and
  *  ~0.5 s under PRACTICE — long enough to ride out one retried exchange either way. Publishing at
@@ -422,7 +423,7 @@ export default function Home() {
     [logWindowStart, setSelectedLogIndex],
   );
 
-  const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap } = veCalc;
+  const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap, tunedRfKorr } = veCalc;
   const { diffSubject, setDiffSubject, diffReference, setDiffReference, diffMapForVisualization } = comparison;
 
   // Runs the VE calculation and refreshes the comparison defaults. Does NOT change the active tab —
@@ -609,6 +610,10 @@ export default function Home() {
     { id: 'new', label: 'TUNED MAP', enabled: !!newMap },
     { id: 'diff', label: 'DIFFERENCE %', enabled: !!currentMap },
     { id: 'log', label: 'CORRECTED LOG', enabled: !!processedLog },
+    // Enabled on the RESULT, not on the binary: the tuner only returns something when the tables
+    // decoded AND the log carried an exhaust temperature, which is exactly when there is a table
+    // to show. A tab that is reachable and empty says the feature is broken.
+    { id: 'rfkorr', label: 'RF KORR (TUNED)', enabled: !!tunedRfKorr },
     { id: 'warmup', label: 'WARMUP (DERIVED / EXP.)', enabled: !!warmupMap },
     { id: 'wot', label: 'WOT (DERIVED / EXP.)', enabled: !!wotMap },
   ];
@@ -634,7 +639,7 @@ export default function Home() {
     // released it, and the screen stayed on DASH with the trim being drawn out of sight. The manual
     // path already pairs these two (onSelectTab does both); this is the same rule for the armed one.
     setNarrowPane('map');
-  }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap]);
+  }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap, tunedRfKorr]);
 
   // Clearing the log or swapping the BASE can disable the tab you're standing on; without this you'd
   // be stranded on a placeholder with its own tab greyed out.
@@ -644,7 +649,7 @@ export default function Home() {
   // being derived would lose its landing.
   useEffect(() => {
     if (!TABS.find(t => t.id === activeTab)?.enabled) setActiveTab('startup');
-  }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap, activeTab]);
+  }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap, tunedRfKorr, activeTab]);
 
   const buildSettings = (): TuneSettings => ({
     filterConfig, interpolationTable, applyPatch, applyWotDisable, writeWarmup, writeWot,
@@ -1584,6 +1589,7 @@ export default function Home() {
     (activeTab === 'lambda' && correctionMap && newMap) ||
     (activeTab === 'warmup' && warmupMap) ||
     (activeTab === 'wot' && wotMap) ||
+    (activeTab === 'rfkorr' && tunedRfKorr) ||
     (activeTab === 'log' && processedLog)
   );
 
@@ -2084,6 +2090,10 @@ export default function Home() {
                 />
               )}
 
+              {(activeTab === 'rfkorr' && tunedRfKorr) && (
+                <RfKorrTable result={tunedRfKorr} zoom={mapZoom.zoom} />
+              )}
+
               {(activeTab === 'warmup' && warmupMap) && (
                 <MapEditor mapData={warmupMap} zoom={mapZoom.zoom} />
               )}
@@ -2211,6 +2221,15 @@ export default function Home() {
               )}
               {graphOnScreen && (activeTab === 'lambda' && correctionMap && newMap) && (
                 <MapVisualizer mapData={lambdaVisualMap!} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
+              )}
+              {/* The correction is a multiplier centred on 1.0, and only the departure from it
+                  means anything, so it takes the deviation scale like the two signed maps above
+                  rather than the absolute one the filling maps use. */}
+              {graphOnScreen && (activeTab === 'rfkorr' && tunedRfKorr) && (
+                <MapVisualizer
+                  mapData={{ xAxis: tunedRfKorr.rpm, yAxis: tunedRfKorr.delta, data: tunedRfKorr.tuned }}
+                  title="" zAxisLabel="RF KORR" scale="deviation" deviationMidpoint={1}
+                />
               )}
               {graphOnScreen && (activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
               {graphOnScreen && (activeTab === 'wot' && wotMap) && <MapVisualizer mapData={wotMap} title="" zAxisLabel="RF %" />}
