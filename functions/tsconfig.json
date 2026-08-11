@@ -1,0 +1,16 @@
+{
+    // The Workers runtime, not the browser. Kept out of the root tsconfig because the two runtimes
+    // declare incompatible globals of the same names — see the note on `exclude` there.
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "types": ["@cloudflare/workers-types"],
+        "strict": true,
+        "noEmit": true,
+        "isolatedModules": true,
+        "skipLibCheck": true
+    },
+    "include": ["**/*.ts"]
+}

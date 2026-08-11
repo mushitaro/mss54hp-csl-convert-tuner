@@ -1,0 +1,48 @@
+/**
+ * Cloudflare Pages — the PREVIEW target for feature branches.
+ *
+ * Production stays on GitHub Pages at mss54hp-csl-convert-tuner.tsunagi.app, deployed from `main`
+ * by .github/workflows/deploy.yml. Nothing here touches that: Pages serves one site per repo and
+ * that site is spoken for, and the service worker precaches the whole origin under scope `/`, so a
+ * second build sharing that origin would fight production's cache rather than sit beside it. A
+ * separate origin is not a preference, it is the only arrangement that works.
+ *
+ * The other reason to be here rather than on a second GitHub Pages site: an upload endpoint. The
+ * app is a static export, so on Pages there is nowhere for a POST to land. Pages Functions plus D1
+ * gives one on the same origin as the app, which means no CORS preflight in a garage on a phone
+ * with two bars of signal.
+ *
+ * ## Setup, once
+ *
+ *   npx wrangler login
+ *   npx wrangler d1 create mss54hp-tuner-runs      # copy database_id into this file
+ *   npm run db:migrate:remote
+ *   npx wrangler pages project create mss54hp-tuner-preview --production-branch main
+ *   npx wrangler pages secret put UPLOAD_TOKEN --project-name mss54hp-tuner-preview
+ *
+ * Then `npm run deploy:preview` for every build after that.
+ */
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "mss54hp-tuner-preview",
+    "pages_build_output_dir": "out",
+
+    // Pinned rather than tracking "latest". A runtime that changes under a car diagnostic tool
+    // between one drive and the next is a variable nobody asked for.
+    "compatibility_date": "2026-08-01",
+
+    "d1_databases": [
+        {
+            "binding": "RUNS_DB",
+            "database_name": "mss54hp-tuner-runs",
+            // Replaced by the UUID `wrangler d1 create` prints — see the setup block above.
+            //
+            // A non-empty placeholder, because local development needs one and an empty string is
+            // a hard validation error before anything runs. Deliberately NOT shaped like a UUID:
+            // a remote deploy against this value fails with "database not found", which is the
+            // right outcome for a config nobody finished, and the wrong-database-silently outcome
+            // is the one worth engineering against.
+            "database_id": "REPLACE-WITH-ID-FROM-wrangler-d1-create"
+        }
+    ]
+}

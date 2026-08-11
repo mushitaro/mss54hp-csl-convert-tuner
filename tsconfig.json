@@ -30,5 +30,9 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  // `functions/` is the Cloudflare Pages API and runs in the Workers runtime, not the browser.
+  // It has its own tsconfig with the Workers types, which cannot be merged into this one: both
+  // define a global `Response`/`Request`/`fetch` with different shapes, and whichever wins makes
+  // the other half of the repo wrong. Two roots, one for each runtime.
+  "exclude": ["node_modules", "functions"]
 }

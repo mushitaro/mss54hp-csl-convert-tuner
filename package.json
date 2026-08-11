@@ -7,7 +7,13 @@
     "dev": "next dev -p 5054",
     "build": "next build && node scripts/gen-sw.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
+    "preview": "npm run build && wrangler pages dev",
+    "deploy:preview": "npm run build && wrangler pages deploy",
+    "db:migrate:local": "wrangler d1 migrations apply mss54hp-tuner-runs --local",
+    "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
+    "db:runs": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(created_at/1000,'unixepoch') AS at, label, point_count, has_rf, has_egt FROM runs ORDER BY created_at DESC LIMIT 20\""
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -22,6 +28,7 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260811.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/papaparse": "^5.5.2",
@@ -31,6 +38,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wrangler": "^4.120.1"
   }
 }

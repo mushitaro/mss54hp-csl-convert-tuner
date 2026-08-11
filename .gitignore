@@ -42,3 +42,7 @@ next-env.d.ts
 
 # local-only reference material (not for distribution)
 /reference/
+
+# Cloudflare local secrets. The real token lives in `wrangler pages secret`, never here.
+.dev.vars
+.wrangler/

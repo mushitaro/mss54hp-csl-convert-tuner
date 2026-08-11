@@ -93,6 +93,18 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(request.url);
     if (url.origin !== self.location.origin) return;
 
+    // The upload API, where one exists (the Cloudflare Pages preview — production is static and has
+    // no /api at all). Left entirely to the network, for two reasons that both bite:
+    //
+    //   A GET to /api/runs has `mode: 'cors'`, so it would fall past the navigate branch into the
+    //   cache lookup, miss, and go to the network anyway — correct today, and only by accident. A
+    //   list of runs served from a cache would be a list of runs that no longer exist.
+    //
+    //   And a *navigation* to /api/... — following the download link for a run — matches the
+    //   navigate branch above and would be answered with index.html. The user would get the app
+    //   where they asked for a CSV, with no error anywhere to explain it.
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
+
     // A navigation to any path resolves to the one HTML document. This app is a
     // single exported route; without this, a deep link or a reload while
     // offline would miss the cache and show the browser's error page.
