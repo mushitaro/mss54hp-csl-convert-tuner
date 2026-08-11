@@ -98,10 +98,17 @@ export const APP_CONFIG = {
      * three spellings are reproduced verbatim below, so behaviour is unchanged for every log that
      * parsed before this table existed.
      *
-     * `rf` and `exhaustTemp` are the two channels the EGT correction work depends on. Their real
-     * Testo header names are NOT yet known — they have to be read off the car — so they ship empty.
-     * An empty alias list simply never matches, which is the same as the column being absent, and
-     * every downstream consumer already treats those two as optional.
+     * `rf` and `exhaustTemp` are the two channels the EGT correction work depends on, and they are
+     * NOT equally optional:
+     *
+     *   rf           REQUIRED. parseLogFile throws without it — see the comment there. Over DS2 it
+     *                arrives in the same 35-byte response as rpm and load, so a live run always
+     *                has it; a CSV that lacks it needs the column added, not a second derivation.
+     *   exhaustTemp  Optional. Without it the DME-table route for rf_korr cannot index a Δ, which
+     *                the app states and works around by using RF ÷ rf_soll.
+     *
+     * Both are seeded with the names this app's own serializer writes, so an exported log
+     * re-imports. Real Testo header names still have to be read off the car — add them here.
      */
     CSV_ALIASES: {
         time: ['time', 'zeit'],

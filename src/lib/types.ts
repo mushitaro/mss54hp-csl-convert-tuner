@@ -104,52 +104,81 @@ export interface LogFilterConfig {
     katsTailSec?: number;
 
     /**
-     * Correct the logged trim by the measured rf_korr before it reaches the VE map — karter16's
-     * "Option 2". Default TRUE.
-     *
-     * It lives on the filter config rather than somewhere calculator-shaped because it is part of
-     * "how this log becomes a map", it has to be persisted with the session for the tune to be
-     * reproducible, and TuneSettings already carries filterConfig whole.
-     *
-     * What it decides is what the Alpha-N table is FOR. With it on, the table holds the filling at
-     * NOMINAL exhaust temperature and rf_korr adds the cold-exhaust enrichment on top — so a map
-     * tuned on a cold-exhaust drive stays valid once things heat up. With it off, the table holds
-     * the filling at whatever rf_korr the log happened to be taken under, which is only right if
-     * BMW's density model exactly matches this engine.
-     *
-     * The two disagree by up to 37 % where KF_RF_KORR_DRREL peaks (~2350 rpm), and they fail in
-     * opposite directions: on is rich-safe, off can leave the map lean under load once the exhaust
-     * comes up to temperature. That asymmetry is why this defaults on — see
-     * docs/ecu-logic/60-tuning-logic.md §6.
+     * @deprecated Superseded by `rfKorrSource`. Read only by `resolveRfKorr`, so a session saved
+     * before that field existed still replays to the same bytes. Never written by new code.
      */
     applyRfKorr?: boolean;
 
     /**
-     * What to do about rf_korr. Supersedes `applyRfKorr`, which is kept in step for sessions
-     * saved by an older build: `rfKorrMode ?? (applyRfKorr !== false ? 'nominal' : 'as-logged')`.
-     *
-     *   'nominal'    New = Old * STFT * rf_korr. The VE table holds filling at NOMINAL exhaust
-     *                temperature and rf_korr adds the cold-exhaust enrichment on top. Default.
-     *   'as-logged'  New = Old * STFT. The table holds filling at whatever rf_korr the log was
-     *                taken under — correct only if BMW's density model matches this engine.
-     *   'tuned'      New = Old * STFT * rf_korr / k_new, where k_new is the back-calculated
-     *                KF_RF_KORR_DRREL. In the ideal limit this collapses to Old * anchor, the
-     *                trim measured at nominal exhaust temperature.
-     *
-     * ONE setting, not two, and that is deliberate. 'tuned' also writes the derived table into
-     * the binary, and the two halves are only correct together: a VE table built for k_new while
-     * the DME still applies k_old leaves the residual k_new/k_old, which reaches -27 % at the
-     * stock peak (2200-2350 rpm) and goes LEAN. Two independent toggles could express that state;
-     * one setting cannot.
+     * @deprecated Superseded by `rfKorrSource` plus `TuneSettings.writeRfKorr`. See `resolveRfKorr`
+     * for the mapping. Never written by new code.
      */
     rfKorrMode?: RfKorrMode;
+
+    /**
+     * Which rf_korr the VE derivation divides out of the logged trim.
+     *
+     * `VE′ = VE × STFT × rf_korr`, always — the DME meters fuel from `RF = rf_soll × rf_korr`
+     * (rf_calc, master 0x0218D0), so the trim the closed loop learned is an error on the CORRECTED
+     * value. Dividing the correction back out is what leaves a table the DME can then re-correct.
+     * That part is not a choice. WHERE the number comes from is:
+     *
+     *   'rf-ratio'     rf_korr = RF ÷ rf_soll
+     *                  What the DME actually applied, recovered from its own output. Needs the RF
+     *                  channel and nothing else. Exact only with the PATCH on (k_rf_cfg = 0x02):
+     *                  with bit 4 set, RF also carries rf_p_saug_i and the ratio is contaminated.
+     *
+     *   'table-delta'  rf_korr = KF_RF_KORR_DRREL(rpm, Δ),  Δ = kf_rf_tabg_modell(rpm, RF) − TABG
+     *                  The binary's own table, read at the exhaust delta the sensor reports. Needs
+     *                  a TABG channel. Cannot see the DME's 20 km/h gate, so where the gate was shut
+     *                  this returns the table value while the DME applied 1.000.
+     *
+     * Both reach the same table two ways, so their AGREEMENT is the check on DS2 offsets 8 and 14 —
+     * see rfKorrRouteAgreement. Their DISAGREEMENT is why this is a choice rather than a constant:
+     * offset 8 has not been confirmed against a real DME, and if it turned out to be pre-correction
+     * `rf_soll`, 'rf-ratio' would silently read 1.000 everywhere.
+     *
+     * Defaults to 'rf-ratio': it is the one that needs no sensor, and it is what the DME did rather
+     * than what its table says it should have done.
+     */
+    rfKorrSource?: RfKorrSource;
 }
 
+/** @deprecated The three-way this replaced. Kept for reading old sessions. */
 export type RfKorrMode = 'nominal' | 'as-logged' | 'tuned';
 
-/** The one place the legacy boolean is reconciled with the mode. */
-export function resolveRfKorrMode(config: Pick<LogFilterConfig, 'rfKorrMode' | 'applyRfKorr'>): RfKorrMode {
-    return config.rfKorrMode ?? ((config.applyRfKorr ?? true) ? 'nominal' : 'as-logged');
+export type RfKorrSource = 'rf-ratio' | 'table-delta';
+
+export interface RfKorrPlan {
+    source: RfKorrSource;
+    /**
+     * Whether rf_korr is divided out at all.
+     *
+     * Always true for anything selectable today. False exists solely so a session saved as
+     * `'as-logged'` — a mode that is gone from the UI — still rebuilds to the bytes it recorded.
+     * Removing it would silently re-derive those sessions and break their sha256 reproduction
+     * check, which is the one thing an archived session is for.
+     */
+    apply: boolean;
+    /**
+     * True only for a legacy `'tuned'` session. The write-back is `TuneSettings.writeRfKorr` now,
+     * beside writeWarmup and writeWot, so the caller has to seed it from here when loading one.
+     */
+    legacyWrite: boolean;
+}
+
+/** The one place the two superseded fields are reconciled with the current one. */
+export function resolveRfKorr(
+    config: Pick<LogFilterConfig, 'rfKorrSource' | 'rfKorrMode' | 'applyRfKorr'>,
+): RfKorrPlan {
+    if (config.rfKorrSource) return { source: config.rfKorrSource, apply: true, legacyWrite: false };
+    const legacy = config.rfKorrMode ?? ((config.applyRfKorr ?? true) ? 'nominal' : 'as-logged');
+    return {
+        // Every legacy mode used RF ÷ rf_soll; the table route did not exist as an input.
+        source: 'rf-ratio',
+        apply: legacy !== 'as-logged',
+        legacyWrite: legacy === 'tuned',
+    };
 }
 
 export interface InterpolationPoint {

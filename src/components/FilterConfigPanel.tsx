@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, X, RefreshCw, Filter } from 'lucide-react';
-import { LogFilterConfig, RfKorrMode, resolveRfKorrMode } from '@/lib/types';
-import { RfKorrModeControl } from './RfKorrModeControl';
+import { X, Filter } from 'lucide-react';
+import { LogFilterConfig, RfKorrSource, resolveRfKorr } from '@/lib/types';
+import { RfKorrSourceControl } from './RfKorrSourceControl';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 /**
@@ -38,12 +38,15 @@ interface Props {
     /** Open above the trigger instead of below it. The mobile footer sits at the bottom edge, so a
      *  popover hanging `top-10` off a control down there opens off-screen. */
     openUp?: boolean;
-    /** Whether TUNED may be chosen at all. False disables it and shows why. Decided by the page,
-     *  which is the only place that can see the binary, the log and the back-calculation at once. */
-    canTuneRfKorr?: boolean;
+    /** The log carries an exhaust temperature, so the DME-table route can index a Δ. Decided by the
+     *  page, which is the only place that can see the processed log. */
+    hasTabg?: boolean;
+    /** Mean gap between the two rf_korr routes over this log, or undefined when they cannot be
+     *  compared. The one check the app has on a DS2 offset nobody has confirmed on a car. */
+    routeGap?: number;
 }
 
-export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false, openUp, canTuneRfKorr = false }) => {
+export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false, openUp, hasTabg = false, routeGap }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
     const t = TEXT[useDialogLang()];
@@ -53,16 +56,20 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
         setLocalConfig(config);
     }, [config]);
 
-    const rfKorrMode = resolveRfKorrMode(localConfig);
+    const rfKorrSource = resolveRfKorr(localConfig).source;
 
-    /** Writes the mode AND the legacy boolean it supersedes, so a session saved here still reads
-     *  sanely in a build that only knows `applyRfKorr`. TUNED has no boolean equivalent; it maps
-     *  to the rich-safe one, which is the correct fallback for a build that cannot divide. */
-    const setRfKorrMode = (mode: RfKorrMode) => {
+    /** Writes the source AND clears the two fields it supersedes.
+     *
+     *  Cleared rather than kept in step, which is the opposite of what the old three-way did. Those
+     *  fields are now read ONLY when `rfKorrSource` is absent (see resolveRfKorr), so leaving a
+     *  stale `rfKorrMode: 'tuned'` behind would be a second, invisible opinion about the table
+     *  write — and `storedWriteRfKorr` consults exactly that field when reconstructing an old
+     *  session. A config that carries the current field must not also answer the legacy question. */
+    const setRfKorrSource = (source: RfKorrSource) => {
         if (readOnly) return;
-        const newCfg: LogFilterConfig = {
-            ...localConfig, rfKorrMode: mode, applyRfKorr: mode !== 'as-logged',
-        };
+        const newCfg: LogFilterConfig = { ...localConfig, rfKorrSource: source };
+        delete newCfg.rfKorrMode;
+        delete newCfg.applyRfKorr;
         setLocalConfig(newCfg);
         onConfigChange(newCfg);
     };
@@ -211,11 +218,12 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                 a VE map built for the new table while the DME still applies the old
                                 one is off by their ratio, which reaches -27 % on the lean side. Two
                                 checkboxes could express that; a three-way cannot. */}
-                            <RfKorrModeControl
-                                mode={rfKorrMode}
-                                onChange={setRfKorrMode}
-                                canTune={canTuneRfKorr}
+                            <RfKorrSourceControl
+                                source={rfKorrSource}
+                                onChange={setRfKorrSource}
+                                hasTabg={hasTabg}
                                 readOnly={readOnly}
+                                routeGap={routeGap}
                             />
 
                             {/* Transient Header */}

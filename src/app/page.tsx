@@ -35,7 +35,8 @@ import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint, resolveRfKorrMode } from '@/lib/types';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, RfKorrSource, resolveRfKorr } from '@/lib/types';
+import { rfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import {
@@ -422,7 +423,7 @@ export default function Home() {
   const {
     binaryFile, currentMap, binaryBuffer, patchStatus,
     applyPatch, setApplyPatch, applyWotDisable, setApplyWotDisable,
-    writeWarmup, setWriteWarmup, writeWot, setWriteWot,
+    writeWarmup, setWriteWarmup, writeWot, setWriteWot, writeRfKorr, setWriteRfKorr,
   } = binaryFileState;
 
   const {
@@ -475,9 +476,30 @@ export default function Home() {
    *  wrong rf_korr treatment, and the sha256 reproduction check then fails against bytes that were
    *  built correctly the first time. The `loadFromBuffer` call in the same handler already passes
    *  its stored settings explicitly for exactly this reason. */
-  const veCalcOptionsFor = (config: LogFilterConfig, egt: EgtTables | null): VeCalcOptions => ({
-    applyRfKorr: config.applyRfKorr ?? true,
-    rfKorrMode: resolveRfKorrMode(config),
+  /** Whether a stored session wrote the derived correction table.
+   *
+   *  Two eras to read. `writeRfKorr` is the field; sessions saved before it existed encoded the
+   *  same decision inside `filterConfig.rfKorrMode === 'tuned'`, which `resolveRfKorr` surfaces as
+   *  `legacyWrite`. Taking the absent field as plain false would drop the table write from every
+   *  archived session of the older kind, and its sha256 reproduction check would then fail against
+   *  bytes that were built correctly at the time. */
+  const storedWriteRfKorr = (settings?: TuneSettings): boolean =>
+    settings?.writeRfKorr ?? (settings ? resolveRfKorr(settings.filterConfig).legacyWrite : false);
+
+  const veCalcOptionsFor = (
+    config: LogFilterConfig, egt: EgtTables | null, write: boolean,
+  ): VeCalcOptions => ({
+    // The whole config goes through resolveRfKorr, which is also what reads the two superseded
+    // fields — so an archived session saved as 'nominal' / 'as-logged' / 'tuned' re-derives to the
+    // same numbers it recorded without this call site knowing those modes ever existed.
+    rfKorrSource: config.rfKorrSource,
+    rfKorrMode: config.rfKorrMode,
+    applyRfKorr: config.applyRfKorr,
+    // The hub toggle, not a filter setting — but the derivation needs it, because dividing by the
+    // new table and writing it are one decision. `write` is a parameter rather than read from
+    // state here for the same reason `config` is: the archived-session handlers run in a render
+    // scope whose state is one step behind what they just asked to load.
+    writeRfKorr: write,
     egt,
   });
 
@@ -495,9 +517,12 @@ export default function Home() {
     [binaryBuffer]);
 
   const veCalcOptions = useMemo(
-    () => veCalcOptionsFor(filterConfig, egtTables),
+    () => veCalcOptionsFor(filterConfig, egtTables, writeRfKorr),
+    // Hand-listed, and the list is the contract: every input veCalcOptionsFor actually reads has
+    // to be here or a toggle change re-renders without re-deriving. `applyRfKorr` alone was enough
+    // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterConfig.applyRfKorr, egtTables]);
+    [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr, egtTables, writeRfKorr]);
 
   const runCalculation = (map: NonNullable<typeof currentMap>, data: any[]) => {
     veCalc.runCalculation(map, data, veCalcOptions);
@@ -567,7 +592,20 @@ export default function Home() {
     }
   };
 
-  /** Whether TUNED is a legal answer for this session, and why not when it is not.
+  /** Does this log carry an exhaust temperature at all? The DME-table route needs a Δ, and Δ has
+   *  exactly one non-circular source: kf_rf_tabg_modell(rpm, RF) − TABG. Without TABG there is no
+   *  row to read the table at, so the route is not a choice. */
+  const logHasTabg = useMemo(
+    () => !!processedLog?.data.some(p => p.exhaustTemp !== undefined),
+    [processedLog]);
+
+  /** How far apart the two routes land on this log — the check on DS2 offset 8, which is still
+   *  unconfirmed against a real DME. Undefined when they cannot be compared at all. */
+  const routeGap = useMemo(
+    () => (processedLog ? rfKorrRouteAgreement(processedLog.data)?.meanAbsGap : undefined),
+    [processedLog]);
+
+  /** Whether the RF KORR write is a legal answer for this session, and why not when it is not.
    *
    *  Four conditions, all of which have to hold at once, which is why this lives here rather than
    *  in the panel: the panel can see the config and nothing else. */
@@ -581,14 +619,34 @@ export default function Home() {
     && (applyPatch || patchStatus?.mapOff)
   );
 
-  /** The one value that decides both halves of TUNED.
+  /** The one value that decides both halves of the RF KORR write.
    *
    *  Deriving the VE map for a corrected table and NOT writing that table leaves the DME applying
    *  the old one, so the difference survives intact: up to -27 % at the stock peak, on the lean
-   *  side. Computing this once and threading it into every write path is what makes that state
-   *  unreachable — there is no separate switch to forget. */
-  const rfKorrWrite = (resolveRfKorrMode(filterConfig) === 'tuned' && canTuneRfKorr)
-    ? tunedRfKorr!.tuned : null;
+   *  side. Computing this once and threading it into every write path — and into the VE derivation
+   *  through `writeRfKorr` — is what makes that state unreachable. The hub toggle is the only
+   *  switch; there is no second one to forget.
+   *
+   *  ANDed with canTuneRfKorr rather than trusting the toggle alone: the toggle can be left armed
+   *  from a previous session whose log had an exhaust probe, exactly as writeWarmup/writeWot can be
+   *  left armed with no tune. Deriving here shows what WRITE will really do. */
+  const rfKorrArmed = writeRfKorr && canTuneRfKorr;
+  const rfKorrWrite = rfKorrArmed ? tunedRfKorr!.tuned : null;
+
+  /** Which of the four conditions is missing, in the order they are usually missing.
+   *
+   *  One sentence naming the actual blocker, not a list of everything it could be. A disabled
+   *  switch that cannot say why is the one that gets reported as broken — the same reasoning as
+   *  derivedTablesLockReason beside it, which this deliberately reads like. */
+  const rfKorrLockReason = !egtTables
+    ? 'Needs the binary\'s EGT tables — they did not decode from these bytes, so there is nothing to derive against.'
+    : !(applyPatch || patchStatus?.mapOff)
+      ? 'Needs a log recorded with the PATCH on (k_rf_cfg = 0x02). With MAP compensation live, RF carries the integrator on top and rf_korr cannot be pinned to a few percent.'
+      : !tunedRfKorr
+        ? 'Needs a log first — the table is back-calculated from one. Record a run (START TUNE) or load one.'
+        : tunedRfKorr.report.sensorMissing
+          ? 'Needs an exhaust temperature (TABG) in the log. Δ has no other non-circular source, and Δ is what picks the row of the table.'
+          : 'Too few cells cleared their evidence thresholds to be worth writing — see the RF KORR tab for the per-cell reasons.';
 
   const handleDownloadBin = () => {
     binaryFileState.downloadBin(newMap, { tunedRfKorr: rfKorrWrite });
@@ -811,6 +869,9 @@ export default function Home() {
 
   const buildSettings = (): TuneSettings => ({
     filterConfig, interpolationTable, applyPatch, applyWotDisable, writeWarmup, writeWot,
+    // The armed value, not the raw toggle: `rfKorrArmed` is what actually reached the bytes, and a
+    // session must record what it did rather than what was switched on at the time.
+    writeRfKorr: rfKorrArmed,
   });
 
   /** Returns the draft to work in, creating one if there is none. */
@@ -865,6 +926,7 @@ export default function Home() {
         applyWotDisable: session.tuneSettings.applyWotDisable,
         writeWarmup: session.tuneSettings.writeWarmup,
         writeWot: session.tuneSettings.writeWot,
+        writeRfKorr: storedWriteRfKorr(session.tuneSettings),
       },
     );
     if (!map) return;
@@ -883,9 +945,14 @@ export default function Home() {
           // The STORED config and THESE bytes, not the memos — see veCalcOptionsFor. Both
           // `loadRawLog` and `loadFromBuffer` above only scheduled their state changes; this
           // scope still sees the outgoing session's settings and the previous binary.
+          // The stored write flag too. Sessions saved before `writeRfKorr` existed encoded it in
+          // filterConfig.rfKorrMode === 'tuned', which resolveRfKorr surfaces as `legacyWrite` —
+          // reading the absent field as plain false would drop the table write from every archived
+          // 'tuned' session and its sha256 check would fail against bytes that were correct.
           veCalc.runCalculation(map, processed.data, veCalcOptionsFor(
             session.tuneSettings?.filterConfig ?? filterConfig,
-            readEgtTables(bins.baseBinaryBuffer)));
+            readEgtTables(bins.baseBinaryBuffer),
+            storedWriteRfKorr(session.tuneSettings)));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -998,7 +1065,7 @@ export default function Home() {
       // the binary swap, so the egtTables memo still describes whatever was loaded before. The
       // filter config is NOT reloaded here, so the live one is the right one.
       veCalc.runCalculation(map, processed.data,
-        veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer)));
+        veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr));
       comparison.applyDefaultsAfterCalculation();
       goToTab('new');
     } else {
@@ -1316,6 +1383,7 @@ export default function Home() {
     cmp('WOT TH', s.applyWotDisable, applyWotDisable);
     cmp('WRITE WARMUP', s.writeWarmup, writeWarmup);
     cmp('WRITE WOT', s.writeWot, writeWot);
+    cmp('WRITE RF KORR', storedWriteRfKorr(s), rfKorrArmed);
     return rows;
   };
 
@@ -1375,7 +1443,7 @@ export default function Home() {
         await binaryFileState.loadFromBuffer(
           patchedBuffer,
           binaryFileState.buildFileName(null),
-          { applyPatch, applyWotDisable, writeWarmup, writeWot },
+          { applyPatch, applyWotDisable, writeWarmup, writeWot, writeRfKorr },
         );
         goToTab('current');
         return;
@@ -2106,7 +2174,7 @@ export default function Home() {
                   onToggle={(enabled) => handleConfigChange({ ...filterConfig, enableCorrection: enabled })}
                   readOnly={isArchived}
                 />
-                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
+                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2802,8 +2870,8 @@ export default function Home() {
                       </span>
                     </div>
 
-                    {/* ROW 3: WRITE WOT (Close to Ring) */}
-                    <div className={`h-7 flex items-center gap-3 ml-1 transition-opacity shrink-0 ${derivedTablesLocked ? 'opacity-40' : 'opacity-90'}`}>
+                    {/* ROW 3: WRITE WOT (Pushed Away/Far) */}
+                    <div className={`h-7 flex items-center gap-4 ml-8 pl-1 shrink-0 transition-opacity ${derivedTablesLocked ? 'opacity-40' : ''}`}>
                       <label
                         className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
@@ -2816,6 +2884,35 @@ export default function Home() {
                         title={derivedTablesLocked ? derivedTablesLockReason : undefined}
                       >
                         {compact ? 'WOT' : 'WRITE WOT'}
+                      </span>
+                    </div>
+
+                    {/* ROW 4: WRITE RF KORR (Close to Ring)
+                        The fourth member of the family above: a table derived from this tune and
+                        injected at flash time. Same shape, same lock behaviour, same reason for
+                        deriving `checked` from the gate rather than clearing the stored flag.
+
+                        Its gate is stricter than derivedTablesLocked, and not by preference. The
+                        other two need only a tuned map; this one needs the binary's EGT tables to
+                        decode, an exhaust temperature in the log to index Δ with, a back-calculation
+                        that met its own evidence thresholds, and the PATCH on. rfKorrLockReason
+                        names whichever is missing.
+
+                        The arc is 1-8-8-1 now rather than 1-8-1: the middle two are pushed out, so a
+                        fourth row extends the convex shape instead of breaking it. */}
+                    <div className={`h-7 flex items-center gap-3 ml-1 transition-opacity shrink-0 ${canTuneRfKorr ? 'opacity-90' : 'opacity-40'}`}>
+                      <label
+                        className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${canTuneRfKorr ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                        title={canTuneRfKorr ? undefined : rfKorrLockReason}
+                      >
+                        <input type="checkbox" className="sr-only peer" checked={rfKorrArmed} disabled={!canTuneRfKorr || dmeLink.state === 'writing'} onChange={(e) => setWriteRfKorr(e.target.checked)} />
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
+                      </label>
+                      <span
+                        className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${rfKorrArmed ? 'text-blue-400' : 'text-slate-500'}`}
+                        title={canTuneRfKorr ? undefined : rfKorrLockReason}
+                      >
+                        {compact ? 'RF KORR' : 'WRITE RF KORR'}
                       </span>
                     </div>
 
@@ -2986,7 +3083,7 @@ export default function Home() {
               readOnly={isArchived}
               openUp
             />
-            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
+            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}

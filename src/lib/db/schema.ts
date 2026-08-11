@@ -34,6 +34,15 @@ export interface TuneSettings {
     applyWotDisable: boolean;
     writeWarmup: boolean;
     writeWot: boolean;
+    /** Write the back-calculated KF_RF_KORR_DRREL into the binary. Beside writeWarmup and writeWot
+     *  because it is the same kind of thing: a table derived from this tune, injected at flash time.
+     *
+     *  Optional, and a missing value reads as false — but NOT because false is a safe default. A
+     *  session saved before this field existed encoded the write inside `filterConfig.rfKorrMode`
+     *  ('tuned'), so `resolveRfKorr().legacyWrite` is what such a row must be reconstructed from.
+     *  Reading the absence as plain false would silently drop the table write from every archived
+     *  'tuned' session and break its sha256 reproduction. See loadSession. */
+    writeRfKorr?: boolean;
 }
 
 export interface FlashRecord {

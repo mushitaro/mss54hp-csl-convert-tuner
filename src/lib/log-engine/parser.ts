@@ -51,6 +51,34 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         return newRow;
     });
 
+    /**
+     * RF is REQUIRED, and this is where that is enforced.
+     *
+     * It used to be optional, with every consumer degrading quietly when it was absent — which put
+     * a silent second methodology in the app: without RF there is no rf_korr, so `VE' = VE x STFT`
+     * with the correction left baked in, which is the derivation this app deliberately does not do
+     * (it goes LEAN once the exhaust temperature moves away from the log's).
+     *
+     * There is no good reason to design around its absence. Over DS2 it arrives in the SAME 35-byte
+     * response as rpm, load and coolant — offset 8, no extra round trip — so a live run always has
+     * it. A Testo CSV is the only way in that could lack it, and the answer there is to add the
+     * column, not to derive a map a different way and not say so.
+     *
+     * Thrown rather than warned: a log that reaches the VE calculator without RF produces a
+     * plausible-looking map by the wrong arithmetic, and that is the failure this app must never
+     * ship. The message names the header the exporter should write.
+     */
+    const RF_ALIASES = APP_CONFIG.CSV_ALIASES.rf;
+    const hasRf = normalizedData.some(row => pick(row, 'rf') !== undefined);
+    if (normalizedData.length > 0 && !hasRf) {
+        throw new Error(
+            'This log has no RF column (the DME\'s relative filling), which the VE derivation '
+            + 'needs in order to divide out rf_korr. '
+            + `Accepted header names: ${RF_ALIASES.join(', ') || '(none configured)'}. `
+            + 'A run recorded over DS2 always carries it; add the column to the CSV export.'
+        );
+    }
+
     const results: LogDataPoint[] = [];
 
     for (const row of normalizedData) {
@@ -92,9 +120,13 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
             coolantTemp,
         };
 
-        // The two EGT-correction channels. Both stay `undefined` unless the file really has them —
-        // an empty alias list (which is how they ship until the headers are known) never matches,
-        // and every consumer already handles their absence by falling back to the old behaviour.
+        // RF is guaranteed present by the check above — a file that reaches here has it under one
+        // of the accepted headers. It is still read per row rather than assumed, because a column
+        // can be present and blank on individual rows.
+        //
+        // TABG is genuinely optional: without it the DME-table route for rf_korr cannot index a Δ,
+        // and the app says so and offers the RF ÷ rf_soll route instead. That is a stated choice
+        // with a visible consequence, not a silent change of arithmetic.
         const rf = pick(row, 'rf');
         if (rf !== undefined) point.rf = rf;
         const exhaustTemp = pick(row, 'exhaustTemp');

@@ -24,6 +24,7 @@ export type ToggleOverrides = {
   applyWotDisable?: boolean;
   writeWarmup?: boolean;
   writeWot?: boolean;
+  writeRfKorr?: boolean;
 };
 
 /** Tables that are not derived from the VE map and so cannot be rebuilt from it. */
@@ -59,6 +60,9 @@ export function useBinaryFile() {
   const [applyWotDisable, setApplyWotDisable] = useState<boolean>(false); // Default OFF
   const [writeWarmup, setWriteWarmup] = useState<boolean>(false); // Default OFF
   const [writeWot, setWriteWot] = useState<boolean>(false); // Default OFF
+  // Default OFF like the two above. This one rewrites KF_RF_KORR_DRREL, which changes fuelling
+  // across the whole cold-exhaust region — it is not something a build should arm on its own.
+  const [writeRfKorr, setWriteRfKorr] = useState<boolean>(false);
 
   const uploadBinary = async (file: File, overrides?: ToggleOverrides) => {
     try {
@@ -106,6 +110,7 @@ export function useBinaryFile() {
       // silently inject derived warmup/WOT tables into an unrelated binary.
       setWriteWarmup(overrides?.writeWarmup ?? false);
       setWriteWot(overrides?.writeWot ?? false);
+      setWriteRfKorr(overrides?.writeRfKorr ?? false);
 
       console.log('Parsed Map:', map);
       return map;
@@ -265,6 +270,8 @@ export function useBinaryFile() {
     setWriteWarmup,
     writeWot,
     setWriteWot,
+    writeRfKorr,
+    setWriteRfKorr,
     uploadBinary,
     loadFromBuffer,
     clear,

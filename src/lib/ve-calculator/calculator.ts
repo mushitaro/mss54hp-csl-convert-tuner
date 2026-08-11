@@ -1,4 +1,4 @@
-import { LogDataPoint, VEMap, RfKorrMode, resolveRfKorrMode } from '@/lib/types';
+import { LogDataPoint, VEMap, RfKorrMode, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WOT_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD, CSL_STOCK_WOT_RPM } from '@/config/constants';
 import {
     EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, interpMap2d, invertRfKorrProfile, rfKorrAt,
@@ -83,12 +83,24 @@ export interface VeCalcOptions {
      */
     egt?: EgtTables | null;
 
-    /** Supersedes `applyRfKorr` when set. See LogFilterConfig.rfKorrMode. */
+    /** @deprecated Read only through `resolveRfKorr`, so old sessions replay unchanged. */
     rfKorrMode?: RfKorrMode;
 
-    /** The back-calculated correction table, required by 'tuned' and ignored by the other two
-     *  modes. Absent or not acceptable degrades 'tuned' to 'nominal' per cell — the caller is
-     *  expected to have disabled the option, and a calculation is not where to raise that. */
+    /** Which rf_korr the derivation divides out. See LogFilterConfig.rfKorrSource. */
+    rfKorrSource?: RfKorrSource;
+
+    /**
+     * Whether the back-calculated KF_RF_KORR_DRREL is being written into the binary — and therefore
+     * whether the VE derivation must divide by it.
+     *
+     * The same flag drives both because they are one decision. `TuneSettings.writeRfKorr` is where
+     * it is stored, alongside writeWarmup and writeWot.
+     */
+    writeRfKorr?: boolean;
+
+    /** The back-calculated correction table. Required when `writeRfKorr` is set and ignored
+     *  otherwise. Absent or not acceptable leaves the divisor out per cell — the caller is expected
+     *  to have disabled the toggle, and a calculation is not where to raise that. */
     tunedRfKorr?: RfKorrTuneResult | null;
 }
 
@@ -119,14 +131,17 @@ export class VECalculator {
     } {
         const rows = this.loadAxis.length;
         const cols = this.rpmAxis.length;
-        // Defaults to 'nominal', matching LogFilterConfig. A caller that forgets to pass options
-        // must land on the rich-safe behaviour, not the one that can write a lean map.
-        const mode = resolveRfKorrMode(options);
-        const applyRfKorr = mode !== 'as-logged';
-        // 'tuned' needs a table that was actually derived and passed its own evidence thresholds.
-        // Without one it degrades per cell to 'nominal' rather than failing: this is the same
-        // shape of decision as an rf_korr-less log, and the UI gates the option separately.
-        const tuned = mode === 'tuned' && options.tunedRfKorr?.acceptable
+        // Defaults to RF ÷ rf_soll — the route that needs no sensor. A caller that forgets to pass
+        // options lands on the same arithmetic the app has always done.
+        const plan = resolveRfKorr(options);
+        // Writing the derived table and dividing by it are one decision: a VE map built for k_new
+        // while the DME still applies k_old leaves the residual k_new/k_old, which reaches -27 % at
+        // the stock peak (2200-2350 rpm) and goes LEAN. So this reads the WRITE flag, not a mode.
+        //
+        // The table still has to have been derived and passed its own evidence thresholds. Without
+        // one it degrades per cell to "no divisor" rather than failing — the UI gates the toggle
+        // separately, and a calculation is not where to raise that.
+        const tuned = options.writeRfKorr && options.tunedRfKorr?.acceptable
             ? options.tunedRfKorr : null;
 
         // Initialize accumulation grid
@@ -156,8 +171,15 @@ export class VECalculator {
 
             if (!rpmInfo || !loadInfo) continue;
 
-            const rfKorr = point.rfKorr;
-            const correction = (applyRfKorr && rfKorr !== undefined) ? avgStft * rfKorr : avgStft;
+            // The chosen route. Both annotated in the same pass by annotateRfKorr, so switching
+            // between them re-derives from the same log without re-reading anything.
+            //   'rf-ratio'    RF ÷ rf_soll        — what the DME applied, from its own output
+            //   'table-delta' KF_RF_KORR_DRREL(rpm, Δ) at the sensor's Δ
+            // A sample the chosen route cannot supply carries no correction rather than silently
+            // borrowing the other one: the two disagree exactly where the disagreement matters
+            // (a shut gate, a missing sensor), and substituting would hide that.
+            const rfKorr = plan.source === 'table-delta' ? point.rfKorrFromEgt : point.rfKorr;
+            const correction = (plan.apply && rfKorr !== undefined) ? avgStft * rfKorr : avgStft;
 
             // The 'tuned' correction: divide the nominal one by what the CORRECTED table would
             // have applied at this operating point. What survives is the trim as it would read
