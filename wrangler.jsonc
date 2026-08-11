@@ -35,14 +35,9 @@
         {
             "binding": "RUNS_DB",
             "database_name": "mss54hp-tuner-runs",
-            // Replaced by the UUID `wrangler d1 create` prints — see the setup block above.
-            //
-            // A non-empty placeholder, because local development needs one and an empty string is
-            // a hard validation error before anything runs. Deliberately NOT shaped like a UUID:
-            // a remote deploy against this value fails with "database not found", which is the
-            // right outcome for a config nobody finished, and the wrong-database-silently outcome
-            // is the one worth engineering against.
-            "database_id": "REPLACE-WITH-ID-FROM-wrangler-d1-create"
+            // From `wrangler d1 create mss54hp-tuner-runs` (region APAC). Not a secret — it names
+            // a database, it does not open one; access still needs the account's own credentials.
+            "database_id": "af71b38c-8582-4432-be2f-054c568fa1dc"
         }
     ]
 }

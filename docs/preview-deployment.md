@@ -78,38 +78,51 @@ npx cloudflared tunnel --url http://localhost:5054
 出てくる `https://….trycloudflare.com` をスマホで開きます。PC を走らせている間だけ有効で、
 コードを直せば即反映されるので、UX の詰めにはこれが一番速いです。
 
-### 3.2 常設のプレビュー URL — Cloudflare Pages
+### 3.2 常設のプレビュー URL — Cloudflare Pages（**構築済み**）
 
-**1 回だけ、あなたの操作が要る手順**（私は代行できません）:
+## 🔗 https://rf-korr.mss54hp-tuner-preview.pages.dev
 
-```bash
-npx wrangler login
-```
+| | |
+|---|---|
+| Pages プロジェクト | `mss54hp-tuner-preview`（production branch は `main`。実配信はブランチ `rf-korr` のプレビュー） |
+| D1 | `mss54hp-tuner-runs`（`af71b38c-8582-4432-be2f-054c568fa1dc`、APAC） |
+| `UPLOAD_TOKEN` | production / preview 両環境に設定済み |
+| **トークンの実物** | リポジトリ直下の **`.upload-token.local`**（gitignore 済み。会話にもコミットにも出していません） |
 
-その後:
-
-```bash
-npx wrangler d1 create mss54hp-tuner-runs
-```
-
-表示された `database_id` を `wrangler.jsonc` の該当欄に貼り、続けて:
-
-```bash
-npm run db:migrate:remote
-npx wrangler pages project create mss54hp-tuner-preview --production-branch main
-npx wrangler pages secret put UPLOAD_TOKEN --project-name mss54hp-tuner-preview
-```
-
-最後にデプロイ:
+以降の更新は 1 コマンドです:
 
 ```bash
 npm run deploy:preview
 ```
 
-URL は `https://mss54hp-tuner-preview.pages.dev`。以降は `npm run deploy:preview` だけです。
+> `deploy:preview` はブランチ名を付けずに叩くと git のブランチ名から別 URL を切ります。
+> 上の固定 URL を保つには `--branch rf-korr` を付けてください:
+> `npm run build && npx wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr`
 
-> `database_id` を貼り忘れると、リモートデプロイは「database not found」で落ちます。
-> これは意図した挙動です — 設定し忘れが**別の DB に静かに書く**より、落ちるほうが安全です。
+**トークンを変えたいとき**（推奨。私が生成した値をそのまま使い続ける理由はありません）:
+
+```bash
+npx wrangler pages secret put UPLOAD_TOKEN --project-name mss54hp-tuner-preview
+npx wrangler pages secret put UPLOAD_TOKEN --project-name mss54hp-tuner-preview --env preview
+```
+
+`.upload-token.local` も同じ値に書き換えておくと、スマホに入れる値の置き場所が 1 つで済みます。
+
+---
+
+### 3.3 デプロイ後に確認済みのこと
+
+| 確認 | 結果 |
+|---|---|
+| アプリが配信されている | ✅ `RF KORR (TUNED)` タブを含めて描画 |
+| Function が動いている | ✅ `/api/runs` が JSON を返す（404 ではない） |
+| `UPLOAD_TOKEN` が bind されている | ✅ **401** が返る。未設定なら 503 を返す実装なので、401 であること自体が証拠 |
+| CORS プリフライト | ✅ 204 |
+| リモート D1 のスキーマ | ✅ `runs` テーブル 18 列 |
+| **Worker → D1 の bind** | ⏳ 認証付きリクエストが要るため未確認。**最初のアップロードが証拠**になります |
+
+最後の 1 行だけ残しているのは、トークンをこの会話に出さないためです。
+もし bind が誤っていれば、最初のアップロードが 500 と `D1_ERROR` を返します（黙って失敗はしません）。
 
 ---
 
