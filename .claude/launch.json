@@ -1,12 +1,20 @@
 {
-  "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 5054,
-      "autoPort": false
-    }
-  ]
+    "version": "0.0.1",
+    "configurations": [
+        {
+            "name": "dev",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "dev"],
+            "port": 5054,
+            "autoPort": false
+        },
+        {
+            "//": "The static export served by the Cloudflare Pages emulator, WITH the /api functions and a local D1. `npm run dev` above has no /api at all, so the upload path can only be exercised here. Run `npm run build` first — this serves out/, it does not create it.",
+            "name": "preview",
+            "runtimeExecutable": "npx",
+            "runtimeArgs": ["wrangler", "pages", "dev", "--port", "8788"],
+            "port": 8788,
+            "autoPort": false
+        }
+    ]
 }
