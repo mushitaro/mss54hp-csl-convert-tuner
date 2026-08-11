@@ -240,7 +240,12 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                                 type="button"
                                                 disabled={readOnly || locked}
                                                 onClick={() => setRfKorrMode(choice.id)}
-                                                className={`flex-1 px-1 py-1.5 text-[9px] font-bold tracking-wider rounded ${rfKorrMode === choice.id
+                                                // min-h-10, not padding alone. The checkboxes in this
+                                                // panel reach a 38px target with `py-3 -my-3` — a big
+                                                // hit area behind a small mark — but a segmented
+                                                // control has no separate mark to keep small, so it
+                                                // just gets the height. Measured at 26px before this.
+                                                className={`flex-1 min-h-10 px-1 text-[9px] font-bold tracking-wider rounded ${rfKorrMode === choice.id
                                                     ? 'bg-blue-600 text-white'
                                                     : locked
                                                         ? 'bg-slate-900 text-slate-700 cursor-not-allowed'

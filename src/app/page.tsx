@@ -14,7 +14,9 @@ import { FilterConfigPanel } from '@/components/FilterConfigPanel';
 import { EcuItemPanel } from '@/components/EcuItemPanel';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
-import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
+import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
+import { RunStorePanel } from '@/components/RunStorePanel';
+import { EMPTY_SETTINGS, UploadSettings, canUpload, uploadRun } from '@/lib/run-upload/client';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
@@ -334,6 +336,12 @@ export default function Home() {
   // The session everything on screen belongs to. Its status decides whether this is a tuning
   // workspace (draft) or a read-only record you may re-flash (archived).
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+
+  // Run store. Settings come from the panel after mount (localStorage cannot exist during the
+  // static prerender), and `uploadState` is per session id because "did that land?" is a question
+  // about one row, not about the app.
+  const [uploadSettings, setUploadSettings] = useState<UploadSettings>(EMPTY_SETTINGS);
+  const [uploadState, setUploadState] = useState<Record<string, UploadState>>({});
   // Latest raw live-telemetry sample, shown as a live readout during tuning (independent of the VE
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
@@ -581,6 +589,38 @@ export default function Home() {
     const points = await sessionDb.loadLog(session.id);
     if (!points?.length) { alert(dialogText().noStoredLog); return; }
     downloadBlob(serializeLogFile(points), `${fileSafe(session.label)}_log.csv`, MIME_CSV);
+  };
+
+  /** Sends a session's stored log to the run store, and says on the row whether it landed.
+   *
+   *  The session id is the run id, which is what makes a retry after a dropped upload replace
+   *  rather than duplicate — and a phone in a garage drops uploads often enough that this is the
+   *  normal path, not the exceptional one. Nothing local is touched either way. */
+  const handleUploadSessionLog = async (session: TuningSession) => {
+    const points = await sessionDb.loadLog(session.id);
+    if (!points?.length) { alert(dialogText().noStoredLog); return; }
+
+    setUploadState(prev => ({ ...prev, [session.id]: 'busy' }));
+    try {
+      await uploadRun(points, {
+        id: session.id,
+        label: session.label,
+        // The run is only interpretable against the bytes that were in the ECU at the time, so
+        // what identifies those travels with it.
+        vin: session.baseOrigin?.kind === 'dme' ? session.baseOrigin.vin : undefined,
+        softwareVersion: session.baseOrigin?.kind === 'dme' ? session.baseOrigin.softwareVersion : undefined,
+        baseFileName: session.baseFileName,
+        rfKorrMode: session.tuneSettings
+          ? resolveRfKorrMode(session.tuneSettings.filterConfig) : undefined,
+        patchOn: session.tuneSettings?.applyPatch,
+        averageHz: session.averageHz,
+      }, uploadSettings);
+      setUploadState(prev => ({ ...prev, [session.id]: 'done' }));
+    } catch (e) {
+      // Kept on the row rather than raised in an alert: an alert has to be dismissed before the
+      // driver can retry, and the message is most useful next to the thing that failed.
+      setUploadState(prev => ({ ...prev, [session.id]: { error: (e as Error).message } }));
+    }
   };
 
   /** The last step of a tune: put the finished map back on the road with the patches off.
@@ -1927,6 +1967,7 @@ export default function Home() {
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
                 <EcuItemPanel buffer={binaryBuffer} />
+                <RunStorePanel onSettingsChange={setUploadSettings} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2157,6 +2198,8 @@ export default function Home() {
                     onDownloadBase={handleDownloadSessionBase}
                     onDownloadTuned={handleDownloadSessionTuned}
                     onDownloadLog={handleDownloadSessionLog}
+                    onUploadLog={canUpload(uploadSettings) ? handleUploadSessionLog : undefined}
+                    uploadState={uploadState}
                     onFinalize={handleFinalizeSession}
                   />
                 </div>
@@ -2763,6 +2806,7 @@ export default function Home() {
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
             <EcuItemPanel buffer={binaryBuffer} openUp />
+            <RunStorePanel onSettingsChange={setUploadSettings} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}

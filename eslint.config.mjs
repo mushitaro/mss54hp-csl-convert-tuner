@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Wrangler's build scratch. It writes bundled middleware facades under here on every
+    // `pages dev`, and linting generated code that nobody can fix only makes the real count
+    // harder to read — which is the number this project actually watches.
+    ".wrangler/**",
   ]),
 ]);
 

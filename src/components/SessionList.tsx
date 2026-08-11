@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download } from 'lucide-react';
+import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download, UploadCloud } from 'lucide-react';
 import { TuningSession, FlashRecord } from '@/lib/db/schema';
 import { DropZone } from '@/components/DropZone';
 import { dialogText } from '@/lib/dialog-text';
@@ -24,9 +24,17 @@ interface Props {
     onDownloadBase: (session: TuningSession) => void;
     onDownloadTuned: (session: TuningSession) => void;
     onDownloadLog: (session: TuningSession) => void;
+    /** Sends this session's log to the preview deployment's store. Absent when no upload token has
+     *  been configured, which is the normal state on a desktop and on production. */
+    onUploadLog?: (session: TuningSession) => void;
+    /** Per-session upload state, keyed by session id. Shown on the same cell as the action, because
+     *  "did that land?" is asked about one row, not about the app. */
+    uploadState?: Record<string, UploadState>;
     /** Arms this session's stored TUNED for a patch-off flash. Does not write — the hub does. */
     onFinalize: (session: TuningSession) => void;
 }
+
+export type UploadState = 'busy' | 'done' | { error: string };
 
 /** The download affordance used in every column, so they read as one control repeated rather than
  *  three lookalikes. */
@@ -39,6 +47,34 @@ const DownloadCell: React.FC<{ onClick: () => void; title: string }> = ({ onClic
         <Download className="w-2.5 h-2.5" />
     </button>
 );
+
+/**
+ * The upload affordance, deliberately the same size and place as the download beside it.
+ *
+ * Its whole job is to answer "did that land?" on the row it belongs to. A phone in a garage loses
+ * signal mid-upload often enough that a control which only reports "tapped" is not enough — so it
+ * has three states and the failed one keeps its message on hover rather than in an alert that has
+ * to be dismissed before the driver can retry.
+ */
+const UploadCell: React.FC<{ onClick: () => void; state?: UploadState }> = ({ onClick, state }) => {
+    const failed = state && typeof state === 'object';
+    return (
+        <button
+            onClick={onClick}
+            disabled={state === 'busy'}
+            title={failed ? `Upload failed — ${state.error}`
+                : state === 'done' ? 'Uploaded. Tap again to replace the stored copy.'
+                    : state === 'busy' ? 'Uploading…'
+                        : 'Upload this log to the run store'}
+            className={`p-0.5 transition-colors shrink-0 rounded hover:bg-slate-800 ${failed ? 'text-red-400 hover:text-red-300'
+                : state === 'done' ? 'text-emerald-400/80'
+                    : state === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                        : 'text-slate-700 hover:text-blue-400'}`}
+        >
+            <UploadCloud className="w-2.5 h-2.5" />
+        </button>
+    );
+};
 
 /** The ✔×N count mixes two kinds of event now that arming the patch is itself a flash — "×2" is a
  *  normal first run (patch, then tune) but reads the same as a tune written twice. The number stays
@@ -150,7 +186,7 @@ export const OriginBadge: React.FC<{ session: TuningSession; parent?: TuningSess
 
 export const SessionList: React.FC<Props> = ({
     sessions, loading, error, onOpen, onNewSession, onNewFrom, onRename, onDelete, onUploadBase,
-    onDownloadBase, onDownloadTuned, onDownloadLog, onFinalize,
+    onDownloadBase, onDownloadTuned, onDownloadLog, onUploadLog, uploadState, onFinalize,
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftLabel, setDraftLabel] = useState('');
@@ -352,6 +388,16 @@ export const SessionList: React.FC<Props> = ({
                                                 <DownloadCell
                                                     onClick={() => onDownloadLog(session)}
                                                     title="Download this session's log as a Testo-format CSV"
+                                                />
+                                            )}
+                                            {/* Next to the download rather than in the row menu: on a
+                                                phone the menu is a sheet, and this is the one action a
+                                                driver takes the moment a run ends, standing next to the
+                                                car. Only appears once an upload token is configured. */}
+                                            {session.hasLog && onUploadLog && (
+                                                <UploadCell
+                                                    onClick={() => onUploadLog(session)}
+                                                    state={uploadState?.[session.id]}
                                                 />
                                             )}
                                         </span>

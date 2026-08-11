@@ -80,6 +80,26 @@ function toBase64(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
+/**
+ * Which build recorded this run, as the service worker's cache name.
+ *
+ * There is no version constant in this app, and adding one would mean a number somebody has to
+ * remember to bump — which is the same as not having one. `gen-sw.mjs` already derives the cache
+ * name from a hash of the built bytes, so it changes exactly when the build does and never
+ * otherwise. That is a better answer to "which build took this log" than a semver would be.
+ *
+ * Undefined on a dev server, where no worker is registered. That is fine: a run uploaded from
+ * `next dev` is a bench test, and saying nothing beats naming a build that was never deployed.
+ */
+async function buildIdentity(): Promise<string | undefined> {
+    try {
+        if (typeof caches === 'undefined') return undefined;
+        return (await caches.keys()).find(k => k.startsWith('tuner-'));
+    } catch {
+        return undefined;
+    }
+}
+
 export interface RunMetadata {
     /** Stable per session, so a retry after a dropped connection updates rather than duplicates. */
     id: string;
@@ -91,7 +111,6 @@ export interface RunMetadata {
     rfKorrMode?: string;
     patchOn?: boolean;
     averageHz?: number;
-    appVersion?: string;
 }
 
 export interface UploadResult {
@@ -141,7 +160,7 @@ export async function uploadRun(
         durationS,
         hasRf: points.some(p => p.rf !== undefined),
         hasEgt: points.some(p => p.exhaustTemp !== undefined),
-        appVersion: meta.appVersion,
+        appVersion: await buildIdentity(),
         clientTime: Date.now(),
         csvBytes: new TextEncoder().encode(csv).byteLength,
         csvGzBase64: toBase64(gz),
