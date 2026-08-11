@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
 import { PRIVACY_POLICY_URL } from '@/config/links';
+import type { InstallState } from '@/hooks/useInstallPrompt';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -66,6 +67,9 @@ interface Props {
     onDragEnd?: () => void;
     /** Reloads the document. The caller confirms first if there is a live link or unsaved work. */
     onReload: () => void;
+    /** Whether this device can take the app, and how. See useInstallPrompt. */
+    installState: InstallState;
+    onInstall: () => void;
     /** The server is serving a newer build than the one running. */
     updateAvailable?: boolean;
 }
@@ -103,6 +107,7 @@ export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
     session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, updateAvailable,
+    installState, onInstall,
 }) => {
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
@@ -231,6 +236,35 @@ export const MobileMenu: React.FC<Props> = ({
                                 {updateAvailable ? 'Update available — reload' : 'Reload'}
                             </span>
                         </button>
+
+                        {/* Install sits with Reload because they are the same subject — which build
+                            is on this device, and where it lives. It is here rather than only in
+                            Chrome's overflow menu because that is where a phone user looks, and
+                            because installed is the state this tool is meant to be used in: no
+                            browser chrome eating the viewport, the screen kept awake, and the whole
+                            build on disk for a garage with no signal.
+
+                            The unavailable case is shown, not hidden. "I looked for install and
+                            found nothing" is the report this exists to answer, and a control that
+                            disappears cannot answer it. */}
+                        {installState !== 'installed' && (
+                            <button
+                                type="button"
+                                onClick={installState === 'ready' ? onInstall : undefined}
+                                disabled={installState !== 'ready'}
+                                className={`w-full flex items-center justify-center gap-3 py-3 rounded transition-colors ${installState === 'ready'
+                                    ? 'text-emerald-400 hover:text-emerald-300 cursor-pointer'
+                                    : 'text-slate-700 cursor-default'}`}
+                            >
+                                <Download className="w-3.5 h-3.5 shrink-0" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest">
+                                    {installState === 'ready' ? 'Install to device'
+                                        : installState === 'ios' ? 'Share → Add to Home Screen'
+                                            : installState === 'dismissed' ? 'Install declined — reload to be asked again'
+                                                : 'Install — not offered by this browser'}
+                                </span>
+                            </button>
+                        )}
                     </div>
 
                     {session && (

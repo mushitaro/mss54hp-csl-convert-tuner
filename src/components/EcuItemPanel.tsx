@@ -126,7 +126,20 @@ export const EcuItemPanel: React.FC<Props> = ({ buffer, openUp }) => {
             {isOpen && (
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-                    <div className={`absolute right-0 ${openUp ? 'bottom-10' : 'top-10'} z-50 w-[min(92vw,720px)] max-h-[70vh] overflow-y-auto bg-slate-950 border border-slate-800 rounded-sm shadow-xl p-4 space-y-3`}>
+                    {/* A fixed bottom sheet on a phone, an anchored popover on a desk — the shape
+                        FilterConfigPanel and FieldVisibilityPanel already use.
+
+                        This was the odd one out, and it showed: anchored `bottom-10` at 70vh, it
+                        hung off the bottom of a 393px landscape screen and the list was cut in
+                        half with no way to reach the rest. An anchored panel cannot be rescued by
+                        capping its height — its overflow depends on where the anchor sits, not on
+                        how tall it is — so it has to stop being anchored.
+                        svh, never vh: vh grows when the address bar retracts, and a panel sized to
+                        that loses its own bottom the moment the bar comes back. */}
+                    <div className={`${openUp
+                        ? 'fixed inset-x-3 bottom-[60px] max-h-[min(calc(100svh-72px),560px)]'
+                        : 'absolute right-0 top-10 w-[min(92vw,720px)] max-h-[min(70dvh,560px)]'
+                        } z-50 overflow-y-auto overscroll-contain bg-slate-950 border border-slate-800 rounded-lg shadow-xl p-4 space-y-3`}>
                         <div className="flex justify-between items-center">
                             <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">{t.title}</span>
                             <button onClick={() => setIsOpen(false)} className="text-slate-600 hover:text-slate-300">

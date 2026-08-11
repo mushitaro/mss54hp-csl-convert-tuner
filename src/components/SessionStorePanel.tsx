@@ -3,61 +3,71 @@
 import React, { useEffect, useState } from 'react';
 import { CloudUpload, X } from 'lucide-react';
 import {
-    EMPTY_SETTINGS, StoredRun, UploadSettings, canUpload, listRuns,
-    loadUploadSettings, saveUploadSettings,
-} from '@/lib/run-upload/client';
+    EMPTY_SETTINGS, StoredSession, SyncSettings, canSync, listStoredSessions,
+    loadSyncSettings, restoreSession, saveSyncSettings,
+} from '@/lib/session-sync/client';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 const TEXT = {
     ja: {
-        title: 'RUN STORE',
-        intro: '実機で取ったログを、この配信環境の保管庫に送ります。ローカルの保存は消えません — 保管庫は控えであって、正本ではありません。',
+        title: 'SESSION STORE',
+        intro: 'セッションを、ローカル DB が持っているそのままの形でこの配信環境に置きます — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えません。戻すこともできるので、スマホで取って PC で仕上げる、が可能です。',
         base: 'API のベース URL',
         baseHint: '空欄ならこのページと同じオリジン。デプロイ済みのアプリから使うときは空でかまいません。ポートを分けたローカル検証のときだけ入れます。',
-        token: 'アップロードトークン',
+        token: '同期トークン',
         tokenHint: 'この端末にだけ保存され、送信先は API のみです。値は `wrangler pages secret put UPLOAD_TOKEN` で設定したもの。',
         save: '保存',
         saved: '保存しました',
         refresh: '一覧を取得',
         none: 'まだ 1 件もありません。',
-        needToken: 'トークンを入れると、セッション一覧の各行にアップロードボタンが出ます。',
+        restore: '取り込む',
+        restoreConfirm: (l: string) => `「${l}」をサーバーの内容で上書きします。同じ ID のローカルセッションがあれば置き換わります。よろしいですか？`,
+        restored: (l: string) => `「${l}」を取り込みました。`,
+        needToken: 'トークンを入れると、セッション一覧の各行に同期ボタンが出ます。',
         loading: '取得中…',
-        cols: { at: '日時', label: '名前', pts: '点数', ch: 'ch', size: 'サイズ' },
+        cols: { at: '同期', label: '名前', pts: '点数', ch: 'ch', size: 'サイズ' },
     },
     en: {
-        title: 'RUN STORE',
-        intro: 'Sends a log recorded on the car to this deployment\'s store. The local copy is not removed — the store is a second copy, not the original.',
+        title: 'SESSION STORE',
+        intro: 'Puts a session on this deployment exactly as the local database holds it — the session record, its log, and its BASE/TUNED binaries. The local copy stays. It can be pulled back, so a session recorded on a phone can be finished at a desk.',
         base: 'API base URL',
         baseHint: 'Empty means the same origin as this page, which is what the deployed app wants. Only needed for a local rig where the app and the functions are on different ports.',
-        token: 'Upload token',
+        token: 'Sync token',
         tokenHint: 'Kept on this device and sent only to the API. The value is whatever `wrangler pages secret put UPLOAD_TOKEN` was given.',
         save: 'Save',
         saved: 'Saved',
         refresh: 'Refresh list',
         none: 'Nothing stored yet.',
-        needToken: 'Enter a token and an upload button appears on every session row.',
+        restore: 'Pull',
+        restoreConfirm: (l: string) => `Overwrite "${l}" with the stored copy? A local session with the same id is replaced.`,
+        restored: (l: string) => `Pulled "${l}".`,
+        needToken: 'Enter a token and a sync button appears on every session row.',
         loading: 'Loading…',
-        cols: { at: 'When', label: 'Label', pts: 'Points', ch: 'ch', size: 'Size' },
+        cols: { at: 'Synced', label: 'Label', pts: 'Points', ch: 'ch', size: 'Size' },
     },
 };
 
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(0)} KB`;
 
 /**
- * Configuration for the run store, and a view of what is in it.
+ * Configuration for the session store, and a view of what is in it.
  *
  * A popover in the footer like every other panel, rather than a page: this is set once per device
- * and then not thought about again, and the thing it configures — the upload button on each session
- * row — is where the actual work happens.
+ * and then not thought about again, and the thing it configures — the sync button on each session
+ * row — is where the actual work happens. Pulling one back is done from here, because that acts on
+ * the STORE's list rather than on a local session that may not exist yet.
  */
-export const RunStorePanel: React.FC<{
+export const SessionStorePanel: React.FC<{
     openUp?: boolean;
-    onSettingsChange: (settings: UploadSettings) => void;
-}> = ({ openUp, onSettingsChange }) => {
+    onSettingsChange: (settings: SyncSettings) => void;
+    /** Refreshes the local session list after a pull. */
+    onRestored?: () => void;
+}> = ({ openUp, onSettingsChange, onRestored }) => {
     const [isOpen, setIsOpen] = useState(false);
-    const [settings, setSettings] = useState<UploadSettings>(EMPTY_SETTINGS);
+    const [settings, setSettings] = useState<SyncSettings>(EMPTY_SETTINGS);
     const [savedFlash, setSavedFlash] = useState(false);
-    const [runs, setRuns] = useState<StoredRun[] | null>(null);
+    const [runs, setRuns] = useState<StoredSession[] | null>(null);
+    const [busy, setBusy] = useState<string | null>(null);
     const [listError, setListError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const t = TEXT[useDialogLang()];
@@ -65,7 +75,7 @@ export const RunStorePanel: React.FC<{
     // localStorage is not available during the static prerender, so the real value can only be
     // read after mount. Seeding state with it directly would bake an empty form into the export.
     useEffect(() => {
-        const loaded = loadUploadSettings();
+        const loaded = loadSyncSettings();
         setSettings(loaded);
         onSettingsChange(loaded);
         // Deliberately once. `onSettingsChange` is a fresh closure every render, and depending on
@@ -74,17 +84,37 @@ export const RunStorePanel: React.FC<{
     }, []);
 
     const save = () => {
-        saveUploadSettings(settings);
+        saveSyncSettings(settings);
         onSettingsChange(settings);
         setSavedFlash(true);
         setTimeout(() => setSavedFlash(false), 1500);
+    };
+
+    /** Pulls one stored session into the local database, after asking.
+     *
+     *  Confirmed rather than silent because it overwrites a local session of the same id — and the
+     *  id is the same one the phone used, so "restore what I recorded in the car" and "throw away
+     *  what I have been doing at the desk" are the same click if nobody asks. */
+    const pull = async (row: StoredSession) => {
+        if (!confirm(t.restoreConfirm(row.label))) return;
+        setBusy(row.id);
+        setListError(null);
+        try {
+            await restoreSession(row.id, settings);
+            onRestored?.();
+            alert(t.restored(row.label));
+        } catch (e) {
+            setListError((e as Error).message);
+        } finally {
+            setBusy(null);
+        }
     };
 
     const refresh = async () => {
         setLoading(true);
         setListError(null);
         try {
-            setRuns(await listRuns(settings));
+            setRuns(await listStoredSessions(settings));
         } catch (e) {
             setListError((e as Error).message);
             setRuns(null);
@@ -98,7 +128,7 @@ export const RunStorePanel: React.FC<{
             <button
                 onClick={() => setIsOpen(v => !v)}
                 title={t.title}
-                className={`p-2 rounded transition-colors ${canUpload(settings)
+                className={`p-2 rounded transition-colors ${canSync(settings)
                     ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800'
                     : 'text-slate-700 hover:text-slate-500 hover:bg-slate-800'}`}
             >
@@ -165,14 +195,14 @@ export const RunStorePanel: React.FC<{
                             </button>
                             <button
                                 onClick={refresh}
-                                disabled={!canUpload(settings) || loading}
+                                disabled={!canSync(settings) || loading}
                                 className="flex-1 min-h-10 text-[10px] font-bold tracking-wider bg-slate-800 hover:bg-slate-700 text-slate-300 rounded disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                                 {loading ? t.loading : t.refresh}
                             </button>
                         </div>
 
-                        {!canUpload(settings) && <p className="text-[9px] text-amber-500/80">{t.needToken}</p>}
+                        {!canSync(settings) && <p className="text-[9px] text-amber-500/80">{t.needToken}</p>}
                         {listError && <p className="text-[9px] text-red-400 break-words">{listError}</p>}
 
                         {runs && (runs.length === 0
@@ -186,26 +216,44 @@ export const RunStorePanel: React.FC<{
                                             <th className="py-1 font-normal text-right">{t.cols.pts}</th>
                                             <th className="py-1 font-normal text-center">{t.cols.ch}</th>
                                             <th className="py-1 font-normal text-right">{t.cols.size}</th>
+                                            <th className="py-1 font-normal" />
                                         </tr>
                                     </thead>
                                     <tbody className="text-slate-400">
                                         {runs.map(r => (
                                             <tr key={r.id} className="border-t border-slate-800">
                                                 <td className="py-1 text-slate-500 whitespace-nowrap">
-                                                    {new Date(r.created_at).toLocaleString(undefined,
+                                                    {new Date(r.synced_at).toLocaleString(undefined,
                                                         { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                                                 </td>
-                                                <td className="py-1 truncate max-w-[7rem]" title={r.label}>{r.label}</td>
+                                                <td className="py-1 truncate max-w-[6rem]" title={r.label}>{r.label}</td>
                                                 <td className="py-1 text-right">{r.point_count.toLocaleString()}</td>
-                                                {/* The two channels the EGT work depends on. First
-                                                    question asked of any stored run, so it is a column
-                                                    rather than something to open the run to discover. */}
-                                                <td className="py-1 text-center">
+                                                {/* The two channels the EGT work depends on, plus whether
+                                                    a tune came with it. These are the first questions
+                                                    asked of any stored session, so they are columns
+                                                    rather than something to pull it back to discover. */}
+                                                <td className="py-1 text-center whitespace-nowrap">
                                                     <span className={r.has_rf ? 'text-blue-300' : 'text-slate-700'}>RF</span>
                                                     {' '}
                                                     <span className={r.has_egt ? 'text-red-300' : 'text-slate-700'}>EGT</span>
+                                                    {' '}
+                                                    <span className={r.has_tune ? 'text-emerald-300' : 'text-slate-700'}>T</span>
                                                 </td>
-                                                <td className="py-1 text-right text-slate-500">{kb(r.gz_bytes)}</td>
+                                                <td className="py-1 text-right text-slate-500">
+                                                    {kb((r.session_bytes ?? 0) + (r.log_bytes ?? 0) + (r.binaries_bytes ?? 0))}
+                                                </td>
+                                                <td className="py-1 pl-2 text-right">
+                                                    {/* The payoff. Without this the store is a
+                                                        write-only hole and a CSV download would have
+                                                        been simpler. */}
+                                                    <button
+                                                        onClick={() => void pull(r)}
+                                                        disabled={busy !== null}
+                                                        className="text-blue-400 hover:text-blue-300 disabled:text-slate-700 disabled:cursor-wait"
+                                                    >
+                                                        {busy === r.id ? '…' : t.restore}
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>

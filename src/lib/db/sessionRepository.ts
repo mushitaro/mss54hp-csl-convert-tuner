@@ -237,6 +237,33 @@ export async function getSessionBinaries(sessionId: string): Promise<SessionBina
     });
 }
 
+/**
+ * Writes a whole session back — the record, its log and its binaries — as one transaction.
+ *
+ * The restore half of the server sync. Everything else in this file builds a session up a step at
+ * a time, which is right for a session being made; this is for one that already exists somewhere
+ * else and has to arrive intact. One transaction because the three stores are only meaningful
+ * together: a session record whose log did not land is a row that claims a log it cannot produce.
+ *
+ * Overwrites by id. That is what makes re-restoring the same session idempotent, and it is the
+ * caller's job to have asked first if it would clobber local work — see the confirm in the panel.
+ */
+export async function putSessionRaw(
+    session: TuningSession,
+    log: LogDataPoint[] | null,
+    binaries: SessionBinariesRecord | null,
+): Promise<void> {
+    await withDb(async db => {
+        const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE, SESSION_BINARIES_STORE], 'readwrite');
+        tx.objectStore(SESSIONS_STORE).put(session);
+        if (log) tx.objectStore(SESSION_LOGS_STORE).put({ sessionId: session.id, data: log });
+        else tx.objectStore(SESSION_LOGS_STORE).delete(session.id);
+        if (binaries) tx.objectStore(SESSION_BINARIES_STORE).put({ ...binaries, sessionId: session.id });
+        else tx.objectStore(SESSION_BINARIES_STORE).delete(session.id);
+        await txDone(tx);
+    });
+}
+
 export async function deleteSession(id: string): Promise<void> {
     await withDb(async db => {
         const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE, SESSION_BINARIES_STORE], 'readwrite');

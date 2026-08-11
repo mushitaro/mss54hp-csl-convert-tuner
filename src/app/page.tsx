@@ -15,8 +15,8 @@ import { EcuItemPanel } from '@/components/EcuItemPanel';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
-import { RunStorePanel } from '@/components/RunStorePanel';
-import { EMPTY_SETTINGS, UploadSettings, canUpload, uploadRun } from '@/lib/run-upload/client';
+import { SessionStorePanel } from '@/components/SessionStorePanel';
+import { EMPTY_SETTINGS, SyncSettings, canSync, syncSession } from '@/lib/session-sync/client';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
@@ -26,6 +26,7 @@ import { MobileMenu } from '@/components/MobileMenu';
 import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
+import { useInstallPrompt } from '@/hooks/useInstallPrompt';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
@@ -340,7 +341,7 @@ export default function Home() {
   // Run store. Settings come from the panel after mount (localStorage cannot exist during the
   // static prerender), and `uploadState` is per session id because "did that land?" is a question
   // about one row, not about the app.
-  const [uploadSettings, setUploadSettings] = useState<UploadSettings>(EMPTY_SETTINGS);
+  const [uploadSettings, setUploadSettings] = useState<SyncSettings>(EMPTY_SETTINGS);
   const [uploadState, setUploadState] = useState<Record<string, UploadState>>({});
   // Latest raw live-telemetry sample, shown as a live readout during tuning (independent of the VE
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
@@ -372,6 +373,7 @@ export default function Home() {
   }), []);
   const [menuOpen, setMenuOpen] = useState(false);
   const updateAvailable = useAppUpdate();
+  const install = useInstallPrompt();
   const wideLayout = useWideLayout();
   const splitGraph = useSplitGraph();
   const mapZoom = useMapZoom();
@@ -591,30 +593,16 @@ export default function Home() {
     downloadBlob(serializeLogFile(points), `${fileSafe(session.label)}_log.csv`, MIME_CSV);
   };
 
-  /** Sends a session's stored log to the run store, and says on the row whether it landed.
+  /** Sends a whole session to the store, and says on the row whether it landed.
    *
-   *  The session id is the run id, which is what makes a retry after a dropped upload replace
-   *  rather than duplicate — and a phone in a garage drops uploads often enough that this is the
-   *  normal path, not the exceptional one. Nothing local is touched either way. */
+   *  The session goes as the local database holds it — the record, its log and its binaries — so
+   *  it can come back the same way. It syncs under its own id, which is what makes a retry after a
+   *  dropped connection replace rather than duplicate; a phone in a garage drops uploads often
+   *  enough that this is the normal path, not the exceptional one. Nothing local is touched. */
   const handleUploadSessionLog = async (session: TuningSession) => {
-    const points = await sessionDb.loadLog(session.id);
-    if (!points?.length) { alert(dialogText().noStoredLog); return; }
-
     setUploadState(prev => ({ ...prev, [session.id]: 'busy' }));
     try {
-      await uploadRun(points, {
-        id: session.id,
-        label: session.label,
-        // The run is only interpretable against the bytes that were in the ECU at the time, so
-        // what identifies those travels with it.
-        vin: session.baseOrigin?.kind === 'dme' ? session.baseOrigin.vin : undefined,
-        softwareVersion: session.baseOrigin?.kind === 'dme' ? session.baseOrigin.softwareVersion : undefined,
-        baseFileName: session.baseFileName,
-        rfKorrMode: session.tuneSettings
-          ? resolveRfKorrMode(session.tuneSettings.filterConfig) : undefined,
-        patchOn: session.tuneSettings?.applyPatch,
-        averageHz: session.averageHz,
-      }, uploadSettings);
+      await syncSession(session, uploadSettings);
       setUploadState(prev => ({ ...prev, [session.id]: 'done' }));
     } catch (e) {
       // Kept on the row rather than raised in an alert: an alert has to be dismissed before the
@@ -1967,7 +1955,7 @@ export default function Home() {
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
                 <EcuItemPanel buffer={binaryBuffer} />
-                <RunStorePanel onSettingsChange={setUploadSettings} />
+                <SessionStorePanel onSettingsChange={setUploadSettings} onRestored={() => void sessionDb.refresh()} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2198,7 +2186,7 @@ export default function Home() {
                     onDownloadBase={handleDownloadSessionBase}
                     onDownloadTuned={handleDownloadSessionTuned}
                     onDownloadLog={handleDownloadSessionLog}
-                    onUploadLog={canUpload(uploadSettings) ? handleUploadSessionLog : undefined}
+                    onUploadLog={canSync(uploadSettings) ? handleUploadSessionLog : undefined}
                     uploadState={uploadState}
                     onFinalize={handleFinalizeSession}
                   />
@@ -2774,8 +2762,23 @@ export default function Home() {
             </span>
           </div>
         )}
-        <div className="relative h-[52px] flex items-center px-4">
-          {narrowPaneTabs}
+        {/* Two rows below 520px, one above it.
+
+            The config cluster is `ml-auto`, so it grows leftward from the right edge, and MENU is
+            absolutely centred. At five panels the cluster is 192px wide, which on a 360px screen
+            puts its left edge at x=152 while MENU spans 154-206 — the cluster sat on top of the
+            app's primary navigation control and MENU could not be pressed. It went wrong when the
+            cluster grew from three icons to five; the comment below used to say "three", which is
+            how long that had been drifting.
+
+            Wrapping is affordable because narrow and short do not co-occur on a phone: the two
+            viewports that matter are 360x800 and 851x393, and the second is wide enough to stay on
+            one row. So the extra 44px is only ever spent where there are 800px to spend it from.
+
+            MENU stays pinned to the FIRST row — it is positioned against this container, which is
+            what makes `top-0` mean the row and not the middle of a two-row block. */}
+        <div className="relative px-4 flex flex-col min-[520px]:flex-row min-[520px]:items-center min-[520px]:h-[52px]">
+          <div className="h-[52px] flex items-center">{narrowPaneTabs}</div>
           {/* Opens on pointerdown, not click, so the same press can carry on into the sheet and
               pick a row on the way back up. `touch-none` stops the browser claiming the gesture as a
               scroll before the menu ever sees it.
@@ -2789,13 +2792,13 @@ export default function Home() {
             type="button"
             onPointerDown={(e) => { e.preventDefault(); setMenuOpen(true); setMenuDrag({ x: e.clientX, y: e.clientY }); }}
             aria-label="Open menu"
-            className="absolute left-1/2 -translate-x-1/2 h-[52px] w-[52px] flex items-center justify-center touch-none text-slate-400 hover:text-slate-200 cursor-pointer"
+            className="absolute left-1/2 -translate-x-1/2 top-0 h-[52px] w-[52px] flex items-center justify-center touch-none text-slate-400 hover:text-slate-200 cursor-pointer z-10"
           >
             <MarkIcon className="w-8 h-7" />
           </button>
-          {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
+          {/* `openUp` because these hang off the bottom edge here; the same five render `top-10`
               in the desktop tab row, which is the other instance of them. */}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2 pb-1.5 min-[520px]:pb-0 min-[520px]:ml-auto">
             <InterpolationTableEditor
               config={interpolationTable}
               onSave={handleTableChange}
@@ -2806,7 +2809,7 @@ export default function Home() {
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
             <EcuItemPanel buffer={binaryBuffer} openUp />
-            <RunStorePanel onSettingsChange={setUploadSettings} openUp />
+            <SessionStorePanel onSettingsChange={setUploadSettings} onRestored={() => void sessionDb.refresh()} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}
@@ -2844,6 +2847,8 @@ export default function Home() {
           onDragEnd={() => setMenuDrag(null)}
           updateAvailable={updateAvailable}
           onReload={handleReload}
+          installState={install.state}
+          onInstall={() => { void install.promptInstall(); }}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed
