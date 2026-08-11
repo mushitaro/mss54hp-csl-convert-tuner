@@ -27,6 +27,39 @@
 const CACHE = '__CACHE_NAME__';
 const ASSETS = __ASSETS__;
 
+/**
+ * Stores one asset, with any redirect flattened out of it.
+ *
+ * `cache.add(url)` is the obvious call and it is the one that broke this app on
+ * Cloudflare Pages. Pages answers `/index.html` with a **308 to `/`**; `add`
+ * follows it and stores a response whose `redirected` flag is true. Per spec a
+ * redirected response **may not satisfy a navigation request**, so every
+ * navigation under this worker failed with `net::ERR_FAILED` — a blank screen,
+ * with the worker looking like the culprit and the redirect nowhere in sight.
+ *
+ * GitHub Pages serves `/index.html` at 200, which is why production never showed
+ * it and why this was found on a phone rather than at a desk. The host is not
+ * something this file gets to assume, so the fix is here rather than in a
+ * redirect rule: re-wrapping through `new Response` produces a copy with
+ * `redirected === false`, which navigation accepts from any host.
+ *
+ * (The repo's own scripts/serve-like-pages.mjs documents this exact trap for the
+ * local harness. It cost an hour there too.)
+ */
+async function cacheOne(cache, url) {
+    const response = await fetch(url, { cache: 'reload' });
+    if (!response.ok) throw new Error(`${response.status} for ${url}`);
+    if (!response.redirected) {
+        await cache.put(url, response);
+        return;
+    }
+    await cache.put(url, new Response(await response.blob(), {
+        status: 200,
+        statusText: 'OK',
+        headers: response.headers,
+    }));
+}
+
 self.addEventListener('install', (event) => {
     event.waitUntil((async () => {
         const cache = await caches.open(CACHE);
@@ -37,7 +70,7 @@ self.addEventListener('install', (event) => {
         // then dies on whichever chunk was missing, which is a worse failure
         // than not being offline-capable at all, because it looks like a bug in
         // the tool rather than a missing download.
-        const results = await Promise.allSettled(ASSETS.map((url) => cache.add(url)));
+        const results = await Promise.allSettled(ASSETS.map((url) => cacheOne(cache, url)));
         const failed = ASSETS.filter((_, i) => results[i].status === 'rejected');
         if (failed.length > 0) {
             await caches.delete(CACHE);
@@ -111,8 +144,28 @@ self.addEventListener('fetch', (event) => {
     if (request.mode === 'navigate') {
         event.respondWith((async () => {
             const cached = await caches.match('/index.html');
-            if (cached) return cached;
-            return fetch(request);
+            // `redirected` is checked as well as presence, and that check is what
+            // lets a cache poisoned by an older build heal itself. A worker that
+            // stored the shell before `cacheOne` existed has a copy navigation
+            // will refuse, and returning it strands the client on a blank screen
+            // with no page running to ask for an update — the one failure this
+            // app cannot recover from on its own. Falling through to the network
+            // costs a request and ends the deadlock.
+            if (cached && !cached.redirected) return cached;
+            try {
+                return await fetch(request);
+            } catch {
+                // Offline AND holding only a poisoned shell. Nothing here can
+                // fix that, but a redirected response is still a document —
+                // re-wrapping it is the difference between the app opening and
+                // the browser's error page.
+                if (cached) {
+                    return new Response(await cached.blob(), {
+                        status: 200, statusText: 'OK', headers: cached.headers,
+                    });
+                }
+                throw new Error('offline and no cached shell');
+            }
         })());
         return;
     }
