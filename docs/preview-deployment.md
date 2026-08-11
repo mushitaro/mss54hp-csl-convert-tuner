@@ -95,9 +95,26 @@ npx cloudflared tunnel --url http://localhost:5054
 npm run deploy:preview
 ```
 
-> `deploy:preview` はブランチ名を付けずに叩くと git のブランチ名から別 URL を切ります。
-> 上の固定 URL を保つには `--branch rf-korr` を付けてください:
-> `npm run build && npx wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr`
+プロジェクト名と `--branch rf-korr` はスクリプトに入れてあるので、上の固定 URL が保たれます。
+
+### アプリ名は本番と分けてあります
+
+| | 本番 | プレビュー |
+|---|---|---|
+| ホーム画面のラベル | `CSL TUNER` | **`CSL PREVIEW`** |
+| インストール名／タスクスイッチャ | `MSS54HP CSL CONVERT /// TUNER` | **`MSS54HP CSL PREVIEW /// TUNER`** |
+| ヘッダー | — | **`PREVIEW`** バッジ（琥珀色） |
+
+オリジンが違うので**インストールは元々別物**でしたが、ラベルが同じだと
+ホーム画面にアイコンが 2 つ並んで、どちらが車と話す方か分かりません。
+
+改名は `scripts/brand-preview.mjs` が `out/` に対して行います。`public/manifest.webmanifest` や
+`layout.tsx` を直接書き換えると**本番まで改名されてしまう**ため、ビルド後パッチにしてあります。
+`npm run build`（本番）は 1 バイトも変わりません。
+
+> `build:preview` の並び順は見た目の問題ではありません。`gen-sw.mjs` は `out/` の内容の
+> ハッシュから Service Worker のキャッシュ名を作るので、**改名は必ずその前**に走らせます。
+> 後ろにすると、ブランディングだけが違う 2 つのデプロイが同じキャッシュ名を共有します。
 
 **トークンを変えたいとき**（推奨。私が生成した値をそのまま使い続ける理由はありません）:
 

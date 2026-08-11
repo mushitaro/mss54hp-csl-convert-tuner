@@ -34,6 +34,7 @@ import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, resolveRfKorrMode } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
+import { useIsPreviewBuild, usePreviewTitle } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
@@ -374,6 +375,8 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const updateAvailable = useAppUpdate();
   const install = useInstallPrompt();
+  const isPreviewBuild = useIsPreviewBuild();
+  usePreviewTitle();
   const wideLayout = useWideLayout();
   const splitGraph = useSplitGraph();
   const mapZoom = useMapZoom();
@@ -1754,6 +1757,18 @@ export default function Home() {
             </span>{' '}
             TUNER
           </h1>
+          {/* Which build this is, once you are already inside it. The manifest name only shows on
+              the way in — on the home screen and in the task switcher — and with production and a
+              preview installed side by side, "which one am I looking at" is a question you ask
+              after opening one, not before.
+
+              Read from a meta tag injected by scripts/brand-preview.mjs rather than compiled in,
+              so the variant has exactly one definition and production's build is untouched. */}
+          {isPreviewBuild && (
+            <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold text-amber-300 bg-amber-500/15 whitespace-nowrap">
+              PREVIEW
+            </span>
+          )}
           <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2.1.1 β</span>
           {/* VIN/AIF/SW are readouts and may clip; FLASH is a control and may not — it is the only
               entry to the flash-counter dialog, so clipping it removes a feature rather than a
