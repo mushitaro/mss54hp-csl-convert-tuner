@@ -2300,16 +2300,6 @@ export default function Home() {
                   zoom={mapZoom.zoom}
                   view={rfKorrView}
                   onViewChange={setRfKorrView}
-                  mode={resolveRfKorrMode(filterConfig)}
-                  onModeChange={(mode) => handleConfigChange({
-                    // The legacy boolean travels with it, exactly as FilterConfigPanel writes it, so
-                    // a session saved from here still reads sanely in a build that only knows
-                    // `applyRfKorr`. MEASURED has no boolean equivalent and maps to the rich-safe
-                    // one, which is the correct fallback for a build that cannot divide.
-                    ...filterConfig, rfKorrMode: mode, applyRfKorr: mode !== 'as-logged',
-                  })}
-                  canTune={canTuneRfKorr}
-                  readOnly={isArchived}
                   buffer={binaryBuffer}
                 />
               )}
