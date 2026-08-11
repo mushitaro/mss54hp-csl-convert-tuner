@@ -138,6 +138,23 @@ export interface TuningSession {
      *  `?? []` for the same reason as adaptationResets — and no DB_VERSION bump, because an added
      *  optional property needs none (see the note at the top of this file). */
     flashCounterResets?: FlashCounterResetRecord[];
+
+    /** When this device last sent the session to the store. Display only — `syncedFingerprint` is
+     *  what decides whether it is still current. */
+    syncedAt?: number;
+
+    /** What was sent, as `sessionFingerprint` describes it (session-sync/client.ts).
+     *
+     *  A timestamp alone cannot answer the question the sync button asks. "Sent at 14:02" says
+     *  nothing about a log recorded at 14:30, so a button keyed on it would go quiet the moment
+     *  anything was sent once and stay quiet through every subsequent run. Storing what was sent is
+     *  what lets "already up there" and "up there, but stale" be different states.
+     *
+     *  Kept on the session rather than in localStorage so that deleting a session takes its sync
+     *  state with it and nothing has to prune orphans. Both fields are optional and additive — no
+     *  DB_VERSION bump, per the note at the top of this file. A row written before they existed
+     *  simply reads as never sent, which is the truthful answer for it. */
+    syncedFingerprint?: string;
 }
 
 export interface SessionLogRecord {

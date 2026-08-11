@@ -3,8 +3,8 @@
 import React, { useEffect, useState } from 'react';
 import { CloudUpload, X } from 'lucide-react';
 import {
-    EMPTY_SETTINGS, StoredSession, SyncSettings, canSync, listStoredSessions,
-    loadSyncSettings, restoreSession, saveSyncSettings,
+    EMPTY_SETTINGS, StoredSession, SyncSettings, canSync, hasBakedToken, isBakedToken,
+    listStoredSessions, loadSyncSettings, restoreSession, saveSyncSettings,
 } from '@/lib/session-sync/client';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
@@ -14,8 +14,9 @@ const TEXT = {
         intro: 'セッションを、ローカル DB が持っているそのままの形でこの配信環境に置きます — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えません。戻すこともできるので、スマホで取って PC で仕上げる、が可能です。',
         base: 'API のベース URL',
         baseHint: '空欄ならこのページと同じオリジン。デプロイ済みのアプリから使うときは空でかまいません。ポートを分けたローカル検証のときだけ入れます。',
-        token: '同期トークン',
+        token: '同期トークン（上書き）',
         tokenHint: 'この端末にだけ保存され、送信先は API のみです。値は `wrangler pages secret put UPLOAD_TOKEN` で設定したもの。',
+        baked: 'このビルドがトークンを持っているので、入力は不要です。別のデプロイ先を見るときだけ、ここで上書きします。',
         save: '保存',
         saved: '保存しました',
         refresh: '一覧を取得',
@@ -32,8 +33,9 @@ const TEXT = {
         intro: 'Puts a session on this deployment exactly as the local database holds it — the session record, its log, and its BASE/TUNED binaries. The local copy stays. It can be pulled back, so a session recorded on a phone can be finished at a desk.',
         base: 'API base URL',
         baseHint: 'Empty means the same origin as this page, which is what the deployed app wants. Only needed for a local rig where the app and the functions are on different ports.',
-        token: 'Sync token',
+        token: 'Sync token (override)',
         tokenHint: 'Kept on this device and sent only to the API. The value is whatever `wrangler pages secret put UPLOAD_TOKEN` was given.',
+        baked: 'This build carries a token, so nothing needs typing. Only fill this in to point at a different deployment.',
         save: 'Save',
         saved: 'Saved',
         refresh: 'Refresh list',
@@ -125,14 +127,18 @@ export const SessionStorePanel: React.FC<{
 
     return (
         <div className="relative">
+            {/* Named, not just drawn. As a bare cloud in the footer's row of graph controls this
+                was reported as "the button I can't identify" — correctly: an icon among icons, in a
+                group about charts, opening a dialog about servers. It sits with NEW SESSION now and
+                carries a word, which is the whole fix. */}
             <button
                 onClick={() => setIsOpen(v => !v)}
                 title={t.title}
-                className={`p-2 rounded transition-colors ${canSync(settings)
-                    ? 'text-slate-400 hover:text-blue-400 hover:bg-slate-800'
-                    : 'text-slate-700 hover:text-slate-500 hover:bg-slate-800'}`}
+                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest transition-colors ${canSync(settings)
+                    ? 'text-slate-500 hover:text-blue-400'
+                    : 'text-slate-700 hover:text-slate-500'}`}
             >
-                <CloudUpload className="w-4 h-4" />
+                <CloudUpload className="w-3 h-3" /> Store
             </button>
 
             {/* The same two shapes FilterConfigPanel and FieldVisibilityPanel use, rather than a
@@ -174,16 +180,28 @@ export const SessionStorePanel: React.FC<{
                             <span className="block text-[9px] text-slate-600">{t.baseHint}</span>
                         </label>
 
+                        {/* An override now, not a gate. The build ships the token (see
+                            scripts/embed-sync-token.mjs), so the ordinary path types nothing —
+                            which is the point: the value was generated on a laptop and never shown
+                            to anybody, so "enter the token" was an instruction nobody could follow.
+
+                            Deliberately not pre-filled with the baked value. Showing it would put
+                            the secret on screen for no gain, and saving it back would pin this
+                            device to today's token — a rotation would then never reach it. Empty
+                            means "use whatever this build carries", which is what should happen. */}
                         <label className="block space-y-1">
                             <span className="text-[10px] text-slate-500 uppercase tracking-wider">{t.token}</span>
                             <input
                                 type="password"
                                 autoComplete="off"
-                                value={settings.token}
+                                placeholder={hasBakedToken() ? '(from this build)' : ''}
+                                value={isBakedToken(settings.token) ? '' : settings.token}
                                 onChange={e => setSettings(s => ({ ...s, token: e.target.value }))}
                                 className="w-full min-h-10 bg-slate-800 border border-slate-700 rounded px-2 text-xs font-mono text-slate-200"
                             />
-                            <span className="block text-[9px] text-slate-600">{t.tokenHint}</span>
+                            <span className="block text-[9px] text-slate-600">
+                                {hasBakedToken() ? t.baked : t.tokenHint}
+                            </span>
                         </label>
 
                         <div className="flex gap-2">

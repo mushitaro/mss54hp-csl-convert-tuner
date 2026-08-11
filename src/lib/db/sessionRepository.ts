@@ -211,6 +211,17 @@ export function appendFlashCounterReset(id: string, record: FlashCounterResetRec
     return patchSession(id, s => ({ ...s, flashCounterResets: [...(s.flashCounterResets ?? []), record] }));
 }
 
+/** Records that this device sent the session to the store, and what it sent.
+ *
+ *  The fingerprint is computed by the caller, from the session as it stood when the upload STARTED.
+ *  That ordering is the whole point: a run that finishes recording while a slow upload is in flight
+ *  must leave the session outstanding, and it does — the fingerprint written here describes the
+ *  older shape, so `needsSync` still returns true for the newer one. Computing it in here, after the
+ *  await, would silently mark the new data as already sent. */
+export function markSessionSynced(id: string, fingerprint: string): Promise<TuningSession> {
+    return patchSession(id, s => ({ ...s, syncedAt: Date.now(), syncedFingerprint: fingerprint }));
+}
+
 export async function listSessions(): Promise<TuningSession[]> {
     return withDb(async db => {
         const tx = db.transaction(SESSIONS_STORE, 'readonly');

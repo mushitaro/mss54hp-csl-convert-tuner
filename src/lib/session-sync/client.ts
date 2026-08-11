@@ -44,27 +44,95 @@ export interface SyncSettings {
 
 export const EMPTY_SETTINGS: SyncSettings = { baseUrl: '', token: '' };
 
+/**
+ * The token the build shipped with, if it shipped with one.
+ *
+ * `scripts/embed-sync-token.mjs` writes this tag into the preview export; see that file for what
+ * putting a token in a public bundle does and does not buy. Production has no tag, no functions and
+ * no `/api`, so this is undefined there and the store simply stays unconfigured.
+ *
+ * Read from the DOM rather than compiled in for the same reason as `app-variant`: both deployments
+ * come out of one `next build`, so anything baked at compile time would need a second definition to
+ * keep in step.
+ */
+function bakedToken(): string {
+    if (typeof document === 'undefined') return '';
+    return document.querySelector('meta[name="sync-token"]')?.getAttribute('content')?.trim() ?? '';
+}
+
+/**
+ * The effective settings: what this device was told, over what the build shipped.
+ *
+ * The device's own value wins so a bench rig can point at a different deployment, and it is only
+ * ever *stored* when it differs from the build's — which is the part that matters. Storing the
+ * baked token as if it had been typed would pin the device to that value: rotating the secret and
+ * redeploying would leave every phone still sending the dead one, and the failure would look like a
+ * broken server rather than a stale copy of a string.
+ */
 export function loadSyncSettings(): SyncSettings {
-    if (typeof localStorage === 'undefined') return EMPTY_SETTINGS;
+    const baked = bakedToken();
+    if (typeof localStorage === 'undefined') return { baseUrl: '', token: baked };
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return EMPTY_SETTINGS;
-        const parsed = JSON.parse(raw) as Partial<SyncSettings>;
-        return { baseUrl: (parsed.baseUrl ?? '').replace(/\/+$/, ''), token: parsed.token ?? '' };
+        const parsed = raw ? JSON.parse(raw) as Partial<SyncSettings> : {};
+        return {
+            baseUrl: (parsed.baseUrl ?? '').replace(/\/+$/, ''),
+            token: (parsed.token ?? '').trim() || baked,
+        };
     } catch {
-        return EMPTY_SETTINGS;
+        return { baseUrl: '', token: baked };
     }
 }
 
 export function saveSyncSettings(settings: SyncSettings): void {
     if (typeof localStorage === 'undefined') return;
+    const token = settings.token.trim();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        baseUrl: settings.baseUrl.replace(/\/+$/, ''), token: settings.token,
+        baseUrl: settings.baseUrl.replace(/\/+$/, ''),
+        // Empty when it matches the build's, so the build stays the source of truth and a rotation
+        // reaches this device on its next update. See loadSyncSettings.
+        token: token === bakedToken() ? '' : token,
     }));
 }
 
 /** Configured enough to try. The base URL may legitimately be empty (same origin); the token not. */
 export const canSync = (s: SyncSettings) => s.token.trim().length > 0;
+
+/** True when the running build carries a token, so nothing has to be typed on this device. */
+export const hasBakedToken = () => bakedToken().length > 0;
+
+/** Whether this token is the build's rather than something this device was told.
+ *
+ *  Used by the store panel to leave its input empty when the effective token came from the build:
+ *  rendering it would put the secret on screen to no purpose, and an input that looks filled invites
+ *  the one edit — saving it back — that would pin the device to today's value. */
+export const isBakedToken = (token: string) => {
+    const baked = bakedToken();
+    return baked.length > 0 && token.trim() === baked;
+};
+
+// --- What is outstanding -------------------------------------------------------------------------
+
+/**
+ * What a stored copy would have to match to still be current.
+ *
+ * Not a hash of the whole session: `TuningSession` has no `updatedAt`, and half its fields change
+ * for reasons a stored copy does not care about (a rename is not a reason to re-send 128 KB over
+ * cellular). These four are the ones that mean the stored copy is now describing something else —
+ * a log was recorded, a tune was produced, it reached the ECU, or it stopped being a draft.
+ */
+export const sessionFingerprint = (s: TuningSession): string =>
+    `${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`;
+
+/**
+ * Whether this session is worth sending and has not been sent as it now stands.
+ *
+ * The `hasLog || sha256` gate is what keeps the button honest. Without it a fresh empty draft counts
+ * as outstanding, so the control would read "1 waiting" from the moment the app opens and never go
+ * quiet — and a badge that is always lit is one nobody reads.
+ */
+export const needsSync = (s: TuningSession): boolean =>
+    (s.hasLog || !!s.sha256) && s.syncedFingerprint !== sessionFingerprint(s);
 
 // --- Codec ------------------------------------------------------------------------------------
 // gzip via the platform. CompressionStream is in every browser that can run the rest of this app —

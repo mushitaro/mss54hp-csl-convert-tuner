@@ -14,7 +14,7 @@
     "db:migrate:local": "wrangler d1 migrations apply mss54hp-tuner-runs --local",
     "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
     "db:sessions": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(synced_at/1000,'unixepoch') AS synced, label, status, point_count, has_tune, has_rf, has_egt FROM sessions ORDER BY created_at DESC LIMIT 20\"",
-    "build:preview": "next build && node scripts/brand-preview.mjs && node scripts/gen-sw.mjs"
+    "build:preview": "next build && node scripts/brand-preview.mjs && node scripts/embed-sync-token.mjs && node scripts/gen-sw.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

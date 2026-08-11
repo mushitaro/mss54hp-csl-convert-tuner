@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield } from 'lucide-react';
+import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield, UploadCloud } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import type { InstallState } from '@/hooks/useInstallPrompt';
+import { describeSync, SyncStatus } from '@/lib/session-sync/status';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -72,6 +73,16 @@ interface Props {
     onInstall: () => void;
     /** The server is serving a newer build than the one running. */
     updateAvailable?: boolean;
+    /** What the sync row says and whether it can be pressed. Computed by the caller so this row and
+     *  the desktop header's twin cannot disagree — see lib/session-sync/status.ts.
+     *
+     *  Null on a build with no store to sync to, which is production: it is served statically from
+     *  GitHub Pages and has no `/api` of any kind. A greyed-out row there would not be a control
+     *  that is temporarily unavailable, it would be a control for a feature that build does not
+     *  contain — which is why this is null rather than a permanent `unavailable` phase. */
+    sync: SyncStatus | null;
+    /** Sends every outstanding session. Does not close the sheet: the row is the progress readout. */
+    onSync: () => void;
 }
 
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
@@ -107,8 +118,9 @@ export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
     session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, updateAvailable,
-    installState, onInstall,
+    installState, onInstall, sync, onSync,
 }) => {
+    const syncLook = sync && describeSync(sync);
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
     useEffect(() => {
@@ -263,6 +275,42 @@ export const MobileMenu: React.FC<Props> = ({
                                             : installState === 'dismissed' ? 'Install declined — reload to be asked again'
                                                 : 'Install — not offered by this browser'}
                                 </span>
+                            </button>
+                        )}
+
+                        {/* Sync, in the pinned block with Reload and Install because this band does
+                            not scroll: the sheet opens at the bottom of its own scroller, so
+                            anything in the list below is out of sight until you go looking. The one
+                            control a driver wants the moment a run ends should not need to be
+                            found.
+
+                            Wired to `onSync` directly and NOT through `row()`, exactly like the two
+                            above it. Without a `data-menu-key` the sweep's hit test returns null
+                            here, so a finger travelling up the sheet can pass over this row and let
+                            go without starting an upload. Do not add one.
+
+                            The sheet stays open on purpose. This row IS the progress readout —
+                            "Syncing…", then a count or a failure — and closing it would replace the
+                            only report with nothing.
+
+                            Once the row is here, every STATE of it is shown, including the ones that
+                            cannot be pressed — "I looked for sync and there was nothing there" is
+                            the report a control that hides itself produces, and offline and
+                            already-synced are precisely the two worth stating out loud. Whether the
+                            row exists at all is a different question, and the caller answers it. */}
+                        {syncLook && (
+                            <button
+                                type="button"
+                                onClick={syncLook.disabled ? undefined : onSync}
+                                disabled={syncLook.disabled}
+                                title={syncLook.title}
+                                className={`w-full flex items-center justify-center gap-3 py-3 rounded transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400 hover:text-blue-300 cursor-pointer'
+                                    : syncLook.tone === 'error' ? 'text-red-400 hover:text-red-300 cursor-pointer'
+                                        : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                            : 'text-slate-700 cursor-default'}`}
+                            >
+                                <UploadCloud className="w-3.5 h-3.5 shrink-0" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
                             </button>
                         )}
                     </div>

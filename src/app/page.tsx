@@ -16,7 +16,11 @@ import { InterpolationTableEditor } from '@/components/InterpolationTableEditor'
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
 import { SessionStorePanel } from '@/components/SessionStorePanel';
-import { EMPTY_SETTINGS, SyncSettings, canSync, syncSession } from '@/lib/session-sync/client';
+import {
+  EMPTY_SETTINGS, SyncSettings, canSync, syncSession, loadSyncSettings, needsSync, sessionFingerprint,
+} from '@/lib/session-sync/client';
+import type { SyncStatus } from '@/lib/session-sync/status';
+import { describeSync } from '@/lib/session-sync/status';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
@@ -27,9 +31,10 @@ import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useInstallPrompt } from '@/hooks/useInstallPrompt';
+import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, resolveRfKorrMode } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
@@ -46,7 +51,7 @@ import { dialogText } from '@/lib/dialog-text';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
-import { sha256Hex } from '@/lib/db/sessionRepository';
+import { sha256Hex, markSessionSynced } from '@/lib/db/sessionRepository';
 import { useBinaryFile } from '@/hooks/useBinaryFile';
 import { useLogFile } from '@/hooks/useLogFile';
 import { useVeCalculation } from '@/hooks/useVeCalculation';
@@ -339,11 +344,19 @@ export default function Home() {
   // workspace (draft) or a read-only record you may re-flash (archived).
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
-  // Run store. Settings come from the panel after mount (localStorage cannot exist during the
-  // static prerender), and `uploadState` is per session id because "did that land?" is a question
-  // about one row, not about the app.
+  // Session store. `uploadState` is per session id because "did that land?" is a question about one
+  // row, not about the app; `syncBusy`/`syncError` are the app-level half, for the one control that
+  // acts on all of them at once.
   const [uploadSettings, setUploadSettings] = useState<SyncSettings>(EMPTY_SETTINGS);
   const [uploadState, setUploadState] = useState<Record<string, UploadState>>({});
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  // Loaded here rather than only in the store panel. The panel lives on the SESSIONS tab now, so
+  // waiting for it to mount would leave the menu's sync row reading "not set up" until somebody
+  // happened to open that tab — a control lying about the app's state because of where a different
+  // component is. An effect, not lazy state: localStorage does not exist during the static
+  // prerender, and seeding from it would bake an empty token into the export.
+  useEffect(() => { setUploadSettings(loadSyncSettings()); }, []);
   // Latest raw live-telemetry sample, shown as a live readout during tuning (independent of the VE
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
@@ -602,17 +615,96 @@ export default function Home() {
    *  it can come back the same way. It syncs under its own id, which is what makes a retry after a
    *  dropped connection replace rather than duplicate; a phone in a garage drops uploads often
    *  enough that this is the normal path, not the exceptional one. Nothing local is touched. */
-  const handleUploadSessionLog = async (session: TuningSession) => {
+  const syncOne = async (session: TuningSession): Promise<string | null> => {
+    // Taken BEFORE the upload, not after. A run that finishes recording while a slow upload is in
+    // flight must leave the session outstanding — see markSessionSynced.
+    const fingerprint = sessionFingerprint(session);
     setUploadState(prev => ({ ...prev, [session.id]: 'busy' }));
     try {
       await syncSession(session, uploadSettings);
+      await markSessionSynced(session.id, fingerprint);
       setUploadState(prev => ({ ...prev, [session.id]: 'done' }));
+      return null;
     } catch (e) {
       // Kept on the row rather than raised in an alert: an alert has to be dismissed before the
       // driver can retry, and the message is most useful next to the thing that failed.
-      setUploadState(prev => ({ ...prev, [session.id]: { error: (e as Error).message } }));
+      const error = (e as Error).message;
+      setUploadState(prev => ({ ...prev, [session.id]: { error } }));
+      return error;
     }
   };
+
+  const handleUploadSessionLog = async (session: TuningSession) => {
+    await syncOne(session);
+    await sessionDb.refresh();   // the row's synced state is now on the record
+  };
+
+  /** Sessions worth sending that are not up there as they now stand. Also what the menu's sync row
+   *  counts, so the number on the button and the rows it would act on are the same list. */
+  const pendingSync = useMemo(
+    () => sessionDb.sessions.filter(needsSync),
+    [sessionDb.sessions],
+  );
+
+  /**
+   * Sends everything outstanding, one at a time.
+   *
+   * Sequential rather than `Promise.all`. Each session carries its BASE and TUNED images — around
+   * 128 KB before gzip, and the API caps a part at 900 KB — so this is a handful of large uploads
+   * over whatever signal a garage has, not a fan-out that finishes sooner for being parallel. It
+   * also means a failure is attributable: the row that failed is the one that stopped, and the rest
+   * still went.
+   *
+   * Nothing is skipped on failure. A phone that loses signal for one session usually has it back
+   * for the next, and stopping the loop would strand later sessions behind an earlier one's bad
+   * luck. The count of failures is what the button reports.
+   */
+  const handleSyncAll = async () => {
+    const outstanding = pendingSync;
+    if (!outstanding.length) return;
+    setSyncBusy(true);
+    setSyncError(null);
+    const failures: string[] = [];
+    for (const session of outstanding) {
+      const error = await syncOne(session);
+      if (error) failures.push(error);
+    }
+    await sessionDb.refresh();
+    setSyncBusy(false);
+    // The first message, with a count — not all of them concatenated. A dropped connection produces
+    // N copies of one sentence, and the button has one line to say it in.
+    setSyncError(failures.length
+      ? `${failures[0]}${failures.length > 1 ? ` (and ${failures.length - 1} more)` : ''}`
+      : null);
+  };
+
+  const online = useOnline();
+  /**
+   * What the sync controls say, or null when this build has no store behind them.
+   *
+   * Null on production, and that is not a styling choice. Production is served statically from
+   * GitHub Pages: there are no Pages Functions, no D1 and no `/api` at any path. A permanently
+   * greyed "Sync — not set up" row there would describe a feature that build does not contain, and
+   * the honest rendering of a feature that does not exist is nothing at all.
+   *
+   * Keyed on the preview marker rather than on having a token, because those come from the same
+   * build step and the marker is the one that means "this deployment has functions". A preview
+   * whose token failed to embed still shows the row, saying `unavailable` — which is exactly the
+   * case somebody needs to be told about rather than shielded from.
+   */
+  const syncStatus: SyncStatus | null = useMemo(() => !isPreviewBuild ? null : ({
+    phase: !canSync(uploadSettings) ? 'unavailable'
+      : syncBusy ? 'busy'
+        // Offline outranks the error: "no network" is the actionable half of a failure that
+        // happened because there was no network, and it is the one that says what to do about it.
+        : !online ? 'offline'
+          : syncError ? 'error'
+            : pendingSync.length > 0 ? 'ready'
+              : 'clean',
+    pending: pendingSync.length,
+    error: syncError ?? undefined,
+  }), [isPreviewBuild, uploadSettings, syncBusy, online, syncError, pendingSync.length]);
+  const syncLook = syncStatus && describeSync(syncStatus);
 
   /** The last step of a tune: put the finished map back on the road with the patches off.
    *
@@ -1894,6 +1986,36 @@ export default function Home() {
               The label keeps a stated width so announcing an update cannot move the header — the
               house rule that a thing which appears and disappears must not resize anything applies
               to a word changing length just as much as to an element arriving. */}
+          {/* Sync, immediately before RELOAD — the same pairing the menu sheet uses, so the two
+              viewports are the same two controls in the same order rather than two designs.
+
+              Icon-only here. The header is the one row in the app with a stated budget, and the
+              menu's wording ("Sync 3 sessions", "Offline — 3 waiting") is 20-odd characters that
+              would have to grow and shrink in place. The count rides on the icon as a superscript
+              instead, which is the whole of what a glance needs; `title` carries the sentence.
+
+              Hidden below 900px like RELOAD beside it: that is where the menu sheet takes over, and
+              both controls live in it. Absent entirely on production — see syncStatus. */}
+          {syncLook && (
+            <button
+              type="button"
+              onClick={syncLook.disabled ? undefined : () => { void handleSyncAll(); }}
+              disabled={syncLook.disabled}
+              title={syncLook.title}
+              className={`hidden min-[900px]:flex items-center gap-1 shrink-0 py-3 -my-3 transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400 hover:text-blue-300 cursor-pointer'
+                : syncLook.tone === 'error' ? 'text-red-400 hover:text-red-300 cursor-pointer'
+                  : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                    : 'text-slate-700 cursor-default'}`}
+            >
+              <UploadCloud className="w-4 h-4 shrink-0" />
+              {/* A stated width, so a count arriving or leaving cannot shift RELOAD sideways — the
+                  same house rule the label below follows. */}
+              <span className="w-[10px] text-left text-[9px] font-bold font-mono leading-none">
+                {(syncStatus?.pending ?? 0) > 0 ? syncStatus?.pending : ''}
+              </span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleReload}
@@ -1970,7 +2092,6 @@ export default function Home() {
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
                 <EcuItemPanel buffer={binaryBuffer} />
-                <SessionStorePanel onSettingsChange={setUploadSettings} onRestored={() => void sessionDb.refresh()} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2204,6 +2325,15 @@ export default function Home() {
                     onUploadLog={canSync(uploadSettings) ? handleUploadSessionLog : undefined}
                     uploadState={uploadState}
                     onFinalize={handleFinalizeSession}
+                    /* Preview only, for the same reason the sync controls are — production has no
+                       `/api` for this to talk to, so a store panel there could only ever report
+                       failures. */
+                    headerExtra={isPreviewBuild ? (
+                      <SessionStorePanel
+                        onSettingsChange={setUploadSettings}
+                        onRestored={() => void sessionDb.refresh()}
+                      />
+                    ) : undefined}
                   />
                 </div>
               )}
@@ -2824,7 +2954,6 @@ export default function Home() {
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
             <EcuItemPanel buffer={binaryBuffer} openUp />
-            <SessionStorePanel onSettingsChange={setUploadSettings} onRestored={() => void sessionDb.refresh()} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}
@@ -2864,6 +2993,8 @@ export default function Home() {
           onReload={handleReload}
           installState={install.state}
           onInstall={() => { void install.promptInstall(); }}
+          sync={syncStatus}
+          onSync={() => { void handleSyncAll(); }}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed
