@@ -11,7 +11,6 @@ import { RfKorrTable } from '@/components/RfKorrTable';
 const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
 const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
-import { EcuItemPanel } from '@/components/EcuItemPanel';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
@@ -2108,7 +2107,6 @@ export default function Home() {
                   readOnly={isArchived}
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} />
-                <EcuItemPanel buffer={binaryBuffer} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2302,6 +2300,17 @@ export default function Home() {
                   zoom={mapZoom.zoom}
                   view={rfKorrView}
                   onViewChange={setRfKorrView}
+                  mode={resolveRfKorrMode(filterConfig)}
+                  onModeChange={(mode) => handleConfigChange({
+                    // The legacy boolean travels with it, exactly as FilterConfigPanel writes it, so
+                    // a session saved from here still reads sanely in a build that only knows
+                    // `applyRfKorr`. MEASURED has no boolean equivalent and maps to the rich-safe
+                    // one, which is the correct fallback for a build that cannot divide.
+                    ...filterConfig, rfKorrMode: mode, applyRfKorr: mode !== 'as-logged',
+                  })}
+                  canTune={canTuneRfKorr}
+                  readOnly={isArchived}
+                  buffer={binaryBuffer}
                 />
               )}
 
@@ -2942,23 +2951,23 @@ export default function Home() {
             </span>
           </div>
         )}
-        {/* Two rows below 520px, one above it.
+        {/* One row again.
 
-            The config cluster is `ml-auto`, so it grows leftward from the right edge, and MENU is
-            absolutely centred. At five panels the cluster is 192px wide, which on a 360px screen
-            puts its left edge at x=152 while MENU spans 154-206 — the cluster sat on top of the
-            app's primary navigation control and MENU could not be pressed. It went wrong when the
-            cluster grew from three icons to five; the comment below used to say "three", which is
-            how long that had been drifting.
+            This wrapped to two rows below 520px, and it had to: the cluster is `ml-auto` so it
+            grows leftward from the right edge while MENU is absolutely centred, and at five panels
+            it was 192px wide — left edge at x=152 on a 360px screen, against MENU's 154-206. The
+            cluster sat on top of the app's primary navigation control.
 
-            Wrapping is affordable because narrow and short do not co-occur on a phone: the two
-            viewports that matter are 360x800 and 851x393, and the second is wide enough to stay on
-            one row. So the extra 44px is only ever spent where there are 800px to spend it from.
+            It is back to three, which is what this row was sized for: the session store moved to
+            the SESSIONS header and the ECU parameters into the RF KORR tab, beside the table they
+            are the provenance of. Measured at 360x800 after the move — MENU ends at x=206, the
+            cluster starts at x=232, and `elementFromPoint` at MENU's centre returns MENU.
 
-            MENU stays pinned to the FIRST row — it is positioned against this container, which is
-            what makes `top-0` mean the row and not the middle of a two-row block. */}
-        <div className="relative px-4 flex flex-col min-[520px]:flex-row min-[520px]:items-center min-[520px]:h-[52px]">
-          <div className="h-[52px] flex items-center">{narrowPaneTabs}</div>
+            `top-0` and `z-10` on MENU are kept rather than reverted with the rest. Neither depends
+            on the wrap: the first says which row MENU belongs to if this ever grows again, and the
+            second means that if it does, the navigation control is the one that stays pressable. */}
+        <div className="relative h-[52px] flex items-center px-4">
+          {narrowPaneTabs}
           {/* Opens on pointerdown, not click, so the same press can carry on into the sheet and
               pick a row on the way back up. `touch-none` stops the browser claiming the gesture as a
               scroll before the menu ever sees it.
@@ -2976,9 +2985,9 @@ export default function Home() {
           >
             <MarkIcon className="w-8 h-7" />
           </button>
-          {/* `openUp` because these hang off the bottom edge here; the same five render `top-10`
+          {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
               in the desktop tab row, which is the other instance of them. */}
-          <div className="flex items-center justify-end gap-2 pb-1.5 min-[520px]:pb-0 min-[520px]:ml-auto">
+          <div className="ml-auto flex items-center gap-2">
             <InterpolationTableEditor
               config={interpolationTable}
               onSave={handleTableChange}
@@ -2988,7 +2997,6 @@ export default function Home() {
               openUp
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} canTuneRfKorr={canTuneRfKorr} openUp />
-            <EcuItemPanel buffer={binaryBuffer} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}

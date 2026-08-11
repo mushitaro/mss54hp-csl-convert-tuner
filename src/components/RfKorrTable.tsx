@@ -1,11 +1,15 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { MapEditor } from './MapEditor';
+import { EcuItemList } from './EcuItemList';
+import { RfKorrModeControl } from './RfKorrModeControl';
 import { RfKorrTuneResult, RejectReason } from '@/lib/ve-calculator/rfKorrTuner';
 import {
     RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, RF_KORR_VALUE_LABEL, RfKorrView, rfKorrViewData,
 } from '@/lib/ve-calculator/rfKorrView';
+import { RfKorrMode } from '@/lib/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 /** Why a cell was left alone, in the reader's language. Kept short — this lands in a tooltip. */
@@ -50,6 +54,7 @@ const TEXT = {
         thin: 'Nothing here is written unless a cell had samples from at least two VE cells that '
             + 'agreed to within 15 %. Everything else keeps its stock value byte for byte.',
         provisional: 'PROVISIONAL — too few cells moved to be worth writing',
+        ecu: 'ECU parameters this table is derived from',
     },
     ja: {
         tuned: 'TUNED', stock: 'STOCK', diff: 'CHANGE %',
@@ -64,6 +69,7 @@ const TEXT = {
         thin: '2 つ以上の VE セルから来たサンプルが 15 % 以内で一致したセルだけを書き換えます。'
             + 'それ以外は純正値のままバイト単位で不変です。',
         provisional: 'PROVISIONAL — 書き込むには更新セルが少なすぎます',
+        ecu: 'この表の元になっている ECU パラメータ',
     },
 };
 
@@ -84,10 +90,22 @@ export const RfKorrTable: React.FC<{
     zoom?: number;
     view: RfKorrView;
     onViewChange: (view: RfKorrView) => void;
-}> = ({ result, zoom = 1, view, onViewChange }) => {
+    /** How the VE map should treat exhaust temperature, and whether MEASURED is available. The
+     *  control lives here as well as in the filter popover — this is where a reader goes looking
+     *  for anything RF KORR, and it was reported as being nowhere at all. */
+    mode: RfKorrMode;
+    onModeChange: (mode: RfKorrMode) => void;
+    canTune: boolean;
+    readOnly?: boolean;
+    /** The loaded BIN, for the calibration this table was derived FROM. */
+    buffer: ArrayBuffer | null;
+}> = ({ result, zoom = 1, view, onViewChange, mode, onModeChange, canTune, readOnly, buffer }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
     const { report } = result;
+    /** Collapsed by default. The grid is the subject of this tab and the calibration is its
+     *  provenance — worth being one tap away, not worth taking the grid's height every visit. */
+    const [ecuOpen, setEcuOpen] = useState(false);
 
     const { map, changePercent } = rfKorrViewData(result, view);
 
@@ -141,6 +159,20 @@ export const RfKorrTable: React.FC<{
                 )}
             </div>
 
+            {/* The mode, above the table it decides the fate of.
+                It is also still in the filter popover, where the session's other reproducible
+                settings live — but that popover is called RAW FILTER and this sat below three
+                sliders about temperature and rpm, behind an unlabelled funnel. Reported, correctly,
+                as not existing. One component, one piece of state, two places to reach it. */}
+            <div className="px-3 py-2 border-b border-slate-800 bg-slate-900/30">
+                <RfKorrModeControl
+                    mode={mode}
+                    onChange={onModeChange}
+                    canTune={canTune}
+                    readOnly={readOnly}
+                />
+            </div>
+
             <div className="flex-1 min-h-0">
                 <MapEditor
                     mapData={map}
@@ -169,6 +201,30 @@ export const RfKorrTable: React.FC<{
                     {report.samplesHysteresis > 0 && <span>{t.hysteresis(report.samplesHysteresis)}</span>}
                 </div>
                 <p>{t.thin}</p>
+            </div>
+
+            {/* The calibration this table was derived FROM.
+                Here rather than behind an icon in the footer, because reading KF_RF_KORR_DRREL out
+                of the binary is how you check that the tuned table above it is a change to the
+                right numbers — and those two were previously two taps and a guess apart.
+
+                Collapsed by default and capped at 45 % when open, so opening it can never take the
+                grid's height away entirely. `shrink-0` on the closed row keeps the toggle reachable
+                on a short landscape phone, where the flex pass would otherwise squeeze it. */}
+            <div className="shrink-0 border-t border-slate-800">
+                <button
+                    type="button"
+                    onClick={() => setEcuOpen(o => !o)}
+                    className="w-full flex items-center gap-2 px-3 min-h-10 text-[9px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                    {ecuOpen ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
+                    <span className="text-left">{t.ecu}</span>
+                </button>
+                {ecuOpen && (
+                    <div className="px-3 pb-3 max-h-[45vh] overflow-y-auto overscroll-contain bg-slate-950">
+                        <EcuItemList buffer={buffer} />
+                    </div>
+                )}
             </div>
         </div>
     );
