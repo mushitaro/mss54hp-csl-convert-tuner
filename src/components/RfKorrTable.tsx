@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import { MapEditor } from './MapEditor';
 import { RfKorrTuneResult, RejectReason } from '@/lib/ve-calculator/rfKorrTuner';
-import { VEMap } from '@/lib/types';
+import {
+    RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, RF_KORR_VALUE_LABEL, RfKorrView, rfKorrViewData,
+} from '@/lib/ve-calculator/rfKorrView';
 import { useDialogLang } from '@/hooks/useDialogLang';
-
-type View = 'tuned' | 'stock' | 'diff';
 
 /** Why a cell was left alone, in the reader's language. Kept short — this lands in a tooltip. */
 const REASON_TEXT: Record<RejectReason, { en: string; ja: string }> = {
@@ -73,21 +73,23 @@ const TEXT = {
  * Three views of one result rather than three tables. STOCK is what the loaded binary holds, TUNED
  * is what would be written, and CHANGE % is the difference — which is the only one of the three
  * that answers "did this log actually say anything", because an untouched cell reads exactly 0.
+ *
+ * The selection is the CALLER's, not this component's. It used to be local state here, which meant
+ * the 3D surface rendered beside this table could not see it: the grid switched between the three
+ * and the surface stayed on TUNED, with nothing on screen admitting they were showing different
+ * things. Both now read `rfKorrViewData` from the same selection.
  */
-export const RfKorrTable: React.FC<{ result: RfKorrTuneResult; zoom?: number }> = ({
-    result, zoom = 1,
-}) => {
-    const [view, setView] = useState<View>('tuned');
+export const RfKorrTable: React.FC<{
+    result: RfKorrTuneResult;
+    zoom?: number;
+    view: RfKorrView;
+    onViewChange: (view: RfKorrView) => void;
+}> = ({ result, zoom = 1, view, onViewChange }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
     const { report } = result;
 
-    const grid = (values: number[][]): VEMap => ({
-        xAxis: result.rpm, yAxis: result.delta, data: values,
-    });
-
-    const diff = result.tuned.map((row, r) =>
-        row.map((v, c) => (result.stock[r][c] > 0 ? (v / result.stock[r][c] - 1) * 100 : 0)));
+    const { map, changePercent } = rfKorrViewData(result, view);
 
     const note = (r: number, c: number) => {
         const parts: string[] = [];
@@ -110,7 +112,7 @@ export const RfKorrTable: React.FC<{ result: RfKorrTuneResult; zoom?: number }> 
         return parts.join('\n');
     };
 
-    const buttons: Array<{ id: View; label: string }> = [
+    const buttons: Array<{ id: RfKorrView; label: string }> = [
         { id: 'tuned', label: t.tuned }, { id: 'stock', label: t.stock }, { id: 'diff', label: t.diff },
     ];
 
@@ -121,7 +123,7 @@ export const RfKorrTable: React.FC<{ result: RfKorrTuneResult; zoom?: number }> 
                     {buttons.map(b => (
                         <button
                             key={b.id}
-                            onClick={() => setView(b.id)}
+                            onClick={() => onViewChange(b.id)}
                             className={`px-2 py-1 text-[10px] font-bold tracking-wider rounded ${view === b.id
                                 ? 'bg-blue-600 text-white'
                                 : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}
@@ -141,15 +143,14 @@ export const RfKorrTable: React.FC<{ result: RfKorrTuneResult; zoom?: number }> 
 
             <div className="flex-1 min-h-0">
                 <MapEditor
-                    mapData={view === 'stock' ? grid(result.stock)
-                        : view === 'diff' ? grid(diff) : grid(result.tuned)}
-                    diffData={view === 'diff' ? diff : undefined}
+                    mapData={map}
+                    diffData={view === 'diff' ? changePercent : undefined}
                     hitData={result.countMap}
                     weightData={result.weightMap}
                     zoom={zoom}
-                    rowLabel="TABG Δ °C"
-                    colLabel="RPM"
-                    valueLabel="RF KORR"
+                    rowLabel={RF_KORR_ROW_LABEL}
+                    colLabel={RF_KORR_COL_LABEL}
+                    valueLabel={RF_KORR_VALUE_LABEL}
                     rowFormat={v => v.toFixed(0)}
                     valueFormat={v => v.toFixed(3)}
                     cellNote={note}

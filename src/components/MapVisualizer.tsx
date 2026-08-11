@@ -70,6 +70,19 @@ interface Props {
     mapData: VEMap;
     title?: string;
     zAxisLabel?: string;
+    /**
+     * What the two horizontal axes ARE.
+     *
+     * These were written into the scene, and the Z label alone was a prop — which held for as long
+     * as every surface here was a VE map. It is not: KF_RF_KORR_DRREL is rpm against **exhaust
+     * temperature delta in °C**, and it was drawn with its rows announced as `RO %`, engine load.
+     * Not a cosmetic slip. The axis name is the only thing on a 3D plot that says what the shape is
+     * a function of, so a reader who trusted it read the map against the wrong variable entirely.
+     *
+     * Defaults reproduce the old strings exactly, so the five VE surfaces are unchanged.
+     */
+    xAxisLabel?: string;
+    yAxisLabel?: string;
     /** 'magnitude' (default) for absolute maps, 'deviation' for signed ones. A signed map on the
      *  sequential scale has no visual zero, which is what made the Diff view unreadable: the color
      *  of "no change" drifted with whatever the min/max of that particular comparison happened to be. */
@@ -87,7 +100,11 @@ interface Props {
  * a toggle, switching panes) had Plotly diff and redraw a 480-point 3D surface. Measured on a
  * 6x-throttled CPU that was the bulk of a 4.3 s menu open.
  */
-export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer({ mapData, title = 'VE Map', zAxisLabel = 'RF %', scale = 'magnitude', deviationMidpoint = 0 }) {
+export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer({
+    mapData, title = 'VE Map', zAxisLabel = 'RF %',
+    xAxisLabel = 'RPM', yAxisLabel = 'RO %',
+    scale = 'magnitude', deviationMidpoint = 0,
+}) {
     // Bumped by the reset button to remount Plotly, which is what re-applies `scene.camera`
     // below. Plotly keeps the camera in its own internal state after the first render.
     const [cameraNonce, setCameraNonce] = useState(0);
@@ -200,15 +217,17 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
             // to put meaning back onto index positions, and they brought their own problem: forced
             // to draw every value it was given, Plotly smeared the dense low-load end into an
             // unreadable pile. Round numbers at sane intervals are the automatic behaviour.
-            xaxis: { title: { text: 'RPM' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
-            yaxis: { title: { text: 'RO %' }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            xaxis: { title: { text: xAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
+            yaxis: { title: { text: yAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             zaxis: { title: { text: zAxisLabel }, color: '#C6C6CF', gridcolor: '#2A2A33' },
             camera: {
                 eye: { x: 1.6, y: -1.6, z: 0.6 }
             }
         },
         margin: { l: 0, r: 0, b: 0, t: 0 }, // Optimized margins
-    }), [title, zAxisLabel]);
+        // All four labels, not just the two that used to vary. A memo that omits one renders the
+        // previous view's axis name after a switch — the exact class of bug this prop exists to fix.
+    }), [title, zAxisLabel, xAxisLabel, yAxisLabel]);
 
     return (
         // `touch-pan-y` so a vertical swipe still scrolls the pane this sits in. Plotly's 3D scene

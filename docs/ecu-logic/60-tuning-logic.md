@@ -426,7 +426,7 @@ karter16 の Option 2:
 | セル別の加重平均 `rfKorrMap` ／ ばらつき `rfKorrSpreadMap` | ✅ |
 | 更新式に**掛ける** | ✅ `NOMINAL`（既定） |
 | 更新式で**割る** | ✅ `TUNED`。ただし**逆算した表を書き込むのとセット**でのみ |
-| **`KF_RF_KORR_DRREL` 自体のチューニング** | ✅ `rfKorrTuner.ts`、`RF KORR (TUNED)` タブ（§6.5） |
+| **`KF_RF_KORR_DRREL` 自体のチューニング** | ✅ `rfKorrTuner.ts`、`RF KORR (TUNED / EXP.)` タブ（§6.5） |
 | **BIN への書き戻し**（Z `0xE86E`, 6×12） | ✅ `BinaryPatcher.setEcuMapValues()`。値のみ・軸は書かない |
 
 > `RF` チャンネルを持たないログでは `rf_korr` が未定義なので、
@@ -439,7 +439,7 @@ karter16 の Option 2:
 
 ### 6.5 `KF_RF_KORR_DRREL` 自体のチューニング
 
-**結論：できる。実装済み（`RF KORR (TUNED)` タブ ＋ `TUNED` モード）。成立条件がある。**
+**結論：できる。実装済み（`RF KORR (TUNED / EXP.)` タブ ＋ `TUNED` モード）。成立条件がある。**
 
 #### まず λ についての誤解を潰しておく
 

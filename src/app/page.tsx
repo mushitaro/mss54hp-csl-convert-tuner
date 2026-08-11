@@ -39,6 +39,9 @@ import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, resolveRfKorrMode } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
+import {
+  RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
+} from '@/lib/ve-calculator/rfKorrView';
 import { useIsPreviewBuild, usePreviewTitle } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -393,6 +396,12 @@ export default function Home() {
   const wideLayout = useWideLayout();
   const splitGraph = useSplitGraph();
   const mapZoom = useMapZoom();
+  /** Which of STOCK / TUNED / CHANGE % the RF KORR tab is showing.
+   *
+   *  Held here rather than inside RfKorrTable because two components render it — the grid and the
+   *  3D surface — and they are siblings. With the state inside one of them the other could not
+   *  follow, so the surface stayed on TUNED while the grid switched underneath it. */
+  const [rfKorrView, setRfKorrView] = useState<RfKorrView>('tuned');
   /** The 3D surface is actually being looked at.
    *
    *  Below 900px the panes share a grid cell and the inactive one is only `invisible` — it stays laid
@@ -760,7 +769,10 @@ export default function Home() {
     // Enabled on the RESULT, not on the binary: the tuner only returns something when the tables
     // decoded AND the log carried an exhaust temperature, which is exactly when there is a table
     // to show. A tab that is reachable and empty says the feature is broken.
-    { id: 'rfkorr', label: 'RF KORR (TUNED)', enabled: !!tunedRfKorr },
+    // "/ EXP." carries the same warning as the two below it, and this table has more claim to it
+    // than either: it is back-calculated from one log, its inversion is only defined over 45 % of
+    // the rpm axis, and nothing here has been checked against a car yet.
+    { id: 'rfkorr', label: 'RF KORR (TUNED / EXP.)', enabled: !!tunedRfKorr },
     { id: 'warmup', label: 'WARMUP (DERIVED / EXP.)', enabled: !!warmupMap },
     { id: 'wot', label: 'WOT (DERIVED / EXP.)', enabled: !!wotMap },
   ];
@@ -1725,6 +1737,11 @@ export default function Home() {
   const lambdaVisualMap = useMemo(
     () => (correctionMap && newMap) ? { ...newMap, data: correctionMap } : null,
     [newMap, correctionMap]);
+  /** The RF KORR grid and surface, from the one selection they share. Memoised for the same reason
+   *  as the two above — MapVisualizer is memoised, and a fresh object each render defeats it. */
+  const rfKorrSurface = useMemo(
+    () => tunedRfKorr ? rfKorrViewData(tunedRfKorr, rfKorrView) : null,
+    [tunedRfKorr, rfKorrView]);
 
   /** Whether the visualisation box has anything in it for the current view. GRAPH is a destination,
    *  and a destination that lands on an empty box is worse than one that is greyed out. STARTUP is
@@ -2280,7 +2297,12 @@ export default function Home() {
               )}
 
               {(activeTab === 'rfkorr' && tunedRfKorr) && (
-                <RfKorrTable result={tunedRfKorr} zoom={mapZoom.zoom} />
+                <RfKorrTable
+                  result={tunedRfKorr}
+                  zoom={mapZoom.zoom}
+                  view={rfKorrView}
+                  onViewChange={setRfKorrView}
+                />
               )}
 
               {(activeTab === 'warmup' && warmupMap) && (
@@ -2424,11 +2446,24 @@ export default function Home() {
               )}
               {/* The correction is a multiplier centred on 1.0, and only the departure from it
                   means anything, so it takes the deviation scale like the two signed maps above
-                  rather than the absolute one the filling maps use. */}
+                  rather than the absolute one the filling maps use. CHANGE % is centred on 0
+                  instead, which is why the midpoint comes from the view rather than being stated
+                  here — see rfKorrView.ts.
+
+                  It also follows the table's STOCK / TUNED / CHANGE % selection. It did not, and
+                  that was the worst kind of wrong: a surface that kept drawing TUNED while the grid
+                  beside it showed STOCK, with nothing on screen saying so. Y is the exhaust
+                  temperature delta, NOT the VE map's load axis, which is the other half of the same
+                  bug — the scene had `RO %` hardcoded. */}
               {graphOnScreen && (activeTab === 'rfkorr' && tunedRfKorr) && (
                 <MapVisualizer
-                  mapData={{ xAxis: tunedRfKorr.rpm, yAxis: tunedRfKorr.delta, data: tunedRfKorr.tuned }}
-                  title="" zAxisLabel="RF KORR" scale="deviation" deviationMidpoint={1}
+                  mapData={rfKorrSurface!.map}
+                  title=""
+                  xAxisLabel={RF_KORR_COL_LABEL}
+                  yAxisLabel={RF_KORR_ROW_LABEL}
+                  zAxisLabel={rfKorrSurface!.zAxisLabel}
+                  scale="deviation"
+                  deviationMidpoint={rfKorrSurface!.deviationMidpoint}
                 />
               )}
               {graphOnScreen && (activeTab === 'warmup' && warmupMap) && <MapVisualizer mapData={warmupMap} title="" zAxisLabel="RF %" />}
