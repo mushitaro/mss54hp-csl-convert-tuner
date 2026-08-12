@@ -99,15 +99,23 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full' }) =>
         'DMEへ書き込みます。\n\n' +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
             : `⚠ マップは変更しません(パッチのみ) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
+        // 検証方式は「何を証明したことになるか」を変える。ダイアログが「検証OK」と言う意味が
+        // モードによって違う以上、消去の前にどちらで走るかを明示しないと約束が曖昧になる。
+        `検証方式: ${a.verifyMode === 'full'
+            ? 'FULL — DME自身のチェックサム照合に加えて、全65536バイトを読み戻してバイト単位で比較します。'
+            : 'QUICK — DME自身のチェックサム照合(DS2 0x0A)。ECUが自分のフラッシュに保持するCRCとの一致を1往復で確認します。'}\n` +
+        (a.verifyMode === 'quick'
+            ? '  ※ QUICKはカバー範囲65536バイト中65528バイト。ただし不一致の「位置」は分かりません。\n'
+            : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
         '  エンジンが回っているとDMEが書き込みを拒否します。\n' +
-        '⚠ 電源(バッテリー)を安定させてください。書き込みには約4分かかります。\n' +
+        `⚠ 電源(バッテリー)を安定させてください。書き込みには約${a.verifyMode === 'full' ? '4分半' : '2分半'}かかります。\n` +
         '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n' +
         // ブラウザ側のダイアログは文言を指定できないため、理由を説明できるのはここだけである。
         '  ブラウザのタブを閉じたり、リロードしたりしないでください。\n' +
@@ -120,7 +128,7 @@ const JA = {
             '  他のアプリに切り替えないでください。\n' +
             '  OTGケーブルとコネクタが動かないよう固定してください。\n'
             : '') +
-        '\nチェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
+        '\nチェックサムは自動補正されます。全テレグラムのverifyバイトは両モードとも必ず検査します。\n\n' +
         '続行しますか？',
 
     /**
@@ -150,12 +158,27 @@ const JA = {
             'チューンに使う前にREADをやり直してください。';
     },
 
-    patchWriteDone:
-        '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
+    /**
+     * 何をもって「完了」と言っているのかを、実際に走った検証で名乗る。
+     *
+     * ここは以前「リードバック検証OK」と固定文で書いていた。QUICKを選べるようになった以上、
+     * その一文は場合によって嘘になる — そして「検証OK」としか読めない完了画面は、
+     * ラベルが約束であるという原則を最も直接に破る場所である。
+     */
+    writeVerifiedBy: (v: { mode: 'quick' | 'full'; readBack: boolean }): string =>
+        v.readBack
+            ? '全バイトのリードバック照合＋DMEのチェックサム照合OK'
+            : v.mode === 'quick'
+                ? 'DMEのチェックサム照合OK(リードバックは実施していません)'
+                : '検証は完了しましたが、実施内容を特定できませんでした',
+
+    patchWriteDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ パッチの書き込みが完了しました(${JA.writeVerifiedBy(v)})。\n\n` +
         KEY_CYCLE_JA + '\n\n' +
         'その後 CONNECTION で接続し直すと、START TUNE でデータログを開始できます。',
 
-    writeDone: '✅ 書き込みが完了しました(リードバック検証OK)。\n\n' + KEY_CYCLE_JA,
+    writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ 書き込みが完了しました(${JA.writeVerifiedBy(v)})。\n\n` + KEY_CYCLE_JA,
 
     retuneConfirm:
         'このチューンの続きから、次のセッションを始めますか？\n\n' +
@@ -260,15 +283,21 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full' }) =>
         'Writing to the DME.\n\n' +
         `What will be written: ${a.tuned
             ? 'the tuned map'
             : `⚠ the map is NOT changed (patches only) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
+        `Verification: ${a.verifyMode === 'full'
+            ? "FULL — the DME's own checksum, plus all 65536 bytes read back and compared byte for byte."
+            : "QUICK — the DME's own encoding checksum (DS2 0x0A), one exchange against the CRCs the ECU stores in its own flash."}\n` +
+        (a.verifyMode === 'quick'
+            ? '  Note: QUICK covers 65528 of the 65536 bytes, but cannot say WHERE a mismatch is.\n'
+            : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +
         '  The DME refuses the write while the engine is running.\n' +
-        '⚠ Keep the power (battery) stable. The write takes about 4 minutes.\n' +
+        `⚠ Keep the power (battery) stable. The write takes about ${a.verifyMode === 'full' ? 'four and a half' : 'two and a half'} minutes.\n` +
         '  Never cut the power or unplug the cable while it is writing.\n' +
         '  Do not close or reload this browser tab.\n' +
         '  (Trying to close it asks for confirmation, but confirming still leaves.)\n' +
@@ -279,7 +308,7 @@ const EN: NativeDialogText = {
             '  Do not switch to another app.\n' +
             '  Secure the OTG cable and connector so they cannot move.\n'
             : '') +
-        '\nThe checksum is corrected automatically. The write is verified by reading it back.\n\n' +
+        "\nThe checksum is corrected automatically. Every telegram's verify byte is checked in both modes.\n\n" +
         'Continue?',
 
     noTransport: (a: { android: boolean }) => a.android
@@ -292,12 +321,20 @@ const EN: NativeDialogText = {
             'Run READ again before tuning from it.';
     },
 
-    patchWriteDone:
-        '✅ The patch write is complete (read-back verified).\n\n' +
+    writeVerifiedBy: (v: { mode: 'quick' | 'full'; readBack: boolean }): string =>
+        v.readBack
+            ? "every byte read back and compared, plus the DME's own checksum"
+            : v.mode === 'quick'
+                ? "the DME's own checksum — no read-back was performed"
+                : 'verified, but the checks that ran could not be identified',
+
+    patchWriteDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ The patch write is complete (${EN.writeVerifiedBy(v)}).\n\n` +
         KEY_CYCLE_EN + '\n\n' +
         'Reconnect with CONNECTION afterwards, then START TUNE begins the data log.',
 
-    writeDone: '✅ The write is complete (read-back verified).\n\n' + KEY_CYCLE_EN,
+    writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ The write is complete (${EN.writeVerifiedBy(v)}).\n\n` + KEY_CYCLE_EN,
 
     retuneConfirm:
         'Start the next session from this tune?\n\n' +

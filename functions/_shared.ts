@@ -49,6 +49,42 @@ export function corsHeaders(): Record<string, string> {
 export const preflight = () => new Response(null, { status: 204, headers: corsHeaders() });
 
 /**
+ * A stored BLOB, back out as base64.
+ *
+ * D1 hands a BLOB back as a plain `number[]`, not an ArrayBuffer, and both shapes are declared in
+ * the wild depending on version. Assuming the wrong one fails silently — the stream errors after the
+ * headers are on the wire and the client gets 200 with an empty body — so all three are handled.
+ *
+ * Shared rather than copied per route: it is subtle in exactly the way that does not announce
+ * itself, and a second copy is a second chance to get the 0x8000-byte chunking wrong on the payload
+ * large enough for `String.fromCharCode(...bytes)` to throw.
+ */
+export function blobToBase64(value: ArrayBuffer | number[] | Uint8Array | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    const bytes = value instanceof Uint8Array ? value
+        : Array.isArray(value) ? Uint8Array.from(value)
+            : new Uint8Array(value);
+    const CHUNK = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+}
+
+/** base64 → bytes, with the gzip-magic check every upload route needs. */
+export function decodeBase64(b64: string): Uint8Array {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+}
+
+/** gzip starts 1f 8b. Checked because a payload that will not inflate months from now is
+ *  indistinguishable from one that was never uploaded. */
+export const isGzip = (b: Uint8Array) => b.byteLength >= 3 && b[0] === 0x1f && b[1] === 0x8b;
+
+/**
  * Length-independent comparison.
  *
  * Timing attacks over the public internet against a token this short are not a realistic threat,

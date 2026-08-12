@@ -477,6 +477,79 @@ export function describeVerifyByte(verifyByte: number): string {
     }
 }
 
+// --- Encoding checksum (control 0x0A) -----------------------------------------------------------
+//
+// The DME's own verdict on its own flash. Ported from the reference Ds2EncodingChecksumResult.cs,
+// where it is the substance of `ProgrammingVerificationMode.QuickVerify` — that tool's DEFAULT
+// post-write check, and the reason it does not read 64 KB back after every flash.
+//
+// One exchange: request `12 04 0A 1C` (4 bytes), response `12 05 A0 xx ck` (5 bytes). ~50 ms at
+// 9600 against ~123 s for a full read-back of the same region.
+//
+// What it actually proves is worth being precise about, because it is NOT the same guarantee as a
+// read-back. The MSS54HP stores CRC-16/ARC values for each area inside the flash itself (see
+// checksum/dmeDataChecksum.ts — two slots covering 65528 of the data pair's 65536 bytes). This asks
+// the DME whether its own stored CRCs match its own contents. So it is an external authority on the
+// bytes rather than a second copy of our read path — a systematic transport fault corrupts a
+// read-back and a re-read identically, and cannot forge a CRC the ECU computed for itself. What it
+// cannot do is say WHERE a mismatch is, or catch a corruption that happens to preserve CRC-16.
+
+export interface Ds2EncodingChecksumArea {
+    bit: number;
+    name: string;
+    /** **A SET BIT MEANS FAULTED.** The polarity is the easy thing to get backwards, and getting it
+     *  backwards turns this check into one that passes on a broken flash and fails on a good one. */
+    faulted: boolean;
+}
+
+export interface Ds2EncodingChecksum {
+    /** The raw status byte, kept so a report can carry what the DME actually said. */
+    lowByte: number;
+    /** Some DMEs answer with a second byte. The reference accepts 1 or 2 and decodes only the first;
+     *  it is retained rather than dropped so an unexpected value is visible in a saved report. */
+    extraByte: number | null;
+    areas: Ds2EncodingChecksumArea[];
+}
+
+/** Bit → area, exactly the reference's table. Bits 3 and 7 are not assigned by it. */
+const ENCODING_CHECKSUM_AREAS: readonly { bit: number; name: string }[] = [
+    { bit: 0, name: 'Boot sector master' },
+    { bit: 1, name: 'Program master' },
+    { bit: 2, name: 'Data master' },
+    { bit: 4, name: 'Boot sector slave' },
+    { bit: 5, name: 'Program slave' },
+    { bit: 6, name: 'Data slave' },
+];
+
+/**
+ * The two areas a DataTune write touches, and therefore the only two a tune's QuickVerify may judge.
+ *
+ * Matches the reference's `DataChecksumBits = { 2, 6 }`. Deliberately not "all areas must be clean":
+ * a program-area fault is a real fact about the ECU but it is not something this write caused or
+ * could fix, and failing a good tune write on it would be wrong. It is reported, not thrown on.
+ */
+export const DATA_TUNE_CHECKSUM_BITS: readonly number[] = [2, 6];
+
+export function parseEncodingChecksum(frame: Ds2Frame): Ds2EncodingChecksum {
+    if (!isPositiveResponse(frame)) {
+        throw new Error(`Encoding checksum query answered DS2 status 0x${frame.controlOrStatus.toString(16)}`);
+    }
+    if (frame.payload.length < 1 || frame.payload.length > 2) {
+        throw new Error(`Encoding checksum payload must be 1 or 2 bytes, got ${frame.payload.length}`);
+    }
+    const lowByte = frame.payload[0];
+    return {
+        lowByte,
+        extraByte: frame.payload.length === 2 ? frame.payload[1] : null,
+        areas: ENCODING_CHECKSUM_AREAS.map(a => ({ ...a, faulted: (lowByte & (1 << a.bit)) !== 0 })),
+    };
+}
+
+/** The faulted areas among `bits`. Empty means those areas are clean by the DME's own reckoning. */
+export function faultedAreas(result: Ds2EncodingChecksum, bits: readonly number[]): Ds2EncodingChecksumArea[] {
+    return result.areas.filter(a => bits.includes(a.bit) && a.faulted);
+}
+
 /**
  * DS2 addressing for the MSS54HP "DataTune" region (our app's 65536-byte "0401 partial BIN" =
  * Slave data block followed by Master data block), confirmed against the reference

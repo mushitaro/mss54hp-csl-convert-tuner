@@ -1,7 +1,9 @@
 import { AdaptationSnapshot } from './adaptationBlocks';
 import { FlashCounterInfo } from './flashCounter';
 import { ServiceBlockPointers } from './serviceBlockReport';
-import type { ReadTimingReport } from './transferTiming';
+import type { Ds2EncodingChecksum } from './ds2';
+import type { LinkEventLogSnapshot } from './linkEventLog';
+import type { TransferTimingReport } from './transferTiming';
 
 export type { AdaptationSnapshot, FlashCounterInfo };
 
@@ -24,6 +26,17 @@ export interface DmeIdentity {
      * never fails the connection.
      */
     flashCounter: FlashCounterInfo | null;
+    /**
+     * The DME's own encoding-checksum verdict, read once at connect. `null` when the query failed or
+     * this DME does not answer control 0x0A.
+     *
+     * Read here — before anything is written — precisely so that a post-write reading has something
+     * to be compared against. On its own, "bits 2 and 6 are clear after the flash" is only evidence
+     * if the DME recomputes on demand; if it were answering from a cached value it would say the
+     * same thing either way. A before-and-after pair settles that empirically, and costs one
+     * 4-byte telegram on a path that already sends a dozen.
+     */
+    encodingChecksum: Ds2EncodingChecksum | null;
 }
 
 /** A single live-telemetry sample, using the same field names as LogDataPoint so it can feed
@@ -43,11 +56,53 @@ export interface LiveMeasurement {
     exhaustTemp?: number;
 }
 
-/** Which stage a long transfer is in. Surfaced in the UI so a slow-but-working stage (notably the
- *  post-write read-back verification, which takes ~70s at 9600 baud) doesn't look like a freeze. */
+/** Which stage a long transfer is in. Surfaced in the UI so a slow-but-working stage (notably a FULL
+ *  post-write read-back, measured at 122.9 s at 9600 baud) doesn't look like a freeze. */
 export type TransferPhase = 'erasing' | 'reading' | 'writing' | 'verifying';
 
 export type TransferProgress = (donePercent: number, phase?: TransferPhase) => void;
+
+/**
+ * How a flash write proves it landed.
+ *
+ * Both modes keep the per-telegram verify byte, which is not optional and is not a mode: every
+ * chunk's response is parsed and a verify byte other than 1 ("programming OK") throws. What the
+ * mode chooses is what happens *after* the last chunk.
+ *
+ * - `quick` — ask the DME for its own encoding checksum (control 0x0A) and require the two data
+ *   areas to be clean. One exchange, ~50 ms. This is the reference tool's default, and its
+ *   authority is the CRC-16/ARC values the ECU stores in its own flash, covering 65528 of the
+ *   pair's 65536 bytes. It cannot say *where* a mismatch is, and it cannot catch a corruption that
+ *   preserves CRC-16.
+ * - `full` — everything `quick` does, **and** read all 65536 bytes back and compare byte for byte.
+ *   ~123 s at 9600. The only check that can name an offset.
+ *
+ * `full` is not "instead of" the checksum: the checksum runs in both modes, because one exchange is
+ * not worth choosing between two independent authorities over.
+ */
+export type WriteVerifyMode = 'quick' | 'full';
+
+export interface WriteOptions {
+    /**
+     * Deliberately required, with no default anywhere in the stack.
+     *
+     * A default here would be a silent decision about how strongly a flash was proven, made in a
+     * layer that has no business making it — and the wrong half of that choice looks identical to
+     * the right one until an ECU is wrong.
+     */
+    verifyMode: WriteVerifyMode;
+}
+
+/** What a completed write actually proved, so the UI can say it rather than imply it. */
+export interface WriteVerification {
+    mode: WriteVerifyMode;
+    /** The DME's post-write verdict, or null when control 0x0A could not be asked. */
+    encodingChecksum: Ds2EncodingChecksum | null;
+    /** Why `encodingChecksum` is null, when it is. Never silently empty. */
+    encodingChecksumError: string | null;
+    /** True when a byte-for-byte read-back ran — and therefore passed, since a mismatch throws. */
+    readBack: boolean;
+}
 
 /** Abstraction the connection state machine (useDmeLink) depends on. Implemented by both
  * WebSerialDmeLink (real navigator.serial + DS2 protocol) and MockDmeLink (offline simulator). */
@@ -55,7 +110,22 @@ export interface DmeLink {
     connect(): Promise<DmeIdentity>;
     disconnect(): Promise<void>;
     readPartialBin(onProgress?: TransferProgress): Promise<ArrayBuffer>;
-    writePartialBin(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void>;
+    /**
+     * Erases and rewrites the DataTune pair, then verifies per `options.verifyMode`.
+     *
+     * Returns what it proved rather than resolving void, so the completion dialog, the session
+     * record and the saved artifact can all state the same thing about the same write. A write
+     * verified two different ways must not be describable by one word.
+     */
+    writePartialBin(buffer: ArrayBuffer, options: WriteOptions, onProgress?: TransferProgress): Promise<WriteVerification>;
+    /**
+     * Asks the DME for its own encoding-checksum status (DS2 control 0x0A).
+     *
+     * **Read-only and non-destructive** — it sends four bytes and asks a question. That is what
+     * makes it usable at connect as well as after a write, and the before/after pair is what turns
+     * a single post-write reading into evidence.
+     */
+    queryEncodingChecksum(): Promise<Ds2EncodingChecksum>;
     pollLiveMeasurement(): Promise<LiveMeasurement>;
     /** Reads the DME's learned adaptation values (DS2 blocks 0x06 and 0x16). */
     readAdaptations(): Promise<AdaptationSnapshot>;
@@ -151,16 +221,31 @@ export interface DmeLink {
      */
     getMaxTelegramLength?(): number | null;
     /**
-     * Per-chunk timing for the last bulk read, or null if timing was off or no read has run.
-     * Collection is armed at connect and runs on every read — see setTimingEnabled.
-     */
-    getLastReadTiming?(): ReadTimingReport | null;
-    /**
-     * Turns per-chunk timing collection on or off.
+     * Per-exchange timing for the last instrumented operation, or null if timing was off or none has
+     * run. One slot, and `kind` says which operation it describes.
      *
-     * There is no user-facing switch behind this any more. It exists because the instrument has to be
-     * inert on the flash-write path, and because a link that never collects is the honest default for
-     * implementations that have no transport to measure (the mock). The caller arms it once at connect.
+     * One slot rather than one per operation on purpose: the alternative is three getters, three
+     * pieces of UI state, and the standing question of which one a save button is looking at. A
+     * report is cleared at the *start* of the next operation, so "no report" always means this
+     * operation produced none — it can never mean "here is the previous one's".
+     */
+    getLastTransferTiming?(): TransferTimingReport | null;
+    /**
+     * Phase-level narrative of the last instrumented operation: what was sent, in what order, and
+     * what the DME answered. Paired with the timing report when a diagnostic record is uploaded.
+     *
+     * Separate from the timing report because they answer different questions and fail
+     * independently — an operation that dies before the instrument is armed still has a story, and
+     * that is exactly the operation worth having one for.
+     */
+    getEventLog?(): LinkEventLogSnapshot;
+    /**
+     * Turns per-exchange timing collection on or off.
+     *
+     * There is no user-facing switch behind this. It exists because a link that never collects is
+     * the honest default for implementations with no transport to measure (the mock), and because
+     * collection is armed per operation rather than globally — see TransferTiming's `collecting`.
+     * The caller arms it once at connect.
      */
     setTimingEnabled?(enabled: boolean): void;
 }

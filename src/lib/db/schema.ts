@@ -58,6 +58,15 @@ export interface FlashRecord {
      *  a missing value reads as `true` rather than as unknown. Additive like `adaptationResets` — no
      *  index changes, so no DB version bump. */
     tuned?: boolean;
+    /** How this flash was verified — 'quick' (the DME's own encoding checksum, DS2 0x0A) or 'full'
+     *  (that, plus a byte-for-byte read-back of all 65536 bytes).
+     *
+     *  Recorded because the two are not the same claim, and the history is the only place the
+     *  distinction survives once the dialog is dismissed. Optional: records written before the
+     *  choice existed were all full read-backs, but they are left undefined rather than backfilled
+     *  as 'full' — "we know it was a read-back" and "we have no record" are different facts, and
+     *  only the UI rendering them should decide how to say so. */
+    verifyMode?: 'quick' | 'full';
 }
 
 /** What the DME had learned when a tune's data capture began, and what it held after being cleared.

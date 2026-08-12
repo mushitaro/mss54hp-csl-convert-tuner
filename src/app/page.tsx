@@ -20,6 +20,9 @@ import {
 } from '@/lib/session-sync/client';
 import type { SyncStatus } from '@/lib/session-sync/status';
 import { describeSync } from '@/lib/session-sync/status';
+import { DiagnosticRecord, uploadDiagnostic } from '@/lib/session-sync/diagnostics';
+import type { WriteVerifyMode } from '@/lib/dme-link/types';
+import { initialVerifyMode, recordQuickVerifyProven } from '@/lib/dme-link/verifyPolicy';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
@@ -360,6 +363,25 @@ export default function Home() {
   // component is. An effect, not lazy state: localStorage does not exist during the static
   // prerender, and seeding from it would bake an empty token into the export.
   useEffect(() => { setUploadSettings(loadSyncSettings()); }, []);
+  // Kept in a ref as well as in state, because the diagnostics uploader runs from inside async
+  // handlers that were created several renders ago and would otherwise close over an empty token —
+  // which is the failure that looks exactly like "the store is not configured".
+  const uploadSettingsRef = useRef(uploadSettings);
+  uploadSettingsRef.current = uploadSettings;
+
+  /**
+   * What a WRITE will prove. Opens on FULL for a DME whose checksum has never been seen to agree
+   * with a read-back; see verifyPolicy.ts for why that is the safe direction to be wrong in.
+   *
+   * Reset from the identity on every connect rather than kept across them: the selector describes
+   * the ECU on the other end of the cable, and carrying a QUICK earned on one car over to another
+   * is precisely the mistake this exists to prevent.
+   */
+  const [verifyMode, setVerifyMode] = useState<WriteVerifyMode>('full');
+  const connectedVin = dmeLink.identity?.vin ?? null;
+  useEffect(() => {
+    setVerifyMode(initialVerifyMode(connectedVin));
+  }, [connectedVin]);
   // Latest raw live-telemetry sample, shown as a live readout during tuning (independent of the VE
   // filters, so the user can confirm data is streaming even when the engine is off / idle-filtered).
   const [liveSample, setLiveSample] = useState<LogDataPoint | null>(null);
@@ -1170,6 +1192,10 @@ export default function Home() {
 
   const handleDmeRead = async () => {
     const buffer = await dmeLink.read();
+    // Before the early return, so a read that died part-way — the read worth measuring, and the one
+    // a baud experiment produces — is uploaded rather than dropped along with the buffer it failed
+    // to return.
+    publishDiagnostics();
     if (!buffer) return;
     const target = await ensureDraft();
     if (!target) return;
@@ -1404,6 +1430,9 @@ export default function Home() {
         tuned: Boolean(newMap),
         patchOn: applyPatch || applyWotDisable,
         drift,
+        // Stated here rather than left to the selector alone. The mode changes what "verified"
+        // will mean in the dialog that follows, and the moment to say so is before the erase.
+        verifyMode,
         // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
         // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
         // and the screen or an app switch can take the connection down mid-write.
@@ -1413,8 +1442,19 @@ export default function Home() {
     });
     if (!confirmed) return;
 
-    const ok = await dmeLink.write(patchedBuffer);
-    if (ok) {
+    const verification = await dmeLink.write(patchedBuffer, verifyMode);
+    // Before either branch, and on both of them. A write that failed part-way on an already-erased
+    // ECU is the single most valuable record this app can produce, and it is also the one the
+    // driver is least able to collect by hand at the time.
+    publishDiagnostics();
+    if (verification) {
+      // The licence QUICK rests on: on this ECU, a byte-for-byte read-back and the DME's own
+      // checksum have now agreed. Recorded only when BOTH actually ran and passed — a FULL write on
+      // a DME that would not answer 0x0A proves the bytes and proves nothing about the checksum,
+      // which is the thing being licensed.
+      if (verification.readBack && verification.encodingChecksum) {
+        recordQuickVerifyProven(dmeLink.identity?.vin);
+      }
       const target = currentSession ?? (await ensureDraft());
       // One flash, so one hash and one timestamp, taken here and used by whichever branch runs below.
       const sha256 = await sha256Hex(patchedBuffer);   // the bytes actually sent, not the stored ones
@@ -1431,9 +1471,9 @@ export default function Home() {
         //  - archive would end the session before it has tuned anything — !isArchived is what makes
         //    the hub offer START TUNE, so archiving here would strand the whole point of the step.
         // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
-        if (target) await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: false });
+        if (target) await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: false, verifyMode: verification.mode });
 
-        alert(dialogText().patchWriteDone);
+        alert(dialogText().patchWriteDone(verification));
         await dmeLink.disconnect();
 
         // The ECU now holds these bytes, so the workspace has to as well — otherwise patchStatus
@@ -1467,7 +1507,7 @@ export default function Home() {
             log: logFileState.rawLogData,
           });
         }
-        await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: true });
+        await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: true, verifyMode: verification.mode });
         // These bytes are now in the ECU, so this session is a record of what was flashed, not a
         // workspace: archive it. Leaving it a draft let you keep tuning it afterwards, which would
         // drift its TUNED away from the bytes its own flash history points at — and the list would
@@ -1476,7 +1516,7 @@ export default function Home() {
       }
 
       // Post-write instruction: the DME must be power-cycled to reinitialize with the new data.
-      alert(dialogText().writeDone);
+      alert(dialogText().writeDone(verification));
 
       await dmeLink.disconnect();
 
@@ -1565,12 +1605,57 @@ export default function Home() {
     downloadBlob(bytes, `ServiceBlock_${fileSafe(vin && vin !== 'UNKNOWN' ? vin : 'DME')}_${Date.now()}.bin`, MIME_BIN);
   };
 
-  /** Offers the last read's per-chunk timing as a file, same explicit-export rule as the service
-   *  blocks. The notice line only has room for medians; the sampled inter-arrival gaps are the part
-   *  that distinguishes per-byte USB packets from batched ones, and those need a file. */
-  const handleSaveReadTiming = () => {
-    const report = dmeLink.lastReadTiming;
-    if (!report) return;
+  /**
+   * Builds the diagnostic record for the last instrumented operation: the numbers, the narrative,
+   * and enough context to place both.
+   *
+   * One shape, used by the download button and by the upload — so a record read out of the store at
+   * a desk and a file saved on a phone are the same thing, and neither can quietly carry less.
+   */
+  const buildDiagnosticRecord = (): DiagnosticRecord | null => {
+    const report = dmeLink.lastTransferTiming;
+    if (!report) return null;
+    return {
+      id: crypto.randomUUID(),
+      kind: report.kind,
+      createdAt: Date.now(),
+      completed: report.completed,
+      error: report.error,
+      // Which car, which bytes, which transport. A timing report without these is a column of
+      // numbers that cannot be compared against any other run — and comparing runs is the only
+      // thing any of this is for.
+      vin: dmeLink.identity?.vin ?? null,
+      softwareVersion: dmeLink.identity?.softwareVersion ?? null,
+      transport: dmeLink.transportKind,
+      mock: dmeLink.mockMode,
+      sessionId: currentSession?.id ?? null,
+      report,
+      events: dmeLink.lastEventLog,
+    };
+  };
+
+  /**
+   * Uploads the last operation's diagnostics, best-effort and silent.
+   *
+   * Fire-and-forget by design: it is called from paths that have just finished a read, a write or a
+   * datalog. An upload that could reject there would either surface as an unhandled rejection or
+   * replace the operation's own error with a networking one — and the operation's own error is the
+   * thing being diagnosed. `uploadDiagnostic` never throws; this `void` is belt and braces.
+   */
+  const publishDiagnostics = () => {
+    const record = buildDiagnosticRecord();
+    if (!record) return;
+    void uploadDiagnostic(record, uploadSettingsRef.current);
+  };
+
+  /** Offers the last operation's per-exchange timing and event log as a file, same explicit-export
+   *  rule as the service blocks. The notice line only has room for medians; the sampled
+   *  inter-arrival gaps are the part that distinguishes per-byte USB packets from batched ones, and
+   *  those need a file. */
+  const handleSaveTransferTiming = () => {
+    const record = buildDiagnosticRecord();
+    const report = dmeLink.lastTransferTiming;
+    if (!record || !report) return;
     // Every knob that was set, in the name. A sweep produces a folder of these, and `baud` alone does
     // not separate a gap-0 run from a gap-20 one at the same rate — it is all inside the JSON, but a
     // directory listing that cannot be read at a glance is how runs get mixed up. The outcome goes in
@@ -1582,8 +1667,10 @@ export default function Home() {
     const rate = report.requestedBaud !== null && report.requestedBaud !== report.baud
         ? `${report.requestedBaud}refused-ran${report.baud}`
         : `${report.baud ?? 'unknown'}baud`;
-    const name = `ReadTiming_${rate}_${outcome}_${Date.now()}.json`;
-    downloadBlob(JSON.stringify(report, null, 2), name, MIME_JSON);
+    // The kind leads the name. Read and write reports are the same shape and land in the same
+    // folder, and their turnaround medians mean completely different physical things.
+    const name = `${report.kind.toUpperCase()}Timing_${rate}_${outcome}_${Date.now()}.json`;
+    downloadBlob(JSON.stringify(record, null, 2), name, MIME_JSON);
   };
 
   /** Restore candidates for the DME actually on the other end of the cable — never anything else. */
@@ -2622,12 +2709,13 @@ export default function Home() {
                         you read, DISCONNECT to change the driver's latency timer, reconnect and read
                         again. Inside the connected branch it vanished at exactly the moment you needed
                         it, taking an un-saved run with it. */}
-                    {dmeLink.lastReadTiming && (
+                    {dmeLink.lastTransferTiming && (
                       <button
-                        onClick={handleSaveReadTiming}
+                        onClick={handleSaveTransferTiming}
                         className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors"
-                        title={'Save the last read\'s per-chunk timing as JSON.\n\n'
-                          + 'One read = one report, and the next read overwrites it. Save before reading again.'}
+                        title={'Save the last operation\'s per-exchange timing and event log as JSON.\n\n'
+                          + 'One operation = one report, and the next one overwrites it. Save before running another.\n\n'
+                          + 'The same record is uploaded to the store automatically when a sync token is configured — this is the offline copy.'}
                       >
                         Timing
                       </button>
@@ -2674,6 +2762,30 @@ export default function Home() {
                     ) : (
                       <>
                         <span className="text-[9px] text-slate-600 font-mono uppercase">{dmeLink.mockMode ? 'practice' : 'live'} · {dmeLink.state}</span>
+                        {/* What a WRITE will prove. Here rather than inside the confirm dialog because
+                            the dialog's job is to state the consequence of the thing about to happen —
+                            it names this mode in its text — and a control that changes the consequence
+                            while the warning is on screen is the wrong shape for a destructive gate.
+                            Opens on FULL for a DME that has never had the two checks agree; see
+                            verifyPolicy.ts. */}
+                        <label
+                          className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
+                          title={'How the flash proves it landed. Every chunk\'s verify byte is checked in BOTH modes — this chooses what happens after the last one.\n\n'
+                            + 'QUICK — ask the DME for its own encoding checksum (DS2 0x0A). One exchange, ~50ms. Its authority is the CRC-16/ARC values the ECU stores in its own flash, covering 65528 of the pair\'s 65536 bytes. It cannot say WHERE a mismatch is, and it cannot catch a corruption that preserves CRC-16.\n\n'
+                            + 'FULL — everything QUICK does, and read all 65536 bytes back and compare them byte for byte. Adds ~123s. The only check that can name an offset.\n\n'
+                            + 'This opens on FULL until QUICK and FULL have agreed once on this VIN.'}
+                        >
+                          VERIFY
+                          <select
+                            value={verifyMode}
+                            disabled={dmeLink.state !== 'connected'}
+                            onChange={(e) => setVerifyMode(e.target.value as WriteVerifyMode)}
+                            className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <option value="quick">QUICK</option>
+                            <option value="full">FULL</option>
+                          </select>
+                        </label>
                         <button
                           onClick={dmeLink.disconnect}
                           className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"

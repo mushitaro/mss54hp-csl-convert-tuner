@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     DmeLink, DmeIdentity, LiveMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
     DmeLinkError, DmeErrorKind, isServiceBlockErasedCause, ServiceBlockDump,
+    WriteVerifyMode, WriteVerification,
 } from '@/lib/dme-link/types';
 import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
@@ -10,7 +11,8 @@ import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport
 import { analyzeDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { dialogText } from '@/lib/dialog-text';
 import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
-import { ReadTimingReport } from '@/lib/dme-link/transferTiming';
+import { TransferTimingReport } from '@/lib/dme-link/transferTiming';
+import { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
 
 /** What the *link* is doing — and nothing else.
  *
@@ -70,7 +72,16 @@ export function useDmeLink() {
     // on a real vehicle. Everything faster needs a 0x91 switch + local port reopen and stays opt-in —
     // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
-    const [lastReadTiming, setLastReadTiming] = useState<ReadTimingReport | null>(null);
+    /**
+     * The last instrumented operation's numbers and its narrative, captured together.
+     *
+     * One slot for both, and one slot for every operation kind — the report itself says whether it
+     * describes a read or a write. Two separate pieces of state would let a write's timing sit
+     * beside a read's event log, which is the shape of a diagnostic that reads perfectly and
+     * describes nothing that happened.
+     */
+    const [lastTransferTiming, setLastTransferTiming] = useState<TransferTimingReport | null>(null);
+    const [lastEventLog, setLastEventLog] = useState<LinkEventLogSnapshot | null>(null);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
     /**
@@ -276,7 +287,8 @@ export function useDmeLink() {
             // every read attempt, so this state always describes the read that just ran or nothing at
             // all. Keeping a stale report because the new one is missing is the exact failure being
             // fixed here — silently saving the wrong run is far worse than having nothing to save.
-            setLastReadTiming(linkRef.current?.getLastReadTiming?.() ?? null);
+            setLastTransferTiming(linkRef.current?.getLastTransferTiming?.() ?? null);
+            setLastEventLog(linkRef.current?.getEventLog?.() ?? null);
             setTransferProgress(null);
             setTransferPhase(null);
         }
@@ -542,15 +554,23 @@ export function useDmeLink() {
         }
     }, [clearError, failWith, applyFlashCounter]);
 
-    const write = useCallback(async (buffer: ArrayBuffer): Promise<boolean> => {
-        if (!linkRef.current) return false;
+    /**
+     * Flashes the tune. `verifyMode` is required by the link and is therefore required here — there
+     * is deliberately no default at any layer, because a default would be this file quietly deciding
+     * how strongly somebody's ECU was proven.
+     *
+     * Resolves to the verification on success and `null` on failure, rather than a boolean: the
+     * completion dialog has to state which checks actually ran, and a `true` cannot carry that.
+     */
+    const write = useCallback(async (buffer: ArrayBuffer, verifyMode: WriteVerifyMode): Promise<WriteVerification | null> => {
+        if (!linkRef.current) return null;
         clearError();
         setState('writing');
         setTransferProgress(0);
         try {
-            await linkRef.current.writePartialBin(buffer, makeThrottledProgress());
+            const verification = await linkRef.current.writePartialBin(buffer, { verifyMode }, makeThrottledProgress());
             setState('connected');
-            return true;
+            return verification;
         } catch (e) {
             failWith(e);
             // Idle again, still connected — but do NOT read this as "nothing happened". writePartialBin
@@ -562,8 +582,13 @@ export function useDmeLink() {
             // Deliberately NOT auto-disconnecting: after the destructive phase has begun, closing the
             // port contradicts this file's own "keep power stable and re-write before disconnecting".
             setState('connected');
-            return false;
+            return null;
         } finally {
+            // Same rule as READ, and for a stronger reason: the write path's diagnostics exist mostly
+            // for the runs that fail, on an ECU that has already been erased. Published on both paths,
+            // published as null when there is nothing — never left showing the previous operation's.
+            setLastTransferTiming(linkRef.current?.getLastTransferTiming?.() ?? null);
+            setLastEventLog(linkRef.current?.getEventLog?.() ?? null);
             setTransferProgress(null);
             setTransferPhase(null);
         }
@@ -575,7 +600,8 @@ export function useDmeLink() {
         setMockMode,
         readBaud,
         setReadBaud,
-        lastReadTiming,
+        lastTransferTiming,
+        lastEventLog,
         identity,
         error,
         errorKind,

@@ -1,10 +1,13 @@
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause, ServiceBlockDump } from './types';
+import {
+    DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    ServiceBlockDump, WriteOptions, WriteVerification,
+} from './types';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
     STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK,
 } from './adaptationBlocks';
 import { FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, analyzeFlashCounter } from './flashCounter';
-import { Mss54HpDataTuneLayout } from './ds2';
+import { Mss54HpDataTuneLayout, Ds2EncodingChecksum, parseEncodingChecksum } from './ds2';
 import { correctDataChecksum } from '@/lib/checksum/dmeDataChecksum';
 import { MockDrive } from './mockDrive';
 
@@ -183,6 +186,7 @@ export class MockDmeLink implements DmeLink {
             aif: 'MOCK-0401-PD31',
             softwareVersion: 'MOCK-SIM-1.0',
             flashCounter: this.flashCounterSnapshot(),
+            encodingChecksum: await this.queryEncodingChecksum(),
         };
     }
 
@@ -215,31 +219,63 @@ export class MockDmeLink implements DmeLink {
         return this.image.slice(0);
     }
 
-    /** Mirrors the real write's stages (erase → write → read-back verify) so the mock is a faithful
-     *  preview of the UI, including the phase labels and the 70/30 progress split. */
-    async writePartialBin(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
+    /**
+     * Mirrors the real write's stages (erase → write → verify) so the mock is a faithful preview of
+     * the UI, including the phase labels and the mode-dependent progress split.
+     *
+     * The two verify modes are rehearsed for real here rather than collapsed into one: QUICK skips
+     * the read-back entirely and returns a clean checksum, FULL walks the read-back. Which matters,
+     * because the difference between them in the UI is a progress bar that behaves differently and
+     * a completion dialog that says something different — both of which are worth seeing before a
+     * car is involved.
+     */
+    async writePartialBin(buffer: ArrayBuffer, options: WriteOptions, onProgress?: TransferProgress): Promise<WriteVerification> {
         this.assertConnected();
         if (buffer.byteLength !== PARTIAL_BIN_LENGTH) {
             throw new DmeLinkError(`Refusing to write a ${buffer.byteLength}-byte buffer (expected ${PARTIAL_BIN_LENGTH})`);
         }
         const total = buffer.byteLength;
+        const writeShare = options.verifyMode === 'full' ? 55 : 98;
 
         onProgress?.(0, 'erasing');
         await delay(300);
 
         for (let written = 0; written < total; written += CHUNK_SIZE) {
             await delay(2);
-            onProgress?.(Math.min(70, Math.round(((written + CHUNK_SIZE) / total) * 70)), 'writing');
+            onProgress?.(Math.min(writeShare, Math.round(((written + CHUNK_SIZE) / total) * writeShare)), 'writing');
         }
         this.buffer = buffer.slice(0);
 
-        // Simulated read-back verification (always matches in mock mode).
-        onProgress?.(70, 'verifying');
-        for (let verified = 0; verified < total; verified += CHUNK_SIZE) {
-            await delay(1);
-            onProgress?.(70 + Math.min(30, Math.round(((verified + CHUNK_SIZE) / total) * 30)), 'verifying');
+        onProgress?.(writeShare, 'verifying');
+        let readBack = false;
+        if (options.verifyMode === 'full') {
+            const verifyShare = 100 - writeShare;
+            for (let verified = 0; verified < total; verified += CHUNK_SIZE) {
+                await delay(1);
+                onProgress?.(writeShare + Math.min(verifyShare, Math.round(((verified + CHUNK_SIZE) / total) * verifyShare)), 'verifying');
+            }
+            readBack = true;
         }
+        const encodingChecksum = await this.queryEncodingChecksum();
         onProgress?.(100, 'verifying');
+        return { mode: options.verifyMode, encodingChecksum, encodingChecksumError: null, readBack };
+    }
+
+    /**
+     * A clean bill of health, always.
+     *
+     * Modelled rather than scripted, in the sense that matters here: the mock's flash cannot be
+     * corrupted, so every area really is clean and saying so is not a lie. What the mock cannot
+     * rehearse is a FAULTED answer or a DME that refuses 0x0A — those paths are exercised by the
+     * scripted-transport tests against the real class, which is the right place for them.
+     */
+    async queryEncodingChecksum(): Promise<Ds2EncodingChecksum> {
+        this.assertConnected();
+        await delay(20);
+        return parseEncodingChecksum({
+            address: 0x12, length: 5, controlOrStatus: 0xA0,
+            payload: new Uint8Array([0x00]), checksum: 0,
+        });
     }
 
     async pollLiveMeasurement(): Promise<LiveMeasurement> {

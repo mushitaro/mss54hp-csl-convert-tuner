@@ -1,4 +1,7 @@
-import { DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause, ServiceBlockDump } from './types';
+import {
+    DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    ServiceBlockDump, WriteOptions, WriteVerification,
+} from './types';
 import { ServiceBlockPointers } from './serviceBlockReport';
 import { ByteTransport, createDmeTransport } from './byteTransport';
 import {
@@ -8,6 +11,7 @@ import {
     buildSeedRequestPayload, buildKeyPayload, isAlreadyUnlockedResponse, isSeedResponse, calculateLoginKey,
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
     TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
+    Ds2EncodingChecksum, parseEncodingChecksum, faultedAreas, DATA_TUNE_CHECKSUM_BITS,
 } from './ds2';
 import {
     parseSystemAddressTable, findPointer, parseAifEntries, latestPopulatedAifEntry,
@@ -24,7 +28,8 @@ import {
     analyzeFlashCounter, extractCounterFromServiceBlock, buildResetServiceBlockImage,
     shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED,
 } from './flashCounter';
-import { TransferTiming, ReadTimingReport } from './transferTiming';
+import { TransferTiming, TransferTimingReport } from './transferTiming';
+import { LinkEventLog, LinkEventLogSnapshot, describeEncodingChecksum } from './linkEventLog';
 
 // DS2 system-address-table pointer indices (Ds2KnownSystemAddressLengths / IdentifyService)
 //
@@ -207,8 +212,20 @@ export class WebSerialDmeLink implements DmeLink {
     /** What happened to the last 0x91 baud switch: 'accepted', 'rejected (DS2 status 0x..)', or
      *  'failed (...)'. Null when no switch was attempted, i.e. a plain 9600 read. */
     private lastSwitchOutcome: string | null = null;
-    /** Per-chunk instrument. Always constructed, collects only when armed by a bulk read with DIAG on. */
+    /** Per-exchange instrument. Always constructed, collects only between an operation's begin/finish. */
     private readonly timing = new TransferTiming();
+    /**
+     * Phase-level narrative of the operation in flight, replaced at the start of each one.
+     *
+     * Replaced rather than appended to, for the same reason the timing report is cleared up front:
+     * a log that spans two attempts reads as one, and the whole value of uploading it is being able
+     * to trust that what it describes is the run that just failed.
+     */
+    private events = new LinkEventLog();
+
+    getEventLog(): LinkEventLogSnapshot {
+        return this.events.snapshot();
+    }
 
     getLastReadBaud(): number | null {
         return this.lastReadBaud;
@@ -218,7 +235,7 @@ export class WebSerialDmeLink implements DmeLink {
         return this.maxTelegramLength;
     }
 
-    getLastReadTiming(): ReadTimingReport | null {
+    getLastTransferTiming(): TransferTimingReport | null {
         return this.timing.getReport();
     }
 
@@ -403,7 +420,10 @@ export class WebSerialDmeLink implements DmeLink {
      * the service block (see flashCounter.ts), so it is outside the system-address-table try below.
      */
     private async identify(): Promise<DmeIdentity> {
-        const result: DmeIdentity = { vin: 'UNKNOWN', aif: 'UNKNOWN', softwareVersion: 'UNKNOWN', flashCounter: null };
+        const result: DmeIdentity = {
+            vin: 'UNKNOWN', aif: 'UNKNOWN', softwareVersion: 'UNKNOWN',
+            flashCounter: null, encodingChecksum: null,
+        };
         try {
             const tableFrame = await this.exchange(Ds2Control.READ_SYSTEM_ADDRESSES, new Uint8Array(0));
             if (!isPositiveResponse(tableFrame)) return result;
@@ -460,7 +480,35 @@ export class WebSerialDmeLink implements DmeLink {
             result.flashCounter = await this.readFlashCounterInner();
         } catch { /* leave null — "not read" is a different fact from "0 used" */ }
 
+        // The BEFORE half of the before/after pair a QuickVerify rests on. Four bytes out, five back.
+        // Own try for the same reason as everything else here: a DME that does not answer 0x0A is a
+        // DME that cannot offer QuickVerify, not a DME that failed to connect.
+        try {
+            result.encodingChecksum = await this.queryEncodingChecksumInner();
+        } catch { /* leave null — the write path reads this to decide whether QUICK is offerable */ }
+
         return result;
+    }
+
+    /**
+     * Asks the DME whether its own stored CRCs still match its own flash (control 0x0A).
+     *
+     * Read-only: a four-byte request with no payload. Safe at connect, safe between operations, and
+     * safe to repeat — which is the whole point, because a single reading proves much less than a
+     * pair taken either side of a write.
+     */
+    async queryEncodingChecksum(): Promise<Ds2EncodingChecksum> {
+        return this.withGate(async () => {
+            this.assertConnected();
+            return this.queryEncodingChecksumInner();
+        });
+    }
+
+    /** The gate-free body. `identify()` and the write path both run inside the gate already, and a
+     *  public method calling another public method here would deadlock on it. */
+    private async queryEncodingChecksumInner(): Promise<Ds2EncodingChecksum> {
+        const frame = await this.exchange(Ds2Control.QUERY_ENCODING_CHECKSUM, new Uint8Array(0));
+        return parseEncodingChecksum(frame);
     }
 
     /** Reads both 256-byte counter regions and decodes them. Six chunk reads, ~1.5 s at 9600. */
@@ -675,6 +723,8 @@ export class WebSerialDmeLink implements DmeLink {
         // Before anything can fail. From here on, "no report" means this read produced none — it can
         // never mean "here is the previous read's".
         this.timing.clearReport();
+        this.events = new LinkEventLog();
+        this.events.push(`READ start: requested baud ${this.readBaud}, chunk ${Mss54HpDataTuneLayout.readChunkSize}`);
         // Refresh the seed/key unlock before reading program/data memory, mirroring the reference
         // EnsureUnlockedForProgramMemoryReadAsync. The diagnostic session can lapse between connect
         // and the user clicking READ; re-login is a no-op if still unlocked.
@@ -713,6 +763,7 @@ export class WebSerialDmeLink implements DmeLink {
         // become one, but it must not be invisible either.
         this.lastReadBaud = boosted ? this.readBaud : 9600;
         this.hasBoostedThisSession ||= boosted;
+        this.events.push(`BAUD ran at ${this.lastReadBaud}${this.lastSwitchOutcome ? ` (switch: ${this.lastSwitchOutcome})` : ' (no switch attempted)'}`);
         // Held so the finally can tell finish() whether the read completed. A read that dies part-way
         // is the case the instrument matters most for — that is the whole 38400 question.
         let readError: unknown;
@@ -722,7 +773,10 @@ export class WebSerialDmeLink implements DmeLink {
 
             // Arm the instrument for exactly this read. Sized up-front so nothing allocates per chunk.
             this.timing.begin(Math.ceil(total / readChunkSize), {
+                kind: 'read',
                 chunkSize: readChunkSize,
+                // [addr][len][status][N data][cksum].
+                responseBytes: readChunkSize + 4,
                 requestedBaud: this.readBaud,
                 switchOutcome: this.lastSwitchOutcome,
                 baud: this.lastReadBaud,
@@ -743,7 +797,10 @@ export class WebSerialDmeLink implements DmeLink {
         } finally {
             // In the finally so a cancelled or failed read still yields whatever was measured — a read
             // that died at 8% is precisely when the numbers are worth having.
-            this.timing.finish(readError);
+            const report = this.timing.finish(readError);
+            this.events.push(readError
+                ? `READ failed after ${report?.chunks ?? 0} chunk(s): ${readError instanceof Error ? readError.message : String(readError)}`
+                : `READ complete: ${report?.chunks ?? 0} chunks in ${Math.round(report?.elapsedMs ?? 0)} ms`);
             if (boosted) {
                 // Always try to hand the session back at 9600. If the DME never really switched, this
                 // request fails too — force the local port back to 9600 anyway so a plain reconnect (or
@@ -779,11 +836,11 @@ export class WebSerialDmeLink implements DmeLink {
         }
     }
 
-    async writePartialBin(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
-        return this.withGate(() => this.writePartialBinInner(buffer, onProgress));
+    async writePartialBin(buffer: ArrayBuffer, options: WriteOptions, onProgress?: TransferProgress): Promise<WriteVerification> {
+        return this.withGate(() => this.writePartialBinInner(buffer, options, onProgress));
     }
 
-    private async writePartialBinInner(buffer: ArrayBuffer, onProgress?: TransferProgress): Promise<void> {
+    private async writePartialBinInner(buffer: ArrayBuffer, options: WriteOptions, onProgress?: TransferProgress): Promise<WriteVerification> {
         this.assertConnected();
         // Clear a stale cancel, exactly as readPartialBin does. Without this, a user who pressed
         // Cancel Read earlier in the session left `aborted` latched true: the flash would then erase,
@@ -794,6 +851,12 @@ export class WebSerialDmeLink implements DmeLink {
         // "between chunks" is mid-programming-session and honouring a cancel there would abandon a
         // half-programmed ECU.
         this.aborted = false;
+        // Before anything that can fail, so "no report" can only ever mean "this write produced
+        // none". Same rule as READ, and the reason for it was paid for once already: a report kept
+        // from the previous attempt is a file that describes a run that did not happen.
+        this.timing.clearReport();
+        this.events = new LinkEventLog();
+        const log = this.events;
         const { slave, master } = Mss54HpDataTuneLayout;
         const total = slave.length + master.length;
         if (buffer.byteLength !== total) {
@@ -808,46 +871,166 @@ export class WebSerialDmeLink implements DmeLink {
         // then act" is the only ordering that stays obviously correct as this function grows.
         assertWriteChunkingLegal([slave, master]);
 
+        log.push(`WRITE start: ${total} bytes, verify=${options.verifyMode}, baud=${this.lastReadBaud ?? 9600}, chunk=${Mss54HpDataTuneLayout.writeChunkSize}`);
+
         // Refresh the seed/key unlock before the protected write (matches ForceRefreshUnlock in the
         // reference). The DME rejects erase/write with 0xA2 if the session lapsed or RPM/speed != 0.
         // resync, not purge — same reason as READ. This is strictly BEFORE the erase below, so it
         // cannot affect flashing itself; it only stops a stale break from failing the pre-flight.
         await this.resyncTransport();
         await this.login();
+        log.push('LOGIN refreshed');
 
         // Erase the data area. The normal flow erases directly (no "pre-clean" prepare — that would
         // consume an extra flash-counter slot). Only on erase failure do we send the prepare (0x0F)
         // and retry the erase once, mirroring EraseDataProgrammingWithFallbackAsync.
         onProgress?.(0, 'erasing');
+        const tErase = performance.now();
         try {
             await this.sendProgrammingControl(Ds2ProgrammingControl.EraseSegment, Ds2ProgrammingControl.DataProgrammingSessionAddress, ERASE_TIMEOUT_MS, true);
         } catch (eraseError) {
+            log.push(`ERASE failed, sending pre-clean and retrying once: ${eraseError instanceof Error ? eraseError.message : String(eraseError)}`);
             await this.sendProgrammingControl(Ds2ProgrammingControl.FinishSegment, Ds2ProgrammingControl.DataProgrammingSessionAddress, WRITE_RESPONSE_TIMEOUT_MS, false); // pre-clean
-            await this.sendProgrammingControl(Ds2ProgrammingControl.EraseSegment, Ds2ProgrammingControl.DataProgrammingSessionAddress, ERASE_TIMEOUT_MS, true);
+            try {
+                await this.sendProgrammingControl(Ds2ProgrammingControl.EraseSegment, Ds2ProgrammingControl.DataProgrammingSessionAddress, ERASE_TIMEOUT_MS, true);
+            } catch (retryError) {
+                // Chain the original. Without this the first erase's reason — which is usually the
+                // informative one, since the retry tends to fail the same way for a reason already
+                // stated — was discarded, and `eraseError` sat bound and unused as the evidence.
+                throw new DmeLinkError(
+                    `Erase failed twice. First: ${eraseError instanceof Error ? eraseError.message : String(eraseError)}. `
+                    + `After pre-clean: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+                    eraseError,
+                );
+            }
         }
+        log.pushTimed('ERASE data area', tErase);
 
-        // Progress is split roughly by how long each stage actually takes at 9600 baud: writing 64 KB
-        // (~2.5 min) then reading it all back to verify (~70 s). Hence 0–70% write, 70–100% verify —
-        // both stages report continuously so neither looks frozen.
-        const WRITE_SHARE = 70;
-        const VERIFY_SHARE = 30;
+        // How the progress bar is split, derived from what this write will actually do rather than
+        // stored as a pair of constants.
+        //
+        // It used to be a flat 70/30 justified by "writing ~2.5 min then verifying ~70 s". The 70 s
+        // was wrong — §9 measures the identical 65536-byte read at 122.9 s — so the bar under-ran
+        // the verify by a factor of nearly two on every flash. And under QUICK there is no read-back
+        // at all: a fixed 30% reserved for a 50 ms exchange would leave the bar sitting at 70% for
+        // the entire time anything was happening, then jumping.
+        const WRITE_SHARE = options.verifyMode === 'full' ? 55 : 98;
+        const VERIFY_SHARE = 100 - WRITE_SHARE;
 
-        await this.writeBlock(slave.address, slaveData, 0, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
-        await this.writeBlock(master.address, masterData, slave.length, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
+        // Arm the instrument for the WRITE TELEGRAMS ONLY.
+        //
+        // Not the erase (one exchange whose turnaround is a flash sector erase, seconds long) and
+        // not the read-back (whose turnaround is the DME *thinking*, ~40 ms). Both would land in the
+        // same `turnaround` lane as the write telegrams and blend three different physical
+        // quantities into one median — and that median is the entire reason to measure a write: it
+        // is the DME's per-chunk flash programming time, which is the part a baud boost cannot
+        // recover. The erase is timed separately above, by a plain stopwatch.
+        this.timing.begin(Math.ceil(total / Mss54HpDataTuneLayout.writeChunkSize), {
+            kind: 'write',
+            chunkSize: Mss54HpDataTuneLayout.writeChunkSize,
+            // A write acknowledgement is [addr][len][status][seg][addr×3][count][verify][cksum] —
+            // fixed at 10 bytes however much was written.
+            responseBytes: 10,
+            requestedBaud: null,
+            switchOutcome: null,
+            baud: this.lastReadBaud ?? 9600,
+            maxTelegramLength: this.maxTelegramLength,
+        });
+        let writeError: unknown;
+        try {
+            await this.writeBlock(slave.address, slaveData, 0, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
+            await this.writeBlock(master.address, masterData, slave.length, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
+        } catch (e) {
+            writeError = e;
+            throw e;
+        } finally {
+            // In the finally so a write that died at chunk 300 still yields its numbers. On this path
+            // that matters more than on the read: the ECU is erased, the user is about to re-run, and
+            // what the telegrams were doing beforehand is the only evidence there will ever be.
+            const report = this.timing.finish(writeError);
+            if (report) log.push(`WRITE telegrams: ${report.chunks} in ${Math.round(report.elapsedMs)} ms, median turnaround ${report.median.turnaround.toFixed(1)} ms, ${report.retries} retr(ies)`);
+        }
 
         // Finalize the programming session (segment 0x0F, address 0).
         await this.sendProgrammingControl(Ds2ProgrammingControl.FinishSegment, 0, WRITE_RESPONSE_TIMEOUT_MS, true);
+        log.push('FINALIZE data programming');
 
-        // Read-back verification: read the written region and compare byte-for-byte.
-        onProgress?.(WRITE_SHARE, 'verifying');
-        const readBackSlave = await this.readRange(slave.address, slave.length,
-            (done) => onProgress?.(WRITE_SHARE + Math.round((done / total) * VERIFY_SHARE), 'verifying'));
-        const readBackMaster = await this.readRange(master.address, master.length,
-            (done) => onProgress?.(WRITE_SHARE + Math.round(((slave.length + done) / total) * VERIFY_SHARE), 'verifying'));
-        if (!arraysEqual(readBackSlave, slaveData) || !arraysEqual(readBackMaster, masterData)) {
-            throw new DmeLinkError('Write verification failed: read-back does not match what was written. Treat the ECU state as unknown — keep power stable and re-write before disconnecting.');
+        return this.verifyWrite(options.verifyMode, slaveData, masterData, total, WRITE_SHARE, VERIFY_SHARE, onProgress);
+    }
+
+    /**
+     * Proves the write landed, and reports which proof it used.
+     *
+     * Both modes ask the DME for its own encoding checksum, because it is one exchange and there is
+     * nothing to gain from choosing between two independent authorities. `full` adds the read-back.
+     *
+     * Deliberately NOT retried as a unit, and deliberately not wrapped in a try that softens a
+     * failure into a warning: a verification that cannot be performed is not a verification that
+     * passed. The one thing that IS tolerated is the DME declining to answer 0x0A at all under
+     * `full` — there the read-back is the stronger check and has already run, so a missing checksum
+     * is recorded and the write stands on the byte comparison.
+     */
+    private async verifyWrite(
+        mode: WriteOptions['verifyMode'],
+        slaveData: Uint8Array,
+        masterData: Uint8Array,
+        total: number,
+        writeShare: number,
+        verifyShare: number,
+        onProgress?: TransferProgress,
+    ): Promise<WriteVerification> {
+        const { slave, master } = Mss54HpDataTuneLayout;
+        const log = this.events;
+        onProgress?.(writeShare, 'verifying');
+
+        let readBack = false;
+        if (mode === 'full') {
+            const tRead = performance.now();
+            const readBackSlave = await this.readRange(slave.address, slave.length,
+                (done) => onProgress?.(writeShare + Math.round((done / total) * verifyShare), 'verifying'));
+            const readBackMaster = await this.readRange(master.address, master.length,
+                (done) => onProgress?.(writeShare + Math.round(((slave.length + done) / total) * verifyShare), 'verifying'));
+            if (!arraysEqual(readBackSlave, slaveData) || !arraysEqual(readBackMaster, masterData)) {
+                log.push('VERIFY read-back MISMATCH');
+                throw new DmeLinkError('Write verification failed: read-back does not match what was written. Treat the ECU state as unknown — keep power stable and re-write before disconnecting.');
+            }
+            readBack = true;
+            log.pushTimed(`VERIFY read-back matched (${total} bytes)`, tRead);
         }
+
+        let encodingChecksum: Ds2EncodingChecksum | null = null;
+        let encodingChecksumError: string | null = null;
+        try {
+            encodingChecksum = await this.queryEncodingChecksumInner();
+            log.push(`VERIFY encoding checksum — ${describeEncodingChecksum(encodingChecksum)}`);
+        } catch (e) {
+            encodingChecksumError = e instanceof Error ? e.message : String(e);
+            log.push(`VERIFY encoding checksum unavailable: ${encodingChecksumError}`);
+        }
+
+        if (mode === 'quick') {
+            // Under QUICK this is the only post-write check there is, so it must be present and it
+            // must be clean. A DME that will not answer 0x0A cannot be quick-verified, and saying so
+            // is the only honest outcome — the alternative is a write reported as verified by a
+            // check that never ran.
+            if (!encodingChecksum) {
+                throw new DmeLinkError(
+                    `Quick verification could not be performed: the DME did not answer the encoding-checksum query (${encodingChecksumError}). `
+                    + `The data was written and every telegram reported "programming OK", but nothing has confirmed the result. `
+                    + `Re-run the write with FULL READBACK before relying on it.`,
+                );
+            }
+            const bad = faultedAreas(encodingChecksum, DATA_TUNE_CHECKSUM_BITS);
+            if (bad.length > 0) {
+                throw new DmeLinkError(
+                    `Write verification failed: the DME reports a checksum fault in ${bad.map(a => a.name).join(' and ')}. `
+                    + `Treat the ECU state as unknown — keep power stable and re-write before disconnecting.`,
+                );
+            }
+        }
+
         onProgress?.(100, 'verifying');
+        return { mode, encodingChecksum, encodingChecksumError, readBack };
     }
 
     async resetFlashCounter(

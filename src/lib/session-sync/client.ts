@@ -139,13 +139,17 @@ export const needsSync = (s: TuningSession): boolean =>
 // Chrome 80+, and the DME link needs Chrome anyway. A pako-sized dependency to compress something
 // that crosses a cellular link once would be the wrong trade in both directions.
 
-async function gzipJson(value: unknown): Promise<Uint8Array> {
+// Exported, not copied, for the diagnostics uploader next door. There is exactly one right way to
+// get bytes over this API — gzip, base64 in 0x8000-byte slices, bearer token — and two
+// implementations of it would be two chances to get the base64 chunking wrong on the payload that
+// is big enough to matter.
+export async function gzipJson(value: unknown): Promise<Uint8Array> {
     const stream = new Blob([JSON.stringify(value)]).stream()
         .pipeThrough(new CompressionStream('gzip'));
     return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function gunzipJson<T>(bytes: Uint8Array<ArrayBuffer>): Promise<T> {
+export async function gunzipJson<T>(bytes: Uint8Array<ArrayBuffer>): Promise<T> {
     const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
     return JSON.parse(await new Response(stream).text()) as T;
 }
@@ -157,14 +161,14 @@ async function gunzipJson<T>(bytes: Uint8Array<ArrayBuffer>): Promise<T> {
  * RangeError somewhere above ~120k. The session that triggers that is a long drive — precisely the
  * one worth keeping.
  */
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
     const CHUNK = 0x8000;
     let binary = '';
     for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
     return btoa(binary);
 }
 
-function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
+export function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
     const binary = atob(b64);
     const out = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
@@ -186,7 +190,7 @@ interface WireBinaries {
  * Undefined on a dev server, where no worker is registered; saying nothing beats naming a build
  * that was never deployed.
  */
-async function buildIdentity(): Promise<string | undefined> {
+export async function buildIdentity(): Promise<string | undefined> {
     try {
         if (typeof caches === 'undefined') return undefined;
         return (await caches.keys()).find(k => k.startsWith('tuner-'));
@@ -195,7 +199,7 @@ async function buildIdentity(): Promise<string | undefined> {
     }
 }
 
-async function call(settings: SyncSettings, path: string, init: RequestInit = {}): Promise<Response> {
+export async function call(settings: SyncSettings, path: string, init: RequestInit = {}): Promise<Response> {
     const response = await fetch(`${settings.baseUrl}${path}`, {
         ...init,
         headers: { ...init.headers, authorization: `Bearer ${settings.token}` },

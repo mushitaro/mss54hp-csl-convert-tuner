@@ -1,4 +1,4 @@
-import { Env, MAX_GZ_BYTES, bad, ok, preflight, requireToken } from '../../_shared';
+import { Env, MAX_GZ_BYTES, bad, decodeBase64, isGzip, ok, preflight, requireToken } from '../../_shared';
 
 /** Every column except the three blobs. The list must never inflate a session to describe it. */
 const LIST_COLUMNS = `
@@ -47,17 +47,6 @@ interface SyncBody {
     binariesGz?: string | null;
 }
 
-function decode(b64: string): Uint8Array {
-    const binary = atob(b64);
-    const out = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-    return out;
-}
-
-/** gzip starts 1f 8b. Checked because a payload that will not inflate months from now is
- *  indistinguishable from a session that was never synced. */
-const isGzip = (b: Uint8Array) => b.byteLength >= 3 && b[0] === 0x1f && b[1] === 0x8b;
-
 /**
  * POST /api/sessions — store one session, exactly as the local database holds it.
  *
@@ -89,7 +78,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     for (const part of parts) {
         if (!part.b64) { blobs[part.name] = null; continue; }
         let bytes: Uint8Array;
-        try { bytes = decode(part.b64); } catch { return bad(`${part.name} is not valid base64.`); }
+        try { bytes = decodeBase64(part.b64); } catch { return bad(`${part.name} is not valid base64.`); }
         if (!isGzip(bytes)) return bad(`${part.name} is not gzip data.`);
         // Checked before the insert rather than caught after it: D1's own error for an oversized
         // value is generic, and the useful answer — which part, how far over — is only available

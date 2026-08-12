@@ -244,8 +244,57 @@ flashed.
      then the erase is retried once — sending pre-clean unconditionally wastes a flash-counter slot.
 3. **Write slave**, then **write master** — `0x07` seg `2`, 122-byte chunks.
 4. **Finalize** — `0x07` seg `15` @ `0`.
-5. **Read-back verify** — read both blocks (segment 0) and compare byte-for-byte. Any mismatch
-   throws; the write is only reported successful if every byte matches.
+5. **Verify** — see the next section. QUICK (default once earned) or FULL.
+
+### Verification — two modes, and what each one actually proves (2026-08-11)
+
+There are **three independent layers**, and the mode chooses only whether the third one runs.
+
+| Layer | What it proves | QUICK | FULL |
+|---|---|---|---|
+| ① per-telegram verify byte | the DME programmed that chunk's cells and passed its own internal check (`1` = OK; `2` = verify failed, `3` = cells not erased, …) | always | always |
+| ② `0x0A` encoding checksum | the DME's **own** stored CRC-16/ARC values match its own flash. The two data slots cover **65528 of 65536 bytes**; the remaining 8 *are* the slots, which a match verifies | ✅ | ✅ |
+| ③ 64 KB read-back | the bytes we sent equal the bytes it returns, and **where** any mismatch is | ✖ | ✅ |
+
+`0x0A` was defined in `ds2.ts` from the start and **never called**, exactly like the
+`maxTelegramLength` decoder and `Ds2BaudRate.Baud38400`. It is the substance of the reference tool's
+`ProgrammingVerificationMode.QuickVerify`, which is **that tool's default** — the reason it does not
+read 64 KB back after every flash.
+
+- Request `12 04 0A 1C` (4 bytes) → response `12 05 A0 xx ck` (5 bytes). **One exchange, ~50 ms**,
+  against **122.9 s** for the read-back of the same region. That is ~45% of a flash.
+- **A set bit means FAULTED.** bit0 boot master · bit1 program master · **bit2 data master** ·
+  bit4 boot slave · bit5 program slave · **bit6 data slave**. A tune write judges bits 2 and 6 only
+  (`DATA_TUNE_CHECKSUM_BITS`), matching the reference's `DataChecksumBits`. A program-area fault is
+  a real fact about the ECU but not one this write caused, so it is reported, never thrown on.
+
+**What QUICK cannot do**, stated plainly because the UI states it too: it cannot say *where* a
+mismatch is, and it cannot catch a corruption that happens to preserve CRC-16 (1 in 65536, and only
+reachable at all if ① passed on every chunk first).
+
+**The assumption QUICK rests on, and how it is discharged.** Nothing in the reference or the 0401
+disassembly says whether the DME recomputes its checksum on demand or answers from a value cached at
+boot. If it cached, a post-write "clean" would be the same answer it gives for a botched write. So:
+
+- `0x0A` is **also read at connect**, into `DmeIdentity.encodingChecksum` — the before half of a
+  before/after pair. It is read-only, four bytes, and cannot fail a connection.
+- `verifyPolicy.ts` keeps, per VIN, whether a **FULL** write has completed on that ECU *and* its
+  checksum came back clean. Until that has happened the VERIFY selector **opens on FULL**. The user
+  can still choose QUICK; the point is that the first write to an unfamiliar DME does not silently
+  take the cheaper proof.
+- Under QUICK a missing or refused `0x0A` is a **failure**, not a warning: "the data was written and
+  every telegram reported programming OK, but nothing has confirmed the result." Under FULL it is
+  recorded and the write stands on the byte comparison, which is the stronger check and already ran.
+
+**Verified against the real class** with a scripted DME (24 assertions), asserting the telegram
+*trace and count* rather than the outcome — which is what proves QUICK skipped the read-back rather
+than merely reporting that it had: QUICK sends **0** read telegrams and FULL sends **538**; the
+checksum is asked exactly once in both; bit 2 set throws and names "Data master" without naming the
+clean slave area; `0xB0` throws under QUICK with the re-run-with-FULL advice and passes under FULL
+with the reason recorded; a double erase failure chains both messages and emits no write telegram.
+
+The mode is carried into `FlashRecord.verifyMode`, the completion dialog and the uploaded diagnostic
+record, all using the same words. A write verified two different ways must not be describable by one.
 
 ### Write-response validation (safety-critical)
 
@@ -288,8 +337,11 @@ already read `0xFF`, so re-writing them is a wasted program cycle.
 ### Safety gates (deliberately lighter than the reference tool)
 
 1. **Checksum auto-correction** — always, no opt-out.
-2. **One confirmation dialog** before flashing (engine off / stable power).
-3. **Read-back verification** — byte-for-byte.
+2. **One confirmation dialog** before flashing (engine off / stable power). It names the verify mode
+   and the resulting duration, because the mode changes what "verified" will mean afterwards and the
+   moment to say so is before the erase.
+3. **Verification** — per-telegram verify byte and the DME's `0x0A` checksum always; the
+   byte-for-byte read-back under FULL. See the verification section above.
 4. **Post-write dialog** — key OFF → wait 10 s → key ON, then auto-disconnect (the power cycle ends
    the DME session anyway).
 5. Write is **not cancellable** (cancelling after erase would leave the ECU half-programmed).
@@ -994,11 +1046,23 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 
 ## 11. Known limitations / TODO
 
-- **Speed**: everything at 9600. Read ~124 s measured, write ~4 min. ~40 s of that read is overhead
-  no one has explained yet, and 38400 now fails part-way through. Both open — see §9.
+- **Speed**: everything at 9600. Read ~124 s measured; write ~2½ min with QUICK verification, ~4½
+  with FULL (the read-back is 122.9 s of it). The read side is at the DME's floor and closed — see
+  §9. The write side's own floor is **not yet measured**: the instrument now covers it (§15) but no
+  vehicle run has produced a write report, so the per-chunk flash programming time — the part a baud
+  boost could never recover — is still the ~110 ms/chunk back-derived from a README sentence.
 - **STFT cross-check**: `la_f_regler` vs Testo *Lambdaintegrator* not validated (§8).
-- **Write baud**: write is always 9600 (the reference boosts to 125000 after erase). Deferred until
-  baud switching is proven.
+- **Write baud**: write is always 9600. The reference boosts to 125000 **inside the programming
+  session, immediately after the erase** (`TuneWriteExecutor.cs:67`, best-effort — it continues at
+  9600 if the switch is refused), and that is the one remaining lever on the write path. Not
+  attempted here yet: the switch can only be sent at the moment failure is most expensive, and the
+  0401 disassembly suggests the DME's SCI cannot actually produce 125000 — `SIM_SYNCR = 0xD700` puts
+  it at `f_sys/(32×6)`, so the host and the ECU may be ~4.9% apart. Probe that non-destructively
+  first.
+- **The datalog is uninstrumented on the wire, and both documented sample rates are wrong.** §8 says
+  "≈ 6–7 samples/s" and `page.tsx` says "~10 Hz"; the wire alone caps the current two-block sample at
+  6.1 Hz and the arithmetic with a settled ~40 ms turnaround gives ~4.1 Hz. `kind: 'log'` exists in
+  the instrument but nothing arms it yet.
 - **Chromium only**: Chrome/Edge/Opera on desktop (Web Serial), Chrome on Android (WebUSB, §14). The
   file-upload workflow remains the fallback for every other browser and must keep working.
 - **The Android backend's WRITE path is proven** (2026-08-09), from the head unit on the car: the
@@ -1435,3 +1499,76 @@ the correct polarity (wrong, and the K-line transceiver never enables — no byt
 
 Still untested, and listed in §11: the write path, break recovery, the flush polarity, backgrounding
 endurance, and 38400.
+
+---
+
+## 15. Diagnostics — measuring the write, and getting the numbers off the phone (2026-08-11)
+
+### The instrument now covers all three operations
+
+`transferTiming.ts` was armed only by `readPartialBinInner`, so §9's whole investigation looked at
+the bulk read and nothing else. Two operations were invisible, and both have levers the read does
+not:
+
+- **write** — a flash telegram's turnaround is the DME *programming cells*, not the DME *thinking*.
+  That single number decides how much a baud boost could ever be worth on the write path, and until
+  now it had only been back-derived from a README sentence (~110 ms/chunk, never measured).
+- **log** — the live poll is the one path with real host-side work in it.
+
+`TransferTimingReport` therefore carries a **`kind`** (`read` | `write` | `log`) and an explicit
+**`responseBytes`**, because the theoretical wire time is computed differently per operation: a read
+response carries the chunk (`chunkSize + 4`), a **write acknowledgement is a fixed 10 bytes** however
+much was written. Deriving it from `chunkSize` for all three would have produced a plausible number
+that quietly makes a healthy link look broken.
+
+A new lane, **`hostGap`** (previous exchange end → next exchange start), is us and nothing else. ~0
+on a bulk read. On the datalog it is where `flushLiveSamples` lands — a full `processLogData` plus a
+full VE recalculation, synchronous, inside the sample callback and O(n) in run length — and on
+Android that is not merely slow: our read loop is the only thing draining the FT232R's 256-byte FIFO
+(§14), which gives ~267 ms of headroom at 9600 before an overrun.
+
+**The write window is armed for the write telegrams only.** Not the erase (one exchange whose
+turnaround is a flash sector erase, seconds long) and not the read-back (turnaround ~40 ms, the DME
+thinking). All three in one median would blend three different physical quantities into the one
+number the measurement exists to isolate. The erase is timed separately, by a plain stopwatch.
+
+### The event log
+
+`linkEventLog.ts` — a bounded ring of phase-level lines: login, erase and its duration, the write
+telegram summary, finalize, the verification verdict, and the failure verbatim. `TransferTiming`
+answers "where did the milliseconds go"; this answers "what did we do, in what order, and what did
+the ECU say", and that is the question asked first.
+
+**Deliberately not a telegram trace.** Nothing in it is called per exchange — 538 strings on the
+critical path of an operation that erases before it writes is exactly the instrument-inside-its-own-
+measurement problem the timing file is built to avoid. A whole flash produces well under 20 lines.
+
+### The store
+
+Diagnostics upload themselves to D1 (`migrations/0003_diagnostics.sql`, `/api/diagnostics`), beside
+sessions and behind the same bearer token.
+
+Sessions sync on an explicit press, because a session is the user's work and a background task that
+quietly gave up would be a lie about where their data is. A diagnostic is the opposite: **it is
+worth most for the operations that FAILED**, which are exactly the ones that never produce a session
+worth syncing — a flash that died at chunk 300 on an already-erased ECU had nowhere to be written
+down. So it uploads by itself, best-effort and silent: `uploadDiagnostic` never throws, is never
+retried, and a failed upload leaves the downloadable copy untouched. An upload must never become the
+reason a flash reports a failure it did not have.
+
+Published on **every** path including failure, and cleared at the *start* of each operation — the
+same rule §9 paid for once, when a latency sweep came back as three byte-identical copies of the
+previous run.
+
+The list columns are denormalised out of the payload (`exchanges`, `elapsed_ms`, `baud`,
+`requested_baud`, `median_turnaround`, `median_total`, `median_host_gap`) so a sweep can be ranked
+without inflating a single row — and `requested_baud` sits beside `baud` because a refused switch
+silently falls back, and without both, four candidate rates all read as "9600".
+
+**R2 is deliberately not used.** A measured 301-exchange failed-write record, with a 300-sample gap
+trace and its event log, compresses to **594 bytes** — three orders of magnitude inside D1's
+1,000,000-byte per-value cap. A second store would buy nothing but something to keep in step, and a
+diagnostic too big for this has stopped being a summary. The endpoint rejects one over 900 KB with
+that sentence rather than letting D1 reject it generically.
+
+`npm run db:diagnostics` lists the last 30 at a desk.

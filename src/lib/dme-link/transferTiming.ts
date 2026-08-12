@@ -28,7 +28,22 @@
  * candidate to move into a Worker later, and an instrument that reaches for `window` would block that.
  */
 
-/** A single chunk's decomposition, all in milliseconds unless noted. */
+/**
+ * Which operation a report describes.
+ *
+ * The instrument started life measuring the bulk read only, and its window was armed from
+ * `readPartialBinInner`. Two operations were therefore invisible, and both turned out to have
+ * levers the read does not:
+ *
+ *  - **write** — a flash telegram's turnaround is the DME programming cells, not the DME thinking.
+ *    That is the number which decides how much a baud boost can be worth, and it had only ever been
+ *    back-derived from a README sentence.
+ *  - **log** — the live poll is the one path with real host-side work in it (a full VE recalculation
+ *    every 500 ms), so it is the one place `hostGap` below is not always ~0.
+ */
+export type TransferKind = 'read' | 'write' | 'log';
+
+/** A single exchange's decomposition, all in milliseconds unless noted. */
 export interface ChunkTiming {
     /** Time inside transport.write() — should be ~0. Non-zero points at WICG/serial#123, where
      *  Chromium splits a write that straddles its ring-buffer boundary. */
@@ -47,9 +62,25 @@ export interface ChunkTiming {
     rxEvents: number;
     /** Wall time for the whole exchange, write through last response byte. */
     total: number;
+    /**
+     * Previous exchange's end → this exchange's start. **Us, and nothing else.**
+     *
+     * ~0 on a bulk read, where the loop does nothing between chunks but copy bytes. On the datalog
+     * it is where `flushLiveSamples` lands: a full `processLogData` plus a full VE recalculation,
+     * synchronous, inside the sample callback and O(n) in run length. That cost has never been
+     * measured, and on the Android backend it is not merely slow — our read loop is the only thing
+     * draining the FT232R's 256-byte FIFO, which gives ~267 ms of headroom at 9600 before an
+     * overrun. This lane is how we find out how close to it we are.
+     *
+     * Zero for the first exchange, which has no predecessor.
+     */
+    hostGap: number;
 }
 
-export interface ReadTimingReport {
+export interface TransferTimingReport {
+    /** Which operation this describes. Reports are saved side by side, and a write report that
+     *  cannot say it is a write is one filename typo away from being read as a read. */
+    kind: TransferKind;
     /**
      * Whether the read ran to completion. **A failed read's timing is the most valuable kind**, so
      * this is recorded rather than the report being discarded: `chunks` then says how far it got and
@@ -73,8 +104,19 @@ export interface ReadTimingReport {
      * Excludes login and the baud switch, which happen before the loop is armed.
      */
     elapsedMs: number;
-    /** Bytes requested per read telegram at the time of the read. */
+    /** Payload bytes per telegram: the read/write chunk size, or 0 for the datalog, whose exchanges
+     *  are fixed-size measurement blocks rather than a chunked range. */
     chunkSize: number;
+    /**
+     * Whole response frame length in bytes, used only to compute `theoreticalResponseWire`.
+     *
+     * Explicit rather than derived from `chunkSize`, because the relationship differs per operation
+     * and getting it wrong produces a plausible number that quietly makes a healthy link look
+     * broken: a READ response carries the chunk (`chunkSize + 4`), a WRITE response is a fixed
+     * 10-byte acknowledgement no matter how much was written, and a LOG exchange's size depends on
+     * which measurement block it was.
+     */
+    responseBytes: number;
     /**
      * The rate the UI ASKED for. Separate from `baud`, which is what the read actually ran at.
      *
@@ -142,12 +184,17 @@ export class TransferTiming {
     private parked!: Float64Array;
     private rxEvents!: Float64Array;
     private total!: Float64Array;
+    private hostGap!: Float64Array;
 
     private capacity = 0;
     private index = 0;
     private tBegin = 0;
+    /** End of the previous exchange, for the hostGap lane. 0 means "no predecessor". */
+    private tPrevEnd = 0;
     private retries = 0;
+    private kind: TransferKind = 'read';
     private chunkSize = 0;
+    private responseBytes = 0;
     private requestedBaud: number | null = null;
     private switchOutcome: string | null = null;
     private baud: number | null = null;
@@ -174,7 +221,7 @@ export class TransferTiming {
     private samples: { chunk: number; gaps: number[] }[] = [];
     private midSampleFrom = Number.MAX_SAFE_INTEGER;
 
-    private lastReport: ReadTimingReport | null = null;
+    private lastReport: TransferTimingReport | null = null;
 
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
@@ -184,7 +231,7 @@ export class TransferTiming {
         return this.enabled;
     }
 
-    getReport(): ReadTimingReport | null {
+    getReport(): TransferTimingReport | null {
         return this.lastReport;
     }
 
@@ -210,14 +257,16 @@ export class TransferTiming {
      * to record.
      */
     begin(expectedChunks: number, info: {
+        kind: TransferKind;
         chunkSize: number;
+        responseBytes: number;
         requestedBaud: number | null;
         switchOutcome: string | null;
         baud: number | null;
         maxTelegramLength: number | null;
     }): void {
         if (!this.enabled) return;
-        const { chunkSize, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
+        const { kind, chunkSize, responseBytes, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
         // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
         // a read. Overflow beyond that is dropped by the bounds check in end().
         const capacity = expectedChunks + 8;
@@ -228,11 +277,15 @@ export class TransferTiming {
         this.parked = new Float64Array(capacity);
         this.rxEvents = new Float64Array(capacity);
         this.total = new Float64Array(capacity);
+        this.hostGap = new Float64Array(capacity);
         this.sampleGaps = new Float64Array(MAX_GAPS_PER_SAMPLE);
         this.capacity = capacity;
         this.index = 0;
+        this.tPrevEnd = 0;
         this.retries = 0;
+        this.kind = kind;
         this.chunkSize = chunkSize;
+        this.responseBytes = responseBytes;
         this.requestedBaud = requestedBaud;
         this.switchOutcome = switchOutcome;
         this.baud = baud;
@@ -322,6 +375,11 @@ export class TransferTiming {
         this.parked[i] = this.chunkParked;
         this.rxEvents[i] = this.chunkRx;
         this.total[i] = now - this.tExchangeStart;
+        // Zero for the first exchange rather than a nonsense interval measured from begin(): the
+        // arming point includes the login and the baud switch, and folding those into a lane that
+        // claims to be "time we spent between exchanges" would put seconds into its median.
+        this.hostGap[i] = this.tPrevEnd ? this.tExchangeStart - this.tPrevEnd : 0;
+        this.tPrevEnd = now;
         if (this.sampleGaps !== null && this.sampleGapCount > 0 && this.isSampledChunk()) {
             this.samples.push({
                 chunk: i,
@@ -333,16 +391,18 @@ export class TransferTiming {
 
     /** Folds the lanes into medians. Called once, after the last chunk — the only place that allocates
      *  or formats. */
-    finish(error?: unknown): ReadTimingReport | null {
+    finish(error?: unknown): TransferTimingReport | null {
         if (!this.collecting) return null;
         this.collecting = false;
         const n = this.index;
-        const report: ReadTimingReport = {
+        const report: TransferTimingReport = {
+            kind: this.kind,
             completed: error === undefined,
             error: error === undefined ? null : (error instanceof Error ? error.message : String(error)),
             chunks: n,
             elapsedMs: performance.now() - this.tBegin,
             chunkSize: this.chunkSize,
+            responseBytes: this.responseBytes,
             requestedBaud: this.requestedBaud,
             switchOutcome: this.switchOutcome,
             baud: this.baud,
@@ -356,10 +416,13 @@ export class TransferTiming {
                 parked: median(this.parked, n),
                 rxEvents: median(this.rxEvents, n),
                 total: median(this.total, n),
+                hostGap: median(this.hostGap, n),
             },
-            // A read response is [addr][len][status][N data][cksum] = N+4 bytes, and 8E1 puts 11 bit
-            // times on the wire per byte.
-            theoreticalResponseWire: this.baud ? ((this.chunkSize + 4) * 11 * 1000) / this.baud : null,
+            // 8E1 puts 11 bit times on the wire per byte (start + 8 data + parity + stop). The frame
+            // size comes from the caller — see `responseBytes` for why it is not derived here.
+            theoreticalResponseWire: this.baud && this.responseBytes
+                ? (this.responseBytes * 11 * 1000) / this.baud
+                : null,
             samples: this.samples,
         };
         this.lastReport = report;

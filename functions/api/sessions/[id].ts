@@ -1,24 +1,6 @@
-import { Env, bad, corsHeaders, ok, preflight, requireToken } from '../../_shared';
+import { Env, bad, blobToBase64, corsHeaders, ok, preflight, requireToken } from '../../_shared';
 
 export const onRequestOptions = () => preflight();
-
-/**
- * D1 hands a BLOB back as a plain `number[]`, not an ArrayBuffer, and both shapes are declared in
- * the wild depending on version. Assuming the wrong one fails silently — the stream errors after
- * the headers are on the wire and the client gets 200 with an empty body.
- */
-function toBase64(value: ArrayBuffer | number[] | Uint8Array | null): string | null {
-    if (value === null || value === undefined) return null;
-    const bytes = value instanceof Uint8Array ? value
-        : Array.isArray(value) ? Uint8Array.from(value)
-            : new Uint8Array(value);
-    const CHUNK = 0x8000;
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-    }
-    return btoa(binary);
-}
 
 /**
  * GET /api/sessions/:id — the whole session back, ready to be written into the local database.
@@ -54,9 +36,9 @@ export const onRequestGet: PagesFunction<Env, 'id'> = async ({ request, env, par
         vin: row.vin,
         pointCount: row.point_count,
         appBuild: row.app_build,
-        sessionGz: toBase64(row.session_json_gz),
-        logGz: toBase64(row.log_json_gz),
-        binariesGz: toBase64(row.binaries_json_gz),
+        sessionGz: blobToBase64(row.session_json_gz),
+        logGz: blobToBase64(row.log_json_gz),
+        binariesGz: blobToBase64(row.binaries_json_gz),
     });
 };
 
