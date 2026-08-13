@@ -288,74 +288,6 @@ export const MobileMenu: React.FC<Props> = ({
                             </button>
                         )}
 
-                        {/* Sync, in the pinned block with Reload and Install because this band does
-                            not scroll: the sheet opens at the bottom of its own scroller, so
-                            anything in the list below is out of sight until you go looking. The one
-                            control a driver wants the moment a run ends should not need to be
-                            found.
-
-                            Wired to `onSync` directly and NOT through `row()`, exactly like the two
-                            above it. Without a `data-menu-key` the sweep's hit test returns null
-                            here, so a finger travelling up the sheet can pass over this row and let
-                            go without starting an upload. Do not add one.
-
-                            The sheet stays open on purpose. This row IS the progress readout —
-                            "Syncing…", then a count or a failure — and closing it would replace the
-                            only report with nothing.
-
-                            Once the row is here, every STATE of it is shown, including the ones that
-                            cannot be pressed — "I looked for sync and there was nothing there" is
-                            the report a control that hides itself produces, and offline and
-                            already-synced are precisely the two worth stating out loud. Whether the
-                            row exists at all is a different question, and the caller answers it. */}
-                        {/* SAVE, immediately above SYNC, and in the pinned band for the same reason
-                            SYNC is: this band does not scroll, and the two of them are one flow read
-                            top to bottom — record it on this device, then send what has changed.
-
-                            It used to live only in the scrolling action list, gated so that it
-                            vanished during a run, and in the desktop session bar, which is
-                            `hidden min-[900px]:flex`. On a phone that left no reachable SAVE at all
-                            on most tabs, and none anywhere during a log.
-
-                            Shown in every state including the ones that cannot be pressed — same
-                            rule as the sync row below. "I looked for save and there was nothing
-                            there" is the report a control that hides itself produces, and
-                            "not until the run stops" is worth saying rather than implying.
-
-                            No `data-menu-key`, deliberately, exactly like the rows around it: the
-                            sweep's hit test must return null here so a finger travelling up the
-                            sheet cannot let go on it and write to the database. */}
-                        {saveLook && (
-                            <button
-                                type="button"
-                                onClick={saveLook.disabled ? undefined : onSave}
-                                disabled={saveLook.disabled}
-                                title={saveLook.title}
-                                className={`w-full flex items-center justify-center gap-3 py-3 rounded transition-colors ${saveLook.tone === 'ready' ? 'text-amber-400 hover:text-amber-300 cursor-pointer'
-                                    : saveLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
-                                        : 'text-slate-700 cursor-default'}`}
-                            >
-                                <Database className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">{saveLook.label}</span>
-                            </button>
-                        )}
-
-                        {syncLook && (
-                            <button
-                                type="button"
-                                onClick={syncLook.disabled ? undefined : onSync}
-                                disabled={syncLook.disabled}
-                                title={syncLook.title}
-                                className={`w-full flex items-center justify-center gap-3 py-3 rounded transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400 hover:text-blue-300 cursor-pointer'
-                                    : syncLook.tone === 'error' ? 'text-red-400 hover:text-red-300 cursor-pointer'
-                                        : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
-                                            : 'text-slate-700 cursor-default'}`}
-                            >
-                                <UploadCloud className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
-                            </button>
-                        )}
-
                         {/* Which build this phone is actually running. Monospace and muted: it is
                             never acted on, but it is the first thing asked when a device behaves
                             differently from the desk — and a service worker serving a stale bundle
@@ -475,6 +407,68 @@ export const MobileMenu: React.FC<Props> = ({
                         </div>
                     </Section>
                 </div>
+
+                {/* SAVE and SYNC, and this time actually pinned.
+                    ────────────────────────────────────────────────────────────────────────────────
+                    They were put "in the pinned block with Reload and Install" on the belief that
+                    that band does not scroll. It does: it is the top of the `overflow-y-auto`
+                    scroller above, which also carries `no-scrollbar`, and the sheet opens at the
+                    BOTTOM of that scroller. So both controls sat off-screen above the fold with no
+                    scrollbar to suggest otherwise, and the report came back three times as "SAVE
+                    does not appear on mobile". It did not appear. It was never visible.
+
+                    Here they are outside the scroller entirely — `shrink-0`, directly above Close,
+                    which is the one region of this sheet guaranteed to be on screen because Close
+                    has to be. That also puts them nearest the thumb, which is what the sheet's own
+                    ordering rule asks for: interactive things closest, readouts further away.
+
+                    Side by side rather than stacked. Two full-width rows cost ~104px, and the band
+                    above already yields from 314px to 109px on a 400px-tall landscape phone — the
+                    space is not there, and taking it from the scroller would push the tab list out
+                    instead. One 52px row keeps both at a full tap target.
+
+                    No `data-menu-key` on either, deliberately, exactly as before: the sweep's hit
+                    test must return null here so a finger travelling up the sheet cannot release
+                    onto SAVE and write to the database, or onto SYNC and start an upload. */}
+                {(saveLook || syncLook) && (
+                    <div className="shrink-0 flex items-stretch gap-2 px-4 py-2 border-t border-slate-800">
+                        {saveLook && (
+                            <button
+                                type="button"
+                                onClick={saveLook.disabled ? undefined : onSave}
+                                disabled={saveLook.disabled}
+                                title={saveLook.title}
+                                className={`flex-1 min-w-0 min-h-[44px] flex items-center justify-center gap-2 rounded transition-colors ${saveLook.tone === 'ready' ? 'text-amber-400 hover:text-amber-300 cursor-pointer'
+                                    : saveLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                        : 'text-slate-700 cursor-default'}`}
+                            >
+                                <Database className="w-3.5 h-3.5 shrink-0" />
+                                {/* The short word here and the full sentence on hold/hover. The
+                                    describeSave labels run to "Save — nothing to record", which does
+                                    not fit half of a 360px screen beside SYNC, and a wrapped label
+                                    would grow this row into the tab list it was sized to protect. */}
+                                <span className="text-[10px] font-bold uppercase tracking-widest truncate">Save</span>
+                            </button>
+                        )}
+                        {syncLook && (
+                            <button
+                                type="button"
+                                onClick={syncLook.disabled ? undefined : onSync}
+                                disabled={syncLook.disabled}
+                                title={syncLook.title}
+                                className={`flex-1 min-w-0 min-h-[44px] flex items-center justify-center gap-2 rounded transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400 hover:text-blue-300 cursor-pointer'
+                                    : syncLook.tone === 'error' ? 'text-red-400 hover:text-red-300 cursor-pointer'
+                                        : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                            : 'text-slate-700 cursor-default'}`}
+                            >
+                                <UploadCloud className="w-3.5 h-3.5 shrink-0" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest truncate">
+                                    Sync{(sync?.pending ?? 0) > 0 ? ` ${sync?.pending}` : ''}
+                                </span>
+                            </button>
+                        )}
+                    </div>
+                )}
 
                 {/* Close, on the spot the opening press landed on. Same height and same centre as the
                     footer's menu button, so releasing without moving lands here and a second tap
