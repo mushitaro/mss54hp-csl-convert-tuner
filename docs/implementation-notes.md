@@ -970,6 +970,45 @@ the answer, and none of it is code.
 - `Timed out waiting for N byte(s) (received M)` with no latched error → the DME stopped answering;
   transport is exonerated, look at the 0x91 switch and the session state instead
 
+### CLOSED AGAIN (2026-08-13, Android/WebUSB + block-size sweep): 38400 is finished
+
+The two loose ends §9 left open have both been run on the car, and both are negative.
+
+**The port transition was not the cause.** §9's "two things only this app has to do" argued that Web
+Serial's forced `close()`/`open()` on a baud change is a disturbance no other DS2 tool produces, and
+that it could not be removed. On the Android/WebUSB backend it *is* removed — `SET_BAUD_RATE` goes to
+the open handle, the read loop never stops, DTR/RTS are never re-driven. **38400 dies there
+identically.** That retires the last host-side suspect.
+
+**Block size does not rescue it either.** karter16's build journal reports 38400 working outside
+programming mode *"provided the block size wasn't too big"*, and every attempt to that point had been
+at 122. Swept across the reference's own `{122, 96, 64, 32}`:
+
+| attempts | died at exchange (of 538) |
+|---|---|
+| desktop Web Serial, 122 | 0, 1, 4, 7, 9, 17 |
+| Android WebUSB, 122–32 | 0, 0, 0, 1, 3, 5, 6, 15, 22, 23, 116 |
+
+Every one of them `Timed out waiting for 2 byte(s) (received 0)` after all five retries — the DME
+stops answering, never a corrupted frame — and **the death position does not track the block size**.
+The best run (116 exchanges, 21.6%) was at 122, the largest. Per-exchange median at 38400 was 159 ms
+against 9600's 209 ms, so the wire really was faster; it simply never survived.
+
+karter16's own verdict on the same experiment: it "wasn't stable enough to make an actual feature".
+Agreed, measured, and closed. The BLK selector has been removed — a knob proven to change nothing
+costs a trip to the vehicle every time someone wonders. The constructor option and the finding stay
+in `DS2_READ_BLOCK_SIZES`.
+
+**And 125000 was never reachable from a read.** From the same journal: the DME only accepts it
+*"when the DME is in programming mode"*, and *"the bootloader lacks mechanisms for entering
+programming mode via DS2 except through valid flash wipe commands"*. Every `TrySwitchToProgrammingBaudAsync`
+in the reference is inside a programming session for exactly that reason. Asking for it from the READ
+selector was structurally wrong, not badly timed — no settle would ever have helped.
+
+**So the read is finished at 9600/122, ~126 s on Android and ~123 s on desktop, and the remaining
+speed work is entirely on the write path** — where the erase puts the DME in programming mode as a
+side effect of what the operation already does.
+
 ### Instrumentation (2026-07-29)
 
 Rather than keep guessing at the 75 ms, `transferTiming.ts` decomposes it per chunk, behind a **DIAG**
@@ -1054,11 +1093,15 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 - **STFT cross-check**: `la_f_regler` vs Testo *Lambdaintegrator* not validated (§8).
 - **Write baud**: write is always 9600. The reference boosts to 125000 **inside the programming
   session, immediately after the erase** (`TuneWriteExecutor.cs:67`, best-effort — it continues at
-  9600 if the switch is refused), and that is the one remaining lever on the write path. Not
-  attempted here yet: the switch can only be sent at the moment failure is most expensive, and the
-  0401 disassembly suggests the DME's SCI cannot actually produce 125000 — `SIM_SYNCR = 0xD700` puts
-  it at `f_sys/(32×6)`, so the host and the ECU may be ~4.9% apart. Probe that non-destructively
-  first.
+  9600 if the switch is refused). **This is now the only remaining speed lever anywhere in the app**,
+  the read having been closed at 9600 (see §9's 2026-08-13 entry). karter16's journal confirms both
+  halves of why: the DME accepts 125000 only *"when the DME is in programming mode"*, and the
+  bootloader offers no way in *"except through valid flash wipe commands"* — which the tune write
+  performs anyway. Still not attempted here, and the reason to be careful is unchanged: the switch
+  can only be sent at the moment failure is most expensive, i.e. on an already-erased ECU. One
+  arithmetic caveat to carry into it — `SIM_SYNCR = 0xD700` puts the DME's SCI at `f_sys/(32×SCBR)`,
+  where 125000 is not exactly representable, so host and ECU may sit ~4.9% apart even when the
+  switch is accepted.
 - **The datalog is uninstrumented on the wire, and both documented sample rates are wrong.** §8 says
   "≈ 6–7 samples/s" and `page.tsx` says "~10 Hz"; the wire alone caps the current two-block sample at
   6.1 Hz and the arithmetic with a settled ~40 ms turnaround gives ~4.1 Hz. `kind: 'log'` exists in

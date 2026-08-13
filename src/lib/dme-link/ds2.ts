@@ -404,36 +404,30 @@ export type Ds2SupportedBaud = 9600 | 38400 | 125000;
 export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 125000];
 
 /**
- * Selectable bytes-per-read-telegram, largest first. Exactly the reference's
- * `AllowedDs2MemoryBlockSizes = { 122, 96, 64, 32 }`.
+ * Bytes per read telegram, as an option on the link. **The UI selector for this has been removed —
+ * the question it existed to answer has been answered, and the answer is no.**
  *
- * **This is a reliability control, not a speed one, and the direction that helps is DOWNWARD.**
- * 122 is already very nearly the maximum: the DME publishes a 132-byte telegram cap, so a read
- * payload can reach 128, and 122 → 128 is worth 538 → 512 exchanges ≈ 1.3%. There is nothing above.
+ * karter16's journal reported 38400 working outside programming mode *"provided the block size
+ * wasn't too big"*, and every attempt here had been at 122, so this was built to move that variable.
+ * It was then swept on the car across all four of the reference's sizes.
  *
- * What it is for is the one variable that has never been moved at 38400. From karter16's own
- * journal, on running the MSS54 outside programming mode: *"I found even in normal OS mode 38,400
- * kinda worked **provided the block size wasn't too big**"* — followed by the judgement that it
- * "wasn't stable enough to make an actual feature". Every 38400 attempt here, on both transports,
- * has been at 122. Six deaths on desktop Web Serial (chunks 0/1/4/7/9/17) and three on Android
- * WebUSB (chunks 23/1/3), all with the same signature: the echo returns, then the ECU sends zero
- * bytes. That is not a corrupted frame, and the Android result rules out the port close/reopen that
- * was the last remaining host-side suspect.
+ * **38400 failed at every size.** Eleven attempts across two transports and four block sizes, dying
+ * at exchange 0, 0, 0, 1, 3, 5, 6, 15, 22, 23 and 116 of 538, every one of them
+ * `Timed out waiting for 2 byte(s) (received 0)` after five retries — the DME sends nothing, never a
+ * corrupted frame, and the death position does not track the block size. The Android/WebUSB runs
+ * also rule out the port close/reopen that Web Serial is forced into, since that transport sets the
+ * FTDI divisor on the open handle and dies identically. This matches karter16's own conclusion that
+ * 38400 "wasn't stable enough to make an actual feature".
  *
- * The arithmetic, so the trade is visible before a drive rather than after it. At 38400 the
- * per-exchange cost is roughly `tx + ~55 ms turnaround + rx`, and the turnaround is paid per
- * exchange no matter how small the block — so shrinking the block buys stability by spending the
- * saving:
+ * The constructor option stays because it is real and free, and because it is the reference's own
+ * reliability escape hatch (`AllowedDs2MemoryBlockSizes`) if a different cable or a different car
+ * ever makes the question live again. What is gone is the control that invited another sweep: a
+ * knob proven to change nothing is not neutral, it costs a trip to the vehicle every time someone
+ * wonders.
  *
- * | block | exchanges | ~total at 38400 |
- * |---|---|---|
- * | 122 | 538 | ~51 s |
- * | 96 | 683 | ~59 s |
- * | 64 | 1024 | ~79 s |
- * | 32 | 2048 | ~139 s — **slower than 9600's measured 126 s** |
- *
- * So 96 and 64 are the two worth trying; 32 is there to complete the reference's set and to be a
- * last resort for a link that will not hold at any useful rate, not because it could ever be fast.
+ * For the record, the arithmetic that made the trade unattractive anyway — the ~55 ms turnaround is
+ * paid per exchange whatever the size, so at 38400: 122 → 538 exchanges ≈ 51 s, 96 → 683 ≈ 59 s,
+ * 64 → 1024 ≈ 79 s, and 32 → 2048 ≈ 139 s, which is slower than 9600's measured 126 s.
  */
 export const DS2_READ_BLOCK_SIZES = [122, 96, 64, 32] as const;
 export type Ds2ReadBlockSize = typeof DS2_READ_BLOCK_SIZES[number];

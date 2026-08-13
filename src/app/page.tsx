@@ -50,9 +50,7 @@ import { useIsPreviewBuild, usePreviewTitle } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
-import {
-  TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, DS2_READ_BLOCK_SIZES, Ds2ReadBlockSize, Ds2SupportedBaud,
-} from '@/lib/dme-link/ds2';
+import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { beginLiveRun, appendLiveChunk, endLiveRun, discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
@@ -1673,7 +1671,11 @@ export default function Home() {
       kind,
       createdAt: Date.now(),
       completed: report?.completed ?? false,
-      error: report?.error ?? dmeLink.error ?? 'failed before the instrument was armed',
+      // `??` chains past null, and `report.error` is null on a SUCCESSFUL run — so the fallback
+      // below fired on every clean read and stamped it "failed before the instrument was armed"
+      // beside completed=1. Caught in the store, where a 538-exchange 126.7 s success was carrying
+      // that sentence. The fallback belongs to the no-report case only.
+      error: report ? report.error : (dmeLink.error ?? 'failed before the instrument was armed'),
       // Which car, which bytes, which transport. A timing report without these is a column of
       // numbers that cannot be compared against any other run — and comparing runs is the only
       // thing any of this is for.
@@ -2865,10 +2867,11 @@ The TIMING button still has the full record; save it before running another oper
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
                           title={'Bulk-read baud rate. These are the only three the DME implements — asked for anything else it answers 0xB0 PARAMETER_ERROR and the read silently falls back to 9600.\n\n'
-                            + '9600 — the default and the proven path. Sends no switch at all. 122.9s on desktop, 126.5s on Android, reproducibly. At this rate the wire is at its floor: measured response time 143.6ms against a theoretical 144.4.\n\n'
-                            + '38400 — WORTH RE-TESTING ON ANDROID. On desktop Web Serial every attempt died inside the first 17 of 538 chunks with the ECU silent, and an inter-telegram gap up to 40ms did not help. But Web Serial cannot change baud without closing and reopening the port — a transition no other DS2 tool produces — and the Android WebUSB backend has no such transition: it sets the FTDI divisor on the open handle. That is the single difference the desktop failure was never able to rule out. If it holds, the read drops to roughly 50s.\n\n'
-                            + '125000 — the DME ACKs, then every exchange times out. The reference only reaches it after a flash-erasing "fast entry" procedure. Also suspect on arithmetic: the DME\'s SCI divides its clock, and 125000 is not one of the values it can land on exactly.\n\n'
-                            + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover — and a failed READ costs nothing else, which is what makes this the cheap place to experiment.'}
+                            + '9600 — the default, the proven path, and on this car the only one that works. Sends no switch at all. 122.9s on desktop, 126.5s on Android, reproducibly. The wire is at its floor here: measured response 143.6ms against a theoretical 144.4, parked/total 98.8%.\n\n'
+                            + '38400 — CLOSED, negative. Eleven attempts across both transports and all four block sizes died at exchange 0/0/0/1/3/5/6/15/22/23/116 of 538, every one "Timed out waiting for 2 byte(s) (received 0)" after five retries. The DME sends nothing — never a corrupted frame — and the death position does not track the block size. Android/WebUSB changes baud on the open handle with no port close/reopen and fails identically, which rules out the last host-side suspect. karter16 reached the same verdict: it was not stable enough to make a feature of.\n\n'
+                            + '125000 — not reachable from a read at all. Per karter16 the DME only accepts it while in programming mode, and the bootloader has no way into programming mode over DS2 except through a valid flash wipe. It is a live option for the WRITE path, which erases anyway; it was never going to work here.\n\n'
+                            + 'Both are left selectable because a different cable or a different car may answer differently, and a failed READ costs nothing but the attempt. Do not expect either to work on this one.'}
+
                         >
                           READ
                           {/* Options come from DS2_SELECTABLE_BAUDS rather than being listed here, so a
@@ -2885,37 +2888,7 @@ The TIMING button still has the full record; save it before running another oper
                             ))}
                           </select>
                         </label>
-                        {/* Bytes per read telegram. Only shown once a rate above 9600 is selected:
-                            at 9600 the read completes at 122 every time, so the control would be a
-                            knob that can only make things slower. It appears exactly where it has a
-                            job — karter16's journal says 38400 "kinda worked provided the block size
-                            wasn't too big", and 122 is the only size either transport has ever tried
-                            it at. */}
-                        <label
-                          className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode || dmeLink.readBaud === 9600 ? 'invisible pointer-events-none' : ''}`}
-                          aria-hidden={dmeLink.mockMode || dmeLink.readBaud === 9600}
-                          title={'Bytes per read telegram. A RELIABILITY control — the direction that helps is downward, and every step down costs time.\n\n'
-                            + '122 — the default, and very nearly the maximum: the DME publishes a 132-byte telegram cap, so 128 is the ceiling and 122→128 is worth about 1.3%. There is nothing above this.\n\n'
-                            + 'Why it is here: every 38400 attempt so far, on both transports, has been at 122. Six deaths on desktop (chunks 0/1/4/7/9/17) and three on Android (23/1/3), all the same signature — the echo returns, then the ECU sends zero bytes. karter16\'s journal reports 38400 working in normal OS mode "provided the block size wasn\'t too big".\n\n'
-                            + 'The trade at 38400, since the ~55ms turnaround is paid per exchange whatever the size:\n'
-                            + '  122 → 538 exchanges, ~51s\n'
-                            + '   96 → 683 exchanges, ~59s\n'
-                            + '   64 → 1024 exchanges, ~79s\n'
-                            + '   32 → 2048 exchanges, ~139s — SLOWER than 9600\'s measured 126s\n\n'
-                            + 'So 96 and 64 are the two worth trying. 32 completes the reference tool\'s set; it cannot be fast.'}
-                        >
-                          BLK
-                          <select
-                            value={dmeLink.readChunkSize}
-                            disabled={dmeLink.mockMode || dmeLink.readBaud === 9600}
-                            onChange={(e) => dmeLink.setReadChunkSize(Number(e.target.value) as Ds2ReadBlockSize)}
-                            className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
-                          >
-                            {DS2_READ_BLOCK_SIZES.map(size => (
-                              <option key={size} value={size}>{size}</option>
-                            ))}
-                          </select>
-                        </label>
+
                       </>
                     ) : (
                       <>

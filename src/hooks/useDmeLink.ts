@@ -10,7 +10,7 @@ import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
 import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport';
 import { analyzeDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { dialogText } from '@/lib/dialog-text';
-import { Ds2ReadBlockSize, Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
+import { Ds2SupportedBaud, EchoMismatchAnalysis } from '@/lib/dme-link/ds2';
 import { TransferTimingReport } from '@/lib/dme-link/transferTiming';
 import { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
 
@@ -72,11 +72,6 @@ export function useDmeLink() {
     // on a real vehicle. Everything faster needs a 0x91 switch + local port reopen and stays opt-in —
     // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
-    // Bytes per read telegram. A reliability control, not a speed one — see DS2_READ_BLOCK_SIZES.
-    // Read at connect like readBaud, because the link takes it in its constructor: the value that
-    // matters is the one in force when the transfer runs, and a mid-session change that silently
-    // applied to the next read would make two runs incomparable with nothing saying so.
-    const [readChunkSize, setReadChunkSize] = useState<Ds2ReadBlockSize>(122);
     /**
      * The last instrumented operation's numbers and its narrative, captured together.
      *
@@ -196,7 +191,7 @@ export function useDmeLink() {
         clearError();
         setState('connecting');
         try {
-            const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud, readChunkSize });
+            const link: DmeLink = mockMode ? new MockDmeLink(mockSourceBuffer) : new WebSerialDmeLink({ readBaud });
             // Always on. There used to be a DIAG checkbox here, which saved nothing measurable — the
             // instrument costs ~7 ms of performance.now() calls across a 123 s read, 0.006% — and cost
             // a whole vehicle run every time someone forgot to arm it before driving out. Before
@@ -217,7 +212,7 @@ export function useDmeLink() {
             if (cancelled) clearError(); else failWith(e);
             setState('disconnected');
         }
-    }, [mockMode, readBaud, readChunkSize, clearError, failWith]);
+    }, [mockMode, readBaud, clearError, failWith]);
 
     const disconnect = useCallback(async () => {
         pollingRef.current = false;
@@ -626,8 +621,6 @@ export function useDmeLink() {
         setMockMode,
         readBaud,
         setReadBaud,
-        readChunkSize,
-        setReadChunkSize,
         lastTransferTiming,
         lastEventLog,
         /** Read these, not the state above, from inside an async handler — see the refs' comment. */
