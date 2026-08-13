@@ -1696,12 +1696,22 @@ export default function Home() {
    * thing being diagnosed. `uploadDiagnostic` never throws; this `void` is belt and braces.
    */
   const publishDiagnostics = (kind: DiagnosticRecord['kind']) => {
-    const record = buildDiagnosticRecord(kind);
-    if (!record) { setDiagUpload({ state: 'none' }); return; }
-    setDiagUpload({ state: 'sending' });
-    void uploadDiagnostic(record, uploadSettingsRef.current).then(r => {
-      setDiagUpload(r.ok ? { state: 'stored', bytes: r.bytes } : { state: 'failed', reason: r.reason });
-    });
+    // Wrapped, because this runs on the line after a read or a flash and NOTHING it does may take
+    // that handler down. It threw once in a way that could only present as "the marker never
+    // appeared": buildDiagnosticRecord touches half a dozen fields off the link, and an exception
+    // here would abort handleDmeRead before any state was set, leaving the UI in exactly the state
+    // it was in before the operation. A reporting path that can fail silently is the bug this whole
+    // feature exists to stop, so it is not allowed to have one itself.
+    try {
+      const record = buildDiagnosticRecord(kind);
+      if (!record) { setDiagUpload({ state: 'none' }); return; }
+      setDiagUpload({ state: 'sending' });
+      void uploadDiagnostic(record, uploadSettingsRef.current).then(r => {
+        setDiagUpload(r.ok ? { state: 'stored', bytes: r.bytes } : { state: 'failed', reason: r.reason });
+      });
+    } catch (e) {
+      setDiagUpload({ state: 'failed', reason: `could not build the record: ${e instanceof Error ? e.message : String(e)}` });
+    }
   };
 
   /** Offers the last operation's per-exchange timing and event log as a file, same explicit-export
@@ -2962,7 +2972,19 @@ The TIMING button still has the full record; save it before running another oper
                       ?? (!dmeLink.mockMode && dmeLink.state === 'disconnected' && dmeLink.transportKind === 'none'
                         ? dialogText().noTransport({ android: isAndroidPlatform() })
                         : null);
-                    const notice = dmeLink.error ?? warning;
+                    // The diagnostic outcome rides on the SAME line as the operation's own result.
+                    //
+                    // It was only a 10px marker up in the DME row, and that was reported as "the DIAG
+                    // text does not appear anywhere" after a real read — which is the second time a
+                    // number that mattered has been put somewhere too small to find in a car (the
+                    // read's own throughput was the first, at 9px/slate-500). This line is the one
+                    // surface already proven readable from the driver's seat, and a record that did
+                    // not reach the store is exactly as much a result of the operation as its speed.
+                    const diagTail = diagUpload.state === 'stored' ? ' · DIAG OK'
+                      : diagUpload.state === 'failed' ? ` · DIAG FAILED: ${diagUpload.reason}`
+                        : diagUpload.state === 'sending' ? ' · DIAG…'
+                          : diagUpload.state === 'none' ? ' · DIAG none' : '';
+                    const notice = (dmeLink.error ?? warning) ? `${dmeLink.error ?? warning}${diagTail}` : (diagTail ? diagTail.slice(3) : null);
                     if (!notice) return null;
                     // Three levels, because a read reporting its own speed is not a warning and
                     // should not wear the warning colour on every successful transfer. But "quieter"
