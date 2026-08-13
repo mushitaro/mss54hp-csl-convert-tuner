@@ -42,6 +42,75 @@ export interface SyncLook {
     tone: SyncTone;
 }
 
+/**
+ * The step BEFORE sync, and the reason the two now sit together.
+ *
+ * Saving writes the tune into this device's own database; syncing sends the sessions that have
+ * changed since they were last sent. That has always been the design — `needsSync` compares a
+ * fingerprint and only outstanding sessions go up — but the only labelled control was a cloud icon
+ * reading "Store", which describes neither half and reads as "upload, now, directly". Naming both
+ * steps and putting them next to each other is the whole fix.
+ *
+ * Same reasoning as SyncStatus for why this lives here: there are two of these controls (the
+ * desktop session bar and the menu sheet) and they must not be able to disagree.
+ */
+export type SavePhase =
+    /** No session, or a session with no derived map — there is no tune to record. */
+    | 'nothing'
+    /** Archived sessions are read-only by design; their tune is already what was flashed. */
+    | 'archived'
+    /** A datalog is running. The map is still being rebuilt every few hundred ms. */
+    | 'logging'
+    | 'busy'
+    | 'ready';
+
+export interface SaveStatus {
+    phase: SavePhase;
+}
+
+export interface SaveLook {
+    label: string;
+    title: string;
+    disabled: boolean;
+    tone: SyncTone;
+}
+
+export function describeSave({ phase }: SaveStatus): SaveLook {
+    switch (phase) {
+        case 'nothing':
+            return {
+                label: 'Save — nothing to record',
+                title: 'Saving records a derived tune against the open session. With only a BASE loaded there '
+                    + 'is nothing to record — the BASE was already stored when it was chosen.',
+                disabled: true, tone: 'muted',
+            };
+        case 'archived':
+            return {
+                label: 'Saved — archived',
+                title: 'This session has been flashed and archived, so its stored tune is the one that went to '
+                    + 'the ECU and must not change. Continue from it with "Use as base → TUNED".',
+                disabled: true, tone: 'muted',
+            };
+        case 'logging':
+            return {
+                label: 'Save — after the run',
+                title: 'A data log is running and the map is still being rebuilt from it. Saving now would record '
+                    + 'a partial run as if it were a finished one. STOP first; the samples are already being '
+                    + 'written to this device every 5 seconds, so nothing is at risk meanwhile.',
+                disabled: true, tone: 'muted',
+            };
+        case 'busy':
+            return { label: 'Saving…', title: 'Writing this tune into the device database.', disabled: true, tone: 'busy' };
+        case 'ready':
+            return {
+                label: 'Save to session',
+                title: 'Writes this tune into THIS DEVICE\'s database — no cable and no network needed. '
+                    + 'Sync afterwards to send what has changed to the store.',
+                disabled: false, tone: 'ready',
+            };
+    }
+}
+
 const plural = (n: number) => (n === 1 ? '' : 's');
 
 export function describeSync({ phase, pending, error }: SyncStatus): SyncLook {

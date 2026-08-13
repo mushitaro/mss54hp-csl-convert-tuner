@@ -5,7 +5,7 @@ import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw
 import { DmeIdentity } from '@/lib/dme-link/types';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import type { InstallState } from '@/hooks/useInstallPrompt';
-import { describeSync, SyncStatus } from '@/lib/session-sync/status';
+import { describeSave, describeSync, SaveStatus, SyncStatus } from '@/lib/session-sync/status';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -83,6 +83,15 @@ interface Props {
     sync: SyncStatus | null;
     /** Sends every outstanding session. Does not close the sheet: the row is the progress readout. */
     onSync: () => void;
+    /** What the SAVE row says and whether it can be pressed — the step before sync. Same
+     *  computed-by-the-caller rule as `sync`, and null for the same kind of reason: a layout with no
+     *  session concept at all should render no row rather than a permanently dead one. */
+    save: SaveStatus | null;
+    /** Records the tune into this device's database. Does not close the sheet, so the row can
+     *  report the outcome the same way the sync row does. */
+    onSave: () => void;
+    /** `<build>.<sha>` plus the service-worker cache name, or undefined on a dev server. */
+    buildLabel?: string;
 }
 
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
@@ -118,9 +127,10 @@ export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
     session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, updateAvailable,
-    installState, onInstall, sync, onSync,
+    installState, onInstall, sync, onSync, save, onSave, buildLabel,
 }) => {
     const syncLook = sync && describeSync(sync);
+    const saveLook = save && describeSave(save);
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
     useEffect(() => {
@@ -298,6 +308,38 @@ export const MobileMenu: React.FC<Props> = ({
                             the report a control that hides itself produces, and offline and
                             already-synced are precisely the two worth stating out loud. Whether the
                             row exists at all is a different question, and the caller answers it. */}
+                        {/* SAVE, immediately above SYNC, and in the pinned band for the same reason
+                            SYNC is: this band does not scroll, and the two of them are one flow read
+                            top to bottom — record it on this device, then send what has changed.
+
+                            It used to live only in the scrolling action list, gated so that it
+                            vanished during a run, and in the desktop session bar, which is
+                            `hidden min-[900px]:flex`. On a phone that left no reachable SAVE at all
+                            on most tabs, and none anywhere during a log.
+
+                            Shown in every state including the ones that cannot be pressed — same
+                            rule as the sync row below. "I looked for save and there was nothing
+                            there" is the report a control that hides itself produces, and
+                            "not until the run stops" is worth saying rather than implying.
+
+                            No `data-menu-key`, deliberately, exactly like the rows around it: the
+                            sweep's hit test must return null here so a finger travelling up the
+                            sheet cannot let go on it and write to the database. */}
+                        {saveLook && (
+                            <button
+                                type="button"
+                                onClick={saveLook.disabled ? undefined : onSave}
+                                disabled={saveLook.disabled}
+                                title={saveLook.title}
+                                className={`w-full flex items-center justify-center gap-3 py-3 rounded transition-colors ${saveLook.tone === 'ready' ? 'text-amber-400 hover:text-amber-300 cursor-pointer'
+                                    : saveLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                        : 'text-slate-700 cursor-default'}`}
+                            >
+                                <Database className="w-3.5 h-3.5 shrink-0" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest">{saveLook.label}</span>
+                            </button>
+                        )}
+
                         {syncLook && (
                             <button
                                 type="button"
@@ -312,6 +354,14 @@ export const MobileMenu: React.FC<Props> = ({
                                 <UploadCloud className="w-3.5 h-3.5 shrink-0" />
                                 <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
                             </button>
+                        )}
+
+                        {/* Which build this phone is actually running. Monospace and muted: it is
+                            never acted on, but it is the first thing asked when a device behaves
+                            differently from the desk — and a service worker serving a stale bundle
+                            is a real failure mode here, which is why the cache name rides along. */}
+                        {buildLabel && (
+                            <p className="pt-1 text-center font-mono text-[9px] text-slate-700 break-all">{buildLabel}</p>
                         )}
                     </div>
 

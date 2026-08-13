@@ -182,21 +182,44 @@ interface WireBinaries {
 }
 
 /**
- * Which build sent this, as the service worker's cache name.
+ * Which build sent this — `<commit-count>.<short-sha>`, e.g. `284.470f492`, with `+` when it was
+ * built from a dirty tree. Written into every document by `scripts/build-id.mjs`.
  *
- * There is no version constant in this app, and adding one would mean a number somebody has to
- * remember to bump — which is the same as not having one. gen-sw.mjs derives the cache name from a
- * hash of the built bytes, so it changes exactly when the build does and never otherwise.
- * Undefined on a dev server, where no worker is registered; saying nothing beats naming a build
- * that was never deployed.
+ * This used to report the service worker's cache name, and that was the wrong value for the
+ * question. The cache name is a hash of the built bytes, which is exactly right for deciding when
+ * to throw a cache away and useless for a human: `tuner-2e5ca880d950` cannot be compared against
+ * `tuner-7bedb7d1bbef`, and neither points at a commit. When a phone and a desk disagree about
+ * which build ran, an ordered number that maps back to a diff is the whole answer.
+ *
+ * The cache name is still recorded alongside it, because it is the one value that identifies what
+ * the device actually has on disk — a phone serving a stale bundle from the service worker is a
+ * real failure mode here, and the pair `build 284, cache tuner-2e5…` is what diagnoses it.
+ */
+export function buildId(): string | undefined {
+    if (typeof document === 'undefined') return undefined;
+    return document.querySelector('meta[name="build-id"]')?.getAttribute('content')?.trim() || undefined;
+}
+
+/** When that build was produced, ISO to the minute. */
+export function buildAt(): string | undefined {
+    if (typeof document === 'undefined') return undefined;
+    return document.querySelector('meta[name="build-at"]')?.getAttribute('content')?.trim() || undefined;
+}
+
+/**
+ * The build id, with the service-worker cache name appended when the two can be read together.
+ *
+ * Undefined only on a dev server with neither — saying nothing beats naming a build that was never
+ * deployed.
  */
 export async function buildIdentity(): Promise<string | undefined> {
+    const id = buildId();
+    let cache: string | undefined;
     try {
-        if (typeof caches === 'undefined') return undefined;
-        return (await caches.keys()).find(k => k.startsWith('tuner-'));
-    } catch {
-        return undefined;
-    }
+        if (typeof caches !== 'undefined') cache = (await caches.keys()).find(k => k.startsWith('tuner-'));
+    } catch { /* a browser that refuses the cache API still has the meta tag */ }
+    if (id && cache) return `${id} (${cache})`;
+    return id ?? cache;
 }
 
 export async function call(settings: SyncSettings, path: string, init: RequestInit = {}): Promise<Response> {

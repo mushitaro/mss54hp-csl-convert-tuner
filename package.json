@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "next dev -p 5054",
-    "build": "next build && node scripts/gen-sw.mjs",
+    "build": "next build && node scripts/build-id.mjs && node scripts/gen-sw.mjs",
     "start": "next start",
     "lint": "eslint",
     "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
@@ -15,7 +15,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
     "db:sessions": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(synced_at/1000,'unixepoch') AS synced, label, status, point_count, has_tune, has_rf, has_egt FROM sessions ORDER BY created_at DESC LIMIT 20\"",
   "db:diagnostics": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT datetime(created_at/1000,'unixepoch') AS at, kind, CASE completed WHEN 1 THEN 'ok' ELSE 'FAILED' END AS outcome, exchanges, elapsed_ms, baud, requested_baud, round(median_turnaround,1) AS turnaround, round(median_total,1) AS total, round(median_host_gap,1) AS host_gap, CASE mock WHEN 1 THEN 'mock' ELSE transport END AS via, substr(coalesce(error,''),1,60) AS err, id FROM diagnostics ORDER BY created_at DESC LIMIT 30\"",
-    "build:preview": "next build && node scripts/brand-preview.mjs && node scripts/embed-sync-token.mjs && node scripts/gen-sw.mjs"
+    "build:preview": "next build && node scripts/brand-preview.mjs && node scripts/embed-sync-token.mjs && node scripts/build-id.mjs && node scripts/gen-sw.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

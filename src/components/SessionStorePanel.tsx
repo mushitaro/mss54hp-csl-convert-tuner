@@ -10,8 +10,8 @@ import { useDialogLang } from '@/hooks/useDialogLang';
 
 const TEXT = {
     ja: {
-        title: 'SESSION STORE',
-        intro: 'セッションを、ローカル DB が持っているそのままの形でこの配信環境に置きます — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えません。戻すこともできるので、スマホで取って PC で仕上げる、が可能です。',
+        title: 'SESSION SYNC',
+        intro: '保存は 2 段階です。まず SAVE でこの端末の DB に記録し、次に SYNC で「前回送ってから変わったセッションだけ」をこの配信環境へ送ります。送るのはローカル DB が持っているそのままの形 — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えません。戻すこともできるので、スマホで取って PC で仕上げる、が可能です。',
         base: 'API のベース URL',
         baseHint: '空欄ならこのページと同じオリジン。デプロイ済みのアプリから使うときは空でかまいません。ポートを分けたローカル検証のときだけ入れます。',
         token: '同期トークン（上書き）',
@@ -24,13 +24,13 @@ const TEXT = {
         restore: '取り込む',
         restoreConfirm: (l: string) => `「${l}」をサーバーの内容で上書きします。同じ ID のローカルセッションがあれば置き換わります。よろしいですか？`,
         restored: (l: string) => `「${l}」を取り込みました。`,
-        needToken: 'トークンを入れると、セッション一覧の各行に同期ボタンが出ます。',
+        needToken: 'トークンを入れると、SYNC が使えるようになります（セッション一覧の各行にも同期ボタンが出ます）。',
         loading: '取得中…',
         cols: { at: '同期', label: '名前', pts: '点数', ch: 'ch', size: 'サイズ' },
     },
     en: {
-        title: 'SESSION STORE',
-        intro: 'Puts a session on this deployment exactly as the local database holds it — the session record, its log, and its BASE/TUNED binaries. The local copy stays. It can be pulled back, so a session recorded on a phone can be finished at a desk.',
+        title: 'SESSION SYNC',
+        intro: 'Saving happens in two steps. SAVE records a tune into this device’s database; SYNC then sends only the sessions that have changed since they were last sent. What goes up is exactly what the local database holds — the session record, its log, and its BASE/TUNED binaries. The local copy stays, and it can be pulled back, so a session recorded on a phone can be finished at a desk.',
         base: 'API base URL',
         baseHint: 'Empty means the same origin as this page, which is what the deployed app wants. Only needed for a local rig where the app and the functions are on different ports.',
         token: 'Sync token (override)',
@@ -43,7 +43,7 @@ const TEXT = {
         restore: 'Pull',
         restoreConfirm: (l: string) => `Overwrite "${l}" with the stored copy? A local session with the same id is replaced.`,
         restored: (l: string) => `Pulled "${l}".`,
-        needToken: 'Enter a token and a sync button appears on every session row.',
+        needToken: 'Enter a token to enable SYNC. A sync button also appears on every session row.',
         loading: 'Loading…',
         cols: { at: 'Synced', label: 'Label', pts: 'Points', ch: 'ch', size: 'Size' },
     },
@@ -58,6 +58,10 @@ const kb = (bytes: number) => `${(bytes / 1024).toFixed(0)} KB`;
  * and then not thought about again, and the thing it configures — the sync button on each session
  * row — is where the actual work happens. Pulling one back is done from here, because that acts on
  * the STORE's list rather than on a local session that may not exist yet.
+ *
+ * Named SYNC, not STORE. The control is the configuration door for a two-step flow — SAVE writes
+ * locally, SYNC sends the diff — and "Store" described neither half while reading as "upload, now,
+ * directly". The menu sheet had always called it SYNC; the footer had not.
  */
 export const SessionStorePanel: React.FC<{
     openUp?: boolean;
@@ -138,7 +142,7 @@ export const SessionStorePanel: React.FC<{
                     ? 'text-slate-500 hover:text-blue-400'
                     : 'text-slate-700 hover:text-slate-500'}`}
             >
-                <CloudUpload className="w-3 h-3" /> Store
+                <CloudUpload className="w-3 h-3" /> Sync
             </button>
 
             {/* The same two shapes FilterConfigPanel and FieldVisibilityPanel use, rather than a

@@ -16,10 +16,11 @@ import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
 import { SessionStorePanel } from '@/components/SessionStorePanel';
 import {
-  EMPTY_SETTINGS, SyncSettings, canSync, syncSession, loadSyncSettings, needsSync, sessionFingerprint,
+  EMPTY_SETTINGS, SyncSettings, buildIdentity, canSync, syncSession, loadSyncSettings, needsSync,
+  sessionFingerprint,
 } from '@/lib/session-sync/client';
-import type { SyncStatus } from '@/lib/session-sync/status';
-import { describeSync } from '@/lib/session-sync/status';
+import type { SaveStatus, SyncStatus } from '@/lib/session-sync/status';
+import { describeSave, describeSync } from '@/lib/session-sync/status';
 import { DiagnosticRecord, uploadDiagnostic } from '@/lib/session-sync/diagnostics';
 import type { WriteVerifyMode } from '@/lib/dme-link/types';
 import { initialVerifyMode, recordQuickVerifyProven } from '@/lib/dme-link/verifyPolicy';
@@ -794,6 +795,12 @@ export default function Home() {
   }), [isPreviewBuild, uploadSettings, syncBusy, online, syncError, pendingSync.length]);
   const syncLook = syncStatus && describeSync(syncStatus);
 
+
+  /** Which build this is, for the menu and for every uploaded record. Resolved after mount: the
+   *  meta tag exists in the export but `document` does not during the static prerender. */
+  const [buildLabel, setBuildLabel] = useState<string | undefined>(undefined);
+  useEffect(() => { void buildIdentity().then(setBuildLabel); }, []);
+
   /** The last step of a tune: put the finished map back on the road with the patches off.
    *
    *  Loads the session's STORED TUNED as the working binary and disarms both patch toggles, which
@@ -834,6 +841,25 @@ export default function Home() {
 
   const currentSession = activeSessionId ? sessionDb.sessions.find(s => s.id === activeSessionId) ?? null : null;
   const isArchived = currentSession?.status === 'archived';
+
+  /**
+   * The step before sync: record the tune into THIS DEVICE's database.
+   *
+   * Computed here, next to `syncStatus`, so the mobile row and the desktop session bar can only
+   * have one answer — and so the two halves of the flow (save locally, then send what changed) are
+   * described in one place rather than implied by two controls that never mention each other.
+   *
+   * `saveBusy` is not tracked: handleSaveSession is a single IndexedDB write and resolves in a few
+   * ms, so a 'busy' phase would flicker rather than inform. The phase exists in SaveStatus for a
+   * caller that needs it; this one honestly does not.
+   */
+  const saveStatus: SaveStatus = useMemo(() => ({
+    phase: dmeLink.state === 'tuning' ? 'logging'
+      : !currentSession || !newMap ? 'nothing'
+        : isArchived ? 'archived'
+          : 'ready',
+  }), [dmeLink.state, currentSession, newMap, isArchived]);
+  const saveLook = describeSave(saveStatus);
 
   // Each tab states the data it needs, rather than a chain of exclusions. CURRENT MAP used to be
   // exempted from every check and so was clickable with nothing loaded, landing on the empty
@@ -2361,12 +2387,27 @@ export default function Home() {
                 {/* Keyed on there being a tune, not just bytes: Save records a TUNED, and with only a
                     BASE loaded there is no TUNED to record — the BASE was already stored when it was
                     chosen. Offering it anyway is what let a base-only session claim a tune. */}
-                {newMap && !isArchived && dmeLink.state !== 'tuning' && (
-                  <button onClick={handleSaveSession} className="group inline-flex items-center gap-1.5" title="Save this tune to the session — no cable needed">
-                    <Database className="w-3 h-3 text-slate-600 group-hover:text-amber-400 transition-colors" />
-                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-amber-400 transition-colors">Save</span>
-                  </button>
-                )}
+                {/* Wording and enabled-ness from describeSave, so this and the menu sheet's row
+                    cannot drift apart — the same rule the sync control already follows. Rendered in
+                    every state rather than hidden when it cannot be pressed: "Save — after the run"
+                    is an answer, a missing button is not. */}
+                <button
+                  onClick={saveLook.disabled ? undefined : handleSaveSession}
+                  disabled={saveLook.disabled}
+                  className="group inline-flex items-center gap-1.5 disabled:cursor-default"
+                  title={saveLook.title}
+                >
+                  <Database className={`w-3 h-3 transition-colors ${saveLook.disabled ? 'text-slate-700' : 'text-slate-600 group-hover:text-amber-400'}`} />
+                  {/* Just "Save" here, not describeSave's full label. This bar is a fixed 26px row
+                      that already carries the session name, the draft/archived badge and the BASE
+                      origin, and "Save — nothing to record" is wide enough to squeeze the badge out
+                      of a narrow window. The reason lives in the tooltip, and the disabled styling
+                      is what says it cannot be pressed. The menu sheet, which has a full row per
+                      control, shows the whole sentence. */}
+                  <span className={`text-[9px] font-bold uppercase tracking-widest transition-colors ${saveLook.disabled ? 'text-slate-700' : 'text-slate-500 group-hover:text-amber-400'}`}>
+                    Save
+                  </span>
+                </button>
               </div>
             </div>
           )}
@@ -2738,10 +2779,10 @@ export default function Home() {
                           className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode ? 'invisible pointer-events-none' : ''}`}
                           aria-hidden={dmeLink.mockMode}
                           title={'Bulk-read baud rate. These are the only three the DME implements — asked for anything else it answers 0xB0 PARAMETER_ERROR and the read silently falls back to 9600.\n\n'
-                            + '9600 — the default. Sends no switch at all. Measured 122.9s for the 64KB read, reproducibly. This is the floor.\n\n'
-                            + '38400 — the switch is accepted and the wire really does run at 38400, but every attempt died inside the first 17 of 538 chunks with the ECU silent. An inter-telegram gap up to 40ms did not help.\n\n'
-                            + '125000 — the DME ACKs, then every exchange times out. The reference only reaches it after a flash-erasing "fast entry" procedure.\n\n'
-                            + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover.'}
+                            + '9600 — the default and the proven path. Sends no switch at all. 122.9s on desktop, 126.5s on Android, reproducibly. At this rate the wire is at its floor: measured response time 143.6ms against a theoretical 144.4.\n\n'
+                            + '38400 — WORTH RE-TESTING ON ANDROID. On desktop Web Serial every attempt died inside the first 17 of 538 chunks with the ECU silent, and an inter-telegram gap up to 40ms did not help. But Web Serial cannot change baud without closing and reopening the port — a transition no other DS2 tool produces — and the Android WebUSB backend has no such transition: it sets the FTDI divisor on the open handle. That is the single difference the desktop failure was never able to rule out. If it holds, the read drops to roughly 50s.\n\n'
+                            + '125000 — the DME ACKs, then every exchange times out. The reference only reaches it after a flash-erasing "fast entry" procedure. Also suspect on arithmetic: the DME\'s SCI divides its clock, and 125000 is not one of the values it can land on exactly.\n\n'
+                            + 'A rate the DME rejects is harmless (it stays at the current one). A rate it accepts but cannot run needs an ignition cycle to recover — and a failed READ costs nothing else, which is what makes this the cheap place to experiment.'}
                         >
                           READ
                           {/* Options come from DS2_SELECTABLE_BAUDS rather than being listed here, so a
@@ -3237,6 +3278,9 @@ export default function Home() {
           onInstall={() => { void install.promptInstall(); }}
           sync={syncStatus}
           onSync={() => { void handleSyncAll(); }}
+          save={saveStatus}
+          onSave={() => { void handleSaveSession(); }}
+          buildLabel={buildLabel}
           tabs={TABS}
           activeTab={activeTab}
           /* Picking a view is also asking to look at it. Without the second call the tab changed
@@ -3271,9 +3315,6 @@ export default function Home() {
             ...(currentSession && binaryBuffer && newMap && dmeLink.state !== 'tuning'
               ? [{ label: 'Download Tuned', kind: 'bin' as const, onClick: handleDownloadBin,
                    hint: 'The TUNED bytes WRITE would send right now, built live from the current map and toggles.' }] : []),
-            ...(currentSession && newMap && !isArchived && dmeLink.state !== 'tuning'
-              ? [{ label: 'Save to session', kind: 'save' as const, onClick: handleSaveSession,
-                   hint: 'Save this tune to the session — no cable needed' }] : []),
             ...(currentSession?.baseOrigin
               ? [{ label: 'Download BASE', kind: 'base' as const, onClick: () => handleDownloadSessionBase(currentSession),
                    hint: "This session's BASE bytes — what it started from" }] : []),
