@@ -32,7 +32,7 @@ const TEXT = {
         diagHint: '読み書きの結果が、成功も失敗もそのまま入ります。失敗した走行こそ価値があるので、エラー文はそのまま保存しています。行をタップすると全文が出ます。',
         diagRefresh: '診断を取得',
         diagNone: 'まだ 1 件もありません。',
-        diagCols: { at: '時刻', kind: '種別', n: '交換', baud: 'baud', err: '結果' },
+        diagCols: { at: '時刻', kind: '種別', n: '交換', dur: '所要', baud: 'baud', rty: '再送', err: '結果' },
         diagOk: 'OK',
     },
     en: {
@@ -58,7 +58,7 @@ const TEXT = {
             + 'valuable kind, so the error is kept verbatim. Tap a row for the whole message.',
         diagRefresh: 'Load diagnostics',
         diagNone: 'Nothing recorded yet.',
-        diagCols: { at: 'When', kind: 'Kind', n: 'Exch', baud: 'baud', err: 'Outcome' },
+        diagCols: { at: 'When', kind: 'Kind', n: 'Exch', dur: 'Time', baud: 'baud', rty: 'Rtry', err: 'Outcome' },
         diagOk: 'OK',
     },
 };
@@ -348,7 +348,9 @@ export const SessionStorePanel: React.FC<{
                                                 <th className="py-1 font-normal">{t.diagCols.at}</th>
                                                 <th className="py-1 font-normal">{t.diagCols.kind}</th>
                                                 <th className="py-1 font-normal text-right">{t.diagCols.n}</th>
+                                                <th className="py-1 font-normal text-right">{t.diagCols.dur}</th>
                                                 <th className="py-1 font-normal text-right">{t.diagCols.baud}</th>
+                                                <th className="py-1 font-normal text-right">{t.diagCols.rty}</th>
                                                 <th className="py-1 font-normal">{t.diagCols.err}</th>
                                             </tr>
                                         </thead>
@@ -363,12 +365,24 @@ export const SessionStorePanel: React.FC<{
                                                         {d.kind}{d.mock ? <span className="text-slate-700"> mock</span> : null}
                                                     </td>
                                                     <td className="py-1 text-right">{d.exchanges.toLocaleString()}</td>
+                                                    <td className="py-1 text-right whitespace-nowrap">{(d.elapsed_ms / 1000).toFixed(0)}s</td>
                                                     {/* Asked-for beside ran-at, because a refused switch silently
                                                         falls back and without both every attempt reads as "9600". */}
                                                     <td className="py-1 text-right whitespace-nowrap">
                                                         {d.requested_baud !== null && d.requested_baud !== d.baud
                                                             ? <span className="text-amber-500/80">{d.requested_baud}&rarr;{d.baud}</span>
                                                             : (d.baud ?? '-')}
+                                                    </td>
+                                                    {/* The number that says whether a fast rate was
+                                                        actually fast. One retried chunk carries
+                                                        300-1600ms of deliberate settle against a
+                                                        ~94ms exchange, so a boosted read can finish
+                                                        in 9600's time with nothing else looking
+                                                        wrong. Null on rows written before this
+                                                        column existed — not zero, which would claim
+                                                        a clean run nobody measured. */}
+                                                    <td className={`py-1 text-right ${(d.retries ?? 0) > 0 ? 'text-amber-500/80' : 'text-slate-600'}`}>
+                                                        {d.retries ?? '-'}
                                                     </td>
                                                     {/* The message in full on tap/hover. Truncating it in the cell and
                                                         nowhere else would hide the latched transport-error name, which

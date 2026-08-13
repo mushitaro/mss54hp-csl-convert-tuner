@@ -12,7 +12,7 @@ import { Env, MAX_GZ_BYTES, bad, decodeBase64, isGzip, ok, preflight, requireTok
 /** Every column except the payload. The list must never inflate a record to describe it. */
 const LIST_COLUMNS = `
     id, synced_at, created_at, kind, completed, error, vin, transport, mock, session_id,
-    exchanges, elapsed_ms, baud, requested_baud,
+    exchanges, elapsed_ms, baud, requested_baud, retries,
     median_turnaround, median_total, median_host_gap, app_build,
     length(payload_gz) AS payload_bytes
 `;
@@ -61,6 +61,7 @@ interface DiagnosticBody {
     sessionId?: string | null;
     exchanges?: number;
     elapsedMs?: number;
+    retries?: number | null;
     baud?: number | null;
     requestedBaud?: number | null;
     medianTurnaround?: number | null;
@@ -109,9 +110,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     await env.RUNS_DB.prepare(`
         INSERT INTO diagnostics (
             id, synced_at, created_at, kind, completed, error, vin, transport, mock, session_id,
-            exchanges, elapsed_ms, baud, requested_baud,
+            exchanges, elapsed_ms, baud, requested_baud, retries,
             median_turnaround, median_total, median_host_gap, payload_gz, app_build
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             synced_at = excluded.synced_at,
             completed = excluded.completed,
@@ -120,6 +121,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
             elapsed_ms = excluded.elapsed_ms,
             baud = excluded.baud,
             requested_baud = excluded.requested_baud,
+            retries = excluded.retries,
             median_turnaround = excluded.median_turnaround,
             median_total = excluded.median_total,
             median_host_gap = excluded.median_host_gap,
@@ -129,6 +131,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
         body.id, Date.now(), body.createdAt, body.kind, body.completed ? 1 : 0, body.error ?? null,
         body.vin ?? null, body.transport ?? null, body.mock ? 1 : 0, body.sessionId ?? null,
         body.exchanges ?? 0, body.elapsedMs ?? 0, body.baud ?? null, body.requestedBaud ?? null,
+        body.retries ?? null,
         body.medianTurnaround ?? null, body.medianTotal ?? null, body.medianHostGap ?? null,
         payload, body.appBuild ?? null,
     ).run();

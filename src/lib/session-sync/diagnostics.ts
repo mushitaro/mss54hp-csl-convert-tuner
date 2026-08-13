@@ -76,6 +76,7 @@ export interface StoredDiagnostic {
     elapsed_ms: number;
     baud: number | null;
     requested_baud: number | null;
+    retries: number | null;
     median_turnaround: number | null;
     median_total: number | null;
     median_host_gap: number | null;
@@ -130,6 +131,8 @@ export async function uploadDiagnostic(record: DiagnosticRecord, settings: SyncS
                 elapsedMs: Math.round(record.report?.elapsedMs ?? 0),
                 baud: record.report?.baud ?? null,
                 requestedBaud: record.report?.requestedBaud ?? null,
+                // The number that separates "ran fast" from "ran fast and spent it all on settle".
+                retries: record.report?.retries ?? null,
                 medianTurnaround: record.report?.median.turnaround ?? null,
                 medianTotal: record.report?.median.total ?? null,
                 medianHostGap: record.report?.median.hostGap ?? null,
