@@ -868,9 +868,13 @@ export default function Home() {
    */
   const saveStatus: SaveStatus = useMemo(() => ({
     phase: dmeLink.state === 'tuning' ? 'logging'
-      : !currentSession || !newMap ? 'nothing'
-        : isArchived ? 'archived'
-          : 'ready',
+      : !currentSession ? 'nothing'
+        // A BASE with no tune yet is already on this device — setSessionBase writes it as the READ
+        // finishes — so the honest state is "saved", not "nothing to record". SYNC is the control
+        // that does something here, and describeSave's copy points at it.
+        : !newMap ? (currentSession.baseOrigin ? 'baseOnly' : 'nothing')
+          : isArchived ? 'archived'
+            : 'ready',
   }), [dmeLink.state, currentSession, newMap, isArchived]);
   const saveLook = describeSave(saveStatus);
 

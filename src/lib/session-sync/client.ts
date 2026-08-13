@@ -118,21 +118,32 @@ export const isBakedToken = (token: string) => {
  *
  * Not a hash of the whole session: `TuningSession` has no `updatedAt`, and half its fields change
  * for reasons a stored copy does not care about (a rename is not a reason to re-send 128 KB over
- * cellular). These four are the ones that mean the stored copy is now describing something else —
- * a log was recorded, a tune was produced, it reached the ECU, or it stopped being a draft.
+ * cellular). These are the ones that mean the stored copy is now describing something else — a BASE
+ * was chosen or re-read, a log was recorded, a tune was produced, it reached the ECU, or it stopped
+ * being a draft.
+ *
+ * `baseSha256` is in here for a reason that only shows up on a second read: it is hashed from the
+ * bytes on every `setSessionBase`, so re-reading the ECU into the same session changes it. Without
+ * it, a session synced once with BASE #1 would never be offered again after BASE #2 replaced it.
  */
 export const sessionFingerprint = (s: TuningSession): string =>
-    `${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`;
+    `${s.baseSha256 ?? '-'}|${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`;
 
 /**
  * Whether this session is worth sending and has not been sent as it now stands.
  *
- * The `hasLog || sha256` gate is what keeps the button honest. Without it a fresh empty draft counts
- * as outstanding, so the control would read "1 waiting" from the moment the app opens and never go
- * quiet — and a badge that is always lit is one nobody reads.
+ * The gate exists to keep the control honest: without one, a fresh empty draft counts as outstanding
+ * and the button reads "1 waiting" from the moment the app opens, which is a badge nobody reads.
+ *
+ * **It used to be `hasLog || sha256`, and that was wrong about the most valuable session there is.**
+ * A session holding only a BASE just read off the car has no log and no tune, so it could never be
+ * synced — reported from the car as "SAVE and SYNC do nothing when all I have is a VIN". Those 64 KB
+ * are bytes that exist nowhere else in the world until they are sent, and they are the whole input
+ * to a write test. An empty draft is one with no BASE either; that is what this now excludes, and
+ * it is what the original guard meant.
  */
 export const needsSync = (s: TuningSession): boolean =>
-    (s.hasLog || !!s.sha256) && s.syncedFingerprint !== sessionFingerprint(s);
+    (s.hasLog || !!s.sha256 || !!s.baseSha256) && s.syncedFingerprint !== sessionFingerprint(s);
 
 // --- Codec ------------------------------------------------------------------------------------
 // gzip via the platform. CompressionStream is in every browser that can run the rest of this app —

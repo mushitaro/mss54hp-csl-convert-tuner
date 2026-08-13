@@ -55,8 +55,18 @@ export interface SyncLook {
  * desktop session bar and the menu sheet) and they must not be able to disagree.
  */
 export type SavePhase =
-    /** No session, or a session with no derived map — there is no tune to record. */
+    /** No session at all, or a session with nothing in it yet. */
     | 'nothing'
+    /**
+     * A BASE is loaded but no tune has been derived from it.
+     *
+     * Distinct from 'nothing' because the two are opposite reassurances. `setSessionBase` writes the
+     * bytes to IndexedDB the instant a READ finishes, so a BASE-only session is **already saved** —
+     * but the label for this state used to be "Save — nothing to record", which reads as "your data
+     * is not stored". Reported from the car as SAVE and SYNC being dead with a freshly read VIN on
+     * screen, which is exactly what that wording invites you to conclude.
+     */
+    | 'baseOnly'
     /** Archived sessions are read-only by design; their tune is already what was flashed. */
     | 'archived'
     /** A datalog is running. The map is still being rebuilt every few hundred ms. */
@@ -79,9 +89,17 @@ export function describeSave({ phase }: SaveStatus): SaveLook {
     switch (phase) {
         case 'nothing':
             return {
-                label: 'Save — nothing to record',
-                title: 'Saving records a derived tune against the open session. With only a BASE loaded there '
-                    + 'is nothing to record — the BASE was already stored when it was chosen.',
+                label: 'Save — nothing yet',
+                title: 'Nothing has been loaded into this session yet. Read a BASE from the DME, or upload one, '
+                    + 'and it is written to this device straight away.',
+                disabled: true, tone: 'muted',
+            };
+        case 'baseOnly':
+            return {
+                label: 'BASE saved on this device',
+                title: 'The BASE was written to this device the moment it was read — there is nothing further to '
+                    + 'save until a tune is derived from it. SYNC can send it to the store as it stands, which is '
+                    + 'what to do if you want these bytes off the phone.',
                 disabled: true, tone: 'muted',
             };
         case 'archived':
