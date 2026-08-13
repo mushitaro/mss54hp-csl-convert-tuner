@@ -87,6 +87,29 @@ export function useDmeLink() {
      */
     const [lastTransferTiming, setLastTransferTiming] = useState<TransferTimingReport | null>(null);
     const [lastEventLog, setLastEventLog] = useState<LinkEventLogSnapshot | null>(null);
+    /**
+     * The same two values, in refs, for readers that run INSIDE the operation's own async handler.
+     *
+     * This is not belt-and-braces, it is a correctness fix for a real off-by-one. `handleDmeRead`
+     * closes over the `dmeLink` object from the render that created it, awaits a read for up to two
+     * minutes, and then builds the diagnostic record. The state setters below have fired by then and
+     * re-rendered — but the suspended handler still holds the OLD object, so it published the
+     * PREVIOUS operation's report every time and the last operation of a session was never uploaded
+     * at all. Proven from the store: three records whose own event logs ended 16 s, 39 s and 2 min 43 s
+     * before the record claimed to have been created.
+     *
+     * State stays for rendering; refs are what the handlers must read.
+     */
+    const lastTransferTimingRef = useRef<TransferTimingReport | null>(null);
+    const lastEventLogRef = useRef<LinkEventLogSnapshot | null>(null);
+    const publishLast = useCallback((link: DmeLink | null) => {
+        const report = link?.getLastTransferTiming?.() ?? null;
+        const events = link?.getEventLog?.() ?? null;
+        lastTransferTimingRef.current = report;
+        lastEventLogRef.current = events;
+        setLastTransferTiming(report);
+        setLastEventLog(events);
+    }, []);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
     /**
@@ -292,12 +315,11 @@ export function useDmeLink() {
             // every read attempt, so this state always describes the read that just ran or nothing at
             // all. Keeping a stale report because the new one is missing is the exact failure being
             // fixed here — silently saving the wrong run is far worse than having nothing to save.
-            setLastTransferTiming(linkRef.current?.getLastTransferTiming?.() ?? null);
-            setLastEventLog(linkRef.current?.getEventLog?.() ?? null);
+            publishLast(linkRef.current);
             setTransferProgress(null);
             setTransferPhase(null);
         }
-    }, [clearError, failWith]);
+    }, [clearError, failWith, publishLast]);
 
     // Aborts an in-progress partial-BIN read (the read() promise rejects with a cancel error,
     // which read()'s catch treats as a clean return to 'connected').
@@ -592,12 +614,11 @@ export function useDmeLink() {
             // Same rule as READ, and for a stronger reason: the write path's diagnostics exist mostly
             // for the runs that fail, on an ECU that has already been erased. Published on both paths,
             // published as null when there is nothing — never left showing the previous operation's.
-            setLastTransferTiming(linkRef.current?.getLastTransferTiming?.() ?? null);
-            setLastEventLog(linkRef.current?.getEventLog?.() ?? null);
+            publishLast(linkRef.current);
             setTransferProgress(null);
             setTransferPhase(null);
         }
-    }, [clearError, failWith]);
+    }, [clearError, failWith, publishLast]);
 
     return {
         state,
@@ -609,6 +630,9 @@ export function useDmeLink() {
         setReadChunkSize,
         lastTransferTiming,
         lastEventLog,
+        /** Read these, not the state above, from inside an async handler — see the refs' comment. */
+        lastTransferTimingRef,
+        lastEventLogRef,
         identity,
         error,
         errorKind,

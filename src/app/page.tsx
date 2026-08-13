@@ -801,6 +801,19 @@ export default function Home() {
   /** Which build this is, for the menu and for every uploaded record. Resolved after mount: the
    *  meta tag exists in the export but `document` does not during the static prerender. */
   const [buildLabel, setBuildLabel] = useState<string | undefined>(undefined);
+  /**
+   * Whether the last operation's diagnostic record reached the store.
+   *
+   * Shown next to TIMING. The upload has always been best-effort and silent, which is right for not
+   * disturbing a flash — and wrong for ever finding out it is not working. Two vehicle sessions were
+   * spent believing records were being sent; they were, but for the previous run each time, and the
+   * only way to discover either fact was to query D1 from a laptop.
+   */
+  type DiagUploadState =
+    | { state: 'idle' } | { state: 'none' } | { state: 'sending' }
+    | { state: 'stored'; bytes: number }
+    | { state: 'failed'; reason: string };
+  const [diagUpload, setDiagUpload] = useState<DiagUploadState>({ state: 'idle' });
   useEffect(() => { void buildIdentity().then(setBuildLabel); }, []);
 
   /** The last step of a tune: put the finished map back on the road with the patches off.
@@ -1641,8 +1654,11 @@ export default function Home() {
    * a desk and a file saved on a phone are the same thing, and neither can quietly carry less.
    */
   const buildDiagnosticRecord = (kind: DiagnosticRecord['kind']): DiagnosticRecord | null => {
-    const report = dmeLink.lastTransferTiming;
-    const events = dmeLink.lastEventLog;
+    // Refs, NOT the rendered state. This function runs from inside the operation's own async
+    // handler, which closed over `dmeLink` before the await — reading the state fields there
+    // published the previous operation's report and never published the last one at all.
+    const report = dmeLink.lastTransferTimingRef.current;
+    const events = dmeLink.lastEventLogRef.current;
     // A record with no report is still worth having when something went wrong — the timing window
     // opens after the login and after the baud switch, so a refused login or a switch the DME
     // accepts and then goes silent on produces no report at all. Those are the failures most worth
@@ -1681,8 +1697,11 @@ export default function Home() {
    */
   const publishDiagnostics = (kind: DiagnosticRecord['kind']) => {
     const record = buildDiagnosticRecord(kind);
-    if (!record) return;
-    void uploadDiagnostic(record, uploadSettingsRef.current);
+    if (!record) { setDiagUpload({ state: 'none' }); return; }
+    setDiagUpload({ state: 'sending' });
+    void uploadDiagnostic(record, uploadSettingsRef.current).then(r => {
+      setDiagUpload(r.ok ? { state: 'stored', bytes: r.bytes } : { state: 'failed', reason: r.reason });
+    });
   };
 
   /** Offers the last operation's per-exchange timing and event log as a file, same explicit-export
@@ -1690,7 +1709,7 @@ export default function Home() {
    *  inter-arrival gaps are the part that distinguishes per-byte USB packets from batched ones, and
    *  those need a file. */
   const handleSaveTransferTiming = () => {
-    const report = dmeLink.lastTransferTiming;
+    const report = dmeLink.lastTransferTimingRef.current ?? dmeLink.lastTransferTiming;
     const record = report && buildDiagnosticRecord(report.kind);
     if (!record || !report) return;
     // Every knob that was set, in the name. A sweep produces a folder of these, and `baud` alone does
@@ -2787,6 +2806,26 @@ export default function Home() {
                         you read, DISCONNECT to change the driver's latency timer, reconnect and read
                         again. Inside the connected branch it vanished at exactly the moment you needed
                         it, taking an un-saved run with it. */}
+                    {/* Did the record reach the store? Silent-ish when it did (a tick and the size
+                        on hover), plain when it did not. This sits with TIMING because they describe
+                        the same artifact: the file you can save and the copy that went up. */}
+                    {diagUpload.state !== 'idle' && (
+                      <span
+                        className={`text-[10px] font-mono ${diagUpload.state === 'stored' ? 'text-slate-600'
+                          : diagUpload.state === 'sending' ? 'text-slate-500 animate-pulse'
+                            : 'text-red-400'}`}
+                        title={diagUpload.state === 'stored' ? `Diagnostic stored (${diagUpload.bytes} B compressed).`
+                          : diagUpload.state === 'sending' ? 'Sending the diagnostic record…'
+                            : diagUpload.state === 'none' ? 'Nothing to send — this operation produced no report, no events and no error.'
+                              : `Diagnostic NOT stored: ${diagUpload.reason}
+
+The TIMING button still has the full record; save it before running another operation.`}
+                      >
+                        {diagUpload.state === 'stored' ? 'DIAG ✓'
+                          : diagUpload.state === 'sending' ? 'DIAG …'
+                            : diagUpload.state === 'none' ? 'DIAG —' : 'DIAG ✕'}
+                      </span>
+                    )}
                     {dmeLink.lastTransferTiming && (
                       <button
                         onClick={handleSaveTransferTiming}

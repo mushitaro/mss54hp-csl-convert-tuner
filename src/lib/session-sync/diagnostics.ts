@@ -84,14 +84,30 @@ export interface StoredDiagnostic {
 }
 
 /**
- * Sends one record. Resolves to the stored size, or null when it could not be sent.
+ * What became of an upload. Silent success, nameable failure.
+ *
+ * It used to return `number | null` and the caller ignored it, which made "the store has no record
+ * of that run" indistinguishable from "the run was never uploaded" and from "there is no token on
+ * this device". Two rounds of vehicle testing were spent on that ambiguity. The result is a value
+ * now, and the UI shows it — quietly when it worked, plainly when it did not.
+ */
+export type DiagnosticUpload =
+    | { ok: true; bytes: number }
+    | { ok: false; reason: string };
+
+/**
+ * Sends one record.
  *
  * **Never throws.** Every call site is on a path that has just finished a read, a write or a
  * datalog — several of them inside a `finally` — and an upload that rejected there would surface as
  * an unhandled rejection, or worse, replace the operation's own error with a networking one.
  */
-export async function uploadDiagnostic(record: DiagnosticRecord, settings: SyncSettings): Promise<number | null> {
-    if (!canSync(settings)) return null;
+export async function uploadDiagnostic(record: DiagnosticRecord, settings: SyncSettings): Promise<DiagnosticUpload> {
+    if (!canSync(settings)) {
+        // Not an error, and the most likely explanation for an empty store: this build carries no
+        // token, or this device was pointed somewhere else. Named rather than swallowed.
+        return { ok: false, reason: 'no sync token on this device' };
+    }
     try {
         const payloadGz = await gzipJson(record);
         const response = await call(settings, '/api/diagnostics', {
@@ -122,12 +138,13 @@ export async function uploadDiagnostic(record: DiagnosticRecord, settings: SyncS
             }),
         });
         const body = await response.json() as { storedBytes: number };
-        return body.storedBytes;
-    } catch {
-        // Deliberately swallowed, and deliberately not retried. The record is still downloadable,
-        // the operation it describes has already ended, and the one thing an upload must never do
-        // is become the reason a flash reports a failure it did not have.
-        return null;
+        return { ok: true, bytes: body.storedBytes };
+    } catch (e) {
+        // Still not retried, and still unable to reach the caller as an exception: the record is
+        // downloadable either way, the operation it describes has already ended, and an upload must
+        // never become the reason a flash reports a failure it did not have. What changed is that
+        // the reason comes back instead of being discarded.
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
     }
 }
 
