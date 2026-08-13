@@ -25,7 +25,7 @@ import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload } from 'lucide-react';
-import { PRIVACY_POLICY_URL } from '@/config/links';
+import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint } from '@/lib/types';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
@@ -380,6 +380,9 @@ export default function Home() {
   const [menuDrag, setMenuDrag] = useState<{ x: number; y: number } | null>(null);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
+  // ポリシーの URL はブラウザ言語で日英を出し分ける。ヘッダーのリンクは静的 HTML に焼き込まれる
+  // ため、判定はマウント後 — 理由は hooks/usePrivacyPolicyUrl.ts に書いてある。
+  const privacyUrl = usePrivacyPolicyUrl();
 
   const {
     binaryFile, currentMap, binaryBuffer, patchStatus,
@@ -1709,7 +1712,7 @@ export default function Home() {
               `_blank` is not decoration: a same-tab navigation would drop the serial link and take
               an unsaved run with it. */}
           <a
-            href={PRIVACY_POLICY_URL}
+            href={privacyUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors"

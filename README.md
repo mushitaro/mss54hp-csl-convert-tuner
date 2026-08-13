@@ -215,8 +215,12 @@ Implementation details (DS2 protocol, checksum algorithm, addresses, verificatio
 documented in [docs/implementation-notes.md](docs/implementation-notes.md).
 
 The app processes everything in your own browser — BINs, logs and sessions are stored locally and are
-not uploaded anywhere. The [privacy policy](https://m3.tsunagi.app/privacy-policy) is linked from the
-header, from the menu sheet, and from the disclaimer shown on first use.
+not uploaded anywhere. The privacy policy is linked from the header, from the menu sheet, and from the
+disclaimer shown on first use, and it is published in
+[English](https://m3.tsunagi.app/en/privacy-policy#tuner) and
+[Japanese](https://m3.tsunagi.app/privacy-policy#tuner) — the links follow your browser's language,
+the same way the dialogs do. Section 9 covers this tool specifically: what it stores on your device,
+what it reads from the DME (including the VIN), and the single request it makes to the network.
 
 ## ⚠️ Safety — please read before flashing
 

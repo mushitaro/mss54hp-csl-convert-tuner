@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
-import { PRIVACY_POLICY_URL } from '@/config/links';
+import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -106,6 +106,8 @@ export const MobileMenu: React.FC<Props> = ({
 }) => {
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
     const [hot, setHot] = useState<string | null>(null);
+    // 日英の出し分け。判定がマウント後なのは hooks/usePrivacyPolicyUrl.ts の理由による。
+    const privacyUrl = usePrivacyPolicyUrl();
     useEffect(() => {
         if (!dragFrom) return;
         // 12px, about a millimetre of skin. Below it the press is a tap that happens to wobble.
@@ -292,7 +294,7 @@ export const MobileMenu: React.FC<Props> = ({
                         `_blank` is not decoration: a same-tab navigation would drop the serial link
                         and take an unsaved run with it. */}
                     <a
-                        href={PRIVACY_POLICY_URL}
+                        href={privacyUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center justify-center gap-2 py-4 border-b border-slate-900 text-slate-600 hover:text-slate-400 transition-colors"

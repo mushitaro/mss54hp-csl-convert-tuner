@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
 import { useDialogLang } from '@/hooks/useDialogLang';
-import { PRIVACY_POLICY_URL } from '@/config/links';
+import { privacyPolicyUrl } from '@/config/links';
 
 interface Props {
     /** 「同意して続ける」を押した時に呼ばれる。dontShowAgain が真なら次回以降は非表示にする。 */
@@ -94,7 +94,7 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                         遷移させないため。 */}
                     <p>
                         <a
-                            href={PRIVACY_POLICY_URL}
+                            href={privacyPolicyUrl(lang)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-[11px] text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
