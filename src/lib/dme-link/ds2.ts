@@ -403,6 +403,41 @@ export type Ds2SupportedBaud = 9600 | 38400 | 125000;
  */
 export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 125000];
 
+/**
+ * Selectable bytes-per-read-telegram, largest first. Exactly the reference's
+ * `AllowedDs2MemoryBlockSizes = { 122, 96, 64, 32 }`.
+ *
+ * **This is a reliability control, not a speed one, and the direction that helps is DOWNWARD.**
+ * 122 is already very nearly the maximum: the DME publishes a 132-byte telegram cap, so a read
+ * payload can reach 128, and 122 → 128 is worth 538 → 512 exchanges ≈ 1.3%. There is nothing above.
+ *
+ * What it is for is the one variable that has never been moved at 38400. From karter16's own
+ * journal, on running the MSS54 outside programming mode: *"I found even in normal OS mode 38,400
+ * kinda worked **provided the block size wasn't too big**"* — followed by the judgement that it
+ * "wasn't stable enough to make an actual feature". Every 38400 attempt here, on both transports,
+ * has been at 122. Six deaths on desktop Web Serial (chunks 0/1/4/7/9/17) and three on Android
+ * WebUSB (chunks 23/1/3), all with the same signature: the echo returns, then the ECU sends zero
+ * bytes. That is not a corrupted frame, and the Android result rules out the port close/reopen that
+ * was the last remaining host-side suspect.
+ *
+ * The arithmetic, so the trade is visible before a drive rather than after it. At 38400 the
+ * per-exchange cost is roughly `tx + ~55 ms turnaround + rx`, and the turnaround is paid per
+ * exchange no matter how small the block — so shrinking the block buys stability by spending the
+ * saving:
+ *
+ * | block | exchanges | ~total at 38400 |
+ * |---|---|---|
+ * | 122 | 538 | ~51 s |
+ * | 96 | 683 | ~59 s |
+ * | 64 | 1024 | ~79 s |
+ * | 32 | 2048 | ~139 s — **slower than 9600's measured 126 s** |
+ *
+ * So 96 and 64 are the two worth trying; 32 is there to complete the reference's set and to be a
+ * last resort for a link that will not hold at any useful rate, not because it could ever be fast.
+ */
+export const DS2_READ_BLOCK_SIZES = [122, 96, 64, 32] as const;
+export type Ds2ReadBlockSize = typeof DS2_READ_BLOCK_SIZES[number];
+
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
         case 38400: return Ds2BaudRate.Baud38400;

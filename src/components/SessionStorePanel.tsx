@@ -6,6 +6,7 @@ import {
     EMPTY_SETTINGS, StoredSession, SyncSettings, canSync, hasBakedToken, isBakedToken,
     listStoredSessions, loadSyncSettings, restoreSession, saveSyncSettings,
 } from '@/lib/session-sync/client';
+import { StoredDiagnostic, listStoredDiagnostics } from '@/lib/session-sync/diagnostics';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 const TEXT = {
@@ -27,6 +28,12 @@ const TEXT = {
         needToken: 'トークンを入れると、SYNC が使えるようになります（セッション一覧の各行にも同期ボタンが出ます）。',
         loading: '取得中…',
         cols: { at: '同期', label: '名前', pts: '点数', ch: 'ch', size: 'サイズ' },
+        diagTitle: 'リンク診断（READ / WRITE / LOG）',
+        diagHint: '読み書きの結果が、成功も失敗もそのまま入ります。失敗した走行こそ価値があるので、エラー文はそのまま保存しています。行をタップすると全文が出ます。',
+        diagRefresh: '診断を取得',
+        diagNone: 'まだ 1 件もありません。',
+        diagCols: { at: '時刻', kind: '種別', n: '交換', baud: 'baud', err: '結果' },
+        diagOk: 'OK',
     },
     en: {
         title: 'SESSION SYNC',
@@ -46,6 +53,13 @@ const TEXT = {
         needToken: 'Enter a token to enable SYNC. A sync button also appears on every session row.',
         loading: 'Loading…',
         cols: { at: 'Synced', label: 'Label', pts: 'Points', ch: 'ch', size: 'Size' },
+        diagTitle: 'Link diagnostics (READ / WRITE / LOG)',
+        diagHint: 'Every read and write lands here, successes and failures alike. A failed run is the '
+            + 'valuable kind, so the error is kept verbatim. Tap a row for the whole message.',
+        diagRefresh: 'Load diagnostics',
+        diagNone: 'Nothing recorded yet.',
+        diagCols: { at: 'When', kind: 'Kind', n: 'Exch', baud: 'baud', err: 'Outcome' },
+        diagOk: 'OK',
     },
 };
 
@@ -76,6 +90,8 @@ export const SessionStorePanel: React.FC<{
     const [busy, setBusy] = useState<string | null>(null);
     const [listError, setListError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
+    const [diags, setDiags] = useState<StoredDiagnostic[] | null>(null);
+    const [diagLoading, setDiagLoading] = useState(false);
     const t = TEXT[useDialogLang()];
 
     // localStorage is not available during the static prerender, so the real value can only be
@@ -113,6 +129,28 @@ export const SessionStorePanel: React.FC<{
             setListError((e as Error).message);
         } finally {
             setBusy(null);
+        }
+    };
+
+    /**
+     * Loads the link diagnostics.
+     *
+     * Separate button and separate list from the sessions above, deliberately. They answer different
+     * questions — "is my work backed up" versus "why did that read die" — and one combined refresh
+     * would make the common case pay for the rare one on a phone with two bars of signal.
+     *
+     * On its own button rather than on open, for the same reason.
+     */
+    const refreshDiags = async () => {
+        setDiagLoading(true);
+        setListError(null);
+        try {
+            setDiags(await listStoredDiagnostics(settings, 25));
+        } catch (e) {
+            setListError((e as Error).message);
+            setDiags(null);
+        } finally {
+            setDiagLoading(false);
         }
     };
 
@@ -281,6 +319,72 @@ export const SessionStorePanel: React.FC<{
                                     </tbody>
                                 </table>
                             ))}
+
+                        {/* Link diagnostics.
+                            This is the half that was missing. Read and write results have been
+                            uploading themselves since the feature shipped — three failed 38400 reads
+                            among them — and there was no way to look at any of it without a laptop
+                            and `npm run db:diagnostics`. From the car, the data went up and vanished.
+                            A store you cannot read from is a write-only hole. */}
+                        <div className="pt-2 border-t border-slate-800 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] text-slate-500 uppercase tracking-wider">{t.diagTitle}</span>
+                                <button
+                                    onClick={refreshDiags}
+                                    disabled={!canSync(settings) || diagLoading}
+                                    className="shrink-0 min-h-8 px-2 text-[10px] font-bold tracking-wider bg-slate-800 hover:bg-slate-700 text-slate-300 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                    {diagLoading ? t.loading : t.diagRefresh}
+                                </button>
+                            </div>
+                            <p className="text-[9px] text-slate-600">{t.diagHint}</p>
+
+                            {diags && (diags.length === 0
+                                ? <p className="text-[9px] text-slate-600">{t.diagNone}</p>
+                                : (
+                                    <table className="w-full text-[9px] font-mono">
+                                        <thead className="text-slate-600">
+                                            <tr className="text-left">
+                                                <th className="py-1 font-normal">{t.diagCols.at}</th>
+                                                <th className="py-1 font-normal">{t.diagCols.kind}</th>
+                                                <th className="py-1 font-normal text-right">{t.diagCols.n}</th>
+                                                <th className="py-1 font-normal text-right">{t.diagCols.baud}</th>
+                                                <th className="py-1 font-normal">{t.diagCols.err}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="text-slate-400">
+                                            {diags.map(d => (
+                                                <tr key={d.id} className="border-t border-slate-800 align-top">
+                                                    <td className="py-1 text-slate-500 whitespace-nowrap">
+                                                        {new Date(d.created_at).toLocaleString(undefined,
+                                                            { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                                    </td>
+                                                    <td className="py-1 uppercase">
+                                                        {d.kind}{d.mock ? <span className="text-slate-700"> mock</span> : null}
+                                                    </td>
+                                                    <td className="py-1 text-right">{d.exchanges.toLocaleString()}</td>
+                                                    {/* Asked-for beside ran-at, because a refused switch silently
+                                                        falls back and without both every attempt reads as "9600". */}
+                                                    <td className="py-1 text-right whitespace-nowrap">
+                                                        {d.requested_baud !== null && d.requested_baud !== d.baud
+                                                            ? <span className="text-amber-500/80">{d.requested_baud}&rarr;{d.baud}</span>
+                                                            : (d.baud ?? '-')}
+                                                    </td>
+                                                    {/* The message in full on tap/hover. Truncating it in the cell and
+                                                        nowhere else would hide the latched transport-error name, which
+                                                        is the part that separates a receive overrun from a physical
+                                                        fault from a DME that simply stopped answering. */}
+                                                    <td className="py-1 pl-2 break-words" title={d.error ?? t.diagOk}>
+                                                        {d.completed
+                                                            ? <span className="text-emerald-300">{t.diagOk}</span>
+                                                            : <span className="text-red-400">{d.error ?? 'FAILED'}</span>}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                ))}
+                        </div>
                     </div>
                 </div>
             )}

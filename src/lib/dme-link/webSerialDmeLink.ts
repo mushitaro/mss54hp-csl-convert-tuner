@@ -12,6 +12,7 @@ import {
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
     TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
     Ds2EncodingChecksum, parseEncodingChecksum, faultedAreas, DATA_TUNE_CHECKSUM_BITS,
+    Ds2ReadBlockSize,
 } from './ds2';
 import {
     parseSystemAddressTable, findPointer, parseAifEntries, latestPopulatedAifEntry,
@@ -195,6 +196,14 @@ export class WebSerialDmeLink implements DmeLink {
      */
     private readonly readBaud: Ds2SupportedBaud;
     /**
+     * Bytes per read telegram. Defaults to the layout's 122.
+     *
+     * An instance field, NOT a mutation of Mss54HpDataTuneLayout: the write chunk lives in that same
+     * object behind a module-load invariant, and the two were one constant until a latent brick was
+     * found in it. Nothing here may reach the write path, and an instance field cannot.
+     */
+    private readonly readChunkSize: number;
+    /**
      * Set once a baud boost has actually been accepted, and never cleared. Adaptation reads/clears
      * need a normal 9600 session; readPartialBin does try to hand the session back at 9600, but that
      * restore is best-effort by design (see its finally block), so "we restored it" is not something
@@ -250,8 +259,9 @@ export class WebSerialDmeLink implements DmeLink {
      * protocol over WebUSB on Android. Deciding it in the factory rather than at the call site keeps
      * the React layer free of platform knowledge.
      */
-    constructor(options?: { readBaud?: Ds2SupportedBaud; transport?: ByteTransport }) {
+    constructor(options?: { readBaud?: Ds2SupportedBaud; readChunkSize?: Ds2ReadBlockSize; transport?: ByteTransport }) {
         this.readBaud = options?.readBaud ?? 9600;
+        this.readChunkSize = options?.readChunkSize ?? Mss54HpDataTuneLayout.readChunkSize;
         this.transport = options?.transport ?? createDmeTransport();
     }
 
@@ -704,7 +714,7 @@ export class WebSerialDmeLink implements DmeLink {
         let done = 0;
         while (done < length) {
             if (this.aborted) throw new DmeLinkError('Read cancelled');
-            const count = Math.min(Mss54HpDataTuneLayout.readChunkSize, length - done);
+            const count = Math.min(this.readChunkSize, length - done);
             const chunk = await this.readMemoryChunkWithRetry(Mss54HpDataTuneLayout.readSegment, address + done, count);
             out.set(chunk, done);
             done += count;
@@ -724,7 +734,7 @@ export class WebSerialDmeLink implements DmeLink {
         // never mean "here is the previous read's".
         this.timing.clearReport();
         this.events = new LinkEventLog();
-        this.events.push(`READ start: requested baud ${this.readBaud}, chunk ${Mss54HpDataTuneLayout.readChunkSize}`);
+        this.events.push(`READ start: requested baud ${this.readBaud}, chunk ${this.readChunkSize}`);
         // Refresh the seed/key unlock before reading program/data memory, mirroring the reference
         // EnsureUnlockedForProgramMemoryReadAsync. The diagnostic session can lapse between connect
         // and the user clicking READ; re-login is a no-op if still unlocked.
@@ -768,7 +778,8 @@ export class WebSerialDmeLink implements DmeLink {
         // is the case the instrument matters most for — that is the whole 38400 question.
         let readError: unknown;
         try {
-            const { slave, master, readChunkSize } = Mss54HpDataTuneLayout;
+            const { slave, master } = Mss54HpDataTuneLayout;
+            const readChunkSize = this.readChunkSize;
             const total = slave.length + master.length;
 
             // Arm the instrument for exactly this read. Sized up-front so nothing allocates per chunk.

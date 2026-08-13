@@ -50,7 +50,9 @@ import { useIsPreviewBuild, usePreviewTitle } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo, TransferPhase } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, LOW_SLOT_WARNING_THRESHOLD } from '@/lib/dme-link/flashCounter';
-import { TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
+import {
+  TUNE_ADAPTATION_CLEAR, DS2_SELECTABLE_BAUDS, DS2_READ_BLOCK_SIZES, Ds2ReadBlockSize, Ds2SupportedBaud,
+} from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { beginLiveRun, appendLiveChunk, endLiveRun, discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
@@ -1221,7 +1223,7 @@ export default function Home() {
     // Before the early return, so a read that died part-way — the read worth measuring, and the one
     // a baud experiment produces — is uploaded rather than dropped along with the buffer it failed
     // to return.
-    publishDiagnostics();
+    publishDiagnostics('read');
     if (!buffer) return;
     const target = await ensureDraft();
     if (!target) return;
@@ -1472,7 +1474,7 @@ export default function Home() {
     // Before either branch, and on both of them. A write that failed part-way on an already-erased
     // ECU is the single most valuable record this app can produce, and it is also the one the
     // driver is least able to collect by hand at the time.
-    publishDiagnostics();
+    publishDiagnostics('write');
     if (verification) {
       // The licence QUICK rests on: on this ECU, a byte-for-byte read-back and the DME's own
       // checksum have now agreed. Recorded only when BOTH actually ran and passed — a FULL write on
@@ -1638,15 +1640,24 @@ export default function Home() {
    * One shape, used by the download button and by the upload — so a record read out of the store at
    * a desk and a file saved on a phone are the same thing, and neither can quietly carry less.
    */
-  const buildDiagnosticRecord = (): DiagnosticRecord | null => {
+  const buildDiagnosticRecord = (kind: DiagnosticRecord['kind']): DiagnosticRecord | null => {
     const report = dmeLink.lastTransferTiming;
-    if (!report) return null;
+    const events = dmeLink.lastEventLog;
+    // A record with no report is still worth having when something went wrong — the timing window
+    // opens after the login and after the baud switch, so a refused login or a switch the DME
+    // accepts and then goes silent on produces no report at all. Those are the failures most worth
+    // reading, and returning early on a missing report is what made them the ones that left no
+    // trace. Nothing at all is published only when there is genuinely nothing: no report, no
+    // events, and no error.
+    if (!report && !events && !dmeLink.error) return null;
     return {
       id: crypto.randomUUID(),
-      kind: report.kind,
+      // From the caller, not from the report: there may not be one, and a record that cannot say
+      // which operation it describes is not a record.
+      kind,
       createdAt: Date.now(),
-      completed: report.completed,
-      error: report.error,
+      completed: report?.completed ?? false,
+      error: report?.error ?? dmeLink.error ?? 'failed before the instrument was armed',
       // Which car, which bytes, which transport. A timing report without these is a column of
       // numbers that cannot be compared against any other run — and comparing runs is the only
       // thing any of this is for.
@@ -1656,7 +1667,7 @@ export default function Home() {
       mock: dmeLink.mockMode,
       sessionId: currentSession?.id ?? null,
       report,
-      events: dmeLink.lastEventLog,
+      events,
     };
   };
 
@@ -1668,8 +1679,8 @@ export default function Home() {
    * replace the operation's own error with a networking one — and the operation's own error is the
    * thing being diagnosed. `uploadDiagnostic` never throws; this `void` is belt and braces.
    */
-  const publishDiagnostics = () => {
-    const record = buildDiagnosticRecord();
+  const publishDiagnostics = (kind: DiagnosticRecord['kind']) => {
+    const record = buildDiagnosticRecord(kind);
     if (!record) return;
     void uploadDiagnostic(record, uploadSettingsRef.current);
   };
@@ -1679,8 +1690,8 @@ export default function Home() {
    *  inter-arrival gaps are the part that distinguishes per-byte USB packets from batched ones, and
    *  those need a file. */
   const handleSaveTransferTiming = () => {
-    const record = buildDiagnosticRecord();
     const report = dmeLink.lastTransferTiming;
+    const record = report && buildDiagnosticRecord(report.kind);
     if (!record || !report) return;
     // Every knob that was set, in the name. A sweep produces a folder of these, and `baud` alone does
     // not separate a gap-0 run from a gap-20 one at the same rate — it is all inside the JSON, but a
@@ -2408,6 +2419,32 @@ export default function Home() {
                     Save
                   </span>
                 </button>
+                {/* SYNC, immediately after SAVE, because they are one flow and were previously
+                    impossible to see together at this width: SAVE lives in this bar, which renders
+                    on every tab EXCEPT startup, and the only labelled SYNC lived in the SESSIONS
+                    header, which renders on startup and nowhere else. The header's icon-only cloud
+                    was on screen the whole time and was not read as the other half of saving —
+                    reported as "SAVE never appears anywhere near SYNC", which was exactly right.
+                    Same status object as the header twin and the menu row, so all three agree. */}
+                {syncLook && (
+                  <button
+                    onClick={syncLook.disabled ? undefined : () => { void handleSyncAll(); }}
+                    disabled={syncLook.disabled}
+                    className="group inline-flex items-center gap-1.5 disabled:cursor-default"
+                    title={syncLook.title}
+                  >
+                    <UploadCloud className={`w-3 h-3 transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400'
+                      : syncLook.tone === 'error' ? 'text-red-400'
+                        : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse' : 'text-slate-700'}`} />
+                    <span className={`text-[9px] font-bold uppercase tracking-widest transition-colors ${syncLook.tone === 'ready' ? 'text-blue-400 group-hover:text-blue-300'
+                      : syncLook.tone === 'error' ? 'text-red-400 group-hover:text-red-300'
+                        : 'text-slate-700'}`}>
+                      {/* The count, not the sentence — this bar is 26px and already crowded. The
+                          full wording is in the tooltip and in the menu sheet. */}
+                      Sync{(syncStatus?.pending ?? 0) > 0 ? ` ${syncStatus?.pending}` : ''}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -2796,6 +2833,37 @@ export default function Home() {
                           >
                             {DS2_SELECTABLE_BAUDS.map(baud => (
                               <option key={baud} value={baud}>{baud}</option>
+                            ))}
+                          </select>
+                        </label>
+                        {/* Bytes per read telegram. Only shown once a rate above 9600 is selected:
+                            at 9600 the read completes at 122 every time, so the control would be a
+                            knob that can only make things slower. It appears exactly where it has a
+                            job — karter16's journal says 38400 "kinda worked provided the block size
+                            wasn't too big", and 122 is the only size either transport has ever tried
+                            it at. */}
+                        <label
+                          className={`flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer ${dmeLink.mockMode || dmeLink.readBaud === 9600 ? 'invisible pointer-events-none' : ''}`}
+                          aria-hidden={dmeLink.mockMode || dmeLink.readBaud === 9600}
+                          title={'Bytes per read telegram. A RELIABILITY control — the direction that helps is downward, and every step down costs time.\n\n'
+                            + '122 — the default, and very nearly the maximum: the DME publishes a 132-byte telegram cap, so 128 is the ceiling and 122→128 is worth about 1.3%. There is nothing above this.\n\n'
+                            + 'Why it is here: every 38400 attempt so far, on both transports, has been at 122. Six deaths on desktop (chunks 0/1/4/7/9/17) and three on Android (23/1/3), all the same signature — the echo returns, then the ECU sends zero bytes. karter16\'s journal reports 38400 working in normal OS mode "provided the block size wasn\'t too big".\n\n'
+                            + 'The trade at 38400, since the ~55ms turnaround is paid per exchange whatever the size:\n'
+                            + '  122 → 538 exchanges, ~51s\n'
+                            + '   96 → 683 exchanges, ~59s\n'
+                            + '   64 → 1024 exchanges, ~79s\n'
+                            + '   32 → 2048 exchanges, ~139s — SLOWER than 9600\'s measured 126s\n\n'
+                            + 'So 96 and 64 are the two worth trying. 32 completes the reference tool\'s set; it cannot be fast.'}
+                        >
+                          BLK
+                          <select
+                            value={dmeLink.readChunkSize}
+                            disabled={dmeLink.mockMode || dmeLink.readBaud === 9600}
+                            onChange={(e) => dmeLink.setReadChunkSize(Number(e.target.value) as Ds2ReadBlockSize)}
+                            className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
+                          >
+                            {DS2_READ_BLOCK_SIZES.map(size => (
+                              <option key={size} value={size}>{size}</option>
                             ))}
                           </select>
                         </label>
