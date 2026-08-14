@@ -788,6 +788,9 @@ export class WebSerialDmeLink implements DmeLink {
                 chunkSize: readChunkSize,
                 // [addr][len][status][N data][cksum].
                 responseBytes: readChunkSize + 4,
+                // [addr][len][0x06][seg][addr x3][count][cksum] — the read asks with 9 bytes, which
+                // is why `write` and `echoLatency` behave on this path and not on the write path.
+                requestBytes: 9,
                 requestedBaud: this.readBaud,
                 switchOutcome: this.lastSwitchOutcome,
                 baud: this.lastReadBaud,
@@ -942,6 +945,9 @@ export class WebSerialDmeLink implements DmeLink {
             // A write acknowledgement is [addr][len][status][seg][addr×3][count][verify][cksum] —
             // fixed at 10 bytes however much was written.
             responseBytes: 10,
+            // [addr][len][0x07][seg][addr x3][count][122 data][cksum] = 131 bytes. On this path the
+            // request is 78% of the exchange, which is what `requestWire` exists to show.
+            requestBytes: 9 + Mss54HpDataTuneLayout.writeChunkSize,
             requestedBaud: null,
             switchOutcome: null,
             baud: this.lastReadBaud ?? 9600,

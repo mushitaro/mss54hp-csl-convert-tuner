@@ -1098,10 +1098,14 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
   halves of why: the DME accepts 125000 only *"when the DME is in programming mode"*, and the
   bootloader offers no way in *"except through valid flash wipe commands"* — which the tune write
   performs anyway. Still not attempted here, and the reason to be careful is unchanged: the switch
-  can only be sent at the moment failure is most expensive, i.e. on an already-erased ECU. One
-  arithmetic caveat to carry into it — `SIM_SYNCR = 0xD700` puts the DME's SCI at `f_sys/(32×SCBR)`,
-  where 125000 is not exactly representable, so host and ECU may sit ~4.9% apart even when the
-  switch is accepted.
+  can only be sent at the moment failure is most expensive, i.e. on an already-erased ECU.
+  **The payoff is now measured rather than guessed. The DME programs a chunk in 32 ms and the
+  request takes 150 ms on the wire, so a write telegram is 78% wire and a boost is worth roughly
+  4× — not the 2.2× estimated while the programming time was assumed to be ~110 ms** (§15).
+  One arithmetic caveat to carry into it: `SIM_SYNCR = 0xD700` puts the DME's SCI at
+  `f_sys/(32×SCBR)`, where 125000 is not exactly representable, so host and ECU may sit ~4.9% apart
+  even when the switch is accepted. `requestWire` against `theoreticalRequestWire` is the check that
+  says whether the request really moved.
 - **The datalog is uninstrumented on the wire, and both documented sample rates are wrong.** §8 says
   "≈ 6–7 samples/s" and `page.tsx` says "~10 Hz"; the wire alone caps the current two-block sample at
   6.1 Hz and the arithmetic with a settled ~40 ms turnaround gives ~4.1 Hz. `kind: 'log'` exists in
@@ -1574,6 +1578,68 @@ Android that is not merely slow: our read loop is the only thing draining the FT
 turnaround is a flash sector erase, seconds long) and not the read-back (turnaround ~40 ms, the DME
 thinking). All three in one median would blend three different physical quantities into the one
 number the measurement exists to isolate. The erase is timed separately, by a plain stopwatch.
+
+### What the first real write measured, and what it broke (2026-08-14)
+
+Two writes on the car, both clean, 0 retries, and the number the whole baud question was waiting on:
+
+| | verify | erase | write telegrams | verification | total |
+|---|---|---|---|---|---|
+| #1 | FULL | 1150 ms | 330 in 65.7 s | read-back **102.9 s** matched, checksum clean | ~170 s |
+| #2 | QUICK | 1134 ms | 330 in 66.2 s | checksum clean | **~68 s** |
+
+330, not 538: 39% of chunks were all-`0xFF` and skipped. The read-back is 103 s rather than the
+standalone read's 126 s because it starts on a DME already warmed by 330 telegrams — the same
+warm-up §9 documents, seen from the other side.
+
+**`median.turnaround` = 32.0 ms.** That is the DME's per-chunk flash programming time, measured for
+the first time; §11 had been carrying ~110 ms back-derived from a README sentence. The per-telegram
+budget at 9600 reconciles exactly:
+
+```
+request  131 B x 1.1458 = 150.1 ms   78%
+program  (DME)          =  32.0 ms   17%
+response  10 B          =  11.5 ms    6%
+                          -------
+                           193.6 ms  (measured median 192.7 / 203.0)
+```
+
+**So the write is wire-bound, not programming-bound, and the earlier estimate that a boost would cap
+around 2.2x is withdrawn.** At 125000 the same exchange is 11.5 + 32 + 0.9 = 44.4 ms, so 330
+telegrams fall from 65.7 s to ~14.7 s and a QUICK write goes from ~68 s to roughly 17 s — about 4x.
+
+**Round-trip byte-exactness, proven independently of the read-back.** Write #1 (patch OFF) sent
+`cab93360…`; the standalone READ between the two writes returned a BASE whose sha256 is `cab93360…`;
+write #2 (patch ON) then sent `07930701…`, which is bit-for-bit the hand-edited BIN that had been
+loaded in the first place. The patch is a clean involution and the flash is exact in both
+directions. A read-back verify compares against bytes held in the same process; this does not.
+
+#### Three lanes were wrong on the write path, and one was missing
+
+The lanes were modelled on a READ, whose request is 9 bytes and whose `write()` therefore resolves
+long before any echo. A write telegram is 131 bytes and takes 150 ms to leave, so:
+
+- **`echoLatency` reported −56.3 ms.** The first echo byte legitimately arrives before `write()`
+  returns. A negative latency is not a small error; the quantity does not exist for that exchange.
+  It is **NaN** now, which `JSON.stringify` renders as `null` and D1 stores as NULL.
+- **`responseWire` reported 0.0** on one write and 12.7 on the next. A 10-byte acknowledgement
+  arrives in a single rx wake, so first and last are the same instant. Also **NaN** now, gated on
+  having seen at least two response events — 0.0 read as "the response transferred instantly".
+- **`write` reported 71.7 ms**, against ~0.10 ms on a read. That one is *correct*: the transport
+  back-pressures on a 131-byte payload. Only its documentation was wrong, which said any non-zero
+  value pointed at WICG/serial#123 write-splitting.
+- **`requestWire` did not exist.** 78% of a write exchange was invisible. It is first-echo-byte to
+  last-echo-byte — our own request on the wire — with `theoreticalRequestWire` beside it, giving the
+  write the same lie-detector `responseWire` gives the read. This is the lane to watch when 125000
+  is attempted: it says whether the request really went out four times faster.
+
+`median()` now skips NaN rather than sorting it, so one measurable exchange among unmeasurable ones
+still produces the right answer. `turnaround` was never affected — it is measured from the last echo
+byte and reconciles with the arithmetic above to within a millisecond, which is why the 32 ms stands.
+
+Verified with synthetic event replays (15 assertions: a short request keeps every lane, a long one
+reports the two impossible ones as absent, NaN survives serialisation as null) and against the real
+class with a scripted DME (29 assertions total).
 
 ### The event log
 

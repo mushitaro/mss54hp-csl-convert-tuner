@@ -45,16 +45,48 @@ export type TransferKind = 'read' | 'write' | 'log';
 
 /** A single exchange's decomposition, all in milliseconds unless noted. */
 export interface ChunkTiming {
-    /** Time inside transport.write() — should be ~0. Non-zero points at WICG/serial#123, where
-     *  Chromium splits a write that straddles its ring-buffer boundary. */
+    /**
+     * Time inside transport.write().
+     *
+     * ~0 on a READ, whose request is 9 bytes. **Not** on a WRITE: a flash telegram is 131 bytes and
+     * measured 71.7 ms here, because the transport back-pressures until the chip has room. That is
+     * the transport doing its job, not the WICG/serial#123 write-splitting this lane was originally
+     * written to catch — read a large value on a write path as "the request is long", and only
+     * suspect splitting when a SHORT request takes measurable time.
+     */
     write: number;
-    /** Write resolved -> first byte of our own echo came back. Cable + UART turnaround. */
+    /**
+     * Write resolved -> first byte of our own echo came back. Cable + UART turnaround, and it also
+     * reveals a driver latency timer.
+     *
+     * **NaN when the request was still going out.** A 131-byte write takes 150 ms on the wire while
+     * `write()` resolves partway through, so the echo's first byte legitimately arrives BEFORE the
+     * write call returns and the subtraction goes negative. It reported -56.3 ms on a real flash.
+     * A negative latency is not a small error, it is a quantity that does not exist for that
+     * exchange, so it is recorded as absent rather than as a number nobody can use.
+     */
     echoLatency: number;
+    /**
+     * First echo byte -> last echo byte: OUR OWN REQUEST going out, measured on the wire.
+     *
+     * The mirror of `responseWire`, and the lane the write path was missing entirely. 150 of a write
+     * telegram's 193 ms are the request, and none of it was visible — the instrument could see the
+     * DME's 32 ms of programming and the 11 ms coming back, and simply had no line for the 78% in
+     * between. Compare against `theoreticalRequestWire` for the same lie-detector `responseWire`
+     * gives a read: it says whether the link is really running at the rate the UI claims.
+     */
+    requestWire: number;
     /** Last echo byte -> first response byte. THE number: this is the DME thinking, and it is the one
      *  part of the residual that no host-side change can recover. */
     turnaround: number;
-    /** First response byte -> last response byte. Compare against theory to confirm the link is
-     *  really running at the baud we believe it is. */
+    /**
+     * First response byte -> last response byte. Compare against theory to confirm the link is
+     * really running at the baud we believe it is.
+     *
+     * **NaN when the whole response arrived in a single rx event**, which is the normal case for a
+     * 10-byte write acknowledgement: first and last are the same instant, so the difference is 0 and
+     * means nothing. A read's 126-byte response spans ~11 events and measures properly.
+     */
     responseWire: number;
     /** Total time the chunk's three readExact calls spent parked waiting to be woken. */
     parked: number;
@@ -117,6 +149,9 @@ export interface TransferTimingReport {
      * which measurement block it was.
      */
     responseBytes: number;
+    /** Whole request frame length in bytes, for `theoreticalRequestWire`. A read asks with 9
+     *  bytes, a write telegram with 131 — and on a write the request IS most of the exchange. */
+    requestBytes: number;
     /**
      * The rate the UI ASKED for. Separate from `baud`, which is what the read actually ran at.
      *
@@ -142,6 +177,9 @@ export interface TransferTimingReport {
     /** Expected response wire time for one chunk at `baud`, from the frame size. Lets a reader see at
      *  a glance whether the line is running at the rate the UI claims. */
     theoreticalResponseWire: number | null;
+    /** Expected time for the REQUEST at `baud`, from `requestBytes`. On a write this is the biggest
+     *  single term in the exchange, so it is the one to check a boosted rate against. */
+    theoreticalRequestWire: number | null;
     /** High-resolution inter-arrival gaps (ms) for a few sampled chunks. Bounded on purpose: a full
      *  trace would be ~72,600 events. Shows the shape a median cannot — e.g. whether bytes arrive one
      *  per ~1.15 ms (per-byte USB packets) or in bursts. */
@@ -154,12 +192,22 @@ const SAMPLE_MID = 5;
 /** Cap on retained gaps per sampled chunk. A 251-byte response cannot exceed this. */
 const MAX_GAPS_PER_SAMPLE = 300;
 
+/**
+ * Median over the entries that were actually measurable.
+ *
+ * NaN means "this quantity does not exist for this exchange", which is a different fact from zero
+ * and has to stay different: a write acknowledgement arrives in a single rx event, so its
+ * `responseWire` is structurally unmeasurable — and reporting that as 0.0 ms invited exactly the
+ * reading that the link had transferred the response instantaneously. NaN also survives to the wire
+ * correctly: `JSON.stringify` renders it as `null`, and D1 stores NULL.
+ */
 function median(values: Float64Array, count: number): number {
-    if (count === 0) return 0;
-    const copy = Array.prototype.slice.call(values, 0, count) as number[];
+    const copy: number[] = [];
+    for (let i = 0; i < count; i++) if (!Number.isNaN(values[i])) copy.push(values[i]);
+    if (copy.length === 0) return count === 0 ? 0 : NaN;
     copy.sort((a, b) => a - b);
-    const mid = count >> 1;
-    return count % 2 ? copy[mid] : (copy[mid - 1] + copy[mid]) / 2;
+    const mid = copy.length >> 1;
+    return copy.length % 2 ? copy[mid] : (copy[mid - 1] + copy[mid]) / 2;
 }
 
 export class TransferTiming {
@@ -180,6 +228,7 @@ export class TransferTiming {
     private write!: Float64Array;
     private echoLatency!: Float64Array;
     private turnaround!: Float64Array;
+    private requestWire!: Float64Array;
     private responseWire!: Float64Array;
     private parked!: Float64Array;
     private rxEvents!: Float64Array;
@@ -195,6 +244,7 @@ export class TransferTiming {
     private kind: TransferKind = 'read';
     private chunkSize = 0;
     private responseBytes = 0;
+    private requestBytes = 0;
     private requestedBaud: number | null = null;
     private switchOutcome: string | null = null;
     private baud: number | null = null;
@@ -215,6 +265,9 @@ export class TransferTiming {
     /** True between echoComplete() and the end of the chunk, so the pump can tag the first rx event
      *  after the echo as the start of the response. */
     private awaitingResponse = false;
+    /** rx events seen AFTER the echo completed. One means the response arrived whole in a single
+     *  wake, which makes its wire time unmeasurable rather than zero. */
+    private responseRx = 0;
 
     private sampleGaps: Float64Array | null = null;
     private sampleGapCount = 0;
@@ -260,19 +313,21 @@ export class TransferTiming {
         kind: TransferKind;
         chunkSize: number;
         responseBytes: number;
+        requestBytes: number;
         requestedBaud: number | null;
         switchOutcome: string | null;
         baud: number | null;
         maxTelegramLength: number | null;
     }): void {
         if (!this.enabled) return;
-        const { kind, chunkSize, responseBytes, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
+        const { kind, chunkSize, responseBytes, requestBytes, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
         // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
         // a read. Overflow beyond that is dropped by the bounds check in end().
         const capacity = expectedChunks + 8;
         this.write = new Float64Array(capacity);
         this.echoLatency = new Float64Array(capacity);
         this.turnaround = new Float64Array(capacity);
+        this.requestWire = new Float64Array(capacity);
         this.responseWire = new Float64Array(capacity);
         this.parked = new Float64Array(capacity);
         this.rxEvents = new Float64Array(capacity);
@@ -286,6 +341,7 @@ export class TransferTiming {
         this.kind = kind;
         this.chunkSize = chunkSize;
         this.responseBytes = responseBytes;
+        this.requestBytes = requestBytes;
         this.requestedBaud = requestedBaud;
         this.switchOutcome = switchOutcome;
         this.baud = baud;
@@ -309,6 +365,7 @@ export class TransferTiming {
         this.chunkRx = 0;
         this.chunkParked = 0;
         this.awaitingResponse = false;
+        this.responseRx = 0;
         this.sampleGapCount = 0;
     }
 
@@ -332,7 +389,10 @@ export class TransferTiming {
         else if (this.sampleGaps !== null && this.sampleGapCount < MAX_GAPS_PER_SAMPLE && this.isSampledChunk()) {
             this.sampleGaps[this.sampleGapCount++] = now - this.tLastRx;
         }
-        if (this.awaitingResponse && this.tFirstResponseRx === 0) this.tFirstResponseRx = now;
+        if (this.awaitingResponse) {
+            if (this.tFirstResponseRx === 0) this.tFirstResponseRx = now;
+            this.responseRx++;
+        }
         this.tLastRx = now;
         this.chunkRx++;
     }
@@ -369,9 +429,17 @@ export class TransferTiming {
         const i = this.index;
         if (i >= this.capacity) return;
         this.write[i] = this.tWriteEnd - this.tWriteStart;
-        this.echoLatency[i] = this.tFirstRx ? this.tFirstRx - this.tWriteEnd : 0;
+        // NaN, not a negative number: on a long request the echo starts before write() resolves, and
+        // "the first byte came back 56 ms before we finished asking" is not a latency.
+        this.echoLatency[i] = this.tFirstRx && this.tFirstRx >= this.tWriteEnd
+            ? this.tFirstRx - this.tWriteEnd : NaN;
+        // Our own request on the wire — first echo byte to last.
+        this.requestWire[i] = this.tFirstRx && this.tEchoDone > this.tFirstRx
+            ? this.tEchoDone - this.tFirstRx : NaN;
         this.turnaround[i] = this.tFirstResponseRx && this.tEchoDone ? this.tFirstResponseRx - this.tEchoDone : 0;
-        this.responseWire[i] = this.tFirstResponseRx ? this.tLastRx - this.tFirstResponseRx : 0;
+        // Two events or it did not happen: with one, first and last are the same instant and the
+        // difference is 0 for a structural reason rather than a measured one.
+        this.responseWire[i] = this.responseRx >= 2 ? this.tLastRx - this.tFirstResponseRx : NaN;
         this.parked[i] = this.chunkParked;
         this.rxEvents[i] = this.chunkRx;
         this.total[i] = now - this.tExchangeStart;
@@ -403,6 +471,7 @@ export class TransferTiming {
             elapsedMs: performance.now() - this.tBegin,
             chunkSize: this.chunkSize,
             responseBytes: this.responseBytes,
+            requestBytes: this.requestBytes,
             requestedBaud: this.requestedBaud,
             switchOutcome: this.switchOutcome,
             baud: this.baud,
@@ -412,6 +481,7 @@ export class TransferTiming {
                 write: median(this.write, n),
                 echoLatency: median(this.echoLatency, n),
                 turnaround: median(this.turnaround, n),
+                requestWire: median(this.requestWire, n),
                 responseWire: median(this.responseWire, n),
                 parked: median(this.parked, n),
                 rxEvents: median(this.rxEvents, n),
@@ -422,6 +492,9 @@ export class TransferTiming {
             // size comes from the caller — see `responseBytes` for why it is not derived here.
             theoreticalResponseWire: this.baud && this.responseBytes
                 ? (this.responseBytes * 11 * 1000) / this.baud
+                : null,
+            theoreticalRequestWire: this.baud && this.requestBytes
+                ? (this.requestBytes * 11 * 1000) / this.baud
                 : null,
             samples: this.samples,
         };
