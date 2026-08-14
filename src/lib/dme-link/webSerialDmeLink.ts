@@ -11,6 +11,7 @@ import {
     buildSeedRequestPayload, buildKeyPayload, isAlreadyUnlockedResponse, isSeedResponse, calculateLoginKey,
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
     TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
+    programmingWriteTimeoutFor,
     Ds2EncodingChecksum, parseEncodingChecksum, faultedAreas, DATA_TUNE_CHECKSUM_BITS,
     Ds2ReadBlockSize,
 } from './ds2';
@@ -204,6 +205,15 @@ export class WebSerialDmeLink implements DmeLink {
      */
     private readonly readChunkSize: number;
     /**
+     * Rate to boost the FLASH WRITE to, after the erase. 9600 means no switch is attempted at all.
+     *
+     * Separate from `readBaud` because they are different experiments with wildly different costs.
+     * A refused or failed read costs a read. This switch can only be sent from inside a programming
+     * session, which only exists after the erase — so the one moment it can be tried is the moment
+     * the ECU has least to fall back on. See writePartialBinInner for the ordering that bounds it.
+     */
+    private writeBaud: Ds2SupportedBaud;
+    /**
      * Set once a baud boost has actually been accepted, and never cleared. Adaptation reads/clears
      * need a normal 9600 session; readPartialBin does try to hand the session back at 9600, but that
      * restore is best-effort by design (see its finally block), so "we restored it" is not something
@@ -254,13 +264,32 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     /**
+     * Arms the post-erase boost. Refused outright on a transport that cannot change rate on the open
+     * handle, so an armed selector can never mean something the transport will not do — the guard
+     * lives here rather than only in the UI, because the UI is not the thing that sends 0x91.
+     */
+    setWriteBaud(baud: Ds2SupportedBaud): void {
+        this.writeBaud = baud !== 9600 && !this.transport.reopenIsInPlace() ? 9600 : baud;
+    }
+
+    getWriteBaud(): Ds2SupportedBaud {
+        return this.writeBaud;
+    }
+
+    /**
      * `transport` exists for the bench harness and for a future byte-level fake; production passes
      * nothing and gets whatever this browser can reach — Web Serial on desktop, the FTDI vendor
      * protocol over WebUSB on Android. Deciding it in the factory rather than at the call site keeps
      * the React layer free of platform knowledge.
      */
-    constructor(options?: { readBaud?: Ds2SupportedBaud; readChunkSize?: Ds2ReadBlockSize; transport?: ByteTransport }) {
+    constructor(options?: {
+        readBaud?: Ds2SupportedBaud;
+        readChunkSize?: Ds2ReadBlockSize;
+        writeBaud?: Ds2SupportedBaud;
+        transport?: ByteTransport;
+    }) {
         this.readBaud = options?.readBaud ?? 9600;
+        this.writeBaud = options?.writeBaud ?? 9600;
         this.readChunkSize = options?.readChunkSize ?? Mss54HpDataTuneLayout.readChunkSize;
         this.transport = options?.transport ?? createDmeTransport();
     }
@@ -837,13 +866,13 @@ export class WebSerialDmeLink implements DmeLink {
      * those cells already read 0xFF, so re-writing them is an unnecessary program cycle (matches the
      * reference erase-aware sparse write). Progress reflects position through the block.
      */
-    private async writeBlock(address: number, data: Uint8Array, doneBefore: number, grandTotal: number, onProgress?: (writtenSoFar: number, total: number) => void): Promise<void> {
+    private async writeBlock(address: number, data: Uint8Array, doneBefore: number, grandTotal: number, onProgress?: (writtenSoFar: number, total: number) => void, timeoutMs = WRITE_RESPONSE_TIMEOUT_MS): Promise<void> {
         let offset = 0;
         while (offset < data.length) {
             const chunkSize = Math.min(Mss54HpDataTuneLayout.writeChunkSize, data.length - offset);
             const chunk = data.subarray(offset, offset + chunkSize);
             if (!isAllErased(chunk)) {
-                await this.writeMemoryChunk(address + offset, chunk);
+                await this.writeMemoryChunk(address + offset, chunk, timeoutMs);
             }
             offset += chunkSize;
             onProgress?.(doneBefore + offset, grandTotal);
@@ -920,6 +949,68 @@ export class WebSerialDmeLink implements DmeLink {
         }
         log.pushTimed('ERASE data area', tErase);
 
+        // ---- The baud boost. Everything about its placement is forced, so read the order. --------
+        //
+        // The DME accepts 125000 only while in a programming session, and karter16's journal is
+        // explicit that its bootloader offers no way into one "except through valid flash wipe
+        // commands". The erase above IS that command, so this is the first instant the switch can
+        // be sent — and the ECU's data area is already gone, which makes it also the most expensive
+        // instant for the link to break. The reference does exactly this (TuneWriteExecutor.cs:67),
+        // best-effort, continuing at 9600 if the switch is refused.
+        //
+        // Three things bound the risk, and the third is the one that matters:
+        //   1. Only on a transport that changes rate on the open handle. Web Serial must close and
+        //      reopen the port, which is a disturbance no other DS2 tool produces at all, let alone
+        //      mid-programming-session.
+        //   2. A refused switch is a normal outcome. 0x91 is answered before anything moves.
+        //   3. A switch that is ACKed and then does NOT hold is caught by a keep-alive probe, and
+        //      the fallback runs BEFORE the first write telegram. Not one byte of flash data is
+        //      sent at a rate that has not just answered.
+        //
+        // The probe uses 0x9E inside a programming session, which neither tool has exercised there.
+        // If the DME refuses tester-present in this state the probe fails, we fall back, and the
+        // cost is the boost — not the flash. That is the right way for an unknown to fail.
+        let boostedWrite = false;
+        let writeTimeout = WRITE_RESPONSE_TIMEOUT_MS;
+        this.lastSwitchOutcome = null;
+        if (this.writeBaud !== 9600) {
+            if (!this.transport.reopenIsInPlace()) {
+                this.lastSwitchOutcome = 'not attempted — this transport cannot change baud without reopening the port';
+                log.push(`BAUD boost skipped: ${this.lastSwitchOutcome}`);
+            } else if (await this.trySwitchBaud(ds2BaudSpecFor(this.writeBaud))) {
+                if (await this.linkRespondsAfterSwitch()) {
+                    boostedWrite = true;
+                    writeTimeout = programmingWriteTimeoutFor(this.writeBaud);
+                    log.push(`BAUD boosted to ${this.writeBaud} and answered — write timeout now ${writeTimeout} ms`);
+                } else {
+                    const accepted = this.lastSwitchOutcome ?? 'accepted';
+                    // Ask it back down, then force the local side regardless — same order and same
+                    // best-effort reasoning as the read path's fallback.
+                    try { await this.trySwitchBaud(Ds2BaudRate.Baud9600); } catch { }
+                    try { await this.transport.reopen(Ds2BaudRate.Baud9600.baudRate); } catch { }
+                    await this.resyncTransport();
+                    // AFTER the restore: trySwitchBaud writes lastSwitchOutcome itself, so setting
+                    // this first would have the fallback's own outcome overwrite the real one.
+                    this.lastSwitchOutcome = `${accepted}, then the link went silent — fell back to 9600 before any write telegram`;
+                    log.push(`BAUD boost to ${this.writeBaud} did not hold; writing at 9600`);
+                    if (!(await this.linkRespondsAfterSwitch())) {
+                        // The ECU is erased and will not answer at either rate. Stopping here is the
+                        // honest outcome: every write telegram from now would fail anyway, and the
+                        // recovery is a power cycle plus a re-run, which restarts from the erase.
+                        throw new DmeLinkError(
+                            `The DME stopped answering after a baud switch to ${this.writeBaud}, and did not come back at 9600. `
+                            + `The data area has been erased and NOT rewritten. Turn the ignition off, wait 10 seconds, turn it back on, `
+                            + `reconnect, and run WRITE again — it always starts from the erase, so re-running it is safe.`,
+                        );
+                    }
+                }
+            } else {
+                log.push(`BAUD boost to ${this.writeBaud} refused: ${this.lastSwitchOutcome}`);
+            }
+        }
+        const writeBaudActual = boostedWrite ? this.writeBaud : 9600;
+        this.hasBoostedThisSession ||= boostedWrite;
+
         // How the progress bar is split, derived from what this write will actually do rather than
         // stored as a pair of constants.
         //
@@ -948,15 +1039,17 @@ export class WebSerialDmeLink implements DmeLink {
             // [addr][len][0x07][seg][addr x3][count][122 data][cksum] = 131 bytes. On this path the
             // request is 78% of the exchange, which is what `requestWire` exists to show.
             requestBytes: 9 + Mss54HpDataTuneLayout.writeChunkSize,
-            requestedBaud: null,
-            switchOutcome: null,
-            baud: this.lastReadBaud ?? 9600,
+            // Asked-for beside ran-at. A refused boost falls back silently, and without both a
+            // 9600 write is indistinguishable from a 125000 one that was never attempted.
+            requestedBaud: this.writeBaud,
+            switchOutcome: this.lastSwitchOutcome,
+            baud: writeBaudActual,
             maxTelegramLength: this.maxTelegramLength,
         });
         let writeError: unknown;
         try {
-            await this.writeBlock(slave.address, slaveData, 0, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
-            await this.writeBlock(master.address, masterData, slave.length, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'));
+            await this.writeBlock(slave.address, slaveData, 0, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'), writeTimeout);
+            await this.writeBlock(master.address, masterData, slave.length, total, (w, t) => onProgress?.(Math.round((w / t) * WRITE_SHARE), 'writing'), writeTimeout);
         } catch (e) {
             writeError = e;
             throw e;
@@ -965,14 +1058,39 @@ export class WebSerialDmeLink implements DmeLink {
             // that matters more than on the read: the ECU is erased, the user is about to re-run, and
             // what the telegrams were doing beforehand is the only evidence there will ever be.
             const report = this.timing.finish(writeError);
-            if (report) log.push(`WRITE telegrams: ${report.chunks} in ${Math.round(report.elapsedMs)} ms, median turnaround ${report.median.turnaround.toFixed(1)} ms, ${report.retries} retr(ies)`);
+            if (report) {
+                log.push(`WRITE telegrams: ${report.chunks} in ${Math.round(report.elapsedMs)} ms at ${writeBaudActual} baud, `
+                    + `median turnaround ${report.median.turnaround.toFixed(1)} ms, requestWire ${report.median.requestWire.toFixed(1)} ms `
+                    + `(theory ${report.theoreticalRequestWire?.toFixed(1)}), ${report.retries} retr(ies)`);
+            }
         }
 
-        // Finalize the programming session (segment 0x0F, address 0).
-        await this.sendProgrammingControl(Ds2ProgrammingControl.FinishSegment, 0, WRITE_RESPONSE_TIMEOUT_MS, true);
-        log.push('FINALIZE data programming');
+        try {
+            // Finalize the programming session (segment 0x0F, address 0).
+            await this.sendProgrammingControl(Ds2ProgrammingControl.FinishSegment, 0, WRITE_RESPONSE_TIMEOUT_MS, true);
+            log.push('FINALIZE data programming');
 
-        return this.verifyWrite(options.verifyMode, slaveData, masterData, total, WRITE_SHARE, VERIFY_SHARE, onProgress);
+            // Finalize and the verification stay at the boosted rate, matching the reference, which
+            // logs that it is "staying at boosted baud for the remainder of the session". Under FULL
+            // that also carries the 65536-byte read-back, which is 103 s of the operation at 9600.
+            return await this.verifyWrite(options.verifyMode, slaveData, masterData, total, WRITE_SHARE, VERIFY_SHARE, onProgress);
+        } finally {
+            // Hand the session back at 9600 however this ended.
+            //
+            // Not optional and not conditional on success: the adaptation paths, the flash counter
+            // and the next connect all assume 9600, and a link left at 125000 after a write that
+            // threw would make the NEXT operation fail for a reason that has nothing to do with it.
+            // Best-effort in the same way the read path's restore is — if the DME never really
+            // moved, the 0x91 fails and forcing the local port back is what recovers.
+            if (boostedWrite) {
+                try {
+                    await this.trySwitchBaud(Ds2BaudRate.Baud9600);
+                } catch {
+                    try { await this.transport.reopen(Ds2BaudRate.Baud9600.baudRate); } catch { }
+                }
+                log.push('BAUD restored to 9600');
+            }
+        }
     }
 
     /**

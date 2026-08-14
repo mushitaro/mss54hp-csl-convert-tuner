@@ -432,6 +432,21 @@ export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 1
 export const DS2_READ_BLOCK_SIZES = [122, 96, 64, 32] as const;
 export type Ds2ReadBlockSize = typeof DS2_READ_BLOCK_SIZES[number];
 
+/**
+ * How long to allow a flash write telegram at a given rate, mirroring the reference's
+ * `ProgrammingWriteSupport.GetProgrammingWriteTimeout`.
+ *
+ * It scales because most of the allowance is the telegram itself, not the DME: at 9600 a 131-byte
+ * request takes 150 ms on the wire and the ECU programs the cells in ~32 ms (measured), so a 15 s
+ * budget is ~90x the expected time. Keeping 15 s at 125000 would leave a dead link taking 15 s per
+ * chunk to notice — 330 chunks of that is over an hour of not failing.
+ */
+export function programmingWriteTimeoutFor(baud: number): number {
+    if (baud >= 125000) return 3000;
+    if (baud >= 38400) return 10000;
+    return 15000;
+}
+
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
         case 38400: return Ds2BaudRate.Baud38400;

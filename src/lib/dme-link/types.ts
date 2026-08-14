@@ -1,7 +1,7 @@
 import { AdaptationSnapshot } from './adaptationBlocks';
 import { FlashCounterInfo } from './flashCounter';
 import { ServiceBlockPointers } from './serviceBlockReport';
-import type { Ds2EncodingChecksum } from './ds2';
+import type { Ds2EncodingChecksum, Ds2SupportedBaud } from './ds2';
 import type { LinkEventLogSnapshot } from './linkEventLog';
 import type { TransferTimingReport } from './transferTiming';
 
@@ -248,6 +248,22 @@ export interface DmeLink {
      * The caller arms it once at connect.
      */
     setTimingEnabled?(enabled: boolean): void;
+    /**
+     * Arms (or disarms) the post-erase baud boost on the WRITE path. 9600 disarms it.
+     *
+     * Settable on a live link rather than fixed at construction, because the control that arms it
+     * has to be on screen at the moment WRITE is pressed. A dangerous mode you cannot see is worse
+     * than one you cannot change: the read rate can sit in a constructor option because a refused
+     * read costs a read, but this one is only reachable after the erase, and the operator has to be
+     * able to look at the panel and see whether it is armed. The link still owns the value — the
+     * hook resets it to 9600 on every connect, so it can never be inherited from a past session.
+     */
+    setWriteBaud?(baud: Ds2SupportedBaud): void;
+    /**
+     * What the boost is actually armed at, which is not always what was asked for — see setWriteBaud.
+     * The caller reads this back so the control can never show a rate the link declined to take.
+     */
+    getWriteBaud?(): Ds2SupportedBaud;
 }
 
 export class DmeLinkError extends Error {

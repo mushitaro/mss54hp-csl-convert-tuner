@@ -400,6 +400,12 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
      * Serial backend re-de-asserts DTR/RTS after every reopen because its close/open cycle moves
      * them; nothing moves them here, so they are set once at open() and never touched again.
      */
+    /** SET_BAUD_RATE on the open handle. No close, no reopen, no control-line movement — the read
+     *  loop never even stops. This is what the reference does over D2XX. */
+    reopenIsInPlace(): boolean {
+        return true;
+    }
+
     async reopen(baudRate: number): Promise<void> {
         if (!this.device) throw new DmeLinkError('USB device is not open');
         await this.setBaudRate(baudRate);

@@ -99,7 +99,7 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full' }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null }) =>
         'DMEへ書き込みます。\n\n' +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
@@ -111,6 +111,15 @@ const JA = {
             : 'QUICK — DME自身のチェックサム照合(DS2 0x0A)。ECUが自分のフラッシュに保持するCRCとの一致を1往復で確認します。'}\n` +
         (a.verifyMode === 'quick'
             ? '  ※ QUICKはカバー範囲65536バイト中65528バイト。ただし不一致の「位置」は分かりません。\n'
+            : '') +
+        (a.boostBaud
+            ? `\n⚠ BOOST ${a.boostBaud} が有効です（実験）。\n`
+            + '  消去の直後にボーレートを上げます。DME は programming session の中でしかこのレートを受け付けません。\n'
+            + '  切替が拒否されたら 9600 のまま書き込みます。受理されたのに応答が止まった場合は、\n'
+            + '  書き込み電文を 1 バイトも送らずに 9600 へ戻します。\n'
+            + '  ⚠ どちらのレートでも応答しなくなった場合、データ領域が消去されたまま中断します。\n'
+            + '    復旧は「イグニッション OFF → 10 秒 → ON → 再接続 → WRITE をやり直し」です。\n'
+            + '    WRITE は必ず消去からやり直すので、再実行は安全です。\n'
             : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
@@ -283,7 +292,7 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full' }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null }) =>
         'Writing to the DME.\n\n' +
         `What will be written: ${a.tuned
             ? 'the tuned map'
@@ -293,6 +302,16 @@ const EN: NativeDialogText = {
             : "QUICK — the DME's own encoding checksum (DS2 0x0A), one exchange against the CRCs the ECU stores in its own flash."}\n` +
         (a.verifyMode === 'quick'
             ? '  Note: QUICK covers 65528 of the 65536 bytes, but cannot say WHERE a mismatch is.\n'
+            : '') +
+        (a.boostBaud
+            ? `\n⚠ BOOST ${a.boostBaud} is armed (experimental).\n`
+            + '  The baud is raised immediately after the erase — the DME accepts this rate only from\n'
+            + '  inside a programming session, and the erase is what creates one.\n'
+            + '  A refused switch simply writes at 9600. If it is accepted and the DME then goes silent,\n'
+            + '  the link drops back to 9600 before a single write telegram is sent.\n'
+            + '  ⚠ If the ECU answers at neither rate, the write stops with the data area erased.\n'
+            + '    Recovery: ignition OFF, wait 10 s, back ON, reconnect, and run WRITE again.\n'
+            + '    WRITE always restarts from the erase, so re-running it is safe.\n'
             : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +

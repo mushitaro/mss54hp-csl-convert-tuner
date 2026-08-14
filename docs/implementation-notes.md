@@ -1641,6 +1641,58 @@ Verified with synthetic event replays (15 assertions: a short request keeps ever
 reports the two impossible ones as absent, NaN survives serialisation as null) and against the real
 class with a scripted DME (29 assertions total).
 
+### The 125000 boost on the write path — armed, not yet run on the car (2026-08-14)
+
+The measurement above is what justifies this: 78% of a write telegram is our own request on the
+wire, so the rate is worth about 4x. It is also the most dangerous thing in the app, because the DME
+only accepts `0x91` from inside a programming session and the only way into one is the erase. The
+switch can therefore be attempted at exactly one moment — the moment the data area is gone.
+
+The ordering in `writePartialBinInner` is what bounds it, and it is asserted on the telegram trace
+rather than on the outcome, because "it fell back correctly" is only true if no flash data left at a
+rate that had not just answered:
+
+```
+erase (9600) -> 0x91 -> keep-alive probe -> [silence?] -> back to 9600 -> first write telegram
+```
+
+Four ways out, in order of how much they cost:
+
+1. **Refused** (`0xB0`): the port is never reopened, the write runs at 9600. Costs nothing.
+2. **Accepted and alive**: every write telegram goes at 125000, and a `finally` hands the session
+   back at 9600.
+3. **Accepted then silent**: the probe fails, the link drops to 9600, and **zero** write telegrams
+   have been sent. This is the case the harness exists for.
+4. **Dead at both rates**: the write stops with the data area erased and throws a message that says
+   so, plus the recovery — ignition off, 10 s, on, reconnect, WRITE again. `writePartialBin` always
+   restarts from the erase, so re-running it is safe. Not a brick, but not unharmed either, and the
+   confirm dialog says exactly that before the erase rather than after.
+
+**Only offered on WebUSB/FTDI**, and the gate is a transport capability (`reopenIsInPlace()`), not a
+platform test. Web Serial has to close and reopen the port to change rate; doing that on an erased
+ECU is the one host-side risk with nothing to fall back on. `setWriteBaud` refuses the arming
+outright on a transport that answers false, and `getWriteBaud` is read back into the selector — so
+the panel can never show 125000 while the link sits at 9600.
+
+**Armed on the live link, not at construction.** The first cut passed `writeBaud` as a constructor
+option, which put the control in the disconnected panel beside READ. That is wrong twice: the
+selector belongs on screen at the moment WRITE is pressed, and a dangerous mode you cannot see is
+worse than one you cannot change. It now resets to 9600 on every connect, in `connect()` rather than
+only in the `useState` initialiser, so it can never be inherited from a session the operator has
+stopped thinking about.
+
+The write timeout is derived from the rate (`programmingWriteTimeoutFor`: 3 s at >=125000, 10 s at
+38400+, 15 s below), following the reference. A fixed 15 s at 125000 would wait 340 telegram-times
+before admitting the link was gone.
+
+Twenty-two assertions across nine scenarios, all on the trace: the probe precedes the first write,
+a refused switch never reopens, an ACK-then-silent DME receives zero telegrams at 125000, the
+dead-at-both-rates throw names the erased state and the recovery, and arming after construction is
+what actually reaches the link.
+
+**Not yet run on a car.** The numbers above are arithmetic. `requestWire` is the lane that settles
+it: 150.1 ms at 9600 against a predicted ~11.5 ms.
+
 ### The event log
 
 `linkEventLog.ts` — a bounded ring of phase-level lines: login, erase and its duration, the write

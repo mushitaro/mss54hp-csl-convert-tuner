@@ -1476,6 +1476,9 @@ export default function Home() {
         // Stated here rather than left to the selector alone. The mode changes what "verified"
         // will mean in the dialog that follows, and the moment to say so is before the erase.
         verifyMode,
+        // Same reasoning, higher stakes: this one changes what can go WRONG, and its failure mode
+        // lands on an erased ECU. It is never implied.
+        boostBaud: dmeLink.writeBaud !== 9600 ? dmeLink.writeBaud : null,
         // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
         // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
         // and the screen or an app switch can take the connection down mid-write.
@@ -2921,6 +2924,31 @@ The TIMING button still has the full record; save it before running another oper
                             <option value="full">FULL</option>
                           </select>
                         </label>
+                        {/* The write-path baud boost. Rendered ONLY on the transport that can change
+                            rate on the open handle, because this switch can only be sent after the
+                            erase — the one moment a port close/reopen could desync the link is the
+                            moment the ECU has nothing to fall back on. It is not a preference: it
+                            resets to 9600 on every connect and has to be armed deliberately. */}
+                        {dmeLink.transportKind === 'web-usb-ftdi' && !dmeLink.mockMode && (
+                          <label
+                            className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
+                            title={'EXPERIMENT. Boost the flash write to 125000 baud, which the DME accepts only from inside a programming session — the erase is what creates one.\n\n'
+                              + 'Measured on this car: a write telegram is 150ms of request, 32ms of DME programming and 11ms of response, so it is 78% wire. At 125000 that is ~44ms instead of ~193ms, and a QUICK write should fall from about 68s to roughly 17s.\n\n'
+                              + 'Bounded three ways: the switch is answered before anything moves; a refused switch just writes at 9600; and if it is accepted but the DME then goes silent, the link drops back to 9600 BEFORE a single write telegram is sent.\n\n'
+                              + 'If the ECU answers at neither rate the write stops with the data area erased. Recovery is ignition off, 10 seconds, back on, reconnect, WRITE again — it always restarts from the erase. Resets to 9600 on every connect.'}
+                          >
+                            BOOST
+                            <select
+                              value={dmeLink.writeBaud}
+                              disabled={dmeLink.state !== 'connected'}
+                              onChange={(e) => dmeLink.setWriteBaud(Number(e.target.value) as Ds2SupportedBaud)}
+                              className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <option value={9600}>OFF</option>
+                              <option value={125000}>125000</option>
+                            </select>
+                          </label>
+                        )}
                         <button
                           onClick={dmeLink.disconnect}
                           className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-red-400 transition-colors"

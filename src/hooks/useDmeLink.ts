@@ -73,6 +73,26 @@ export function useDmeLink() {
     // 125000 is known to fail here, and the rates between the two are untested candidates.
     const [readBaud, setReadBaud] = useState<Ds2SupportedBaud>(9600);
     /**
+     * Rate to boost the FLASH WRITE to after the erase. 9600 = no switch attempted.
+     *
+     * Deliberately NOT defaulted from readBaud, and deliberately not persisted. The read's rate is a
+     * cheap experiment; this one can only be run on an erased ECU, so it starts off on every
+     * connect and has to be armed on purpose each time.
+     */
+    const [writeBaud, setWriteBaudState] = useState<Ds2SupportedBaud>(9600);
+    /**
+     * Arms the boost on the live link as well as in React state, so the selector is describing the
+     * link that WRITE will actually use rather than the one that existed at connect.
+     *
+     * The link is the authority on whether the arming took: a transport that cannot change rate on
+     * the open handle refuses it, and reading the value back means the selector cannot sit on
+     * 125000 while the link quietly stays at 9600.
+     */
+    const setWriteBaud = useCallback((baud: Ds2SupportedBaud) => {
+        linkRef.current?.setWriteBaud?.(baud);
+        setWriteBaudState(linkRef.current?.getWriteBaud?.() ?? baud);
+    }, []);
+    /**
      * The last instrumented operation's numbers and its narrative, captured together.
      *
      * One slot for both, and one slot for every operation kind — the report itself says whether it
@@ -197,6 +217,11 @@ export function useDmeLink() {
             // a whole vehicle run every time someone forgot to arm it before driving out. Before
             // connect, because identify() already runs exchanges.
             link.setTimingEnabled?.(true);
+            // Every connect starts disarmed. The one thing that must not happen is a boost surviving
+            // from a session the operator has stopped thinking about — the selector says it resets,
+            // and the reset belongs where the link is built, not only where the state is declared.
+            link.setWriteBaud?.(9600);
+            setWriteBaudState(9600);
             const id = await link.connect();
             linkRef.current = link;
             setIdentity(id);
@@ -621,6 +646,8 @@ export function useDmeLink() {
         setMockMode,
         readBaud,
         setReadBaud,
+        writeBaud,
+        setWriteBaud,
         lastTransferTiming,
         lastEventLog,
         /** Read these, not the state above, from inside an async handler — see the refs' comment. */

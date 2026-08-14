@@ -19,6 +19,21 @@ export interface ByteTransport {
     open(): Promise<void>;
     close(): Promise<void>;
     reopen(baudRate: number): Promise<void>;
+    /**
+     * Whether `reopen` changes the rate on the OPEN handle, without closing the port.
+     *
+     * A capability question, not a platform check — which is what lets the DS2 layer stay ignorant
+     * of its backend while still refusing to do something only one backend can survive. Web Serial
+     * has no in-place baud change at all (`close()` + `open()` is mandatory, WICG/serial has no
+     * `setOptions`), so a boost there begins with a port transition no other DS2 tool produces, and
+     * moves DTR/RTS across it. The FTDI vendor path assigns the divisor on the open handle and never
+     * disturbs the line, exactly as the reference tool's `FT_SetBaudRate` does.
+     *
+     * It matters most for the WRITE path: there the switch can only be sent after the erase, so the
+     * one moment a transition could desync the link is the moment the ECU is least able to survive
+     * it. See writePartialBinInner.
+     */
+    reopenIsInPlace(): boolean;
     write(bytes: Uint8Array): Promise<void>;
     /**
      * Synchronous by contract, and it must stay that way. `resyncTransport` calls it without
