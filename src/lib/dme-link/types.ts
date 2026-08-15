@@ -54,6 +54,19 @@ export interface LiveMeasurement {
     rf?: number;
     /** TABG — exhaust gas temperature, 16 °C resolution. Same block as rpm/rawLoad. */
     exhaustTemp?: number;
+    /**
+     * TETV — tank-vent valve pulse time, ms. Same block as stft1/stft2, so it is free.
+     *
+     * Zero means the valve is shut and this sample's trim is the engine's own mixture error. Any
+     * non-zero value means some of `stft1`/`stft2` is the DME compensating for fuel it did not
+     * inject, and the sample is worth less than it looks. Undefined means this DME did not report
+     * the field at all — which is not the same as zero and must not be filtered as if it were.
+     */
+    tankVent?: number;
+    /** TEFC_LL_ST — tank-vent idle functional-check state. Non-zero while the check runs. */
+    tankVentCheckState?: number;
+    /** TEFC_ED — tank-vent diagnostic handle. Non-zero once the DME has faulted the valve. */
+    tankVentDiag?: number;
 }
 
 /**

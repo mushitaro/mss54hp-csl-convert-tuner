@@ -1595,12 +1595,21 @@ export class WebSerialDmeLink implements DmeLink {
         // correction, so the lambda channel must be validated before trusting tuning output.)
         let stft1 = 1.0;
         let stft2 = 1.0;
+        // No neutral default for these three. Trim falls back to 1.0 because a missing trim has an
+        // unambiguous "no correction" value; a missing purge duty does not — defaulting it to 0
+        // would assert the valve was shut, which is exactly the claim the channel exists to test.
+        let tankVent: number | undefined;
+        let tankVentCheckState: number | undefined;
+        let tankVentDiag: number | undefined;
         try {
             const opFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([OPERATING_MEASUREMENTS_BLOCK.selection]));
             if (isPositiveResponse(opFrame)) {
                 const op = decodeOperatingMeasurementsBlock(opFrame.payload);
                 stft1 = op.stft1 ?? 1.0;
                 stft2 = op.stft2 ?? 1.0;
+                tankVent = op.tankVent ?? undefined;
+                tankVentCheckState = op.tankVentCheckState ?? undefined;
+                tankVentDiag = op.tankVentDiag ?? undefined;
             }
         } catch {
             // Leave trim neutral — but resync, because a break latched here would otherwise be
@@ -1622,6 +1631,10 @@ export class WebSerialDmeLink implements DmeLink {
             // must stay distinguishable from a genuine 0 °C / 0 % reading.
             rf: std.rf ?? undefined,
             exhaustTemp: std.exhaustTemp ?? undefined,
+            // Free — same 90-byte response as stft1/stft2 above.
+            tankVent,
+            tankVentCheckState,
+            tankVentDiag,
         };
     }
 

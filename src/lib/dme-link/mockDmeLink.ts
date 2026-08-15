@@ -339,6 +339,13 @@ export class MockDmeLink implements DmeLink {
         // under K_TI_KATS_TABG_EIN (850 °C) so the mock does not trip the cat-protection filter.
         const rf = 10 + Math.sin(t * 0.7) * 0.6;
         const exhaustTemp = Math.round((360 + Math.sin(t * 0.11) * 40) / 16) * 16;
+        // Tank ventilation, modelled as the thing it actually is: intermittent. The DME purges in
+        // windows, so a mock that held a constant duty would teach the wrong shape — the reason this
+        // channel is worth logging is that it comes and goes, and that a run can be spoiled by a
+        // window you did not notice. ~30 s on, ~30 s off. At idle the stock duty map asks for only a
+        // few percent, and K_TE_TV_MIN puts the floor near 6.9 ms, so the open value stays small.
+        const purging = Math.sin(t * 0.1) > 0;
+        const tankVent = purging ? 7.4 + Math.sin(t * 0.6) * 0.5 : 0;
 
         return {
             time: t,
@@ -349,6 +356,12 @@ export class MockDmeLink implements DmeLink {
             coolantTemp,
             rf,
             exhaustTemp,
+            tankVent,
+            // Both idle at 0 on a healthy DME: the functional check is not running and the valve has
+            // not faulted. PRACTICE has no failure to simulate here, and inventing one would put a
+            // fault code on screen that no car reported.
+            tankVentCheckState: 0,
+            tankVentDiag: 0,
         };
     }
 

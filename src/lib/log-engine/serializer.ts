@@ -27,6 +27,12 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     // a CSV at all.
     const hasRf = points.some(p => p.rf !== undefined);
     const hasEgt = points.some(p => p.exhaustTemp !== undefined);
+    // Tank ventilation. Each column stands alone rather than sharing one flag: a DME can report the
+    // valve duty and not the TEFC state bytes, and a column of blanks says something different from
+    // an absent column.
+    const hasTankVent = points.some(p => p.tankVent !== undefined);
+    const hasTankVentCheck = points.some(p => p.tankVentCheckState !== undefined);
+    const hasTankVentDiag = points.some(p => p.tankVentDiag !== undefined);
 
     const rows = points.map(p => {
         const row: Record<string, number | string> = {
@@ -39,6 +45,9 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasTemp) row[M.COOLANT_TEMP] = p.coolantTemp ?? '';
         if (hasRf) row[M.RF] = p.rf ?? '';
         if (hasEgt) row[M.EXHAUST_TEMP] = p.exhaustTemp ?? '';
+        if (hasTankVent) row[M.TANK_VENT] = p.tankVent ?? '';
+        if (hasTankVentCheck) row[M.TANK_VENT_CHECK] = p.tankVentCheckState ?? '';
+        if (hasTankVentDiag) row[M.TANK_VENT_DIAG] = p.tankVentDiag ?? '';
         return row;
     });
 

@@ -15,7 +15,11 @@ export type FieldKey =
     // The cross-check pair: each of the two measured channels above, re-derived from the OTHER
     // one through the DME's own tables. Instruments, not data — they exist to be laid against
     // their measured counterparts, and a residual is what they are for.
-    | 'egtFromRfKorr' | 'rfKorrFromEgt';
+    | 'egtFromRfKorr' | 'rfKorrFromEgt'
+    // Tank ventilation, out of the same block as the lambda pair. Not a tuning input — a
+    // credibility check ON the tuning input, since purge moves the trims these channels sit
+    // beside. See LogDataPoint for why that matters.
+    | 'tankVent' | 'tankVentCheckState' | 'tankVentDiag';
 
 export interface FieldMeta {
     key: FieldKey;
@@ -91,6 +95,26 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         key: 'rfKorrFromEgt', label: 'RF KORR (EGT)', unit: '', format: v => v.toFixed(3),
         relevance: 'optional', chartAxis: 'y2', color: '#CBBCF2', // M-violet 200
     },
+    tankVent: {
+        key: 'tankVent', label: 'TANK VENT', unit: 'ms', format: v => v.toFixed(2),
+        // On y2 with the lambda traces on purpose: purge duty is only interesting laid directly
+        // against the trims it is disturbing, and the whole reason to log it is to see the two
+        // move together. Amber because it is a warning channel, not a measurement — nothing else
+        // in the registry uses that hue.
+        relevance: 'optional', chartAxis: 'y2', color: '#F0A020',
+    },
+    tankVentCheckState: {
+        key: 'tankVentCheckState', label: 'TEFC ST', unit: '', format: v => v.toFixed(0),
+        // A state number, so it is charted as a step on the lambda axis where its range (0-0x15)
+        // sits close enough to be readable beside a 1.0 trim without its own scale.
+        relevance: 'optional', chartAxis: 'y2', color: '#C77A10',
+    },
+    tankVentDiag: {
+        key: 'tankVentDiag', label: 'TEFC ED', unit: '', format: v => v.toFixed(0),
+        // Never charted. It is a fault handle: what matters is whether it is non-zero, which the
+        // table says better than a flat line at 0 says it.
+        relevance: 'optional', color: '#A05E0C',
+    },
 };
 
 export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as FieldKey[])
@@ -106,6 +130,12 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     // has an invertible correction profile), and a mostly-empty column shown by default reads as
     // a broken feature. Turn them on when checking a log against the DME, not while tuning.
     egtFromRfKorr: false, rfKorrFromEgt: false,
+    // Purge duty is ON by default wherever the log carries it, for the same reason EGT and RF are:
+    // the failure it describes is invisible otherwise, and a run spoiled by tank ventilation looks
+    // exactly like a run that simply disagrees with the last one. The two TEFC state bytes stay
+    // off — they answer a question you go looking for (did the functional check run? did the valve
+    // fault?) rather than one you want on screen while driving.
+    tankVent: true, tankVentCheckState: false, tankVentDiag: false,
 };
 
 /** For a derived channel, the logged channel whose presence decides whether the column belongs. */

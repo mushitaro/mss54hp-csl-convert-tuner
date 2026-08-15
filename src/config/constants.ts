@@ -86,6 +86,11 @@ export const APP_CONFIG = {
         // Header names the WRITER uses live above; the READER accepts any of CSV_ALIASES below.
         EXHAUST_TEMP: 'Abgastemperatur',
         RF: 'relative Fuellung',
+        // Tank ventilation. German, matching the rest of this table — the DME's own vocabulary is
+        // Tankentlueftung, and a log exported here should re-import through the same names.
+        TANK_VENT: 'Tankentlueftung Ventil',
+        TANK_VENT_CHECK: 'Tankentlueftung Funktionspruefung',
+        TANK_VENT_DIAG: 'Tankentlueftung Diagnose',
     },
 
     /**
@@ -123,6 +128,11 @@ export const APP_CONFIG = {
         // TODO(on-car): add the real Testo header names alongside. One entry each, nothing else.
         rf: ['relative fuellung'] as string[],
         exhaustTemp: ['abgastemperatur'] as string[],
+        // Same round-trip reasoning as the two above: these come from the live DS2 link, so the
+        // serializer's own header is the only name that exists for them today.
+        tankVent: ['tankentlueftung ventil'] as string[],
+        tankVentCheckState: ['tankentlueftung funktionspruefung'] as string[],
+        tankVentDiag: ['tankentlueftung diagnose'] as string[],
     },
 
     /**

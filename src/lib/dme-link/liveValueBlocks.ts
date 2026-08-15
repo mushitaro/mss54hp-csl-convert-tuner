@@ -5,7 +5,7 @@
  * blockDecoder.ts, shared with adaptationBlocks.ts.
  */
 
-import { FieldDef, decodeField } from './blockDecoder';
+import { type FieldDef, decodeField } from './blockDecoder';
 
 /** Selection 3 "Standard Measurements" (35 bytes) — RPM, coolant temp, and relative opening (RO). */
 export const STANDARD_MEASUREMENT_BLOCK = {
@@ -50,13 +50,53 @@ export const STANDARD_MEASUREMENT_BLOCK = {
     },
 };
 
-/** Selection 19 "Operating Measurements" (90 bytes) — lambda controller trim (STFT-equivalent). */
+/**
+ * Selection 19 "Operating Measurements" (90 bytes) — lambda controller trim (STFT-equivalent), and
+ * the tank-ventilation channels that ride along in the same response.
+ */
 export const OPERATING_MEASUREMENTS_BLOCK = {
     selection: 19,
     expectedLength: 90,
     fields: {
         stft1: { symbol: 'la_f_regler1', offset: 40, format: 'uint16', scale: 3.0517578125e-05, add: 0 } as FieldDef,
         stft2: { symbol: 'la_f_regler2', offset: 42, format: 'uint16', scale: 3.0517578125e-05, add: 0 } as FieldDef,
+
+        // --- tank ventilation ---------------------------------------------------------------
+        // Three more fields out of the SAME 90-byte response the two above already fetch. No extra
+        // round trip, no cost to the sample rate — the bytes were being discarded.
+        //
+        // Worth having because evaporative purge is the largest known threat to the reproducibility
+        // of a VE log, and until now this app had no way to see whether it was happening. karter16,
+        // thread 242281 #161: "in my experience this makes a MASSIVE difference to reproducibility,
+        // to the point that I personally wouldn't bother attempting tuning runs without it.
+        // Occasionally you get a lucky run where it is mostly not active ... but most of the time it
+        // has a significant impact on the end result."
+        //
+        // It reaches the numbers this app reads by two independent routes. Purged vapour is fuel the
+        // DME did not inject, so the lambda controller trims for it and `la_f_regler` moves — the
+        // one input the whole VE correction is derived from. And the DME's own purge estimate is
+        // subtracted from the air mass in m_calc (decomp/master/0216e2.txt), so `rf_p_saug` and
+        // therefore `rf` move as well. Stock KF_TE_N_RF_TVTE runs 94-99.6% duty above 2500 rpm at
+        // mid load, which is exactly the region worth tuning.
+        //
+        // Offsets from the reference catalog (DmeLiveValueCatalog.cs:138, :152, :168). Same caveat
+        // as `rf`/`tabg` in selection 3 above, and for the same reason: the master's responder
+        // (decomp/master/030b84.txt case 0x18) zeroes payload 38..47 — but that identical loop also
+        // zeroes 40 and 42, where la_f_regler1/2 are read successfully on a real car. The
+        // "slave fills them in afterwards" reading covers all of them or none. If tetv reads a flat
+        // zero on the car while the engine is clearly purging, that is evidence against the
+        // interpretation of offsets 40/42 as well, which is worth knowing either way.
+
+        /** TETV — tank-vent valve pulse time. 0 means the valve is commanded shut. */
+        tankVent: { symbol: 'tetv', offset: 38, format: 'uint16', scale: 0.002, add: 0 } as FieldDef,
+        /** TEFC_LL_ST — the idle functional-check state machine. Non-zero means the check is running,
+         *  and states 0x10-0x15 are the one path that drives TETV from TEFC rather than from the
+         *  duty map, i.e. the one path K_TE_TVTE_GA = 0 does NOT gate. Logged so that claim can be
+         *  tested rather than assumed. */
+        tankVentCheckState: { symbol: 'tefc_ll_st', offset: 62, format: 'uint8', scale: 1.0, add: 0 } as FieldDef,
+        /** TEFC_ED — the tank-vent diagnostic handle. Watch this after disabling purge: DTC 24
+         *  (tank-venting valve) is exactly the code a permanently-shut valve would set. */
+        tankVentDiag: { symbol: 'tefc_ed', offset: 88, format: 'uint8', scale: 1.0, add: 0 } as FieldDef,
     },
 };
 
@@ -154,6 +194,12 @@ export function decodeOperatingMeasurementsBlock(payload: Uint8Array) {
     return {
         stft1: decodeField(payload, f.stft1),
         stft2: decodeField(payload, f.stft2),
+        // Null when this DME's block is shorter than the offset — a different fact from a decoded 0,
+        // and the distinction matters here more than usual: `tetv: 0` is "the valve is shut", which
+        // is the reading a tuning run wants to see, while `tetv: null` is "we never found out".
+        tankVent: decodeField(payload, f.tankVent),
+        tankVentCheckState: decodeField(payload, f.tankVentCheckState),
+        tankVentDiag: decodeField(payload, f.tankVentDiag),
     };
 }
 

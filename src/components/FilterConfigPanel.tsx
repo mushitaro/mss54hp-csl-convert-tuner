@@ -18,6 +18,8 @@ const TEXT = {
         tpsHint: 'スロットル開度の変化量(絶対値)',
         immediate: '変更は即時反映されます',
         katsHint: '排気温が上限を超えると触媒保護増量が入り、DMEはλ制御を停止します。凍結したトリム値をVE計算に取り込まないよう、その区間と復帰後20秒を除外します。EGTを含まないログでは何も起きません。',
+        tankVentLabel: 'Tank Vent',
+        tankVentHint: 'タンク換気（パージ）中は、DMEが噴いていない燃料がエンジンに入るため、λトリムがその分だけ動きます。λ制御は正常に閉じたままなので、値は「意味がない」のではなく「別の理由で正しい」— そのままVEに取り込むと、次回は存在しない蒸発ガスの分だけマップが動きます。純正は2500rpm以上・中負荷で94〜99.6%作動するので、除外すると大半のサンプルが消えることがあります。本来は K_TE_TVTE_GA=0 で走行中だけ止めるのが正解で、これはそれをしなかったログの救済です。TETVを含まないログでは何も起きません。',
     },
     en: {
         settings: 'Filter Settings',
@@ -26,6 +28,8 @@ const TEXT = {
         tpsHint: 'Absolute Change in Opening %',
         immediate: 'Adjustments apply immediately',
         katsHint: 'Above this EGT the DME adds cat-protection fuel and switches lambda control off, freezing the trim. Those samples and the 20 s it takes the enrichment to unwind are dropped so a frozen trim never reaches the VE map. Does nothing on a log without EGT.',
+        tankVentLabel: 'Tank Vent',
+        tankVentHint: 'While the purge valve is open the engine receives fuel the DME did not inject, so the lambda trim moves to cancel it. The loop is still closed, so the trim is not meaningless — it is correct for a reason the VE map cannot reproduce, and folding it in moves cells to chase vapour that will not be there next time. Stock duty is 94-99.6% above 2500 rpm at mid load, so this can discard most of a log. Disabling the valve for the run (K_TE_TVTE_GA = 0) is the real fix; this salvages a log taken without it. Does nothing on a log without TETV.',
     },
 };
 
@@ -201,6 +205,29 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                     className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${(localConfig.enableOpenLoopExclusion ?? true) ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
                                 />
                                 <p className="text-[9px] text-slate-600">{t.katsHint}</p>
+                            </div>
+
+                            {/* Tank Vent. Defaults OFF, unlike Cat Protect above — see
+                                LogFilterConfig. No slider: the threshold exists in the config for a
+                                car whose valve reads a small non-zero at rest, but the useful
+                                setting is "anything the DME calls open", and a control offering a
+                                number here would imply there is a good one to pick. */}
+                            <div className="space-y-1">
+                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
+                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={localConfig.enableTankVentExclusion ?? false}
+                                            onChange={(e) => handleChange('enableTankVentExclusion', e.target.checked)}
+                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
+                                        />
+                                        <span>{t.tankVentLabel}</span>
+                                    </label>
+                                    <span className={`${(localConfig.enableTankVentExclusion ?? false) ? 'text-slate-300' : 'text-slate-600'}`}>
+                                        &gt; {localConfig.tankVentMaxMs ?? 0} ms
+                                    </span>
+                                </div>
+                                <p className="text-[9px] text-slate-600">{t.tankVentHint}</p>
                             </div>
 
                             {/* RF KORR — not a filter, but it belongs to "how this log becomes a

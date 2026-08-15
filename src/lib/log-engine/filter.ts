@@ -1,4 +1,4 @@
-import { LogDataPoint, ProcessedLog, LogFilterConfig, InterpolationPoint } from '@/lib/types';
+import type { LogDataPoint, ProcessedLog, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { APP_CONFIG } from '@/config/constants';
 
 export const processLogData = (
@@ -48,6 +48,11 @@ export const processLogData = (
     const katsExclusionOn = (cfg.enableOpenLoopExclusion ?? true);
     // Time of the last sample seen at or above the arming threshold; -Infinity = never armed.
     let lastKatsHotTime = -Infinity;
+
+    // Tank ventilation. Off by default — see LogFilterConfig for why this one is opt-in while the
+    // cat-protection exclusion is not.
+    const tankVentExclusionOn = cfg.enableTankVentExclusion ?? false;
+    const tankVentMax = cfg.tankVentMaxMs ?? 0;
 
     // Use custom table or default
     const interpTable = customTable || APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
@@ -106,6 +111,20 @@ export const processLogData = (
                 droppedCount++;
                 continue;
             }
+        }
+
+        // 2c. Tank-ventilation filter.
+        // Unlike cat protection this needs no arming and no tail. Purge is not a latched state the
+        // DME unwinds out of — the valve is either passing vapour on this sample or it is not, and
+        // TETV says which. The trim does lag the vapour, but modelling that lag would mean guessing
+        // a time constant, and the honest answer to "how long after purge is the trim still dirty"
+        // is to stop purging for the whole run instead.
+        //
+        // `!== undefined` rather than a truthiness test: a log with no TETV channel must pass
+        // through untouched, and 0 is a real reading meaning the valve is shut.
+        if (tankVentExclusionOn && current.tankVent !== undefined && current.tankVent > tankVentMax) {
+            droppedCount++;
+            continue;
         }
 
         // 3. Correction (Interpolation)

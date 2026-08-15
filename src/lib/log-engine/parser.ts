@@ -132,6 +132,17 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         const exhaustTemp = pick(row, 'exhaustTemp');
         if (exhaustTemp !== undefined) point.exhaustTemp = exhaustTemp;
 
+        // Tank ventilation, read the same optional way. Assigned only when present so that a log
+        // recorded before these channels existed keeps `tankVent: undefined` — "we never measured
+        // it" — rather than acquiring a 0 that would read as "the valve was shut", which is a claim
+        // no such log can support.
+        const tankVent = pick(row, 'tankVent');
+        if (tankVent !== undefined) point.tankVent = tankVent;
+        const tankVentCheckState = pick(row, 'tankVentCheckState');
+        if (tankVentCheckState !== undefined) point.tankVentCheckState = tankVentCheckState;
+        const tankVentDiag = pick(row, 'tankVentDiag');
+        if (tankVentDiag !== undefined) point.tankVentDiag = tankVentDiag;
+
         results.push(point);
     }
 

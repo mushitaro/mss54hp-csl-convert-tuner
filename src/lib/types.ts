@@ -27,6 +27,26 @@ export interface LogDataPoint {
     /** RF — the DME's final relative filling (%), AFTER the EGT correction rf_korr has been applied
      *  to the Alpha-N table's rf_soll. DS2 selection 3, payload bytes 8-9. */
     rf?: number;
+
+    // --- tank ventilation -------------------------------------------------------------------
+    // Free: DS2 selection 19, the same response stft1/stft2 already come out of.
+    //
+    // These exist because evaporative purge is the largest known threat to a VE log's
+    // reproducibility, and this pipeline had no way to see it. Purged vapour is fuel the DME did
+    // not inject, so `stft1`/`stft2` — the only input the VE correction is derived from — absorb
+    // it; and the DME's own purge estimate is subtracted from the air mass, so `rf` moves too.
+    // Stock duty is 94-99.6 % above 2500 rpm at mid load, i.e. squarely in the tuning region.
+
+    /** TETV — tank-vent valve pulse time (ms). 0 = shut, which is the state a tuning run wants.
+     *  Undefined = this DME did not report it, which is NOT the same as shut. */
+    tankVent?: number;
+    /** TEFC_LL_ST — tank-vent idle functional-check state. States 0x10-0x15 drive the valve from
+     *  the TEFC ramp instead of the duty map, and are the one path `K_TE_TVTE_GA = 0` does not
+     *  gate. Logged so that gap can be measured rather than assumed closed. */
+    tankVentCheckState?: number;
+    /** TEFC_ED — tank-vent diagnostic handle. Watch it after disabling purge: DTC 24 is exactly
+     *  the code a permanently-shut valve would set. */
+    tankVentDiag?: number;
     /** rf_korr — the EGT density correction the DME applied, measured rather than looked up:
      *  with MAP compensation off (k_rf_cfg = 0x02) the DME computes RF = rf_soll * rf_korr exactly,
      *  so rf_korr = (rf/100) / kf_rf_soll(rpm, correctedLoad). 1.0 = no correction.
@@ -120,6 +140,37 @@ export interface LogFilterConfig {
      *  at KL_TI_KATS_DELTA_ML = 0.0195/s and has up to 0.3496 of travel (K_TI_F_KATS_MAX), so it
      *  needs ~18 s to reach 1.0 again — and lambda stays open for all of it. Default 20. */
     katsTailSec?: number;
+
+    // --- Tank-ventilation exclusion ---------------------------------------------------------
+    // A different failure from the one above, needing the same remedy. Cat protection makes the
+    // trim MEANINGLESS (the controller is off). Purge makes it MISLEADING: the controller is
+    // perfectly closed and doing its job, and the trim it reports is a true correction for fuel
+    // the engine really received — just not fuel this app injected or can model. Folding it into
+    // the map moves cells to compensate for vapour that will not be there next time.
+    //
+    // karter16, thread 242281 #161, on why this matters more than it sounds: "in my experience
+    // this makes a MASSIVE difference to reproducibility, to the point that I personally wouldn't
+    // bother attempting tuning runs without it."
+    //
+    // Off by default, unlike the cat-protection exclusion. That one is free — a log without EGT
+    // simply never triggers it. This one throws away samples that a run with purge disabled at
+    // the calibration would not have produced in the first place, and on a car that purges 94 % of
+    // the time above 2500 rpm it could discard most of a log. Discarding is the second-best
+    // answer; disabling the valve is the first. This exists so a log taken WITHOUT that patch can
+    // still be salvaged, and so a log taken WITH it can be checked for having actually worked.
+
+    /** Drop samples recorded while the tank-vent valve was open. Default false. */
+    enableTankVentExclusion?: boolean;
+    /**
+     * TETV pulse time (ms) above which a sample is dropped. Default 0, i.e. drop anything the DME
+     * reports as non-zero.
+     *
+     * A threshold rather than a boolean because `K_TE_TV_MIN` puts a floor of ~6.9 ms under any
+     * commanded duty, so "barely open" and "shut" are not adjacent numbers — and because a car
+     * whose valve reads a small non-zero at rest would otherwise have every sample discarded.
+     * Samples with no TETV reading at all are always kept: absent is not open.
+     */
+    tankVentMaxMs?: number;
 
     /**
      * @deprecated Superseded by `rfKorrSource`. Read only by `resolveRfKorr`, so a session saved
