@@ -57,11 +57,27 @@ const RESPONSE_OVERHEAD = 4;
  * host — which is exactly the whole-log derivation that #903 no longer pays. Two runs, one constant,
  * and the residual lands where the code says it should.
  *
- * It is the floor this whole exercise runs into: at 100 ms of thinking against 50 ms of wire, the
- * DME is two thirds of a block-3 sample. Dropping a block beats shaving bytes, and nothing short of
- * leaving DS2 behind beats dropping a block.
+ * Then session #904 measured it DIRECTLY, which is why the number is 83 and not 101. The instrument
+ * armed for datalogs reports a median turnaround of **83 ms** and a median `hostGap` of **0.3 ms** —
+ * so the host really is out of the picture, and the subtraction above was attributing transport
+ * cost to the DME.
+ *
+ * What is left over does not fit one constant, and this comment will not pretend it does:
+ *
+ *     #904  VE  [3,19]   329.8 ms predicted   339 ms measured (2.95 Hz)    ~5 ms/exchange over
+ *     #903  EGT [3]      133.4 ms predicted   151 ms measured (6.60 Hz)   ~18 ms/exchange over
+ *
+ * The remainder is larger on the SMALLER block, which rules out anything proportional to bytes and
+ * fits a fixed per-response latency that a big response partly hides — the FTDI latency timer
+ * (16 ms by default) is the obvious candidate, and the transport is `web-usb-ftdi`. Two points is
+ * not enough to fit a second term, so none is fitted: the model states the DME's own cost, and the
+ * gap to a measured rate is the transport's. Naming it that way is what stopped the last revision
+ * from being right.
+ *
+ * It is still the floor this exercise runs into: 83 ms of thinking against 50 ms of wire makes the
+ * DME two thirds of a block-3 sample. Dropping a block beats shaving bytes.
  */
-export const DME_TURNAROUND_MS = 100;
+export const DME_TURNAROUND_MS = 83;
 
 export interface BlockCost { selection: number; payload: number }
 

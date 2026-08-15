@@ -27,18 +27,18 @@ console.log('\n[the rate a profile can expect, from the blocks it reads]');
     // The measured baseline, and the one assertion here that is anchored to a real drive rather
     // than to the arithmetic's own consistency.
     //
-    // Session #903: 2940 samples in 446 s of block 3 alone = 6.60 Hz. That is what fixes
-    // DME_TURNAROUND_MS, so this is the number that would catch a change to it that nobody meant.
-    // It is asserted on the EGT profile and not on VE deliberately — #903 ran AFTER the derivation
-    // was made incremental, so its host cost is O(1) per sample and the wire model is allowed to
-    // account for nearly all of it. #902's 2.44 Hz still has ~23 ms/exchange of whole-log host work
-    // in it, so predicting it exactly would mean modelling a code path that no longer exists.
-    check('EGT matches the measured 6.60 Hz of session #903', Math.abs(egt - 6.6) < 0.2, egt.toFixed(2));
-    // Sanity, not measurement: applying the same constant to the VE pair predicts 2.75 Hz against
-    // 2.44 measured. The gap is host, and it is the right SIGN — the model may not predict a rate
-    // FASTER than the car managed under a heavier code path.
-    check('VE prediction sits just above the 2.44 Hz #902 managed',
-        ve > 2.44 && ve < 3.0, ve.toFixed(2));
+    // DME_TURNAROUND_MS is now measured directly (83 ms median, session #904) rather than derived
+    // by subtraction, so these bound the model against two real drives instead of pinning it to
+    // one. The model deliberately omits transport latency — see the constant's own comment — so it
+    // is expected to sit ABOVE both measured rates, and the margin is bigger on the small block.
+    //
+    //     #904 VE  measured 2.95 Hz   #903 EGT measured 6.60 Hz
+    //
+    // A bound rather than an equality, because tightening either to a point would be fitting the
+    // transport's cost into the DME's constant, which is exactly the error being corrected.
+    check('VE brackets the 2.95 Hz of #904', ve >= 2.95 && ve < 3.2, ve.toFixed(2));
+    check('EGT brackets the 6.60 Hz of #903', egt >= 6.6 && egt < 7.7, egt.toFixed(2));
+    check('the model never predicts SLOWER than the car managed', ve >= 2.95 && egt >= 6.6);
     // The whole reason the EGT profile exists.
     check('EGT is more than twice VE', egt > ve * 2, `${egt.toFixed(1)} vs ${ve.toFixed(1)}`);
     check('dropping a block always helps', expectedHz([3]) > expectedHz([3, 19]));

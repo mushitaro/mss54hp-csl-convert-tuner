@@ -364,7 +364,16 @@ export function tuneRfKorrTable(
             'off-breakpoint': 0,
         },
         sensorMissing: true,
-        trimMissing: true,
+        // Decided over the WHOLE log up front, not inside the loop.
+        //
+        // It has to be, because it is a fact about the CHANNEL and every other test in the loop is a
+        // fact about an operating point. Cleared where `samplesNoTrim` is counted, it would only
+        // ever be reached by samples that had already passed the gate, the hysteresis band and the
+        // settle window — so a drive full of trim that simply never held sustained load reported
+        // "this log has no lambda trim", which is both false and the exact misdiagnosis this flag
+        // was added to prevent. Session #904 is that run: 1260 rows, all of them carrying both
+        // banks, and the tuner refused claiming there were none.
+        trimMissing: !annotatedLog.some(p => p.stft1 !== undefined || p.stft2 !== undefined),
         largestChange: 0,
     };
 
@@ -462,7 +471,6 @@ export function tuneRfKorrTable(
         if (p.stft1 !== undefined) banks.push(p.stft1);
         if (p.stft2 !== undefined) banks.push(p.stft2);
         if (!banks.length) { report.samplesNoTrim++; continue; }
-        report.trimMissing = false;
         const stft = banks.reduce((a, b) => a + b, 0) / banks.length;
         if (!(stft > 0)) { report.samplesNoMeasurement++; continue; }
 
