@@ -2702,10 +2702,15 @@ const WOT_CRITERION =
                header's own convention renders these at 16px tall. The padding is cancelled by the
                margin so the row still lays out at 16 and nothing moves. Vertical only — the gap to
                the link beside it is 16px, and horizontal padding would consume all of it. */
-            className={`hidden min-[900px]:flex items-center gap-2 shrink-0 py-3 -my-3 transition-colors cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300' : 'text-slate-500 hover:text-slate-300'}`}
+            /* Hidden below 900px only while there is NOTHING to take.
+               A plain Reload is a convenience the mobile menu already carries; an available update
+               is not, and burying it behind a menu nobody opens is why three deploys in a row were
+               read as "you did not commit it". On a phone the whole point of this control is to be
+               seen without being looked for. */
+            className={`${updateAvailable ? 'flex' : 'hidden min-[900px]:flex'} items-center gap-2 shrink-0 py-3 -my-3 transition-colors cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300 animate-pulse' : 'text-slate-500 hover:text-slate-300'}`}
           >
             <RefreshCw className="w-4 h-4 shrink-0" />
-            <span className="w-[52px] text-left text-[10px] uppercase font-bold tracking-wider whitespace-nowrap">
+            <span className={`text-left text-[10px] uppercase font-bold tracking-wider whitespace-nowrap ${updateAvailable ? '' : 'w-[52px]'}`}>
               {updateAvailable ? 'Update' : 'Reload'}
             </span>
           </button>

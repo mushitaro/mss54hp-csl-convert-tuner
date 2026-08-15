@@ -99,7 +99,19 @@ export async function reloadForUpdate(deadlineMs = 4000) {
     location.reload();
 }
 
-export function useAppUpdate(pollMs = 15 * 60 * 1000) {
+/**
+ * Two minutes, down from fifteen.
+ *
+ * Fifteen was sized for a tool that gets deployed occasionally, and the visibilitychange check was
+ * meant to cover the rest — but it only fires when the tab was hidden and comes back. Somebody
+ * holding the phone, watching the screen while a build goes out, triggers neither: the tab never
+ * hides, so the only thing left is the interval, and they wait up to a quarter of an hour looking at
+ * a build they were told had shipped. That happened three times in a row.
+ *
+ * The check is one no-store GET of the entry document. Against a datalog's measured 0.3 ms of host
+ * gap per sample it is not a cost worth trading a quarter hour of confusion for.
+ */
+export function useAppUpdate(pollMs = 2 * 60 * 1000) {
     const [updateAvailable, setUpdateAvailable] = useState(false);
 
     const check = useCallback(async () => {
