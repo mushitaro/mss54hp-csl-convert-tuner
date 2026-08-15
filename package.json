@@ -16,6 +16,8 @@
     "verify:tankvent-patch": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent-patch.mjs",
     "//verify:coverage": "Checks the VE evidence gate: one sample no longer moves a cell, both conditions are required, and a REJECTED cell still reports the samples it has rather than 0.",
     "verify:coverage": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-coverage.mjs",
+    "//verify:lambda-gates": "Checks the FR 5.01 sample gates: the full-load test reads the binary's own table (so the WOT patch disables it), a missing channel never rejects, and the drop census sums to the drop count.",
+    "verify:lambda-gates": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-lambda-gates.mjs",
     "//verify:field-registry": "Checks that a log column's label is a claim it can keep: a DME channel wears the symbol its block really decodes, and a computed one is not shaped like a DME symbol.",
     "verify:field-registry": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-field-registry.mjs",
     "//verify:flash-state": "Checks the FINAL verdict: a flash only puts a tune on the road if it carried one, and TANK VENT counts as a patch that has to come back off.",
@@ -28,7 +30,7 @@
     "db:migrate:local": "wrangler d1 migrations apply mss54hp-tuner-runs --local",
     "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
     "db:sessions": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(synced_at/1000,'unixepoch') AS synced, label, status, point_count, has_tune, has_rf, has_egt FROM sessions ORDER BY created_at DESC LIMIT 20\"",
-  "db:diagnostics": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT datetime(created_at/1000,'unixepoch') AS at, kind, CASE completed WHEN 1 THEN 'ok' ELSE 'FAILED' END AS outcome, exchanges, elapsed_ms, baud, requested_baud, round(median_turnaround,1) AS turnaround, round(median_total,1) AS total, round(median_host_gap,1) AS host_gap, retries, CASE mock WHEN 1 THEN 'mock' ELSE transport END AS via, substr(coalesce(error,''),1,60) AS err, id FROM diagnostics ORDER BY created_at DESC LIMIT 30\"",
+    "db:diagnostics": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT datetime(created_at/1000,'unixepoch') AS at, kind, CASE completed WHEN 1 THEN 'ok' ELSE 'FAILED' END AS outcome, exchanges, elapsed_ms, baud, requested_baud, round(median_turnaround,1) AS turnaround, round(median_total,1) AS total, round(median_host_gap,1) AS host_gap, retries, CASE mock WHEN 1 THEN 'mock' ELSE transport END AS via, substr(coalesce(error,''),1,60) AS err, id FROM diagnostics ORDER BY created_at DESC LIMIT 30\"",
     "build:preview": "next build && node scripts/brand-preview.mjs && node scripts/embed-sync-token.mjs && node scripts/build-id.mjs && node scripts/gen-sw.mjs"
   },
   "dependencies": {

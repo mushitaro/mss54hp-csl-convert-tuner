@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { parseLogFile } from '@/lib/log-engine/parser';
 import { processLogData } from '@/lib/log-engine/filter';
 import { ProcessedLog, LogDataPoint, LogFilterConfig, InterpolationPoint } from '@/lib/types';
+import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import { APP_CONFIG } from '@/config/constants';
 import { dialogText } from '@/lib/dialog-text';
 
@@ -25,6 +26,14 @@ export function useLogFile() {
   const [processedLog, setProcessedLog] = useState<ProcessedLog | null>(null);
   const [filterConfig, setFilterConfig] = useState<LogFilterConfig>(DEFAULT_FILTER_CONFIG);
   const [interpolationTable, setInterpolationTable] = useState<InterpolationPoint[]>(APP_CONFIG.MSS54HP.INTERPOLATION_TABLE);
+  /**
+   * The lambda-shutdown thresholds of the binary this log belongs to.
+   *
+   * Held here for the same reason `filterConfig` is: every later re-process has to use the same
+   * ones, or dragging a filter would silently re-derive the tune against a different set of gates
+   * than produced it. Null until a binary is loaded, and null means those gates do not run.
+   */
+  const [lambdaLimits, setLambdaLimits] = useState<LambdaLimits | null>(null);
 
   const [logWindowStart, setLogWindowStart] = useState<number>(0);
   const [selectedLogIndex, setSelectedLogIndex] = useState<number | null>(null);
@@ -87,7 +96,7 @@ export function useLogFile() {
     }
 
     setRawLogData(rawData);
-    const processed = processLogData(rawData, file.name, filterConfig, interpolationTable);
+    const processed = processLogData(rawData, file.name, filterConfig, interpolationTable, lambdaLimits);
     setLogFile(file);
     setProcessedLog(processed);
     return processed;
@@ -105,16 +114,22 @@ export function useLogFile() {
     fileName: string,
     config?: LogFilterConfig,
     table?: InterpolationPoint[],
+    /** Same override-and-adopt rule as `config` and `table` above, and needed for the same reason:
+     *  a caller that has just swapped the binary is still in a scope where `lambdaLimits` holds the
+     *  PREVIOUS one, because setState only scheduled the change. */
+    limits?: LambdaLimits | null,
   ): ProcessedLog | null => {
     if (rawData.length === 0) return null;
     const cfg = config ?? filterConfig;
     const tbl = table ?? interpolationTable;
+    const lim = limits !== undefined ? limits : lambdaLimits;
     if (config) setFilterConfig(config);
     if (table) setInterpolationTable(table);
+    if (limits !== undefined) setLambdaLimits(limits);
 
     const file = new File([], fileName);
     setRawLogData(rawData);
-    const processed = processLogData(rawData, fileName, cfg, tbl);
+    const processed = processLogData(rawData, fileName, cfg, tbl, lim);
     setLogFile(file);
     setProcessedLog(processed);
     return processed;
@@ -124,7 +139,7 @@ export function useLogFile() {
   const reprocess = (newConfig: LogFilterConfig): ProcessedLog | null => {
     setFilterConfig(newConfig);
     if (rawLogData && logFile) {
-      const processed = processLogData(rawLogData, logFile.name, newConfig, interpolationTable);
+      const processed = processLogData(rawLogData, logFile.name, newConfig, interpolationTable, lambdaLimits);
       setProcessedLog(processed);
       return processed;
     }
@@ -135,7 +150,7 @@ export function useLogFile() {
   const reprocessWithTable = (newTable: InterpolationPoint[]): ProcessedLog | null => {
     setInterpolationTable(newTable);
     if (rawLogData && logFile) {
-      const processed = processLogData(rawLogData, logFile.name, filterConfig, newTable);
+      const processed = processLogData(rawLogData, logFile.name, filterConfig, newTable, lambdaLimits);
       setProcessedLog(processed);
       return processed;
     }
@@ -156,6 +171,8 @@ export function useLogFile() {
     processedLog,
     filterConfig,
     interpolationTable,
+    lambdaLimits,
+    setLambdaLimits,
     logWindowStart,
     setLogWindowStart,
     maxWindowStart,

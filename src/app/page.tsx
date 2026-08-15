@@ -11,6 +11,7 @@ import { RfKorrTable } from '@/components/RfKorrTable';
 const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
 const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
+import { DropCensusLine } from '@/components/DropCensus';
 import { InertiaWorkflow } from '@/components/InertiaWorkflow';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
@@ -45,6 +46,7 @@ import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
+import { BinaryParser } from '@/lib/binary-engine/parser';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -558,6 +560,22 @@ export default function Home() {
     () => (binaryBuffer ? readEgtTables(binaryBuffer) : null),
     [binaryBuffer]);
 
+  /**
+   * The lambda-controller shutdown thresholds of the loaded binary.
+   *
+   * Beside egtTables because it is the same kind of thing — calibration this app must read rather
+   * than assume — and derived from the same dependency for the same reason: these gates have to
+   * describe the bytes the DME was running, and one of them is a table this app patches.
+   */
+  const lambdaLimits = useMemo(
+    () => (binaryBuffer ? new BinaryParser(binaryBuffer).readLambdaLimits() : null),
+    [binaryBuffer]);
+
+  // Push it into the log hook so every later re-process (a filter drag, a table edit) uses the same
+  // gates that produced the tune. Call sites that load a log in the same tick as a new binary pass
+  // it explicitly instead — see handleOpenSession.
+  useEffect(() => { logFileState.setLambdaLimits(lambdaLimits); }, [lambdaLimits]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   const veCalcOptions = useMemo(
     () => veCalcOptionsFor(filterConfig, egtTables, writeRfKorr),
     // Hand-listed, and the list is the contract: every input veCalcOptionsFor actually reads has
@@ -1055,6 +1073,10 @@ export default function Home() {
           (session.binaryFileName ?? 'session').replace(/\.bin$/i, '.csv'),
           session.tuneSettings?.filterConfig,
           session.tuneSettings?.interpolationTable,
+          // Explicit, for the reason the comment below gives about config and table: the effect
+          // that pushes `lambdaLimits` into the hook has not run yet in this scope, so the hook
+          // still holds the OUTGOING session's binary. Read them from the bytes just loaded.
+          new BinaryParser(bins.baseBinaryBuffer).readLambdaLimits(),
         );
         if (processed) {
           // The STORED config and THESE bytes, not the memos — see veCalcOptionsFor. Both
@@ -2541,6 +2563,9 @@ const WOT_CRITERION =
                     <span className="text-slate-600">TOTAL</span>
                     <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
                   </div>
+                  {/* The difference between the two numbers above, itemised. Without this the pair
+                      says "half your drive is gone" and stops there. */}
+                  <DropCensusLine census={processedLog.dropCensus} className="justify-end mt-1" />
                 </div>
               )}
               <div className="flex items-center gap-2">
@@ -3611,7 +3636,12 @@ The TIMING button still has the full record; save it before running another oper
           edge, where Android's gesture bar is, and a 9px readout is not something to put there. */}
       <div className="min-[900px]:hidden flex-none z-30 border-t border-slate-900 bg-slate-900/50 backdrop-blur-sm">
         {processedLog && (
-          <div className="h-[16px] flex items-center justify-end gap-4 px-4">
+          // Height is no longer fixed at 16px: the census wraps on a narrow screen, and clipping the
+          // reason a drive was thrown away to keep a row height would defeat the point of showing it.
+          <div className="py-0.5 flex items-center justify-end gap-4 px-4 flex-wrap">
+            {/* Ahead of the counts, not after them, because it is the part with an action in it and
+                this row is read at arm's length on a phone. */}
+            <DropCensusLine census={processedLog.dropCensus} className="mr-auto" />
             <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
               <span className="text-slate-500">VALID</span>
               <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>

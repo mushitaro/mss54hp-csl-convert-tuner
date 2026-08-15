@@ -1,17 +1,39 @@
 import type { LogDataPoint, ProcessedLog, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { APP_CONFIG } from '@/config/constants';
+import {
+    type LambdaLimits, type DropCensus, type DropReason, EMPTY_CENSUS,
+    isFullLoad, isOverLoadThreshold, isAtControllerStop,
+} from './lambdaGates';
 
 export const processLogData = (
     rawData: LogDataPoint[],
     fileName: string,
     config?: LogFilterConfig,
-    customTable?: InterpolationPoint[]
+    customTable?: InterpolationPoint[],
+    /**
+     * The lambda-controller shutdown thresholds, read from the binary this log was captured
+     * against. Optional, and absent means those gates simply do not run — a CSV from another tool
+     * has no binary to read them from, and inventing thresholds would reject real samples for a
+     * reason that came from nowhere.
+     */
+    lambdaLimits?: LambdaLimits | null,
 ): ProcessedLog => {
     const validData: LogDataPoint[] = [];
     // Same prerequisites as validData, but WITHOUT the transient test. See ProcessedLog.rfKorrData
     // for why the rf_korr table needs its own sample set, and rfKorrTuner for what it does with it.
     const rfKorrData: LogDataPoint[] = [];
     let droppedCount = 0;
+    /**
+     * Not just how many samples were dropped, but why.
+     *
+     * A bare "751 of 1600" is the least actionable number in the app: it says half the drive was
+     * thrown away and gives no hint whether the fix is to warm the engine up, hold a steadier
+     * throttle, or write the tank-vent patch and go again. Each reason is separately fixable, and
+     * counting them apart is the whole point — the census is what turns a filtered log into an
+     * instruction for the next run.
+     */
+    const census: DropCensus = { ...EMPTY_CENSUS };
+    const drop = (reason: DropReason) => { droppedCount++; census[reason]++; };
 
     // Use provided config or defaults
     const cfg: LogFilterConfig = config || {
@@ -71,7 +93,7 @@ export const processLogData = (
         // [UPDATED] Check for undefined. If undefined, we SKIP the filter (allow the row).
         // Only Drop if temp exists and is below threshold.
         if (cfg.enableMinTemp && current.coolantTemp !== undefined && current.coolantTemp < cfg.minTemp) {
-            droppedCount++;
+            drop('coldEngine');
             continue;
         }
 
@@ -79,7 +101,7 @@ export const processLogData = (
         // Exclude if TPS <= 1.0 (approx 0%) and RPM < IdleThreshold
         // rawLoad is 'relative opening' (0-100)
         if (cfg.enableIdle && current.rawLoad <= 1.0 && current.rpm < cfg.idleRpm) {
-            droppedCount++;
+            drop('idle');
             continue;
         }
 
@@ -108,7 +130,7 @@ export const processLogData = (
             const armed = lastKatsHotTime > -Infinity;
             const secondsSinceHot = (current.time - lastKatsHotTime) * secondsPerTimeUnit;
             if (armed && (current.exhaustTemp >= katsOff || secondsSinceHot < katsTail)) {
-                droppedCount++;
+                drop('catProtect');
                 continue;
             }
         }
@@ -123,8 +145,35 @@ export const processLogData = (
         // `!== undefined` rather than a truthiness test: a log with no TETV channel must pass
         // through untouched, and 0 is a real reading meaning the valve is shut.
         if (tankVentExclusionOn && current.tankVent !== undefined && current.tankVent > tankVentMax) {
-            droppedCount++;
+            drop('tankVent');
             continue;
+        }
+
+        // 2d. Lambda controller shutdown — Funktionsrahmen 5.01.
+        //
+        // These sit apart from the four filters above because they are a different kind of claim.
+        // Those are OUR choices about which samples are useful; these are the DME telling us it was
+        // not controlling. `la_f_regler` with the loop open is not a mixture error, and averaging
+        // more of it does not converge on anything — it moves the cell somewhere else entirely.
+        //
+        // Thresholds come from the binary the log was captured against, never from a constant here:
+        // this app PATCHES the full-load threshold, so a log taken patch-on was taken with the
+        // controller deliberately kept alive, and the gate has to read the same bytes the DME read
+        // to know that. See lambdaGates.ts for what is checked, what is not, and why K_LA_N_VL is
+        // deliberately left out of the full-load test.
+        if (lambdaLimits) {
+            // Both of the DME's load-side shutdowns report as one reason. They are the same
+            // instruction to the driver — "you were past the point where the loop opens" — and
+            // splitting them would put a distinction in the census that nobody can act on.
+            if (isFullLoad(lambdaLimits, current.wdk1, current.rpm, current.coolantTemp)
+                || isOverLoadThreshold(lambdaLimits, current.rf, current.rpm)) {
+                drop('fullLoad');
+                continue;
+            }
+            if (isAtControllerStop(lambdaLimits, current.stft1, current.stft2)) {
+                drop('controllerStop');
+                continue;
+            }
         }
 
         // 3. Correction (Interpolation)
@@ -166,14 +215,14 @@ export const processLogData = (
                 // RPM Stability Check (Relative %)
                 const rpmDiffPct = Math.abs((current.rpm - prev.rpm) / prev.rpm) * 100;
                 if (rpmDiffPct > cfg.rpmStableThreshold) {
-                    droppedCount++;
+                    drop('transient');
                     continue;
                 }
 
                 // TPS Stability Check (Absolute Delta)
                 const tpsDiffAbs = Math.abs(current.rawLoad - prev.rawLoad);
                 if (tpsDiffAbs > cfg.tpsStableThreshold) {
-                    droppedCount++;
+                    drop('transient');
                     continue;
                 }
             }
@@ -187,6 +236,7 @@ export const processLogData = (
         data: validData,
         validCount: validData.length,
         droppedCount,
+        dropCensus: census,
         rfKorrData,
     };
 };

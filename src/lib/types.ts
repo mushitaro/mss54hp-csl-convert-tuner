@@ -1,3 +1,7 @@
+// The census lives with the gates that produce it rather than here, so the reason list and the
+// rules that assign a reason cannot drift apart. Type-only, so this stays a leaf import.
+import type { DropCensus } from '@/lib/log-engine/lambdaGates';
+
 export interface VEMap {
     xAxis: number[]; // RPM
     yAxis: number[]; // Load
@@ -96,6 +100,10 @@ export interface ProcessedLog {
     data: LogDataPoint[];
     validCount: number;
     droppedCount: number;
+    /** The same total, broken out by reason. `droppedCount` says how much of the drive was thrown
+     *  away; this says what to do about it. See lambdaGates.ts for the reason list and the rule
+     *  that decides which one a sample gets when several apply. */
+    dropCensus: DropCensus;
 
     /**
      * The samples the rf_korr TABLE derivation is allowed to see — a different set from `data`, on

@@ -242,6 +242,34 @@ export const EXPERIMENTAL_CONFIG = {
 };
 
 /**
+ * The calibration that decides whether the lambda controller was running — Funktionsrahmen 5.01.
+ *
+ * Addresses from `CSL_0401_Karter16_v3_6_publish.xdf`, which orients a 64 KB partial as
+ * [slave 0x0000-0x7FFF | master 0x8000-0xFFFF], so an XDF address is an offset. `KF_BZ_WDK_VL` is
+ * master and the three lambda constants are slave, which is why they look like different worlds.
+ *
+ * `ADDRESS_WOT_THRESHOLD_MAP` above is the same table's Z data. It has been in the app since the WOT
+ * patch shipped, but only ever as "is the first cell over 1000", because the axes were not known and
+ * a patch check does not need them. Reading a threshold at an operating point does.
+ */
+export const LAMBDA_SHUTDOWN = {
+    /** KF_BZ_WDK_VL — throttle % at which the DME calls it full load. Z is x/10. */
+    WOT_THRESHOLD_X: 0xAC44,   // 4 x u16, rpm
+    WOT_THRESHOLD_Y: 0xAC4C,   // 4 x u16, degC
+    WOT_THRESHOLD_Z: 0xAC54,   // 4 rows x 4 cols u16, x/10 -> %
+    /** KL_LA_N — relative filling above which the controller is switched off, over rpm. Y is
+     *  x/1000. Measured 1.500 flat across all seven points on a real binary, i.e. unreachable
+     *  (filling runs 0.3-1.1), so this gate is expected to report zero. Implemented anyway: it is
+     *  a calibration and another car's may differ, and a gate that silently is not there is worse
+     *  than one that honestly reports nothing. */
+    LOAD_THRESHOLD_X: 0x489A,  // 7 x u16, rpm
+    LOAD_THRESHOLD_Y: 0x48A8,  // 7 x u16, x/1000
+    /** K_LA_FMAX / K_LA_FMIN — the controller's clamps, x/32768. Measured 1.30 / 0.70. */
+    F_MAX: 0x481A,
+    F_MIN: 0x481C,
+} as const;
+
+/**
  * `K_TE_TVTE_GA` — the tank-vent duty gain, slave `0xBF1`, one byte.
  *
  * Not in EXPERIMENTAL_CONFIG, because it is not experimental in the way those three are. Their

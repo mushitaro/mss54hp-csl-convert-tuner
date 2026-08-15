@@ -1,4 +1,5 @@
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN } from '@/config/constants';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, LAMBDA_SHUTDOWN } from '@/config/constants';
+import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import type { VEMap } from '@/lib/types';
 import type { EcuItemDef, EcuItemValue, EcuNumericDef } from '@/lib/ecu-items/types';
 
@@ -31,6 +32,44 @@ export class BinaryParser {
      */
     public getTankVentDisabled(): boolean {
         return this.getUint8(TANK_VENT_GAIN.ADDRESS) === TANK_VENT_GAIN.DISABLED_RAW;
+    }
+
+    /**
+     * The thresholds that decide whether the lambda controller was running — read from THIS binary.
+     *
+     * Never hard-coded, for the reason the WOT table demonstrates: this app patches it. A log
+     * captured with the patch in force was captured with the controller deliberately kept alive at
+     * full load, and the only way for the filter to know that is to read the same bytes the DME did.
+     * Constants in the source would say the opposite and be confidently wrong.
+     *
+     * Returns null if the axes do not look like axes. A 4-point rpm axis that is not ascending is
+     * either the wrong address or a binary this app does not understand, and in both cases guessing
+     * a threshold would reject real samples for an invented reason.
+     */
+    public readLambdaLimits(): LambdaLimits | null {
+        const u16s = (addr: number, n: number) =>
+            Array.from({ length: n }, (_, i) => this.getUint16(addr + i * 2));
+        const ascending = (a: number[]) => a.every((v, i) => i === 0 || v > a[i - 1]);
+
+        const wotX = u16s(LAMBDA_SHUTDOWN.WOT_THRESHOLD_X, 4);
+        const wotY = u16s(LAMBDA_SHUTDOWN.WOT_THRESHOLD_Y, 4);
+        const loadX = u16s(LAMBDA_SHUTDOWN.LOAD_THRESHOLD_X, 7);
+        if (!ascending(wotX) || !ascending(wotY) || !ascending(loadX)) return null;
+
+        return {
+            wotThreshold: {
+                x: wotX,
+                y: wotY,
+                z: Array.from({ length: 4 }, (_, r) =>
+                    u16s(LAMBDA_SHUTDOWN.WOT_THRESHOLD_Z + r * 8, 4).map(v => v / 10)),
+            },
+            loadThreshold: {
+                x: loadX,
+                y: u16s(LAMBDA_SHUTDOWN.LOAD_THRESHOLD_Y, 7).map(v => v / 1000),
+            },
+            fMax: this.getUint16(LAMBDA_SHUTDOWN.F_MAX) / 32768,
+            fMin: this.getUint16(LAMBDA_SHUTDOWN.F_MIN) / 32768,
+        };
     }
 
     public getBuffer(): ArrayBuffer {
