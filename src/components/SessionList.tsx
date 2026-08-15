@@ -263,9 +263,18 @@ export const SessionList: React.FC<Props> = ({
                 </span>
             </div>
 
+            {/* Five columns need about 730px, and this list sits in a pane that is roughly 0.6 of
+                the viewport — so the table only fits without sideways scrolling from about 1280px
+                up. Below that it becomes one card per session, because on a phone the columns put
+                CONTINUE 550px off the right edge: the whole list was reachable and none of its
+                actions were.
+
+                Same DOM either way, switched by display. Two renderings of a row would be two
+                places to add the next thing to it, and the one nobody opens on a desk is the one
+                that would rot. */}
             <div className="flex-1 min-h-0 overflow-auto">
-                <table className="w-full text-left border-collapse">
-                    <thead className="sticky top-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                <table className="w-full text-left border-collapse block min-[1280px]:table">
+                    <thead className="hidden min-[1280px]:table-header-group sticky top-0 bg-slate-900/90 backdrop-blur-sm z-10">
                         <tr className="text-[9px] text-slate-500 uppercase tracking-widest border-b border-slate-800">
                             <th className="px-3 py-2 font-bold">Name / Base</th>
                             <th className="px-3 py-2 font-bold">Date</th>
@@ -274,7 +283,7 @@ export const SessionList: React.FC<Props> = ({
                             <th className="px-3 py-2 font-bold text-right">Actions</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="block min-[1280px]:table-row-group">
                         {tree.map(({ session, depth, guides, isLast }) => {
                             const parent = session.parentSessionId ? byId.get(session.parentSessionId) : undefined;
                             const isDraft = session.status === 'draft';
@@ -293,8 +302,11 @@ export const SessionList: React.FC<Props> = ({
                             // if that tune is already in the ECU with the patches off.
                             const canFinalize = canFromTuned && !isFinal;
                             return (
-                                <tr key={session.id} className="text-xs border-b border-slate-900 hover:bg-slate-900/40 transition-colors group align-top">
-                                    <td className="px-3 py-2">
+                                // `order` is what puts the actions under the name on a card: the
+                                // cells stay in the order the table header promises, and only the
+                                // narrow layout re-sequences them to name → actions → facts.
+                                <tr key={session.id} className="text-xs group align-top transition-colors hover:bg-slate-900/40 flex flex-wrap items-center gap-x-3 px-3 py-1.5 border-b border-slate-800 min-[1280px]:table-row min-[1280px]:border-slate-900">
+                                    <td className="block w-full order-1 py-1 min-[1280px]:table-cell min-[1280px]:w-auto min-[1280px]:px-3 min-[1280px]:py-2">
                                         <div className="flex flex-col gap-0.5 min-w-0">
                                             <div className="flex items-center gap-1.5 min-w-0">
                                                 {/* Real tree guides. A lone "└" per row left every branch floating —
@@ -347,7 +359,9 @@ export const SessionList: React.FC<Props> = ({
                                                         title="Click to rename"
                                                     >
                                                         <span className="truncate max-w-[220px]">{session.label}</span>
-                                                        <Pencil className="w-2.5 h-2.5 opacity-0 group-hover:opacity-50 shrink-0" />
+                                                        {/* Kept visible where there is no hover to reveal it — on a phone
+                                                            the row simply looked unrenameable. */}
+                                                        <Pencil className="w-2.5 h-2.5 shrink-0 opacity-50 min-[1280px]:opacity-0 min-[1280px]:group-hover:opacity-50" />
                                                     </button>
                                                 )}
                                             </div>
@@ -382,9 +396,12 @@ export const SessionList: React.FC<Props> = ({
                                             </div>
                                         </div>
                                     </td>
-                                    <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{formatDate(session.createdAt)}</td>
-                                    <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">
+                                    <td className="block order-3 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2">{formatDate(session.createdAt)}</td>
+                                    <td className="block order-4 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2">
                                         <span className="inline-flex items-center gap-1.5">
+                                            {/* The header carries this on a desk; a card has no header, and
+                                                "—" beside another "—" says nothing about which is which. */}
+                                            <span className="text-[8px] uppercase tracking-widest text-slate-700 min-[1280px]:hidden">Log</span>
                                             {session.hasLog
                                                 ? <span className="text-emerald-400/80">{session.logPointCount.toLocaleString()}</span>
                                                 : <span className="text-slate-700">—</span>}
@@ -417,8 +434,9 @@ export const SessionList: React.FC<Props> = ({
                                             )}
                                         </span>
                                     </td>
-                                    <td className="px-3 py-2 font-mono whitespace-nowrap" title={describeFlashHistory(session.flashHistory)}>
+                                    <td className="block order-5 font-mono whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2" title={describeFlashHistory(session.flashHistory)}>
                                         <span className="inline-flex items-center gap-1.5">
+                                            <span className="text-[8px] uppercase tracking-widest text-slate-700 min-[1280px]:hidden">Flash</span>
                                             {flashes
                                                 ? <span className="text-emerald-400/90">✔{flashes > 1 ? `×${flashes}` : ''}</span>
                                                 : <span className="text-slate-700">—</span>}
@@ -433,7 +451,7 @@ export const SessionList: React.FC<Props> = ({
                                             )}
                                         </span>
                                     </td>
-                                    <td className="px-3 py-2 text-right whitespace-nowrap relative">
+                                    <td className="block w-full order-2 whitespace-nowrap relative text-left min-[1280px]:table-cell min-[1280px]:w-auto min-[1280px]:px-3 min-[1280px]:py-2 min-[1280px]:text-right">
                                         {/* One word per outcome. "Open" meant two different things —
                                             resume work on a draft vs look at a locked archive — and a
                                             folder icon said neither. */}
@@ -472,7 +490,9 @@ export const SessionList: React.FC<Props> = ({
                                         {menuFor === session.id && (
                                             <>
                                                 <div className="fixed inset-0 z-40" onClick={() => setMenuFor(null)} />
-                                                <div className="absolute right-8 top-9 z-50 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 text-left">
+                                                {/* Hangs off the left on a card, where the trigger is; off the
+                                                    right on a desk, where the column is. */}
+                                                <div className="absolute z-50 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 text-left left-0 top-8 min-[1280px]:left-auto min-[1280px]:right-8 min-[1280px]:top-9">
                                                     {(canFromTuned || canFromBase) && (
                                                         <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
                                                             New session
@@ -514,7 +534,9 @@ export const SessionList: React.FC<Props> = ({
                                         )}
                                         <button
                                             onClick={() => { if (confirm(dialogText().deleteSession(session.label))) onDelete(session.id); }}
-                                            className="ml-1 p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded hover:bg-slate-800"
+                                            /* Floated away from CONTINUE on a card. Left where it is on a desk,
+                                               where a pointer does not miss by 8px. */
+                                            className="ml-1 p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded hover:bg-slate-800 float-right min-[1280px]:float-none"
                                             title="Delete session"
                                         >
                                             <Trash2 className="w-3 h-3" />
