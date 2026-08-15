@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download, UploadCloud } from 'lucide-react';
+import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download, UploadCloud, Info } from 'lucide-react';
 import { TuningSession, FlashRecord } from '@/lib/db/schema';
 import { isRoadState, isTuneOnTheRoad } from '@/lib/db/flashState';
 import { DropZone } from '@/components/DropZone';
@@ -200,6 +200,17 @@ export const SessionList: React.FC<Props> = ({
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftLabel, setDraftLabel] = useState('');
     const [menuFor, setMenuFor] = useState<string | null>(null);
+    /** Which cards have their detail line open, on the narrow layout only.
+     *
+     *  A Set rather than one id at a time, unlike `menuFor`: these are facts you read against each
+     *  other — which run was longer, which one was written — and a list that shuts the last card
+     *  every time you open the next can't be compared at all. The menu is a menu, so it closes. */
+    const [infoFor, setInfoFor] = useState<ReadonlySet<string>>(() => new Set());
+    const toggleInfo = (id: string) => setInfoFor(prev => {
+        const next = new Set(prev);
+        if (!next.delete(id)) next.add(id);
+        return next;
+    });
 
     const tree = useMemo(() => buildTree(sessions), [sessions]);
     const byId = useMemo(() => new Map(sessions.map(s => [s.id, s])), [sessions]);
@@ -301,6 +312,7 @@ export const SessionList: React.FC<Props> = ({
                             // Nothing to finalize without stored TUNED bytes, and nothing to finalize
                             // if that tune is already in the ECU with the patches off.
                             const canFinalize = canFromTuned && !isFinal;
+                            const infoOpen = infoFor.has(session.id);
                             return (
                                 // `order` is what puts the actions under the name on a card: the
                                 // cells stay in the order the table header promises, and only the
@@ -396,8 +408,11 @@ export const SessionList: React.FC<Props> = ({
                                             </div>
                                         </div>
                                     </td>
-                                    <td className="block order-3 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2">{formatDate(session.createdAt)}</td>
-                                    <td className="block order-4 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2">
+                                    {/* The three readouts, folded away behind ⓘ on a card. They are what
+                                        you check about a session, not what you do with it, and at four
+                                        lines a card the list only fitted seven of them on a phone. */}
+                                    <td className={`${infoOpen ? 'block' : 'hidden'} order-3 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2`}>{formatDate(session.createdAt)}</td>
+                                    <td className={`${infoOpen ? 'block' : 'hidden'} order-4 font-mono text-slate-500 whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2`}>
                                         <span className="inline-flex items-center gap-1.5">
                                             {/* The header carries this on a desk; a card has no header, and
                                                 "—" beside another "—" says nothing about which is which. */}
@@ -434,7 +449,7 @@ export const SessionList: React.FC<Props> = ({
                                             )}
                                         </span>
                                     </td>
-                                    <td className="block order-5 font-mono whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2" title={describeFlashHistory(session.flashHistory)}>
+                                    <td className={`${infoOpen ? 'block' : 'hidden'} order-5 font-mono whitespace-nowrap min-[1280px]:table-cell min-[1280px]:px-3 min-[1280px]:py-2`} title={describeFlashHistory(session.flashHistory)}>
                                         <span className="inline-flex items-center gap-1.5">
                                             <span className="text-[8px] uppercase tracking-widest text-slate-700 min-[1280px]:hidden">Flash</span>
                                             {flashes
@@ -532,11 +547,23 @@ export const SessionList: React.FC<Props> = ({
                                                 </div>
                                             </>
                                         )}
+                                        {/* First of the two floats, so it lands furthest right and holds that
+                                            corner whether or not the card is open. Narrow layout only — the
+                                            columns it unfolds are all on screen at once on a desk. */}
+                                        <button
+                                            onClick={() => toggleInfo(session.id)}
+                                            aria-expanded={infoOpen}
+                                            className={`float-right ml-1 p-1.5 rounded transition-colors hover:bg-slate-800 min-[1280px]:hidden ${infoOpen ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}
+                                            title="Date, log size, flash history — and delete"
+                                        >
+                                            <Info className="w-3 h-3" />
+                                        </button>
                                         <button
                                             onClick={() => { if (confirm(dialogText().deleteSession(session.label))) onDelete(session.id); }}
-                                            /* Floated away from CONTINUE on a card. Left where it is on a desk,
-                                               where a pointer does not miss by 8px. */
-                                            className="ml-1 p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded hover:bg-slate-800 float-right min-[1280px]:float-none"
+                                            /* Folded in with the readouts on a card: it was 8px from CONTINUE
+                                               under a thumb, and now it takes a deliberate ⓘ first. Left exactly
+                                               where it is on a desk, where a pointer does not miss. */
+                                            className={`ml-1 mr-3 p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded hover:bg-slate-800 float-right ${infoOpen ? '' : 'hidden'} min-[1280px]:inline-block min-[1280px]:float-none min-[1280px]:mr-0`}
                                             title="Delete session"
                                         >
                                             <Trash2 className="w-3 h-3" />
