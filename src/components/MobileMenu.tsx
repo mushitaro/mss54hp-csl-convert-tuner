@@ -431,7 +431,27 @@ export const MobileMenu: React.FC<Props> = ({
                     test must return null here so a finger travelling up the sheet cannot release
                     onto SAVE and write to the database, or onto SYNC and start an upload. */}
                 {(saveLook || syncLook) && (
-                    <div className="shrink-0 flex items-stretch gap-2 px-4 py-2 border-t border-slate-800">
+                    <div className="shrink-0 border-t border-slate-800">
+                        {/* The failure, in text, on the device that cannot hover.
+                            ────────────────────────────────────────────────────────────────────────
+                            Everything else on this sheet keeps its long form in `title`, which is
+                            correct for a label whose short form is already the answer. It is wrong
+                            for an error: the short form is "Sync failed" and the long form is the
+                            only thing that says WHY. A phone has no hover, so on the one platform
+                            SAVE and SYNC were moved down here to serve, the app could report that
+                            an upload failed and had no way to report the reason — which is exactly
+                            how it went: "Sync failed — retry" on screen, and the API's own sentence
+                            unreachable behind a tooltip.
+
+                            Wraps rather than truncates, and sits above the buttons rather than
+                            beside them, because it is read once and then acted on. Rendered only in
+                            the error tone, so nothing moves in the normal case. */}
+                        {syncLook?.tone === 'error' && sync?.error && (
+                            <p className="px-4 pt-2 text-[10px] leading-relaxed text-red-400 break-words">
+                                {sync.error}
+                            </p>
+                        )}
+                        <div className="flex items-stretch gap-2 px-4 py-2">
                         {saveLook && (
                             <button
                                 type="button"
@@ -467,6 +487,7 @@ export const MobileMenu: React.FC<Props> = ({
                                 </span>
                             </button>
                         )}
+                        </div>
                     </div>
                 )}
 
