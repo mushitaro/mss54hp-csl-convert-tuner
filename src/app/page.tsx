@@ -12,6 +12,9 @@ const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mo
 const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
 import { DropCensusLine } from '@/components/DropCensus';
+import {
+  type ProcessId, LOG_PROFILES, expectedHz, missingPatches, deriveRoute,
+} from '@/lib/log-engine/logProfile';
 import { InertiaWorkflow } from '@/components/InertiaWorkflow';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
@@ -383,6 +386,15 @@ export default function Home() {
    * is precisely the mistake this exists to prevent.
    */
   const [verifyMode, setVerifyMode] = useState<WriteVerifyMode>('full');
+  /**
+   * What the next run is for. Chosen before START TUNE, because it decides which DS2 blocks a
+   * sample is made of and therefore what the log can answer afterwards.
+   *
+   * Not derived, unlike almost everything else on this screen — it is a statement of intent that
+   * nothing in the data can imply, and the whole point is to make it before the drive rather than
+   * discover it after. Defaults to VE, which is what every run was until profiles existed.
+   */
+  const [logProcess, setLogProcess] = useState<ProcessId>('VE');
   const connectedVin = dmeLink.identity?.vin ?? null;
   useEffect(() => {
     setVerifyMode(initialVerifyMode(connectedVin));
@@ -1506,7 +1518,23 @@ export default function Home() {
   const finishLogRef = useRef(finishLog);
   finishLogRef.current = finishLog;
 
-  const handleStartTune = () => {
+  const handleStartTune = async () => {
+    const profile = LOG_PROFILES[logProcess];
+    // Preflight, before a drive rather than after one. Overridable — see missingPatches for why —
+    // but never silent, because the cost of finding out afterwards is the whole run.
+    const missing = missingPatches(profile, { patched: bytesPatched, tankVentShut: bytesTankVentShut });
+    if (missing.length) {
+      const tPre = dialogText();
+      const go = await ask({
+        title: tPre.titleRunPreflight, icon: <AlertCircle className="w-3 h-3" />,
+        body: tPre.runPreflight(profile.label, missing),
+        confirmLabel: tPre.btnRunAnyway, cancelLabel: tPre.btnCancel, danger: true,
+      });
+      if (!go) return;
+    }
+    if (currentSession) {
+      void sessionDb.setProcess(currentSession.id, logProcess).catch(() => { /* label only */ });
+    }
     liveSamplesRef.current = [];
     lastFlushRef.current = 0;
     finishedRef.current = false;
@@ -1573,6 +1601,9 @@ export default function Home() {
         void persistLiveSamples(false); // own throttle, far slower than the 500 ms UI flush
       },
       (failure) => { void finishLogRef.current(failure); },
+      // The profile's block set. An EGT run skips block 19, which roughly doubles the sample rate
+      // and leaves `la_f_regler` undefined — so its log cannot produce a VE map, which is correct.
+      profile.blocks,
     );
   };
 
@@ -1657,6 +1688,10 @@ export default function Home() {
         // lands on an erased ECU. It is never implied.
         boostBaud: dmeLink.writeBaud !== 9600 ? dmeLink.writeBaud : null,
         tankVentOff: applyTankVentDisable,
+        // Which campaign shape this write is part of, and — for route B only — that it rests on a
+        // division no car has checked. Stated here rather than left to the hub because this is the
+        // dialog whose job is the consequence of the thing about to happen.
+        route: writeRoute,
         // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
         // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
         // and the screen or an app switch can take the connection down mid-write.
@@ -2076,13 +2111,36 @@ export default function Home() {
    *  Unlike 'tune' it is NOT gated on !isArchived: finalising is exactly an archived session's job. */
   const idleAction: 'read' | 'tune' | 'write' | 'writePatch' =
     newMap ? 'write'
-      : (patchDrift && patchWriteAllowed && currentMap && currentSession) ? 'writePatch'
-        : (currentMap && currentSession && !isArchived) ? 'tune'
-          : 'read';
+      // Route A step 1: a correction table with no VE map behind it. An EGT run produces exactly
+      // that — its log has no trim, so `newMap` stays null — and without this branch there would be
+      // no way to send it. buildPatchedBuffer already writes KF_RF_KORR_DRREL outside its
+      // `if (newMap)`, so the bytes have always been reachable; only the offer was missing.
+      : (rfKorrArmed && currentMap && currentSession && !isArchived) ? 'writePatch'
+        : (patchDrift && patchWriteAllowed && currentMap && currentSession) ? 'writePatch'
+          : (currentMap && currentSession && !isArchived) ? 'tune'
+            : 'read';
+
+  /**
+   * Which campaign shape the next WRITE belongs to. Derived, never stored — see deriveRoute.
+   *
+   * The parent's process is what separates "a VE map on BMW's own correction table" from "a VE map
+   * on the table this campaign just replaced". Both write the same kind of bytes; only the history
+   * says which one you are doing.
+   */
+  const parentSession = currentSession?.parentSessionId
+    ? sessionDb.sessions.find(s => s.id === currentSession.parentSessionId)
+    : undefined;
+  const writeRoute = deriveRoute({
+    process: logProcess,
+    writeRfKorr: rfKorrArmed,
+    hasVeMap: !!newMap,
+    parentProcess: parentSession?.process ?? (parentSession ? 'VE' : undefined),
+  });
 
   // Names the bytes by what they will carry once written, not by what is in the ECU now — the label
   // is a promise about the file being sent, the same rule DOWNLOAD PATCH-ON follows.
-  const writePatchLabel = (applyPatch || applyWotDisable || applyTankVentDisable) ? 'WRITE PATCH-ON' : 'WRITE PATCH-OFF';
+  const writePatchLabel = writeRoute === 'A1' ? 'WRITE RF KORR'
+    : (applyPatch || applyWotDisable || applyTankVentDisable) ? 'WRITE PATCH-ON' : 'WRITE PATCH-OFF';
 
   const dmeButtonConfig = (() => {
     switch (dmeLink.state) {
@@ -2873,6 +2931,33 @@ const WOT_CRITERION =
                     startRun={dmeLink.startInertiaRun}
                     stopRun={dmeLink.stopTuning}
                     baseImage={binaryFileState.binaryBuffer}
+                    /**
+                     * An inertia run is research in its own session — the samples used to live in a
+                     * ref and nothing else, so navigating away lost the drive.
+                     *
+                     * Stored through saveResearch rather than saveSessionTune because there are no
+                     * TUNED bytes: this run proposes calibration changes and writes nothing. No
+                     * sha256 means the list never offers FINAL, Finalize or From TUNED for it, which
+                     * is right and needs no special case anywhere.
+                     *
+                     * EGAS samples are not LogDataPoints and deliberately cannot be — see
+                     * EgasMeasurement. They are mapped onto the log record's shape here, at the one
+                     * boundary that knows both, keeping `time` and the channels the estimator reads.
+                     */
+                    onSaveRun={(samples) => {
+                      if (!currentSession) return;
+                      void sessionDb.saveResearch({
+                        sessionId: currentSession.id,
+                        process: 'INERTIA',
+                        log: samples.map(s => ({
+                          time: s.time,
+                          rpm: s.n40 ?? 0,
+                          rawLoad: s.rf ?? 0,
+                          wdk1: s.wdk1 ?? undefined,
+                          rf: s.rf ?? undefined,
+                        })),
+                      }).catch(() => { /* the estimate is on screen either way */ });
+                    }}
                   />
                 </div>
               )}
@@ -3218,6 +3303,42 @@ The TIMING button still has the full record; save it before running another oper
                             <option value="full">FULL</option>
                           </select>
                         </label>
+                        {/* What the next run is FOR.
+                            Beside VERIFY rather than on the ring, because the ring's label says what
+                            the button does and this says what the run is about — and because the
+                            choice has to be made before the drive, which is where this cluster is
+                            read. The rate is part of the option rather than a separate readout: it
+                            is the consequence of the choice, and the whole reason EGT exists as a
+                            process is that not reading block 19 roughly doubles it.
+                            Selecting INERTIA moves to its tab, which owns its own start — see
+                            InertiaWorkflow for why that run is driven from there. */}
+                        {dmeLink.state === 'connected' && (
+                          <label
+                            className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
+                            title={'What this run measures, which decides which DS2 blocks a sample is made of.\n\n'
+                              + `VE — blocks 3+19. The lambda trim is the input. ${LOG_PROFILES.VE.produces}.\n`
+                              + `EGT — block 3 only. rf_korr is (rf/100)/rf_soll and every term is in block 3, so the 90-byte trim block is 113ms per sample spent on four unused bytes. ${LOG_PROFILES.EGT.produces}.\n`
+                              + `INERTIA — block 83 alone. ${LOG_PROFILES.INERTIA.produces}.\n\n`
+                              + 'The channels are the enforcement: an EGT log has no la_f_regler, so no VE map can come out of it.'}
+                          >
+                            RUN
+                            <select
+                              value={logProcess}
+                              onChange={(e) => {
+                                const next = e.target.value as ProcessId;
+                                setLogProcess(next);
+                                if (next === 'INERTIA') goToTab('inertia');
+                              }}
+                              className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
+                            >
+                              {(Object.keys(LOG_PROFILES) as ProcessId[]).map(id => (
+                                <option key={id} value={id}>
+                                  {LOG_PROFILES[id].label} ~{expectedHz(LOG_PROFILES[id].blocks).toFixed(1)}Hz
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
                         {/* FAST READ. A readout, not a control — it is armed by whether a service-block
                             backup exists for this VIN, which is a fact about the DME rather than a
                             preference. Shown even when off, because "why was my read still 2 minutes"

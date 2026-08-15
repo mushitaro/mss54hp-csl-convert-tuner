@@ -1,3 +1,4 @@
+import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { LogDataPoint, VEMap, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { AdaptationSnapshot } from '@/lib/dme-link/adaptationBlocks';
 
@@ -128,6 +129,22 @@ export interface TuningSession {
     label: string;
     /** draft = the one working session, tunable. archived = reference + flash only. */
     status: 'draft' | 'archived';
+
+    /**
+     * What this session's log was captured FOR — and therefore which DS2 blocks it holds.
+     *
+     * One session, one log, one process: `SessionLogRecord` is keyed by session id and holds a
+     * single log, so the process is a property of the session rather than of a run within it.
+     *
+     * Optional, and absent reads as 'VE'. That is not a lenient default but a historically correct
+     * one — every session recorded before profiles existed polled blocks 3 and 19 and produced a VE
+     * map, because there was nothing else it could do.
+     *
+     * Nothing is gated on this. An EGT log has no `la_f_regler` and so cannot produce a VE map
+     * whatever this field says; the field is here so the session list can show the chain (an EGT run
+     * and the VE run branched from it) and so `deriveRoute` can name the campaign shape.
+     */
+    process?: ProcessId;
 
     baseOrigin: BaseOrigin | null;   // null = BASE not chosen yet
     /** Denormalised from baseOrigin for tree building. Decorative: the bytes are self-contained,

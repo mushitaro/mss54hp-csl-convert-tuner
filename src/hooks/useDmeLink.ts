@@ -429,8 +429,18 @@ export function useDmeLink() {
     const startTuning = useCallback((
         onSample: (sample: LiveMeasurement) => void,
         onEnd?: (failure: string | null) => void,
+        /**
+         * Which DS2 blocks a sample is made of — the run profile's block set.
+         *
+         * Applied here rather than left to the caller to set beforehand, because the two have to
+         * move together: a profile chosen and a poll still fetching the old blocks would produce a
+         * log with channels the process does not claim, or missing ones it does. Omitted means the
+         * link keeps whatever it had, which is both blocks.
+         */
+        blocks?: number[],
     ) => {
         if (!linkRef.current) { onEnd?.('Not connected to DME'); return; }
+        if (blocks) linkRef.current.setLiveBlocks?.(blocks);
         // Every other operation clears the previous error first; this one didn't, so a failed
         // adaptation reset — the step designed to happen immediately before a log — left the status
         // dot red for the whole run and made the abort invisible.

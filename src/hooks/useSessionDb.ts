@@ -1,3 +1,4 @@
+import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { useCallback, useEffect, useState } from 'react';
 import { LogDataPoint, VEMap } from '@/lib/types';
 import { TuningSession, BaseOrigin, TuneSettings, FlashRecord, AdaptationResetRecord, FlashCounterResetRecord, SessionBinariesRecord } from '@/lib/db/schema';
@@ -7,6 +8,8 @@ import {
     saveTune,
     renameSession,
     archiveSession,
+    setSessionProcess,
+    saveResearchRun,
     appendFlashRecord,
     appendAdaptationReset,
     appendFlashCounterReset,
@@ -66,6 +69,19 @@ export function useSessionDb() {
         await refresh();
     }, [refresh]);
 
+    const saveResearch = useCallback(async (params: {
+        sessionId: string; process: ProcessId; log: LogDataPoint[];
+    }) => {
+        const s = await saveResearchRun(params);
+        await refresh();
+        return s;
+    }, [refresh]);
+
+    const setProcess = useCallback(async (id: string, process: ProcessId) => {
+        await setSessionProcess(id, process);
+        await refresh();
+    }, [refresh]);
+
     const archive = useCallback(async (id: string) => {
         await archiveSession(id);
         await refresh();
@@ -96,7 +112,7 @@ export function useSessionDb() {
 
     return {
         sessions, loading, error, refresh,
-        newDraft, setBase, saveSessionTune, rename, archive, recordFlash, recordAdaptationReset,
+        newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
         recordFlashCounterReset, remove,
         loadLog, loadBinaries,
     };

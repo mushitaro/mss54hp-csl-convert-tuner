@@ -386,6 +386,9 @@ export interface DmeLink {
      * that does not exist.
      */
     setFastRead?(seed: SeedMap | null): void;
+    /** Which DS2 selections a live sample is made of — see lib/log-engine/logProfile.ts. Optional
+     *  so a mock link that only ever produces one shape of sample need not implement it. */
+    setLiveBlocks?(selections: number[]): void;
     /** Whether the link actually armed it. Not the same as what was asked for — a transport that
      *  cannot change rate on the open handle refuses, and the UI must report the link's answer. */
     getFastReadArmed?(): boolean;

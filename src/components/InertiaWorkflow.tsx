@@ -27,9 +27,17 @@ interface Props {
     baseImage: ArrayBuffer | null;
     /** True J when the link is the offline bench, so PRACTICE can grade the estimate. */
     benchTrueJ?: number;
+    /**
+     * Hands the finished run to the session store.
+     *
+     * Optional, and absent means the run stays in memory as it always did. Passed in rather than
+     * done here because this component owns an EGAS run, not a session — the page owns those, and
+     * knows which one is open.
+     */
+    onSaveRun?: (samples: EgasMeasurement[]) => void;
 }
 
-export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage, benchTrueJ }) => {
+export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage, benchTrueJ, onSaveRun }) => {
     // The authoritative copy, for the same reason the VE datalog keeps one: React state updates are
     // batched and a poll loop running faster than a render would drop samples through a setState
     // closure. The array in state exists to drive the sample counter.
@@ -63,9 +71,14 @@ export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage,
                 // and the estimator's own gates decide whether it is enough — which is a better
                 // answer than discarding it on the caller's behalf.
                 setEstimate(estimateInertia(collected));
+                // Persist on the same terms as the estimate above: a partial run is still evidence,
+                // and an inertia run is research whose whole value is being able to come back to it.
+                // Until now the samples lived in this ref and nothing else — navigating away lost
+                // the drive.
+                if (collected.length) onSaveRun?.(collected);
             },
         );
-    }, [startRun]);
+    }, [startRun, onSaveRun]);
 
     const onStop = useCallback(() => {
         stopRun();

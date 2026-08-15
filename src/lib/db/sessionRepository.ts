@@ -1,3 +1,4 @@
+import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { LogDataPoint, VEMap } from '@/lib/types';
 import { sampleRateHz } from '@/lib/log-engine/rate';
 import {
@@ -179,6 +180,52 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
     });
 }
 
+/**
+ * Persists an inertia run: its samples, and the fact that it happened.
+ *
+ * A separate entry point from `saveTune`, not a flag on it, because the two record different kinds
+ * of thing. `saveTune` exists to say "this session produced TUNED bytes" — it sets `sha256`, which
+ * is what makes the download and the "Use as base" branch offer anything. An inertia run produces
+ * no bytes at all: it proposes calibration changes for a person to read and decide on, and writes
+ * nothing. Giving it a sha256 would put a downloadable TUNED on a session that never made one,
+ * which is exactly the "BASE dressed as a TUNED" this repository already refuses elsewhere.
+ *
+ * So the record is BASE + log + the process label, and nothing more. The session list needs no
+ * special case: `canFromTuned` is `!!session.sha256`, so an inertia session simply never offers
+ * FINAL, Finalize or From TUNED. It stays a draft for the same reason — nothing was flashed.
+ *
+ * The log is stored in the same store as every other, keyed the same way. It is EgasMeasurement
+ * rather than LogDataPoint, which is why the caller serialises it: the two sample types are
+ * deliberately not interchangeable (see EgasMeasurement) and this function is not the place to
+ * blur that.
+ */
+export async function saveResearchRun(input: {
+    sessionId: string;
+    process: ProcessId;
+    log: LogDataPoint[];
+}): Promise<TuningSession> {
+    return withDb(async db => {
+        const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE], 'readwrite');
+        const store = tx.objectStore(SESSIONS_STORE);
+        const existing = await promisify<TuningSession | undefined>(store.get(input.sessionId));
+        if (!existing) throw new Error(`Session ${input.sessionId} not found`);
+
+        const updated: TuningSession = {
+            ...existing,
+            process: input.process,
+            hasLog: input.log.length > 0,
+            logPointCount: input.log.length,
+            averageHz: sampleRateHz(input.log),
+        };
+        store.put(updated);
+        if (input.log.length > 0) {
+            tx.objectStore(SESSION_LOGS_STORE).put({ sessionId: input.sessionId, data: input.log });
+        }
+        await txDone(tx);
+        return updated;
+    });
+}
+
 async function patchSession(id: string, patch: (s: TuningSession) => TuningSession): Promise<TuningSession> {
     return withDb(async db => {
         const tx = db.transaction(SESSIONS_STORE, 'readwrite');
@@ -194,6 +241,13 @@ async function patchSession(id: string, patch: (s: TuningSession) => TuningSessi
 
 export function renameSession(id: string, label: string): Promise<TuningSession> {
     return patchSession(id, s => ({ ...s, label }));
+}
+
+/** Records what a run was for, at the moment it starts. Best-effort at the call site: it labels the
+ *  session and feeds `deriveRoute`, and nothing is gated on it — an EGT log cannot make a VE map
+ *  because it has no trim channel, not because of this field. */
+export function setSessionProcess(id: string, process: ProcessId): Promise<TuningSession> {
+    return patchSession(id, s => ({ ...s, process }));
 }
 
 export function archiveSession(id: string): Promise<TuningSession> {

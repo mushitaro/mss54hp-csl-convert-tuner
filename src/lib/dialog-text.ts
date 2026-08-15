@@ -23,6 +23,8 @@
  * instrument's vocabulary — translating those would break the label-is-a-promise chain, not serve it.
  */
 
+import type { RouteId } from '@/lib/log-engine/logProfile';
+
 export type DialogLang = 'ja' | 'en';
 
 // ブラウザの言語設定から表示言語を判定する。日本語(ja / ja-JP 等)なら日本語、それ以外はすべて英語。
@@ -49,6 +51,39 @@ const KEY_CYCLE_EN =
     '3. Turn the key back ON\n\n' +
     'The DME reinitializes with the new data.';
 
+/**
+ * Which campaign shape a write belongs to, in one line at the top of the confirm.
+ *
+ * Only route B gets a warning, and it is the one worth having: B divides the VE map by k_new, which
+ * docs/ecu-logic/60 §9 records as never checked on a car. A costs one more flash slot and depends
+ * on nothing of the kind, so the dialog says which of those is about to happen while there is still
+ * a Cancel button. `verify:route` asserts that B is the only route carrying that dependency, so the
+ * warning cannot drift away from the arithmetic it describes.
+ */
+const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
+    ja: {
+        NONE: '',
+        CONSERVATIVE: 'ROUTE 0 — BMW の EGT 補正表はそのままです。VE マップだけを書きます。\n\n',
+        A1: 'ROUTE A · 第1段 — EGT 補正表 (KF_RF_KORR_DRREL) だけを書きます。VE マップは含まれません。\n'
+            + '  この後は「Use as base → TUNED」で新しいセッションを作り、そこで VE を測ってください。\n\n',
+        A2: 'ROUTE A · 第2段 — VE マップを書きます。補正表はこのキャンペーンで既に書き換え済みです。\n\n',
+        B: 'ROUTE B — VE マップと EGT 補正表を同時に書きます。\n'
+            + '  ⚠ VE マップは k_new で割ってあります。この割り算は実車で未検証です。\n'
+            + '    ROUTE A（表と VE を別々に書く）なら、フラッシュ1回分多く使う代わりに\n'
+            + '    この未検証の式に依存しません。\n\n',
+    },
+    en: {
+        NONE: '',
+        CONSERVATIVE: "ROUTE 0 — BMW's EGT correction table is left alone. Only the VE map is written.\n\n",
+        A1: 'ROUTE A step 1 — the EGT correction table (KF_RF_KORR_DRREL) alone. No VE map.\n'
+            + '  Continue with "Use as base → TUNED" and measure VE in that new session.\n\n',
+        A2: 'ROUTE A step 2 — the VE map. The correction table was already replaced by this campaign.\n\n',
+        B: 'ROUTE B — the VE map and the EGT correction table, together.\n'
+            + '  ⚠ The VE map has been divided by k_new. That division has never been checked on a car.\n'
+            + '    ROUTE A writes them separately: one more flash slot, and no dependency on it.\n\n',
+    },
+};
+
 const JA = {
     // --- workspace / session housekeeping ---
     clearLog: 'このデータログ(CSV)を破棄しますか？',
@@ -60,6 +95,18 @@ const JA = {
     noStoredTune: 'このセッションにはまだTUNEDが保存されていません。',
     noStoredLog: 'このセッションにはデータログが保存されていません。',
     noTuneToFinalize: 'このセッションにはファイナライズできるTUNEDがありません。',
+
+    titleRunPreflight: '走行前の確認',
+    runPreflight: (profile: string, missing: string[]) =>
+        `${profile} のランに必要なパッチが、いま ECU に入っていません。` + '\n\n'
+        + missing.map(m => m === 'PATCH'
+            ? '・PATCH — MAP補正とLTFT学習が生きたままです。トリムはVE誤差ではなく、'
+            + 'DMEが自分で補正した結果を映します。'
+            : '・TANK VENT — パージバルブが開きます。EGTランは block 19 を読まないので、'
+            + '起きていても検出できません。').join('\n')
+        + '\n\n先に WRITE PATCH-ON を当ててから走るのが本来の順序です。'
+        + '\nこのまま走ることもできますが、そのログが何を測っているかは保証されません。',
+    btnRunAnyway: 'このまま走る',
     noBinaryOfKind: (which: string) => `このセッションには ${which.toUpperCase()} のBINがありません。`,
     notReconstructed: '保存されたデータログからこのセッションを再構築できませんでした。書き込みは無効です。',
     setBaseFirst: '先にBASEを設定してください(BINを読み込むか、DMEから読み出してください)。',
@@ -100,8 +147,9 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
         'DMEへ書き込みます。\n\n' +
+        ROUTE_TEXT.ja[a.route] +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
             : `⚠ マップは変更しません(パッチのみ) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
@@ -284,6 +332,18 @@ const EN: NativeDialogText = {
     noStoredTune: 'This session has no saved tune yet.',
     noStoredLog: 'This session has no stored log.',
     noTuneToFinalize: 'This session has no saved tune to finalize.',
+
+    titleRunPreflight: 'Before this run',
+    runPreflight: (profile: string, missing: string[]) =>
+        `The ${profile} run needs patches that are not in the ECU right now.` + '\n\n'
+        + missing.map(m => m === 'PATCH'
+            ? '- PATCH - MAP compensation and LTFT learning are still live, so the trim reports the '
+            + 'DME correcting itself rather than the VE error you are trying to measure.'
+            : '- TANK VENT - the purge valve will open. An EGT run does not read block 19, so it '
+            + 'cannot even see it happening.').join('\n')
+        + '\n\nThe intended order is WRITE PATCH-ON first, then drive.'
+        + '\nRunning anyway is allowed; what the log measures is then not guaranteed.',
+    btnRunAnyway: 'Run anyway',
     noBinaryOfKind: (which: string) => `This session has no ${which.toUpperCase()} binary.`,
     notReconstructed: 'This session could not be reconstructed from its stored log — flashing is disabled.',
     setBaseFirst: 'Set a BASE first (upload a BIN or read it from the DME).',
@@ -321,8 +381,9 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +
+        ROUTE_TEXT.en[a.route] +
         `What will be written: ${a.tuned
             ? 'the tuned map'
             : `⚠ the map is NOT changed (patches only) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
