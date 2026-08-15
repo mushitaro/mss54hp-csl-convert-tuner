@@ -3620,8 +3620,13 @@ The TIMING button still has the full record; save it before running another oper
                       </div>
                     </div>
 
-                    {/* ROW 3: LTFT STATUS (Close to Ring) */}
-                    <div className="h-7 flex items-center gap-3 mr-1 opacity-90 transition-opacity shrink-0">
+                    {/* ROW 3: LTFT STATUS (Pushed Away/Far)
+                        `mr-8 pr-1`, matching MAP above rather than PATCH. The wings are a convex
+                        arc — near, far, far, near — and the right one still reads 84 / 112 / 112 / 84.
+                        This row was `mr-1` because the left wing had three rows and near/far/near was
+                        the arc for three; adding TANK VENT made it four and left this one bulging
+                        inward on its own. */}
+                    <div className="h-7 flex items-center gap-4 mr-8 pr-1 opacity-90 transition-opacity shrink-0">
                       <span className="text-[10px] font-bold text-slate-600 tracking-widest uppercase whitespace-nowrap">LTFT MIN</span>
                       <div className="flex items-center justify-end w-8">
                         <span className={`text-[11px] font-mono font-bold tracking-wider ${applyPatch ? 'text-amber-500' : 'text-slate-500'}`}>
@@ -3646,6 +3651,7 @@ The TIMING button still has the full record; save it before running another oper
                         emissions device disabled, and it is the only line on the hub that does. */}
                     <div
                       className="h-7 flex items-center gap-3 mr-1 opacity-90 transition-opacity shrink-0"
+                      /* `mr-1`, the near end of the arc, mirroring WRITE RF KORR opposite. */
                       title={'Armed by PATCH — a readout, not a switch.\n\n'
                         + 'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
                         + 'Why: purged vapour is fuel the DME did not inject, so the lambda controller trims for it — and that trim is the single input this app derives the VE correction from. Measured on this car (Session #902): the valve was open for 82.8% of a 657s drive, at up to 99.9% duty. Session #904, with this armed: TETV read 0 on all 1260 samples.\n\n'
