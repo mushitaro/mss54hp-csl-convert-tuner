@@ -120,24 +120,45 @@ export const APP_CONFIG = {
      * re-imports. Real Testo header names still have to be read off the car — add them here.
      */
     CSV_ALIASES: {
+        // The TODO below is discharged. These are no longer guesses: they are Testo's own MSS54
+        // channel list, `ecudata/MSS54DS0_DATATABLE_results.txt`, which gives every channel as
+        // `display name, SYMBOL, unit, telegram` — and the display name is what a Testo CSV heads
+        // its column with. The telegram field settles provenance too: `12050B03` is DS2 selection 3
+        // and `12050B13` is selection 19, the same two blocks this app reads.
+        //
+        // The list is a German/English mix, which is why guessing did not work. `Abgastemperatur`,
+        // `Tankentlueftung Ventil` and `Drosselklappe Istwert` were all reasonable and all wrong;
+        // Testo says `Exhaust temp.`, `Tank ventilation valve duty cycle`, `Throttle pos. actual`.
+        // The invented spellings stay, LAST, because this app's own serializer writes them and an
+        // exported log has to re-import.
         time: ['time', 'zeit'],
         rpm: ['rpm', 'drehzahl'],
         rawLoad: ['relativer oeffnungsquerschnitt'],
         stft1: ['lambdaintegrator 1'],
         stft2: ['lambdaintegrator 2'],
-        coolantTemp: ['kuehlmitteltemperatur', 'motor temp.', 'coolant temp'],
-        // Seeded with the names the SERIALIZER writes, so a log exported by this app re-imports to
-        // what it was exported from — that round trip is the only way these two channels reach a
-        // CSV today, since they come from the live DS2 link rather than from a file.
-        // TODO(on-car): add the real Testo header names alongside. One entry each, nothing else.
+        /**
+         * ORDER MATTERS HERE, and it is not cosmetic — first match wins.
+         *
+         * Testo exports TWO temperatures from block 3 and only one of them is the engine:
+         *   Motor temp.   MOTORTEMPERATUR          = tmot, the DME's engine temperature
+         *   Coolant temp. KUEHLW_AUSL_TEMPERATUR   = tka, the RADIATOR OUTLET
+         *
+         * `tmot` is what the minimum-temperature filter tests and what the DME's own warm-up logic
+         * uses; the radiator outlet is a different sensor that reads lower and lags. A CSV carrying
+         * both would have matched `coolant temp` first under the old ordering and quietly filtered
+         * the log against the wrong one, so the correct spellings are now ahead of it.
+         */
+        coolantTemp: ['motor temp.', 'motortemperatur', 'kuehlmitteltemperatur', 'coolant temp.', 'coolant temp'],
+        // Testo's name first, this app's serializer second — see the note at the top of the table.
         rf: ['relative fuellung'] as string[],
-        exhaustTemp: ['abgastemperatur'] as string[],
-        // Same round-trip reasoning as the two above: these come from the live DS2 link, so the
-        // serializer's own header is the only name that exists for them today.
-        tankVent: ['tankentlueftung ventil'] as string[],
+        exhaustTemp: ['exhaust temp.', 'abgastemperatur'] as string[],
+        tankVent: ['tank ventilation valve duty cycle', 'tankentlueftung ventil'] as string[],
+        wdk1: ['throttle pos. actual', 'drosselklappe istwert'] as string[],
+        // No Testo equivalent: these three are not in its MSS54 list at all, so the serializer's own
+        // header is the only name they have. `tefc_ll_st` and `tefc_ed` are decoded here from bytes
+        // Testo never surfaced, and `la_freeze_flag` is not even named outside karter16's catalog.
         tankVentCheckState: ['tankentlueftung funktionspruefung'] as string[],
         tankVentDiag: ['tankentlueftung diagnose'] as string[],
-        wdk1: ['drosselklappe istwert'] as string[],
         lambdaFreeze: ['lambda freeze flag'] as string[],
     },
 

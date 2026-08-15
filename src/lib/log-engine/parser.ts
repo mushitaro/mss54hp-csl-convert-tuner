@@ -68,6 +68,35 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
      * plausible-looking map by the wrong arithmetic, and that is the failure this app must never
      * ship. The message names the header the exporter should write.
      */
+    /**
+     * At least one lambda controller factor, on the same terms as RF above.
+     *
+     * The VE correction has exactly one input, and this is it — `NewVE = OldVE x avg(la_f_regler)`.
+     * Yet a log with NEITHER bank used to parse: the bank-filling below saw both undefined and
+     * substituted 1.0, which means "no correction", so the derivation ran to completion and
+     * produced a map that said every cell was already perfect. Silent, plausible, and wrong in the
+     * one direction nobody checks, because a map of no-change looks like a converged tune.
+     *
+     * ONE bank is enough and is not an error: the filling below copies it to the other, which is
+     * correct — the two banks measure different cylinders of the same engine and a single-bank log
+     * is a real Testo export, not a broken one. What is refused is having none.
+     *
+     * Testo names these `Lambdaintegrator 1` / `2`, and its own definition file puts them on DS2
+     * telegram `12050B13` — selection 19, the same bytes this app decodes as `la_f_regler1/2`.
+     */
+    const TRIM_ALIASES = [...APP_CONFIG.CSV_ALIASES.stft1, ...APP_CONFIG.CSV_ALIASES.stft2];
+    const hasTrim = normalizedData.some(row =>
+        pick(row, 'stft1') !== undefined || pick(row, 'stft2') !== undefined);
+    if (normalizedData.length > 0 && !hasTrim) {
+        throw new Error(
+            'This log has no lambda controller factor column (Testo calls it Lambdaintegrator), '
+            + 'which is the only input the VE correction has. Without it every cell would come out '
+            + 'as "no change", which is not a result. '
+            + `Accepted header names: ${TRIM_ALIASES.join(', ')}. `
+            + 'One bank is enough; a run recorded over DS2 always carries both.'
+        );
+    }
+
     const RF_ALIASES = APP_CONFIG.CSV_ALIASES.rf;
     const hasRf = normalizedData.some(row => pick(row, 'rf') !== undefined);
     if (normalizedData.length > 0 && !hasRf) {
@@ -98,12 +127,13 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         // HOWEVER, if the CSV only has 1 bank (STFT 1), STFT 2 is auto-filled with STFT 1 for
         // calculation safety. For DISPLAY (Lambda columns), the user wants to see "Empty" if
         // Bank 2 is missing, not a copy of Bank 1.
+        // No `both undefined` branch any more: the guard above rejects such a log outright rather
+        // than inventing 1.0 for it. A row that happens to be blank in an otherwise-populated
+        // column still lands here with both undefined, and leaving those NaN-free is what the
+        // `?? 1.0` at the end is for — a single blank row is not the same as a missing channel.
         let s1 = raw1;
         let s2 = raw2;
-        if (s1 === undefined && s2 === undefined) {
-            s1 = 1.0;
-            s2 = 1.0;
-        } else if (s1 === undefined) {
+        if (s1 === undefined) {
             s1 = s2;
         } else if (s2 === undefined) {
             s2 = s1;
@@ -113,8 +143,8 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
             time,
             rpm,
             rawLoad: pick(row, 'rawLoad') ?? 0,
-            stft1: s1!, // Used for Calc (Auto-filled if missing)
-            stft2: s2!, // Used for Calc (Auto-filled if missing)
+            stft1: s1 ?? 1.0, // Used for Calc (bank-filled above; 1.0 only for a blank row)
+            stft2: s2 ?? 1.0,
             lambda1: raw1, // Display: Only if physically present
             lambda2: raw2, // Display: Only if physically present
             coolantTemp,
