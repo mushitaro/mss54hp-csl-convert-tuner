@@ -5,49 +5,71 @@
  * exactly the unknown being measured, so a plausible-looking answer and a correct one are
  * indistinguishable; here the answer is chosen in advance and the estimator either recovers it or
  * does not. `mockDrive.ts` cannot serve — it is a scripted rpm/load cycle with no rotational
- * dynamics and no torque model, so its samples have no relationship between torque and gradient
- * for a regression to find.
+ * dynamics and no torque model, so its samples have no relationship between torque and gradient for
+ * a regression to find.
  *
  * The simulation is deliberately not a good engine model. It is a good *channel* model: what
- * matters for testing the estimator is that `n40` and `d_n40` are produced with the DME's own
- * quantisation — including the asymmetric truncation in `D_N40 = (D_N_SEGMENT + 0x14) / 0x28` — so
- * that the correction in `gradient.ts` is exercised against the thing it claims to correct rather
- * than against a restatement of itself.
+ * matters for testing the estimator is that the sample carries the channels the car carries, at the
+ * quantisation the car delivers them at, and no others.
+ *
+ * ## A fixture must not share the code's mistakes
+ *
+ * The previous version of this file encoded the DME's `d_n40` truncation so that the correction in
+ * `gradient.ts` was tested against the thing it claimed to correct. That was the right instinct and
+ * it still failed, twice over, for a reason worth keeping written down:
+ *
+ * - It hardcoded `engineState: 2` and `saWeSt: 1` — the same two wrong values the estimator's gates
+ *   were written against. Forty-one checks passed over a workflow that could not have accepted a
+ *   single real sample, because the fixture agreed with the bug.
+ * - All of it was moot: the channels it modelled come from DS2 selection 83, which is a latched
+ *   fault freeze-frame and never updates on a healthy car. The bench was a faithful simulation of a
+ *   telegram the estimator would never receive.
+ *
+ * So this version models only what `pollInertiaSample` actually returns, and the sweeps below now
+ * include the release as well as the pull — because the release is where the regression gets the
+ * other end of its line.
  */
 
-import type { EgasMeasurement } from '../dme-link/types';
+import type { InertiaSample } from '../dme-link/types';
 
 export interface BenchOptions {
     /** The inertia the estimator is supposed to recover, Nms^2. */
     j: number;
-    /** Sample interval, seconds. ~0.11 is the rate a single-block EGAS poll is expected to reach. */
+    /** Sample interval, seconds. ~0.19 is the rate two telegrams reach at 9600 baud. */
     sampleIntervalS: number;
     /** Integration step, seconds. Much smaller than the sample interval so the plant is not itself
      *  a quantisation artefact. */
     stepS: number;
     /** Peak-to-peak noise added to the modelled torque before quantisation, Nm. */
     torqueNoiseNm: number;
+    /** Coolant temperature the simulated engine reports, °C. Above the estimator's gate. */
+    coolantTempC: number;
     /** Deterministic seed, so a failing case is reproducible. */
     seed: number;
 }
 
 export const DEFAULT_BENCH: BenchOptions = {
     j: 0.2100,
-    sampleIntervalS: 0.11,
+    // Measured expectation for selection 3 (44 bytes on the wire) plus a 49-byte RAM read, at the
+    // ~45 ms per-exchange overhead this link shows at 9600. Deliberately pessimistic: if the
+    // estimator only works at a rate the car cannot reach, the bench should say so.
+    sampleIntervalS: 0.19,
     stepS: 0.002,
     torqueNoiseNm: 1.5,
+    coolantTempC: 92,
     seed: 12345,
 };
 
 /**
  * Loss torque: friction plus pumping, Nm, rising with speed.
  *
- * Shaped to land where an S54 actually motors — around 22 Nm at 2000 rpm and 40 Nm at 5000 — so
- * that the estimator's plausibility rail on `M_loss` is exercised at a realistic value rather than
- * being trivially satisfied.
+ * Shaped to land where an S54 actually motors. Raised from the original curve (22 Nm at 2000,
+ * 40 at 5000) after the free-deceleration rate was measured on the car at 2200-2400 rpm/s, which at
+ * J ~ 0.22 implies ~50 Nm rather than ~30 — the original shape was a guess and the car disagreed
+ * with it. Now ~35 Nm at 2000 and ~62 at 5000.
  */
 export function benchLossTorque(rpm: number): number {
-    return 12 + 0.0045 * rpm + 3.5e-7 * rpm * rpm;
+    return 20 + 0.0060 * rpm + 4.8e-7 * rpm * rpm;
 }
 
 /** Indicated torque for a pedal fraction, Nm. Smooth, monotonic, and peaked mid-range. */
@@ -68,25 +90,21 @@ function rng(seed: number): () => number {
 }
 
 /**
- * Applies the DME's own `d_n40` encoding, truncation and all.
- *
- * `D_N40 = (D_N_SEGMENT + 0x14) / 0x28` with integer division that truncates toward zero, then read
- * back at 40 rpm/s per LSB and clipped to a signed byte. Reproducing the truncation here rather
- * than rounding is the entire reason this bench can test `correctDN40`: round symmetrically and the
- * correction would look wrong, which is exactly the mistake the correction exists to fix.
+ * `n` from selection 3 is an unsigned 16-bit count at 1 rpm. Rounding, because that is what a
+ * counter does — and the whole reason this channel replaced `n40` is that it has nothing else
+ * happening to it.
  */
-export function encodeDN40(trueRpmPerS: number): number {
-    const lsb = Math.trunc((trueRpmPerS + 20) / 40);
-    const clipped = Math.max(-128, Math.min(127, lsb));
-    return clipped * 40;
+export function encodeRpm(rpm: number): number {
+    return Math.max(0, Math.min(65535, Math.round(rpm)));
 }
 
-/** `n40` is a plain unsigned byte at 40 rpm per count — truncating, not rounding. */
-export function encodeN40(rpm: number): number {
-    return Math.max(0, Math.min(255, Math.floor(rpm / 40))) * 40;
+/** `md_ind_ne` is uint16 x 0.1 Nm, and **unsigned** — so it floors at zero rather than going
+ *  negative on the overrun. Reproduced, because the estimator's zero-torque anchor depends on it. */
+export function encodeTorqueNm(nm: number): number {
+    return Math.max(0, Math.round(nm * 10)) / 10;
 }
 
-/** One leg of the procedure: hold a pedal fraction until the engine passes `toRpm`. */
+/** One leg of the procedure: a pull to `toRpm` at a pedal fraction, then a release back to `fromRpm`. */
 export interface BenchSweep {
     pedalFraction: number;
     fromRpm: number;
@@ -94,48 +112,33 @@ export interface BenchSweep {
 }
 
 /**
- * Runs a set of sweeps and a closing coast-down, and returns the samples a DME would have sent.
+ * Runs the procedure and returns the samples the link would have produced.
  *
- * The coast-down is emitted with the overrun-cut bit set and zero indicated torque, which is what
- * the estimator's free-deceleration cross-check looks for.
+ * Each sweep is a pull **and** a release. The release is not decoration: it is emitted with zero
+ * indicated torque and a shut throttle, which is both the free-deceleration cross-check's input and
+ * the far end of every rpm bin's regression line. A bench that only pulled would let an estimator
+ * pass that could never separate slope from intercept on a real run.
  */
 export function runBench(
     sweeps: readonly BenchSweep[],
     options: Partial<BenchOptions> = {},
-): EgasMeasurement[] {
+): InertiaSample[] {
     const opts: BenchOptions = { ...DEFAULT_BENCH, ...options };
     const rand = rng(opts.seed);
-    const out: EgasMeasurement[] = [];
+    const out: InertiaSample[] = [];
     let t = 0;
 
-    const emit = (rpm: number, trueRpmPerS: number, torqueNm: number, fuelCut: boolean) => {
+    const emit = (rpm: number, torqueNm: number, throttleOpen: boolean) => {
         out.push({
             time: t,
-            // What the DME really sends, not what the gate happened to expect. `zustand_motor` is a
-            // one-hot bitfield: 0x08 = TL (part load) under throttle, 0x04 = LL (idle) on the
-            // overrun. It was hardcoded to 2 — cranking — which is exactly the value the estimator's
-            // gate was wrongly written against, so the bench agreed with the bug and forty checks
-            // passed over a workflow that could not accept a single real sample. A fixture that
-            // encodes the same misunderstanding as the code under test cannot fail with it.
-            engineState: fuelCut ? 0x04 : 0x08,
-            wdk1: 0,
-            n40: encodeN40(rpm),
-            dN40: encodeDN40(trueRpmPerS),
-            dPwg: 0,
-            dWdk: 0,
-            rf: 20,
-            mdIndWunsch: Math.round(torqueNm * 10) / 10,
-            mdIndNe: Math.round(torqueNm * 10) / 10,
-            // 0.1 Nm quantisation, exactly as the uint16 x 0.1 channel delivers it.
-            mdIndOptKorr: Math.round(torqueNm * 10) / 10,
-            vAntrieb: 0,
+            rpm: encodeRpm(rpm),
+            coolantTemp: opts.coolantTempC,
+            wdk1: throttleOpen ? 12 : 0,
+            rf: throttleOpen ? 45 : 12,
+            mdIndNe: encodeTorqueNm(torqueNm),
+            // Zero throughout: the limiters are bypassed below K_MD_DF_VMIN and this bench is
+            // stationary. A non-zero value here would be modelling a car that was moving.
             mdDynSt: 0,
-            gang: 0,
-            sKrafts: 0,
-            // bit0 armed + bit1 + bit3 active, which is what the ROM sets once fuel really stops.
-            // Bit 3 is the one that means "cut", and bit 0 alone means only "conditions met" — the
-            // estimator used to test bit 0, and this fixture used to set exactly bit 0.
-            saWeSt: fuelCut ? 0b1011 : 0,
         });
     };
 
@@ -143,7 +146,7 @@ export function runBench(
         startRpm: number,
         stopWhen: (rpm: number) => boolean,
         torqueAt: (rpm: number) => number,
-        fuelCut: boolean,
+        throttleOpen: boolean,
         maxSeconds: number,
     ): number => {
         let rpm = startRpm;
@@ -156,7 +159,7 @@ export function runBench(
             const rpmPerS = (alpha * 60) / (2 * Math.PI);
             if (sinceSample <= 0) {
                 const noise = (rand() - 0.5) * opts.torqueNoiseNm;
-                emit(rpm, rpmPerS, Math.max(0, mInd + noise), fuelCut);
+                emit(rpm, Math.max(0, mInd + (mInd > 0 ? noise : 0)), throttleOpen);
                 sinceSample = opts.sampleIntervalS;
             }
             rpm += rpmPerS * opts.stepS;
@@ -173,15 +176,15 @@ export function runBench(
             sweep.fromRpm,
             rpm => rpm >= sweep.toRpm,
             rpm => benchIndicatedTorque(sweep.pedalFraction, rpm),
-            false,
+            true,
             30,
         );
-        // A beat at the top with the throttle shut, so consecutive sweeps do not run together.
+        // The release. Zero combustion torque, throttle shut, all the way back down — this is the
+        // overrun the driver is asked not to catch.
+        integrate(sweep.toRpm, rpm => rpm <= sweep.fromRpm, () => 0, false, 30);
+        // A beat at the bottom, so consecutive sweeps do not run together.
         t += 0.5;
     }
-
-    // Coast-down for the cross-check: no combustion torque, overrun cut flagged.
-    integrate(5000, rpm => rpm <= 3000, () => 0, true, 30);
 
     return out;
 }
@@ -195,7 +198,7 @@ export function runBench(
  * checks cover. A second, subtly different simulator would rehearse something nobody tested.
  */
 export class MockInertiaBench {
-    private readonly samples: EgasMeasurement[];
+    private readonly samples: InertiaSample[];
     readonly trueJ: number;
 
     constructor(j = DEFAULT_BENCH.j) {
@@ -209,10 +212,10 @@ export class MockInertiaBench {
     }
 
     /** The sample this run would have produced `t` seconds in, looping. */
-    sample(t: number): EgasMeasurement {
+    sample(t: number): InertiaSample {
         const cycle = this.cycleSeconds;
         const into = cycle > 0 ? ((t % cycle) + cycle) % cycle : 0;
-        // Linear scan is fine: a pass is a few hundred samples and this is called at ~9 Hz.
+        // Linear scan is fine: a pass is a few hundred samples and this is called at ~5 Hz.
         let index = 0;
         while (index + 1 < this.samples.length && this.samples[index + 1].time <= into) index++;
         // Restamped with the caller's clock — the estimator measures the sample interval from these
@@ -222,12 +225,18 @@ export class MockInertiaBench {
     }
 }
 
-/** The procedure the InertiaPanel asks the driver to perform: three pedal steps, twice each. */
+/**
+ * The procedure the InertiaPanel asks the driver to perform.
+ *
+ * Six pull-and-release cycles at four pedal openings, 2000 to 5000 rpm. The pedal spread is what
+ * gives each rpm bin two well-separated torques; without it the fit cannot tell a slope from an
+ * intercept no matter how many samples it has.
+ */
 export const STANDARD_BENCH_SWEEPS: readonly BenchSweep[] = [
-    { pedalFraction: 0.15, fromRpm: 1800, toRpm: 4800 },
-    { pedalFraction: 0.25, fromRpm: 1800, toRpm: 4800 },
-    { pedalFraction: 0.35, fromRpm: 1800, toRpm: 4800 },
-    { pedalFraction: 0.18, fromRpm: 1800, toRpm: 4800 },
-    { pedalFraction: 0.28, fromRpm: 1800, toRpm: 4800 },
-    { pedalFraction: 0.33, fromRpm: 1800, toRpm: 4800 },
+    { pedalFraction: 0.15, fromRpm: 2000, toRpm: 5000 },
+    { pedalFraction: 0.25, fromRpm: 2000, toRpm: 5000 },
+    { pedalFraction: 0.35, fromRpm: 2000, toRpm: 5000 },
+    { pedalFraction: 0.20, fromRpm: 2000, toRpm: 5000 },
+    { pedalFraction: 0.30, fromRpm: 2000, toRpm: 5000 },
+    { pedalFraction: 0.40, fromRpm: 2000, toRpm: 5000 },
 ];

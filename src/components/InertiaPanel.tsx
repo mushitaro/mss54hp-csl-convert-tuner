@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Gauge, AlertTriangle, CheckCircle2, CircleSlash } from 'lucide-react';
-import type { EgasMeasurement } from '@/lib/dme-link/types';
+import type { InertiaSample, RamProbeResult } from '@/lib/dme-link/types';
 import type { InertiaEstimate } from '@/lib/inertia/types';
 import type { CorrectionPlan, Proposal } from '@/lib/inertia/corrections';
 import { useDialogLang } from '@/hooks/useDialogLang';
@@ -34,12 +34,20 @@ const BIN_THIN = Math.ceil(BIN_OK / 2);
 const TEXT = {
     ja: {
         title: '慣性測定',
-        idle: '停車・ニュートラル・サイドブレーキ。ペダル 15 / 20 / 25 / 30 % のスイープを各 3 回（計 12 回）、'
-            + '毎回 1600 rpm から 4700 rpm まで一定開度で。最後に 5000 rpm から'
-            + 'アクセル全閉で 3000 rpm まで惰性降下を 1 回。'
-            + '30 % を超えないこと — 超えると d_n40 が飽和して全サンプルが捨てられます。',
+        idle: '停車・ニュートラル・サイドブレーキ・水温 80 °C 以上。'
+            + 'ペダル 15 / 20 / 30 / 40 % で 2000 → 5000 rpm まで吹かし、'
+            + '全閉にして 2000 rpm まで落ちるのを待つ。これを 6 回。'
+            + '落ちる途中でアクセルに触らないこと — 燃料カット中のトルク 0 が回帰のもう一方の端で、'
+            + '踏み直すとその区間が消えます。',
         run: '測定開始',
         stop: '停止',
+        probeNeeded: 'RAM 読み出しの確認が必要',
+        probing: '確認中…',
+        probeOk: 'RAM 読み出し可 — トルクを取得できます',
+        probeFailed: 'RAM 読み出し不可',
+        probeRun: '確認',
+        probeFailedHelp: 'この DME は DS2 0x06 でライブ RAM を返しませんでした。トルクを取る手段が無いため測定は成立しません。'
+            + 'ブロック 83 は EGAS 故障のフリーズフレームで、代わりにはなりません。',
         samples: '受信',
         usable: '有効',
         rate: 'レート',
@@ -67,12 +75,20 @@ const TEXT = {
     },
     en: {
         title: 'Inertia measurement',
-        idle: 'Stationary, in neutral, handbrake on. Three sweeps each at 15 / 20 / 25 / 30 % pedal '
-            + '(twelve in all), every one held at a fixed pedal from 1600 to 4700 rpm. Finish with '
-            + 'one coast-down from 5000 rpm to 3000 on a shut throttle. Do not exceed 30 % — beyond '
-            + 'that d_n40 saturates and every sample is discarded.',
+        idle: 'Stationary, in neutral, handbrake on, coolant above 80 °C. Pull to 5000 rpm from 2000 '
+            + 'at 15 / 20 / 30 / 40 % pedal, then shut the throttle and let it fall all the way back '
+            + 'to 2000. Six times. Do not catch the revs on the way down — zero torque under overrun '
+            + 'is the other end of the regression, and blipping deletes that half of the run.',
         run: 'Start',
         stop: 'Stop',
+        probeNeeded: 'RAM read not yet confirmed',
+        probing: 'Asking…',
+        probeOk: 'RAM reads served — torque is available',
+        probeFailed: 'RAM reads refused',
+        probeRun: 'Probe',
+        probeFailedHelp: 'This DME did not return live RAM over DS2 0x06. There is no other route to a live '
+            + 'torque channel, so the measurement cannot be made. Selection 83 is a latched EGAS fault '
+            + 'freeze-frame and is not a substitute.',
         samples: 'Received',
         usable: 'Usable',
         rate: 'Rate',
@@ -101,7 +117,7 @@ const TEXT = {
 };
 
 interface Props {
-    samples: readonly EgasMeasurement[];
+    samples: readonly InertiaSample[];
     estimate: InertiaEstimate | null;
     plan: CorrectionPlan | null;
     running: boolean;
@@ -110,6 +126,16 @@ interface Props {
     /** True J, when running against the offline bench. Lets PRACTICE say whether the estimate is
      *  RIGHT rather than merely plausible — the one thing a real car can never tell you. */
     benchTrueJ?: number;
+    /**
+     * Asks the DME whether it serves live RAM reads. Read-only, two telegrams.
+     *
+     * A gate rather than a diagnostic, because the whole torque half of this measurement now comes
+     * from a control-0x06 read whose availability was established from a disassembly rather than
+     * observed on this car. The evidence is strong (see `ramMap.ts`) and it is still not the same
+     * thing as having asked. The previous design skipped exactly this step and shipped a workflow
+     * built on a block that returns 52 zero bytes forever.
+     */
+    probeRam?: () => Promise<RamProbeResult | null>;
 }
 
 const CLASS_HINT: Record<Proposal['klass'], string> = {
@@ -127,10 +153,28 @@ const EVIDENCE_STYLE: Record<Proposal['evidence'], string> = {
 };
 
 export const InertiaPanel: React.FC<Props> = ({
-    samples, estimate, plan, running, onStart, onStop, benchTrueJ,
+    samples, estimate, plan, running, onStart, onStop, benchTrueJ, probeRam,
 }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
+
+    /**
+     * The RAM probe's verdict. `undefined` = not asked yet, `null` = asking.
+     *
+     * START is disabled until this passes, and that is the point. Everything else in this panel can
+     * be recovered from by driving again; a run recorded against a channel the DME will not serve
+     * cannot, and the last time that happened it was not discovered until the estimate came back
+     * empty. Two telegrams and about a tenth of a second is a cheap way to never repeat it.
+     */
+    const [probe, setProbe] = React.useState<RamProbeResult | null | undefined>(undefined);
+    const runProbe = React.useCallback(() => {
+        if (!probeRam) return;
+        setProbe(null);
+        void probeRam().then(r => setProbe(r ?? { ok: false, windows: [] }));
+    }, [probeRam]);
+    // A run in progress must never be blocked by a probe that has not been asked — the gate is on
+    // starting, not on continuing.
+    const canStart = !probeRam || probe?.ok === true;
 
     /**
      * MEAN rate, not the median of the intervals.
@@ -169,13 +213,66 @@ export const InertiaPanel: React.FC<Props> = ({
                 </h3>
                 <button
                     onClick={running ? onStop : onStart}
+                    disabled={!running && !canStart}
                     className={`px-3 py-1 text-[10px] font-bold uppercase tracking-widest rounded ${running
                         ? 'bg-red-900/60 text-red-200 hover:bg-red-900'
-                        : 'bg-blue-900/60 text-blue-200 hover:bg-blue-900'}`}
+                        : canStart
+                            ? 'bg-blue-900/60 text-blue-200 hover:bg-blue-900'
+                            : 'bg-slate-800/60 text-slate-600 cursor-not-allowed'}`}
                 >
                     {running ? t.stop : t.run}
                 </button>
             </div>
+
+            {/* The RAM probe, above the procedure, because it decides whether the procedure is worth
+                performing. Shown as evidence — the bytes it read are on screen — rather than as a
+                tick, so "it answered" and "it answered plausibly" are separable by eye. */}
+            {probeRam && !running && (
+                <div className={`rounded border p-3 ${probe?.ok
+                    ? 'border-emerald-900 bg-emerald-950/30'
+                    : probe === undefined || probe === null
+                        ? 'border-slate-800 bg-slate-900/40'
+                        : 'border-red-900 bg-red-950/30'}`}>
+                    <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase tracking-widest font-bold flex items-center gap-2">
+                            {probe?.ok
+                                ? <><CheckCircle2 className="w-3 h-3 text-emerald-400" />{t.probeOk}</>
+                                : probe === null
+                                    ? <><Gauge className="w-3 h-3 text-slate-400" />{t.probing}</>
+                                    : probe === undefined
+                                        ? <><CircleSlash className="w-3 h-3 text-slate-600" />{t.probeNeeded}</>
+                                        : <><AlertTriangle className="w-3 h-3 text-red-400" />{t.probeFailed}</>}
+                        </span>
+                        <button
+                            onClick={runProbe}
+                            disabled={probe === null}
+                            className="px-3 py-1 text-[10px] font-bold uppercase tracking-widest rounded
+                                       bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40"
+                        >
+                            {t.probeRun}
+                        </button>
+                    </div>
+                    {probe && probe.windows.length > 0 && (
+                        <div className="mt-2 grid grid-cols-[auto_auto_1fr] gap-x-3 gap-y-1 text-[9px] font-mono">
+                            {probe.windows.map(w => (
+                                <React.Fragment key={w.name}>
+                                    <span className="text-slate-500">
+                                        {w.name} @ {w.segment.toString(16).padStart(2, '0')}:
+                                        {w.address.toString(16)}
+                                    </span>
+                                    <span className={w.supported ? 'text-emerald-400' : 'text-red-400'}>
+                                        {w.supported ? (w.bytes ?? []).map(b => b.toString(16).padStart(2, '0')).join(' ') : w.failure}
+                                    </span>
+                                    <span className="text-slate-600 truncate">{w.detail ?? ''}</span>
+                                </React.Fragment>
+                            ))}
+                        </div>
+                    )}
+                    {probe && !probe.ok && (
+                        <p className="mt-2 text-[9px] font-mono text-red-300/80 leading-relaxed">{t.probeFailedHelp}</p>
+                    )}
+                </div>
+            )}
 
             <p className="text-[9px] font-mono text-amber-500/80 leading-relaxed">{t.idle}</p>
 
@@ -250,7 +347,7 @@ export const InertiaPanel: React.FC<Props> = ({
 
                     {/* Live reject tally. When a run is going wrong this is the only thing that says
                         WHY, and it says it in the first second rather than after three minutes —
-                        `not-neutral` on every sample means the gearbox is not in N, and that is worth
+                        `not-warm` on every sample means go and warm the engine up, and that is worth
                         knowing before the whole procedure has been performed. */}
                     {live.rejects.length > 0 && (
                         <div className="mt-2 text-[9px] font-mono text-slate-500 leading-relaxed">
@@ -258,9 +355,11 @@ export const InertiaPanel: React.FC<Props> = ({
                             {live.rejects.map(r => (
                                 <span key={r.reason} className={
                                     // The gates a driver can act on, highlighted. The rest are
-                                    // ordinary attrition — a few per sweep is normal.
-                                    (r.reason === 'not-neutral' || r.reason === 'moving'
-                                        || r.reason === 'not-running' || r.reason === 'saturated-gradient')
+                                    // ordinary attrition — `no-gradient` fires on the first and last
+                                    // sample of every window by construction, and `out-of-range` on
+                                    // every sample spent below 2000 rpm between sweeps.
+                                    (r.reason === 'not-warm' || r.reason === 'filter-active'
+                                        || r.reason === 'no-torque')
                                         && r.count > live.accepted
                                         ? 'text-red-400' : ''}>
                                     {r.reason} {r.count}{'  '}

@@ -83,16 +83,22 @@ export interface LiveMeasurement {
 }
 
 /**
- * One sample of DS2 selection 83 (EGAS) — the drivability block.
+ * One read of DS2 selection 83 (EGAS) — **a latched fault freeze-frame, not telemetry.**
  *
- * **Deliberately not a `LiveMeasurement`, and deliberately not convertible to one.** The two carry
- * disjoint channels: this block has torque, gear, speed gradient and the slew-limiter state but no
- * `aq_rel`, no `tabg` and no `la_f_regler`; the VE pair has those and none of these. A run recorded
- * for one purpose cannot answer the other's question, and the cheapest place to discover that is
- * the compiler rather than a VE map quietly rebuilt from samples that never carried a trim.
+ * This block does not stream. Master `0x024A66` fills the 52-byte buffer at `0xFFDA48` on the first
+ * EGAS event and latches immediately (`tst.b (a1) / bne.w $24b82`); every later event only bumps the
+ * counter in byte 0 (`0x024B82: cmpi.b #$ff,(a1) / addq.b #$1,(a1)`). On a healthy car it reads 52
+ * zero bytes for as long as you care to poll it, at whatever rate you like.
  *
- * So the separation is the type, not a flag. `estimateInertia` takes `EgasMeasurement[]` and
- * `calculateNewVEMap` takes `LogDataPoint[]`, and neither will accept the other's array.
+ * The inertia measurement was built on this block and could not have worked. What it is good for is
+ * the question it was designed to answer — *what was the throttle system doing when it faulted* —
+ * and, incidentally, proving where its own contents live: the copy at `0x024A66` names the RAM
+ * address of every field, which is what `ramMap.ts` is built from. Live values come from there now.
+ *
+ * **Deliberately not a `LiveMeasurement`, and deliberately not convertible to one.** The channels
+ * are disjoint, and a run recorded for one purpose cannot answer the other's question; the cheapest
+ * place to discover that is the compiler rather than a VE map quietly rebuilt from samples that
+ * never carried a trim.
  *
  * Every channel is `number | null` because `decodeField` returns null on a short block and null is
  * a different fact from zero — see `decodeEgasMeasurementBlock`.
@@ -120,6 +126,73 @@ export interface EgasMeasurement {
     gang: number | null;
     sKrafts: number | null;
     saWeSt: number | null;
+}
+
+/**
+ * One sample of the inertia run: DS2 selection 3 plus one control-0x06 read of live RAM.
+ *
+ * ## Why two exchanges rather than one block
+ *
+ * Because no single block carries both halves. Selection 3 has engine speed at **1 rpm** — the best
+ * speed channel the DME offers, better than the 40 rpm `n40` the EGAS block would have given — plus
+ * coolant temperature and throttle. It has no torque. The torque lives in RAM, and after the
+ * freeze-frame discovery RAM is the only place a *live* torque can be read from at all.
+ *
+ * The cost is one extra round trip and the benefit is that the measurement exists. Both stamps come
+ * from the same `time`, taken after the second exchange returns; the skew between them is one
+ * telegram (~20 ms at 9600) and is the same every sample, so it shifts the pairing rather than
+ * scattering it.
+ *
+ * ## Why this is not `EgasMeasurement` with different sources
+ *
+ * Same reason `EgasMeasurement` is not `LiveMeasurement`: the channel sets differ, and a stale run
+ * of the old shape must not silently satisfy the new estimator. There is no gear, no vehicle speed
+ * and no engine-state channel here — see `estimateInertia` for what stands in for each.
+ */
+export interface InertiaSample {
+    /** Seconds since this run started. Host clock, taken after the RAM read returns. */
+    time: number;
+    /** Engine speed, **1 rpm** resolution (selection 3 `n`). The measurement rests on this channel. */
+    rpm: number | null;
+    /** Coolant temperature, °C. The gate the EGAS block could never support — it carries no `tmot`. */
+    coolantTemp: number | null;
+    /** Throttle plate 1, %. Used to find the closed-throttle deceleration, not as a gate. */
+    wdk1: number | null;
+    /** Relative filling, %. Recorded for diagnosis; the fit does not read it. */
+    rf: number | null;
+    /** `MD_IND_NE` — indicated torque after intervention, Nm. Read from RAM `0xFF81A6`. */
+    mdIndNe: number | null;
+    /** `MD_DYN_ST` — slew-limiter state. Read from RAM `0xFF8180` in the same telegram. */
+    mdDynSt: number | null;
+}
+
+/** What one window of the RAM probe reported. */
+export interface RamProbeWindow {
+    /** The signal the probe read, for naming the window in a message. */
+    name: string;
+    segment: number;
+    address: number;
+    /** True when the DME answered with the requested bytes. */
+    supported: boolean;
+    /** The bytes it returned, when it did. Shown so a probe can be read as evidence, not a verdict. */
+    bytes: number[] | null;
+    /** Why not, when not. `parameter-error` is the DME's own `0xB0` — the region lookup refused the
+     *  address, which is a different fact from the link being broken. */
+    failure: 'parameter-error' | 'rejected' | 'transport' | null;
+    detail: string | null;
+}
+
+/**
+ * The result of asking the DME, without writing anything, whether it will serve live RAM reads.
+ *
+ * Exists as its own step because the whole inertia path now depends on an answer recovered from a
+ * disassembly rather than observed on this car. The evidence is strong — see `ramMap.ts` — but
+ * "strong" is not "checked", and the cheap way to check costs two telegrams and changes nothing.
+ */
+export interface RamProbeResult {
+    /** Every declared window answered. */
+    ok: boolean;
+    windows: RamProbeWindow[];
 }
 
 /** Which stage a long transfer is in. Surfaced in the UI so a slow-but-working stage (notably a FULL
@@ -194,15 +267,37 @@ export interface DmeLink {
     queryEncodingChecksum(): Promise<Ds2EncodingChecksum>;
     pollLiveMeasurement(): Promise<LiveMeasurement>;
     /**
-     * Polls DS2 selection 83 (EGAS) alone — one exchange, one block, no cross-block skew.
+     * Reads DS2 selection 83 (EGAS) — the latched fault freeze-frame. **Not a telemetry poll.**
      *
-     * Separate from `pollLiveMeasurement` rather than a mode of it, for the same reason
-     * `EgasMeasurement` is a separate type: the caller is running a different experiment. The VE
-     * datalog wants two blocks and tolerates the second failing; this wants one block and cannot
-     * substitute anything for it, so a failure here is fatal to the sample rather than something to
-     * paper over with a neutral default.
+     * Kept, and kept named for what it is, because the block still answers the question it was
+     * designed for. It is no longer on the inertia path; `pollInertiaSample` is. See
+     * `EgasMeasurement` for why polling this in a loop returns the same bytes forever.
      */
-    pollEgasMeasurement(): Promise<EgasMeasurement>;
+    readEgasFreezeFrame(): Promise<EgasMeasurement>;
+    /**
+     * One sample of the inertia run: selection 3 plus one control-0x06 read of live RAM.
+     *
+     * Both exchanges are required — there is no useful degraded sample, because a speed without a
+     * torque and a torque without a speed are each half of one point. So a failure in either is
+     * fatal to the sample rather than something to paper over with a neutral default, which is the
+     * opposite of what the VE datalog does with its second block and deliberately so.
+     */
+    pollInertiaSample(): Promise<InertiaSample>;
+    /**
+     * Reads `count` bytes of the DME's live RAM (DS2 control 0x06).
+     *
+     * **Read-only.** Sends one telegram, asks for bytes, changes nothing. The address must lie
+     * inside a declared window in `ramMap.ts`; the DME would answer `0xB0` otherwise, but a caller
+     * should not need a car to find out it asked for the wrong thing.
+     */
+    readRam(segment: number, address: number, count: number): Promise<Uint8Array>;
+    /**
+     * Asks whether this DME serves live RAM reads, by trying the smallest legal read in each window.
+     *
+     * Sends nothing but control-0x06 reads and never throws on a refusal — a refusal is the answer,
+     * reported per window with the DME's own status distinguished from a transport failure.
+     */
+    probeRam(): Promise<RamProbeResult>;
     /**
      * The two CRCs the calibration currently in the ECU stores, one per processor half.
      *

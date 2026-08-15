@@ -1,7 +1,11 @@
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, InertiaSample, RamProbeResult, RamProbeWindow,
+    TransferProgress, DmeLinkError, ServiceBlockErasedCause,
     ServiceBlockDump, WriteOptions, WriteVerification,
 } from './types';
+import {
+    INERTIA_RAM_READ, RAM_PROBE_READS, Mss54HpRamSignals, decodeRamSignal, isRamReadInRange,
+} from './ramMap';
 import { ServiceBlockPointers } from './serviceBlockReport';
 import { ByteTransport, createDmeTransport } from './byteTransport';
 import {
@@ -1799,8 +1803,60 @@ export class WebSerialDmeLink implements DmeLink {
 
     getLiveBlocks(): number[] { return [...this.liveBlocks]; }
 
-    async pollEgasMeasurement(): Promise<EgasMeasurement> {
-        return this.withGate(() => this.pollEgasMeasurementInner());
+    async readEgasFreezeFrame(): Promise<EgasMeasurement> {
+        return this.withGate(() => this.readEgasFreezeFrameInner());
+    }
+
+    async pollInertiaSample(): Promise<InertiaSample> {
+        return this.withGate(() => this.pollInertiaSampleInner());
+    }
+
+    async readRam(segment: number, address: number, count: number): Promise<Uint8Array> {
+        if (!isRamReadInRange(segment, address, count)) {
+            throw new DmeLinkError(
+                `RAM read 0x${address.toString(16)} +${count} is not inside a declared window for segment `
+                + `0x${segment.toString(16)}. See Mss54HpRamWindows.`);
+        }
+        return this.withGate(async () => {
+            this.assertConnected();
+            // Cleared for the same reason readPartialBin clears it: a cancelled read earlier in the
+            // session leaves `aborted` latched, and readMemoryChunkWithRetry checks it every attempt.
+            this.aborted = false;
+            await this.resyncTransport();
+            return this.readMemoryChunkWithRetry(segment, address, count);
+        });
+    }
+
+    /**
+     * Tries the smallest legal read in each RAM window and reports what came back.
+     *
+     * **Never throws on a refusal.** A DME that will not serve RAM is an answer this app has to be
+     * able to display, not an exception to surface as a broken cable — and the two are genuinely
+     * different: `0xB0` is `flash_req_parse` declining the address (`0x002938: move.b #$b0,$2(a0)`),
+     * which means the region table on this calibration is not what the disassembly said, while a
+     * timeout means the link. Only a bug in the request itself propagates, because that is the one
+     * case where continuing would hide a mistake rather than report a fact.
+     */
+    async probeRam(): Promise<RamProbeResult> {
+        this.assertConnected();
+        const windows: RamProbeWindow[] = [];
+        for (const probe of RAM_PROBE_READS) {
+            const base = { name: probe.name, segment: probe.segment, address: probe.address };
+            try {
+                const bytes = await this.readRam(probe.segment, probe.address, probe.count);
+                windows.push({ ...base, supported: true, bytes: [...bytes], failure: null, detail: null });
+            } catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                // `readMemoryChunk` phrases a non-ACK as "rejected by DME"; the underlying status is
+                // not carried up. That is enough to separate "the DME answered no" from "nothing
+                // answered", which is the distinction that changes what the operator should do.
+                const failure: RamProbeWindow['failure'] = /rejected by DME/i.test(message)
+                    ? 'parameter-error'
+                    : /timed out|timeout|not connected|port/i.test(message) ? 'transport' : 'rejected';
+                windows.push({ ...base, supported: false, bytes: null, failure, detail: message });
+            }
+        }
+        return { ok: windows.every(w => w.supported), windows };
     }
 
     async readDataChecksums(): Promise<{ slave: number; master: number }> {
@@ -1821,17 +1877,15 @@ export class WebSerialDmeLink implements DmeLink {
     }
 
     /**
-     * One exchange, one block, no fallback.
+     * One exchange, one block, no fallback. Reads the latched EGAS freeze-frame.
      *
-     * Where `pollLiveMeasurementInner` treats its second block as best-effort and substitutes
-     * neutral trim, this substitutes nothing. There is no neutral value for a torque or a gear that
-     * would leave the sample honest, and the estimator's whole defence against a wrong answer is
-     * that every sample it sees really came off the DME. A failed exchange is a failed sample.
+     * Nothing here polls: the buffer at `0xFFDA48` is written once per fault and then latched, so
+     * calling this twice returns the same bytes. It is kept as a diagnostic read.
      *
      * The retry is the same bounded, resync-first retry block 3 gets, and is safe for the same
      * reason: READ_IO_STATUS with a selection byte is an idempotent read.
      */
-    private async pollEgasMeasurementInner(): Promise<EgasMeasurement> {
+    private async readEgasFreezeFrameInner(): Promise<EgasMeasurement> {
         this.assertConnected();
         if (this.startTime === 0) this.startTime = performance.now();
 
@@ -1848,16 +1902,59 @@ export class WebSerialDmeLink implements DmeLink {
             }
         }
         if (!frame) throw lastError instanceof Error ? lastError : new DmeLinkError(String(lastError));
-        if (!isPositiveResponse(frame)) throw new DmeLinkError('EGAS measurement block (selection 83) read rejected by DME');
+        if (!isPositiveResponse(frame)) throw new DmeLinkError('EGAS block (selection 83) read rejected by DME');
+        // No length assertion beyond the decoder's own. An all-zero 52 bytes is the NORMAL answer on
+        // a car that has never faulted, and throwing on it would turn a healthy result into an error.
+        return { time: (performance.now() - this.startTime) / 1000, ...decodeEgasMeasurementBlock(frame.payload) };
+    }
 
-        const egas = decodeEgasMeasurementBlock(frame.payload);
-        // n40 is the one field with no useful reading if it is missing: every downstream calculation
-        // is indexed on engine speed. The rest stay null and are rejected per-sample by the
-        // estimator, which reports WHY it dropped them.
-        if (egas.n40 === null) {
-            throw new DmeLinkError('EGAS block response was shorter than expected (no engine speed)');
+    /**
+     * Selection 3, then one control-0x06 read of `INERTIA_RAM_READ`. Both required.
+     *
+     * Where `pollLiveMeasurementInner` treats its second block as best-effort and substitutes
+     * neutral trim, this substitutes nothing. A speed without a torque and a torque without a speed
+     * are each half of one regression point, and the estimator's whole defence against a wrong
+     * answer is that every sample it sees really came off the DME. A failed exchange is a failed
+     * sample.
+     *
+     * The two exchanges are ~20 ms apart at 9600 and the stamp is taken after the second, so the
+     * skew is a constant offset between the speed and the torque rather than jitter. That matters:
+     * a constant lag shifts the fitted intercept, which the plausibility rail on `M_loss` can see,
+     * whereas jitter would scatter the slope, which nothing can.
+     */
+    private async pollInertiaSampleInner(): Promise<InertiaSample> {
+        this.assertConnected();
+        if (this.startTime === 0) this.startTime = performance.now();
+
+        let frame: Ds2Frame | null = null;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= POLL_RETRY_ATTEMPTS; attempt++) {
+            try {
+                await this.resyncTransport();
+                frame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([STANDARD_MEASUREMENT_BLOCK.selection]));
+                lastError = undefined;
+                break;
+            } catch (e) {
+                lastError = e;
+            }
         }
-        return { time: (performance.now() - this.startTime) / 1000, ...egas };
+        if (!frame) throw lastError instanceof Error ? lastError : new DmeLinkError(String(lastError));
+        if (!isPositiveResponse(frame)) throw new DmeLinkError('Standard measurement block (selection 3) read rejected by DME');
+        const std = decodeStandardMeasurementBlock(frame.payload);
+        if (std.rpm === null) throw new DmeLinkError('Selection 3 response was shorter than expected (no engine speed)');
+
+        const { segment, address, count } = INERTIA_RAM_READ;
+        const ram = await this.readMemoryChunkWithRetry(segment, address, count);
+
+        return {
+            time: (performance.now() - this.startTime) / 1000,
+            rpm: std.rpm,
+            coolantTemp: std.coolantTemp,
+            wdk1: std.wdk1 ?? null,
+            rf: std.rf ?? null,
+            mdIndNe: decodeRamSignal(Mss54HpRamSignals.MD_IND_NE, ram, address),
+            mdDynSt: decodeRamSignal(Mss54HpRamSignals.MD_DYN_ST, ram, address),
+        };
     }
 
     private async pollLiveMeasurementInner(): Promise<LiveMeasurement> {

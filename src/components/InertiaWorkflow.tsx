@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import type { EgasMeasurement } from '@/lib/dme-link/types';
+import type { InertiaSample, RamProbeResult } from '@/lib/dme-link/types';
 import type { InertiaEstimate } from '@/lib/inertia/types';
 import type { CorrectionPlan } from '@/lib/inertia/corrections';
 import { estimateInertia } from '@/lib/inertia/estimator';
@@ -11,7 +11,7 @@ import { InertiaPanel } from './InertiaPanel';
 const PUBLISH_INTERVAL_MS = 250;
 
 /**
- * Owns the inertia run: collects EGAS samples, estimates J when the run stops, and asks for a
+ * Owns the inertia run: collects samples, estimates J when the run stops, and asks for a
  * correction plan.
  *
  * A container rather than state threaded through the page, for the same reason the samples are
@@ -25,7 +25,7 @@ const PUBLISH_INTERVAL_MS = 250;
  */
 interface Props {
     /** Starts the polling loop. Returns via the callbacks; the caller owns the transport. */
-    startRun: (onSample: (s: EgasMeasurement) => void, onEnd?: (failure: string | null) => void) => void;
+    startRun: (onSample: (s: InertiaSample) => void, onEnd?: (failure: string | null) => void) => void;
     stopRun: () => void;
     /** The image currently in the car, for reading every current value from. */
     baseImage: ArrayBuffer | null;
@@ -35,20 +35,22 @@ interface Props {
      * Hands the finished run to the session store.
      *
      * Optional, and absent means the run stays in memory as it always did. Passed in rather than
-     * done here because this component owns an EGAS run, not a session — the page owns those, and
-     * knows which one is open.
+     * done here because this component owns a measurement run, not a session — the page owns those,
+     * and knows which one is open.
      */
-    onSaveRun?: (samples: EgasMeasurement[]) => void;
+    onSaveRun?: (samples: InertiaSample[]) => void;
+    /** Passed straight through to the panel, which owns the gate. See `InertiaPanel`. */
+    probeRam?: () => Promise<RamProbeResult | null>;
 }
 
-export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage, benchTrueJ, onSaveRun }) => {
+export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage, benchTrueJ, onSaveRun, probeRam }) => {
     // The authoritative copy, for the same reason the VE datalog keeps one: React state updates are
     // batched and a poll loop running faster than a render would drop samples through a setState
     // closure. The array in state exists to drive the sample counter.
-    const samplesRef = useRef<EgasMeasurement[]>([]);
+    const samplesRef = useRef<InertiaSample[]>([]);
     /** Last time the sample array was published to React, for the throttle in onStart. */
     const lastPublishRef = useRef(0);
-    const [samples, setSamples] = useState<EgasMeasurement[]>([]);
+    const [samples, setSamples] = useState<InertiaSample[]>([]);
     const [running, setRunning] = useState(false);
     const [estimate, setEstimate] = useState<InertiaEstimate | null>(null);
 
@@ -115,6 +117,7 @@ export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage,
             onStart={onStart}
             onStop={onStop}
             benchTrueJ={benchTrueJ}
+            probeRam={probeRam}
         />
     );
 };

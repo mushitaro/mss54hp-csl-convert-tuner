@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
+    DmeLink, DmeIdentity, LiveMeasurement, InertiaSample, RamProbeResult, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
     DmeLinkError, DmeErrorKind, isServiceBlockErasedCause, ServiceBlockDump,
     WriteVerifyMode, WriteVerification,
 } from '@/lib/dme-link/types';
@@ -519,13 +519,13 @@ export function useDmeLink() {
     }, []);
 
     /**
-     * The inertia run: polls DS2 selection 83 alone until stopped.
+     * The inertia run: selection 3 plus one RAM read, per sample, until stopped.
      *
      * A sibling of startTuning rather than a mode of it, because the two produce different sample
-     * types and answer different questions — a VE log has no torque or gear, an inertia log has no
-     * exhaust temperature or lambda trim, and neither can be used for the other's analysis. Keeping
-     * them apart at the type level means a mismatched log is a compile error rather than a
-     * confident wrong answer downstream.
+     * types and answer different questions — a VE log has no torque, an inertia log has no exhaust
+     * temperature or lambda trim, and neither can be used for the other's analysis. Keeping them
+     * apart at the type level means a mismatched log is a compile error rather than a confident
+     * wrong answer downstream.
      *
      * Shares `pollingRef` deliberately: both drive the same transport, so they must be mutually
      * exclusive, and one flag is the simplest thing that guarantees it. STOP stops whichever is
@@ -535,7 +535,7 @@ export function useDmeLink() {
      * measured the datalog path on the wire — see `beginLogTiming`.
      */
     const startInertiaRun = useCallback((
-        onSample: (sample: EgasMeasurement) => void,
+        onSample: (sample: InertiaSample) => void,
         onEnd?: (failure: string | null) => void,
     ) => {
         const link = linkRef.current;
@@ -550,7 +550,7 @@ export function useDmeLink() {
             try {
                 while (pollingRef.current && linkRef.current) {
                     try {
-                        const sample = await linkRef.current.pollEgasMeasurement();
+                        const sample = await linkRef.current.pollInertiaSample();
                         if (!pollingRef.current) break;
                         onSample(sample);
                     } catch (e) {
@@ -571,6 +571,30 @@ export function useDmeLink() {
             }
         })();
     }, [clearError, closeLogTiming]);
+
+    /**
+     * Asks the DME whether it will serve live RAM reads. **Read-only, two telegrams, ~100 ms.**
+     *
+     * Does NOT change `state`. Every other DS2 operation here takes the link somewhere — 'reading',
+     * 'writing', 'resetting' — because they are long, or exclusive, or destructive; this is none of
+     * those. Moving state for it would flicker the hub's buttons for a tenth of a second and, worse,
+     * would make a probe look like a mode the user had entered rather than a question that was
+     * asked. It shares the link's own gate, so it still cannot interleave with anything.
+     *
+     * Returns null when there is no link, rather than throwing: the caller is a UI that wants to
+     * show "not connected", not to handle an exception.
+     */
+    const probeRam = useCallback(async (): Promise<RamProbeResult | null> => {
+        const link = linkRef.current;
+        if (!link) return null;
+        try {
+            return await link.probeRam();
+        } catch (e) {
+            // Only a bug in the request itself reaches here — probeRam reports a refusal as data.
+            setError(e instanceof Error ? e.message : String(e));
+            return null;
+        }
+    }, []);
 
     /**
      * Adaptation read and clear. Both take the link to 'resetting' for the duration.
@@ -855,6 +879,7 @@ export function useDmeLink() {
         startTuning,
         stopTuning,
         startInertiaRun,
+        probeRam,
         write,
         readAdaptations,
         resetAdaptations,

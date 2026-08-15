@@ -1,7 +1,9 @@
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, InertiaSample, RamProbeResult, RamProbeWindow,
+    TransferProgress, DmeLinkError, ServiceBlockErasedCause,
     ServiceBlockDump, WriteOptions, WriteVerification,
 } from './types';
+import { RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange } from './ramMap';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
     STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK, isClearedByTuneReset,
@@ -300,11 +302,76 @@ export class MockDmeLink implements DmeLink {
         return readStoredChecksums(new Uint8Array(this.buffer!));
     }
 
-    async pollEgasMeasurement(): Promise<EgasMeasurement> {
+    /**
+     * The latched EGAS freeze-frame — and on this simulated DME it is what a healthy car returns:
+     * all zeros, because nothing has faulted.
+     *
+     * Modelled honestly rather than filled with telemetry. A mock that streamed live-looking values
+     * out of selection 83 is precisely how the real block's behaviour stayed hidden through an
+     * entire build; PRACTICE mode has to reproduce the DME's silence, not paper over it.
+     */
+    async readEgasFreezeFrame(): Promise<EgasMeasurement> {
         this.assertConnected();
-        await delay(20); // one DS2 round trip — the EGAS profile polls a single block
+        await delay(20);
+        if (this.measurementStartTime === 0) this.measurementStartTime = performance.now();
+        return {
+            time: (performance.now() - this.measurementStartTime) / 1000,
+            engineState: 0, wdk1: 0, n40: 0, dN40: 0, dPwg: 0, dWdk: 0, rf: 0,
+            mdIndWunsch: 0, mdIndNe: 0, mdIndOptKorr: 0, vAntrieb: 0,
+            mdDynSt: 0, gang: 0, sKrafts: 0, saWeSt: 0,
+        };
+    }
+
+    async pollInertiaSample(): Promise<InertiaSample> {
+        this.assertConnected();
+        // Two round trips, because the real path is two: selection 3 then one RAM read. Modelling
+        // the cost is the point — the run's usable sample rate is what decides whether the
+        // procedure is possible at all, and a mock that answered in one would rehearse the wrong
+        // manoeuvre.
+        await delay(40);
         if (this.measurementStartTime === 0) this.measurementStartTime = performance.now();
         return this.inertiaBench.sample((performance.now() - this.measurementStartTime) / 1000);
+    }
+
+    /**
+     * The simulated DME serves RAM, so the probe passes offline.
+     *
+     * Returns the bench's own current torque bytes rather than a canned pair, so a probe result
+     * shown in PRACTICE is a real reading of the simulated engine and not a green tick that would
+     * look identical if the plumbing were broken.
+     */
+    async readRam(segment: number, address: number, count: number): Promise<Uint8Array> {
+        this.assertConnected();
+        if (!isRamReadInRange(segment, address, count)) {
+            throw new DmeLinkError(`RAM read 0x${address.toString(16)} +${count} is outside every declared window`);
+        }
+        await delay(20);
+        const out = new Uint8Array(count);
+        const sample = this.inertiaBench.sample((performance.now() - this.measurementStartTime) / 1000);
+        const write = (sig: { address: number; size: 1 | 2; scale: number }, value: number | null) => {
+            const at = sig.address - address;
+            if (at < 0 || at + sig.size > count || value === null) return;
+            const raw = Math.max(0, Math.round(value / sig.scale));
+            if (sig.size === 1) out[at] = raw & 0xFF;
+            else { out[at] = (raw >> 8) & 0xFF; out[at + 1] = raw & 0xFF; }
+        };
+        write(Mss54HpRamSignals.MD_IND_NE, sample.mdIndNe);
+        write(Mss54HpRamSignals.MD_DYN_ST, sample.mdDynSt);
+        write(Mss54HpRamSignals.MD_IND_OPT_KORR, sample.mdIndNe);
+        return out;
+    }
+
+    async probeRam(): Promise<RamProbeResult> {
+        this.assertConnected();
+        const windows: RamProbeWindow[] = [];
+        for (const probe of RAM_PROBE_READS) {
+            const bytes = await this.readRam(probe.segment, probe.address, probe.count);
+            windows.push({
+                name: probe.name, segment: probe.segment, address: probe.address,
+                supported: true, bytes: [...bytes], failure: null, detail: null,
+            });
+        }
+        return { ok: true, windows };
     }
 
     /** The J the offline bench is simulating, so PRACTICE mode can say whether the estimate is

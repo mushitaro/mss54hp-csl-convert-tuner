@@ -1,7 +1,7 @@
 import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { LogDataPoint, VEMap, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import { AdaptationSnapshot } from '@/lib/dme-link/adaptationBlocks';
-import type { EgasMeasurement } from '@/lib/dme-link/types';
+import type { EgasMeasurement, InertiaSample } from '@/lib/dme-link/types';
 
 export const DB_NAME = 'mss54hp-tuner-db';
 // 3: adds `seq`. Existing rows have no number, and the lineage badges are built on it, so the
@@ -210,22 +210,32 @@ export interface SessionLogRecord {
     data: LogDataPoint[];
 
     /**
-     * The raw DS2 selection-83 samples of an inertia run, stored unprojected.
+     * The raw samples of an inertia run, stored unprojected.
      *
-     * `data` above cannot hold them and must not try. An `EgasMeasurement` carries torque, gear,
-     * speed gradient, road speed and three state bytes; a `LogDataPoint` has fields for none of
-     * those. Mapping one onto the other keeps `time` and engine speed and silently discards
-     * `mdIndOptKorr` (the quantity being regressed) and `dN40` (the quantity it is regressed
-     * against) — which makes a stored run un-re-analysable, and cost one real drive to discover.
+     * `data` above cannot hold them and must not try. An `InertiaSample` carries indicated torque
+     * and the slew-limiter state; a `LogDataPoint` has fields for neither. Mapping one onto the
+     * other keeps `time` and engine speed and silently discards `mdIndNe` — one of the two
+     * quantities the estimate is a regression between — which makes a stored run un-re-analysable,
+     * and cost one real drive to discover.
      *
      * So both are kept: `data` in the projected shape the log table and the CSV export read, and
      * this in the shape `estimateInertia` reads. Optional and additive, so no `DB_VERSION` bump
      * (see the note at the top of this file) and a session written before it existed simply has no
-     * EGAS copy — which is the truthful answer for it.
+     * raw copy — which is the truthful answer for it.
      *
-     * Nulls are preserved as nulls on the way in. `gang: null` means the DME did not report a gear
-     * and `gang: 0` means neutral; collapsing the first into the second admits in-gear samples to a
-     * measurement whose first precondition is neutral.
+     * Nulls are preserved as nulls on the way in. `mdIndNe: null` means the RAM read came back
+     * short; `mdIndNe: 0` means overrun, no combustion torque. Collapsing the first into the second
+     * would feed the regression a fabricated anchor point at exactly the place it is most sensitive.
+     */
+    inertia?: InertiaSample[];
+
+    /**
+     * Runs recorded against the abandoned DS2 selection-83 design, kept readable.
+     *
+     * Never written any more. Selection 83 is a latched fault freeze-frame, so every array under
+     * this key is either empty or 52 zero bytes repeated — but deleting the field would turn those
+     * sessions into ones that silently lost data rather than ones that never had any, and the
+     * difference is worth a line of type.
      */
     egas?: EgasMeasurement[];
 }

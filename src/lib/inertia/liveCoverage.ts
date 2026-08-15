@@ -24,13 +24,15 @@
  * the caller throttles to a few times a second. That is nothing, and it cannot drift.
  */
 
-import type { EgasMeasurement } from '../dme-link/types';
+import type { InertiaSample } from '../dme-link/types';
 import type { InertiaEstimatorOptions, InertiaRejectCounts, InertiaRejectReason } from './types';
 import { DEFAULT_INERTIA_OPTIONS } from './types';
 import { admitSample } from './estimator';
 
-/** `sa_we_st` bit 3 — the overrun cut is active. Same bit the estimator's coast-down search uses. */
-const SA_WE_ST_CUT_MASK = 0b0000_1000;
+/** No combustion torque, Nm. Same band the estimator's coast-down search uses. */
+const NO_COMBUSTION_TORQUE_NM = 0.5;
+/** Throttle shut, %. Same threshold the estimator's coast-down search uses. */
+const CLOSED_THROTTLE_PCT = 0.5;
 
 export interface LiveBin {
     loRpm: number;
@@ -75,7 +77,7 @@ export interface LiveCoverage {
 const MIN_COAST_DOWN_SAMPLES = 4;
 
 export function liveCoverage(
-    samples: readonly EgasMeasurement[],
+    samples: readonly InertiaSample[],
     options: Partial<InertiaEstimatorOptions> = {},
 ): LiveCoverage {
     const opts: InertiaEstimatorOptions = { ...DEFAULT_INERTIA_OPTIONS, ...options };
@@ -126,10 +128,10 @@ export function liveCoverage(
     let coastDownSamples = 0;
     let current = 0;
     for (const s of samples) {
-        const inCut = s.gang === 0
-            && s.saWeSt !== null && (s.saWeSt & SA_WE_ST_CUT_MASK) !== 0
-            && s.n40 !== null && s.n40 >= opts.minRpm;
-        current = inCut ? current + 1 : 0;
+        const coasting = s.mdIndNe !== null && s.mdIndNe <= NO_COMBUSTION_TORQUE_NM
+            && s.wdk1 !== null && s.wdk1 <= CLOSED_THROTTLE_PCT
+            && s.rpm !== null && s.rpm >= opts.minRpm;
+        current = coasting ? current + 1 : 0;
         if (current > coastDownSamples) coastDownSamples = current;
     }
 
@@ -146,10 +148,18 @@ export function liveCoverage(
         hz: span > 0 ? (samples.length - 1) / span : null,
         coastDownSamples,
         coastDownCaptured,
-        // Deliberately requires the coast-down as well as the bins. It is the only independent
-        // falsification the estimate has, and a run that stops without it produces a number with
-        // nothing to check it against.
-        ready: bins.every(b => b.satisfied) && coastDownCaptured,
+        // `ready` must mean "the estimator would accept this", and the estimator asks for
+        // `minAcceptedBins` bins, not for all of them. Requiring every bin was stricter than the
+        // verdict — the top bin never fills, because the sweeps turn round at `maxRpm` and spend
+        // almost no time up there — so the display told the driver to keep going long after the
+        // measurement was good. That is the same class of lie as a progress bar that fills while
+        // every sample is being rejected, just pointing the other way.
+        //
+        // The coast-down is still required on top. It is the only independent falsification the
+        // estimate has, and a run that stops without it produces a number with nothing to check it
+        // against. `outstanding` still lists every short bin, so "you may stop" and "here is what
+        // would make it better" stay separate answers.
+        ready: bins.filter(b => b.satisfied).length >= opts.minAcceptedBins && coastDownCaptured,
         outstanding,
     };
 }

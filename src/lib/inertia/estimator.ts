@@ -14,93 +14,92 @@
  * makes `M_loss(n)` drop out without a friction model: inside one bin it is a constant, so it
  * becomes the intercept instead of an error term.
  *
- * Two properties of that make it worth doing this way rather than by free deceleration alone:
+ * Three properties of that make it worth doing this way rather than by free deceleration alone:
  *
  * - **No before-and-after measurement is needed.** J_old is already in the ROM (`K_SMG_J_MOTOR`,
  *   `K_MD_J_MOTOR`), so only J_new has to be measured and the ratio follows. A flywheel change that
- *   was never instrumented beforehand is still recoverable.
+ *   was never instrumented beforehand is still recoverable — and on this car it was not, so a
+ *   before-and-after method has nothing to be a ratio against.
+ * - **`M_loss` never has to be known.** Which matters because the DME's own drag channel cannot
+ *   supply it: `MD_IND_SCHLEPP` is `(MD_MIN_F_LLRA * (MD_LLRA_KO + MD_LLRA)) >> 10` floored at
+ *   zero — a function of the learned *idle* adaptation, not a friction curve over engine speed.
+ *   Dividing a coast-down gradient by that would import its whole model error into J.
  * - **J must not depend on rpm.** So the agreement of the bins is an independent test of the whole
  *   procedure, paid for by nothing. See `jSpread`.
  *
- * ## Why stationary specifically
+ * ## Where the spread in alpha comes from
  *
- * The tip-in and dashpot slew limiters are bypassed below `K_MD_DF_VMIN` (3 km/h) — the torque
- * request passes through untouched, so `md_ind_opt_korr` is on the engine's own curve rather than
- * on a filter's ramp. Standing still removes that variable rather than modelling it. `md_dyn_st` is
- * still checked per sample, because "should be bypassed" and "was bypassed" are different claims.
+ * A regression needs two well-separated torques at the same engine speed, and the manoeuvre that
+ * produces them is simply blipping to ~5000 rpm and letting go, several times, at different pedal
+ * openings. The up-sweep gives large positive alpha at large torque; the release gives large
+ * negative alpha at **zero** torque, because under overrun cut there is no combustion.
+ *
+ * Those overrun samples are the most valuable ones in the run and an earlier version threw all of
+ * them away on a `fuel-cut` gate. That gate came from a design where the torque channel was read
+ * out of a block that could not be polled at all; with a live `md_ind_ne` the cut state stops being
+ * something to reason about, because the channel reports the torque either way.
+ *
+ * ## What replaced the neutral/standstill/running gates
+ *
+ * Nothing observes them any more — `gang`, `v_antrieb` and `zustand_motor` live in the EGAS
+ * freeze-frame, which is latched and not pollable. Three things stand in, and it is worth being
+ * explicit that they are weaker:
+ *
+ * - **In gear, J comes out wrong by an order of magnitude, not subtly.** `KL_MD_JFZ_GANG` puts the
+ *   car's inertia at the crank at 0.70 Nms² in first and 12.0 in sixth, against ~0.22 for the
+ *   engine alone. `minPlausibleJ`/`maxPlausibleJ` catch that with room to spare.
+ * - **`md_dyn_st` is still read per sample.** The tip-in and dashpot limiters are bypassed below
+ *   `K_MD_DF_VMIN` (3 km/h), so at a standstill the gate should never fire — and "should be
+ *   bypassed" and "was bypassed" are different claims, so it is checked rather than assumed. It
+ *   firing at all is evidence the car was moving.
+ * - **The operator is standing still with the handbrake on.** Which is a procedure, not a check,
+ *   and is stated as such.
  *
  * ## The bias this cannot see, stated plainly
  *
- * `md_ind_opt_korr` is a **model output**, not a measurement: the DME computes it from measured
- * filling and an assumed efficiency. Any multiplicative error `k` in that model scales the slope
- * and the intercept **identically**, so it lands on J at full strength — and the free-deceleration
+ * `md_ind_ne` is a **model output**, not a measurement: the DME computes it from measured filling
+ * and an ignition efficiency. Any multiplicative error `k` in that model scales the slope and the
+ * intercept **identically**, so it lands on J at full strength — and the free-deceleration
  * cross-check cannot detect it either, because `k` cancels there too.
  *
  * The measurement regime is chosen to make `k` small rather than to measure it: warm, closed-loop,
- * 15-35 % pedal, low exhaust temperature, so mixture is trimmed to lambda 1 by the closed loop and
- * `rf_korr` sits on its identity column. What remains is bounded only by the plausibility rail on
- * `M_loss` — an S54 does not motor at 90 Nm — and that is weak, roughly +/-30 %.
+ * stationary, so mixture is trimmed to lambda 1 by the closed loop and `rf_korr` sits on its
+ * identity column. What remains is bounded only by the plausibility rail on `M_loss` — an S54 does
+ * not motor at 100 Nm — and that is weak, roughly +/-30 %.
  *
  * So: the ratio `J_new / J_old` is a starting point for a correction, not a verdict. The final
  * value of every parameter it feeds is settled by an A/B on the car. Nothing downstream should
  * present this number as more certain than that.
  */
 
-import type { EgasMeasurement } from '../dme-link/types';
+import type { InertiaSample } from '../dme-link/types';
 import type {
     InertiaBin, InertiaEstimate, InertiaEstimatorOptions, InertiaRejectCounts, InertiaRejectReason,
     FreeDecelCheck,
 } from './types';
 import { DEFAULT_INERTIA_OPTIONS } from './types';
-import {
-    correctDN40, isDN40Saturated, centralDifferenceRpmPerS, rpmPerSecToRadPerSec2,
-} from './gradient';
+import { centralDifferenceRpmPerS, rpmPerSecToRadPerSec2, radPerSec2ToRpmPerSec } from './gradient';
 
-/**
- * `zustand_motor` bits meaning "the engine is running and making torque": LL | TL | VL.
- *
- * **This is a one-hot BITFIELD, not an enum**, and getting that wrong is not a near miss — it is
- * the difference between accepting a run and rejecting all of it. The states are
- * `1 = Motor steht`, `2 = Start (cranking)`, `4 = LL (idle)`, `8 = TL (part load)`,
- * `0x10 = VL (full load)`, `0x20 = Kl.15 aus`, `0x40 = Nachlauf`.
- *
- * This gate previously read `=== 2` and so demanded the engine be **cranking**. A warm engine on a
- * part-throttle sweep is TL, and idling between sweeps it is LL; it is never 2 once it has started.
- * Every sample of a correct measurement was therefore rejected — and, because the reason was
- * labelled `not-warm`, the driver was told to warm the car up further.
- *
- * A mask rather than an equality against TL, because a sweep that crosses into full load moves to
- * VL mid-run and must not be thrown away for it.
- *
- * Corroborated three ways: the ROM's own symbolic guards decode as `ZUSTAND_MOTOR & (VL|TL|LL)`;
- * `zustand_motor_calc` builds the value from `moveq #$1/#$2/#$4/#$8/#$10/#$20/#$40`; and
- * `docs/ecu-logic/00-glossary.md` has carried the table since before this file existed.
- */
-const ENGINE_STATE_RUNNING_MASK = 0b0001_1100;
-/** Standstill threshold, km/h. Below `K_MD_DF_VMIN` (3) with margin for the 0.0625 km/h channel. */
-const STATIONARY_KMH = 1.5;
 /** `md_dyn_st` bits 4-6: the dashpot or the tip-in limiter actually clipped. */
 const MD_DYN_ST_LIMITER_MASK = 0b0111_0000;
+
 /**
- * `sa_we_st` bit 3: the overrun cut is ACTIVE — fuel has actually stopped.
+ * Torque at or below this counts as "no combustion", Nm.
  *
- * Bit 0 is a different fact: it means the cut is *armed*, i.e. the entry conditions are met. The
- * cut itself is `026270: ori.b #$8,(a2)` in `sa_we_st_calc`, and every other consumer in the ROM
- * (`md_res_calc`, `trg_calc`, `kats_calc`, `tz_sa_calc`) tests bit 3. Testing bit 0 draws the
- * free-deceleration boundary one or two samples before fuel actually stops, which biases the one
- * independent cross-check the estimate has.
- *
- * Bit 5 (Wiedereinsetzen) is deliberately NOT in this mask: it is sticky — set by
- * `0262de: ori #$20` and cleared only by the next arming — so masking it would reject every sample
- * after the first overrun of the run.
+ * `md_ind_ne` is unsigned, so overrun reads as 0 rather than negative — but it is a computed
+ * quantity and need not land exactly on zero, so this is a small band rather than an equality.
+ * Used only to find the free-deceleration run; the regression itself takes the value as it is.
  */
-const SA_WE_ST_CUT_MASK = 0b0000_1000;
+const NO_COMBUSTION_TORQUE_NM = 0.5;
+
+/** Throttle below this counts as shut, %. `wdk1` idles at 0.0-0.3 on this car. */
+const CLOSED_THROTTLE_PCT = 0.5;
 
 export interface Accepted {
     rpm: number;
-    /** rad/s^2, from the corrected `d_n40`. */
+    /** rad/s^2, from a central difference of the 1 rpm speed channel. */
     alpha: number;
-    /** Nm. */
+    /** Nm, `md_ind_ne`. */
     torque: number;
 }
 
@@ -122,34 +121,56 @@ export type AdmitResult =
  * arrives — the last `gradientHalfWindow` samples of a run are always pending.
  */
 export function admitSample(
-    samples: readonly EgasMeasurement[],
+    samples: readonly InertiaSample[],
     i: number,
     opts: InertiaEstimatorOptions,
 ): AdmitResult {
     const s = samples[i];
 
-    // Null is not zero. A DME that did not report a gear has not reported neutral.
-    if (s.gang === null || s.gang !== 0) return { ok: false, reason: 'not-neutral' };
-    if (s.vAntrieb === null || s.vAntrieb > STATIONARY_KMH) return { ok: false, reason: 'moving' };
-    if (s.engineState === null || (s.engineState & ENGINE_STATE_RUNNING_MASK) === 0) return { ok: false, reason: 'not-running' };
+    // Null is not zero, throughout. A channel the DME did not report has not reported a value.
+    if (s.coolantTemp === null || s.coolantTemp < opts.minCoolantTempC) return { ok: false, reason: 'not-warm' };
     if (s.mdDynSt === null || (s.mdDynSt & MD_DYN_ST_LIMITER_MASK) !== 0) return { ok: false, reason: 'filter-active' };
-    if (s.saWeSt === null || (s.saWeSt & SA_WE_ST_CUT_MASK) !== 0) return { ok: false, reason: 'fuel-cut' };
+    if (s.rpm === null || s.rpm < opts.minRpm || s.rpm > opts.maxRpm) return { ok: false, reason: 'out-of-range' };
+    // `>= 0`, not `> 0`. Zero indicated torque under overrun cut is a real reading and the single
+    // most informative sample class in the run — it is the only way the fit reaches large negative
+    // alpha. Rejecting it (as `> 0` did) removed one end of every regression line.
+    if (s.mdIndNe === null || !(s.mdIndNe >= 0)) return { ok: false, reason: 'no-torque' };
 
-    if (s.n40 === null || s.n40 < opts.minRpm || s.n40 > opts.maxRpm) return { ok: false, reason: 'out-of-range' };
-    if (s.mdIndOptKorr === null || !(s.mdIndOptKorr > 0)) return { ok: false, reason: 'no-torque' };
+    const rpmPerS = centralDifferenceRpmPerS(samples, i, opts.gradientHalfWindow, opts.maxSampleGapS);
+    if (rpmPerS === null) return { ok: false, reason: 'no-gradient' };
 
-    if (s.dN40 === null) return { ok: false, reason: 'no-gradient' };
-    if (isDN40Saturated(s.dN40)) return { ok: false, reason: 'saturated-gradient' };
+    // Torque averaged over the SAME window the gradient spans, not the centre sample's value.
+    //
+    // This is the pairing the physics asks for, not a smoothing choice. Integrating
+    // `J dw/dt = M(t) - M_loss(w)` over [t1, t2] and dividing by the span gives
+    // `J * alpha_mean = M_mean - M_loss_mean` — so a central difference, which IS the mean
+    // acceleration over its window, belongs with the mean torque over that window. Pairing it with
+    // the instantaneous torque is an approximation that is exact only where torque is constant, and
+    // the run is deliberately full of places where it is not.
+    //
+    // Measured effect on the bench: recovering J to 6.5 % with the point value, under 2 % with this.
+    const lo = i - opts.gradientHalfWindow, hi = i + opts.gradientHalfWindow;
+    let sum = 0, minT = Infinity, maxT = -Infinity;
+    for (let k = lo; k <= hi; k++) {
+        const v = samples[k].mdIndNe;
+        if (v === null) return { ok: false, reason: 'no-torque' };
+        sum += v;
+        if (v < minT) minT = v;
+        if (v > maxT) maxT = v;
+    }
+    // A window straddling the throttle opening or shutting has no single torque and no single
+    // acceleration — it averages two regimes, and the average is on neither curve. One or two such
+    // samples per sweep is enough to drag a bin's slope, which is exactly what happened.
+    if (maxT - minT > opts.maxTorqueSpanNm) return { ok: false, reason: 'torque-transient' };
 
-    const fromDN40 = correctDN40(s.dN40);
-    const fromN40 = centralDifferenceRpmPerS(samples, i, opts.gradientHalfWindow, opts.maxSampleGapS);
-    if (fromN40 === null) return { ok: false, reason: 'no-gradient' };
-    if (Math.abs(fromDN40 - fromN40) > opts.gradientAgreementRpmPerS) return { ok: false, reason: 'gradient-disagree' };
-
-    // The DME's own channel is the one kept: it is a per-sample value, where the central difference
-    // is an average over the window and therefore lags a changing gradient. The window's job was to
-    // catch the case where `d_n40` is wrong, not to replace it.
-    return { ok: true, accepted: { rpm: s.n40, alpha: rpmPerSecToRadPerSec2(fromDN40), torque: s.mdIndOptKorr } };
+    return {
+        ok: true,
+        accepted: {
+            rpm: s.rpm,
+            alpha: rpmPerSecToRadPerSec2(rpmPerS),
+            torque: sum / (hi - lo + 1),
+        },
+    };
 }
 
 /**
@@ -183,15 +204,21 @@ function median(values: number[]): number | null {
 }
 
 /**
- * Finds the longest run of consecutive samples in overrun fuel cut, neutral and decelerating, and
+ * Finds the longest run of consecutive samples with the throttle shut and no combustion torque, and
  * measures its mean gradient — then compares against what the regression predicts.
  *
- * Independent of the main fit in its inputs (it uses no torque channel at all) and dependent on it
- * for the prediction, which is the useful direction: it can falsify the fit without being able to
- * be dragged along by it.
+ * Keyed on `md_ind_ne == 0` rather than on an overrun-cut flag. That is not a workaround for the
+ * flag being unavailable: zero indicated torque **is** the condition the prediction is about, where
+ * the flag is one inference removed from it. The throttle is checked too, because a torque that
+ * happens to pass through zero on its way somewhere is not a coast-down.
+ *
+ * Dependent on the fit for its prediction and independent of it in its measurement, which is the
+ * useful direction: it can falsify the fit without being able to be dragged along by it. What it
+ * cannot do is see a scale error in the torque model, because `k` cancels here too — a
+ * disagreement means something *else* is wrong, and the note it emits says so.
  */
 function checkFreeDecel(
-    samples: readonly EgasMeasurement[],
+    samples: readonly InertiaSample[],
     j: number | null,
     mLossAt: (rpm: number) => number | null,
     opts: InertiaEstimatorOptions,
@@ -205,12 +232,12 @@ function checkFreeDecel(
     let runStart = -1;
     for (let i = 0; i <= samples.length; i++) {
         const s = i < samples.length ? samples[i] : null;
-        const inCut = s !== null
-            && s.gang === 0
-            && s.saWeSt !== null && (s.saWeSt & SA_WE_ST_CUT_MASK) !== 0
-            && s.n40 !== null
-            && s.n40 >= opts.minRpm && s.n40 <= opts.maxRpm + 1000;
-        if (inCut) {
+        const coasting = s !== null
+            && s.mdIndNe !== null && s.mdIndNe <= NO_COMBUSTION_TORQUE_NM
+            && s.wdk1 !== null && s.wdk1 <= CLOSED_THROTTLE_PCT
+            && s.rpm !== null
+            && s.rpm >= opts.minRpm && s.rpm <= opts.maxRpm + 1000;
+        if (coasting) {
             if (runStart < 0) runStart = i;
         } else if (runStart >= 0) {
             const len = i - runStart;
@@ -218,25 +245,24 @@ function checkFreeDecel(
             runStart = -1;
         }
     }
-    // Four samples is the shortest span whose endpoints are far enough apart for n40's 40 rpm
-    // quantisation to be small against the difference.
+    // Four samples spans ~0.6 s at the rate two telegrams reach — long enough that the endpoints are
+    // hundreds of rpm apart at a free-deceleration rate, and short enough to actually occur.
     if (bestStart < 0 || bestLen < 4) return empty;
 
     const a = samples[bestStart];
     const b = samples[bestStart + bestLen - 1];
-    if (a.n40 === null || b.n40 === null) return empty;
+    if (a.rpm === null || b.rpm === null) return empty;
     const dt = b.time - a.time;
     if (!(dt > 0)) return empty;
 
-    const measured = (b.n40 - a.n40) / dt;
-    // Under fuel cut there is no combustion torque, so J * alpha = -M_loss(n) exactly. Evaluated at
-    // the midpoint speed, which is where a mean gradient over the span belongs.
-    const midRpm = (a.n40 + b.n40) / 2;
+    const measured = (b.rpm - a.rpm) / dt;
+    // With no combustion torque, J * alpha = -M_loss(n) exactly. Evaluated at the midpoint speed,
+    // which is where a mean gradient over the span belongs.
+    const midRpm = (a.rpm + b.rpm) / 2;
     const loss = mLossAt(midRpm);
     if (loss === null) return { ...empty, found: true, measuredRpmPerS: measured };
 
-    const predictedRadPerS2 = -loss / j;
-    const predicted = (predictedRadPerS2 * 60) / (2 * Math.PI);
+    const predicted = radPerSec2ToRpmPerSec(-loss / j);
     if (!(Math.abs(predicted) > 0)) return { ...empty, found: true, measuredRpmPerS: measured };
 
     const relativeError = Math.abs(measured - predicted) / Math.abs(predicted);
@@ -250,14 +276,15 @@ function checkFreeDecel(
 }
 
 /**
- * Estimates engine rotational inertia from an EGAS (selection 83) run.
+ * Estimates engine rotational inertia from a stationary-neutral inertia run.
  *
- * Takes `EgasMeasurement[]` and nothing else — a VE datalog is a different type and will not
- * compile here, which is deliberate. The two runs carry disjoint channels and cannot answer each
- * other's question; see the note on `EgasMeasurement`.
+ * Takes `InertiaSample[]` and nothing else — a VE datalog is a different type and will not compile
+ * here, and neither will a stale `EgasMeasurement[]` from the abandoned selection-83 design. Both
+ * exclusions are deliberate: the runs carry disjoint channels and cannot answer each other's
+ * question, and a freeze-frame array would type-check into silence.
  */
 export function estimateInertia(
-    samples: readonly EgasMeasurement[],
+    samples: readonly InertiaSample[],
     options: Partial<InertiaEstimatorOptions> = {},
 ): InertiaEstimate {
     const opts: InertiaEstimatorOptions = { ...DEFAULT_INERTIA_OPTIONS, ...options };
@@ -333,8 +360,8 @@ export function estimateInertia(
     if (j === null) {
         acceptable = false;
         notes.push(`No rpm bin produced a usable fit (${accepted.length} samples survived the gates). `
-            + `Re-run the sweeps: the usual causes are not being in neutral, rolling, or a pedal so `
-            + `large that d_n40 saturated.`);
+            + `The reject tally above names the gate — the usual causes are a cold engine and sweeps `
+            + `that never reached ${opts.minRpm} rpm.`);
     } else {
         if (good.length < opts.minAcceptedBins) {
             acceptable = false;
@@ -350,15 +377,24 @@ export function estimateInertia(
         }
         if (j < opts.minPlausibleJ || j > opts.maxPlausibleJ) {
             acceptable = false;
+            // The specific failure worth naming: with `gang` no longer observable, a run taken in
+            // gear is caught here rather than at the gate. KL_MD_JFZ_GANG puts the car's inertia at
+            // the crank between 0.70 (1st) and 12.0 (6th) Nms², so an in-gear run lands far above
+            // the rail rather than near it.
+            const inGearish = j > opts.maxPlausibleJ * 2;
             notes.push(`J = ${j.toFixed(4)} Nms² is outside the plausible range `
-                + `${opts.minPlausibleJ}-${opts.maxPlausibleJ}. Suspect the torque channel before the flywheel.`);
+                + `${opts.minPlausibleJ}-${opts.maxPlausibleJ}. `
+                + (inGearish
+                    ? 'A value this high is the driveline, not the engine — the gearbox was in gear for at '
+                        + 'least part of this run. Repeat it in neutral, stationary.'
+                    : 'Suspect the torque channel before the flywheel.'));
         }
         const lossNear4000 = mLossAt(4000);
         if (lossNear4000 !== null && (lossNear4000 < opts.minPlausibleMLoss || lossNear4000 > opts.maxPlausibleMLoss)) {
             acceptable = false;
             notes.push(`Loss torque came out at ${lossNear4000.toFixed(1)} Nm near 4000 rpm, outside the `
                 + `${opts.minPlausibleMLoss}-${opts.maxPlausibleMLoss} Nm an S54 motors at. This is the only `
-                + `check on a scale error in md_ind_opt_korr, and a scale error there lands on J one-for-one.`);
+                + `check on a scale error in md_ind_ne, and a scale error there lands on J one-for-one.`);
         }
         if (freeDecel.found && freeDecel.agrees === false) {
             notes.push(`Free-deceleration cross-check disagrees by `
@@ -369,8 +405,8 @@ export function estimateInertia(
             acceptable = false;
         }
         if (!freeDecel.found) {
-            notes.push('No free-deceleration run found, so the cross-check did not run. Add a coast-down '
-                + 'in neutral from 5000 rpm with the throttle shut.');
+            notes.push('No free-deceleration run found, so the cross-check did not run. Let the revs fall '
+                + 'all the way from 5000 to 2000 rpm with the throttle shut, without catching them.');
         }
         if (acceptable) {
             notes.push(`J = ${j.toFixed(4)} ± ${(jSpread ?? 0).toFixed(4)} Nms² across ${good.length} rpm bins.`);

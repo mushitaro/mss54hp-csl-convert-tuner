@@ -7,31 +7,28 @@
  * worth acting on" stay separate answers.
  */
 
-/** Why a sample never reached the regression. Counted per reason, and shown that way. */
+/**
+ * Why a sample never reached the regression. Counted per reason, and shown that way.
+ *
+ * Shorter than it was, and the removals are the interesting part. Gone: `not-neutral`, `moving` and
+ * `not-running`, because the channels that fed them (`gang`, `v_antrieb`, `zustand_motor`) came
+ * from the EGAS freeze-frame and are not available live in one telegram — what stands in for them
+ * is described on `estimateInertia`. Gone too: `saturated-gradient` and `gradient-disagree`, which
+ * existed only to police `d_n40`, and `fuel-cut`, which threw away the single most useful sample
+ * class in the run. See `admitSample`.
+ */
 export type InertiaRejectReason =
-    /** Gear was not neutral, or the DME did not report a gear at all. */
-    | 'not-neutral'
-    /** Rolling. The measurement requires standstill so the tip-in/dashpot limiter is bypassed. */
-    | 'moving'
-    /**
-     * `zustand_motor` says the engine is not running and making torque (LL/TL/VL).
-     *
-     * Named for what is actually checked. It used to be `not-warm`, which was wrong twice over: the
-     * gate never tested temperature, and block 83 carries no coolant channel at all — so a driver
-     * who saw it was being sent to warm up an already-warm engine.
-     */
-    | 'not-running'
+    /** Coolant below `minCoolantTempC`. Loss torque moves with temperature, and it is the intercept
+     *  the fit is trying to hold constant inside a bin. */
+    | 'not-warm'
     /** `md_dyn_st` says the torque-request slew limiter clipped this cycle, so the torque channel
-     *  is not the driver's request and the sample is not on the free-running curve. */
+     *  is a filter's ramp rather than the engine's own curve. */
     | 'filter-active'
-    /** Overrun fuel cut was active — combustion torque is not what the model reports. */
-    | 'fuel-cut'
-    /** `d_n40` was at a rail; magnitude unknown. */
-    | 'saturated-gradient'
-    /** The two gradient routes disagreed by more than the tolerance. */
-    | 'gradient-disagree'
     /** Window did not fit, straddled a gap, or a needed channel was null. */
     | 'no-gradient'
+    /** The gradient window straddled the throttle opening or shutting, so its mean acceleration and
+     *  its mean torque describe two different regimes and the sample sits on neither curve. */
+    | 'torque-transient'
     /** Torque channel absent or implausible. */
     | 'no-torque'
     /** Outside the rpm range the procedure covers. */
@@ -51,7 +48,7 @@ export interface InertiaBin {
     /** Samples that survived every gate and entered this bin's regression. */
     count: number;
     /**
-     * Slope of `md_ind_opt_korr` against angular acceleration — the inertia, in Nms^2 (== kg m^2).
+     * Slope of `md_ind_ne` against angular acceleration — the inertia, in Nms^2 (== kg m^2).
      * Null when the bin did not meet its evidence thresholds.
      */
     j: number | null;
@@ -66,7 +63,13 @@ export interface InertiaBin {
     rejected: 'thin-count' | 'thin-alpha-span' | 'poor-fit' | null;
 }
 
-/** The free-deceleration cross-check. */
+/**
+ * The free-deceleration cross-check.
+ *
+ * Found by torque rather than by a fuel-cut flag: `md_ind_ne` at zero *is* "no combustion torque",
+ * and it is the quantity the prediction is about. The old version keyed on `sa_we_st` bit 3 out of
+ * the freeze-frame, which is both unavailable now and one step removed from the thing that matters.
+ */
 export interface FreeDecelCheck {
     /** Whether a usable deceleration run was found at all. */
     found: boolean;
@@ -119,13 +122,15 @@ export interface InertiaEstimatorOptions {
     /** rpm range the procedure covers. */
     minRpm: number;
     maxRpm: number;
-    /** Half-window for the `n40` central difference, in samples. */
+    /** Half-window for the `rpm` central difference, in samples. */
     gradientHalfWindow: number;
     /** Largest inter-sample gap tolerated inside a gradient window, seconds. */
     maxSampleGapS: number;
-    /** How far the two gradient routes may differ, rpm/s, before the sample is dropped.
-     *  Two independent +/-20 rpm/s quantisations plus the window's own averaging. */
-    gradientAgreementRpmPerS: number;
+    /** Coolant temperature a sample must reach, °C. */
+    minCoolantTempC: number;
+    /** Largest torque range tolerated across a gradient window, Nm, before the sample is treated as
+     *  a transition rather than a point on a curve. */
+    maxTorqueSpanNm: number;
     /** Minimum samples for a bin to report a J. */
     minBinSamples: number;
     /** Minimum angular-acceleration span for a bin to report a J, rad/s^2. */
@@ -148,25 +153,41 @@ export interface InertiaEstimatorOptions {
 
 export const DEFAULT_INERTIA_OPTIONS: InertiaEstimatorOptions = {
     binWidthRpm: 500,
-    minRpm: 1750,
-    maxRpm: 4750,
-    // +/-2 samples spans ~0.44 s at the ~9 Hz this profile is expected to reach: long enough that
-    // n40's 40 rpm endpoints are small against the span, short enough that the gradient has not
-    // meaningfully changed across it during a deliberate pedal sweep.
-    gradientHalfWindow: 2,
+    // 2000-5000. Below 2000 the idle controller starts intervening on its own account; above 5000
+    // a stationary sweep spends too little time per bin to be worth a bin.
+    minRpm: 2000,
+    maxRpm: 5000,
+    // +/-1 sample: ~0.4 s at the ~5 Hz two telegrams reach. Narrower than the old +/-2 because it
+    // no longer has to average out a 40 rpm quantisation — `n` resolves 1 rpm, so the only thing the
+    // window costs is curvature error, and a free deceleration at 2000+ rpm/s has plenty of that.
+    gradientHalfWindow: 1,
     maxSampleGapS: 0.5,
-    gradientAgreementRpmPerS: 150,
+    // Warm, and firmly so. Loss torque falls steeply with oil temperature, and inside one rpm bin
+    // it is the intercept the fit holds constant — a run that warms up while it is being taken puts
+    // that drift into the residuals, and if the torque levels happen to correlate with time it puts
+    // it into the slope. Every log recorded on this car so far sat at 74-82 °C, which is why this
+    // is a gate rather than a note.
+    minCoolantTempC: 80,
+    // 40 Nm across ~0.4 s. A held pedal moves the torque far less than that as the engine sweeps a
+    // bin; the throttle opening or shutting moves it by 100+ Nm in one sample. Generous on purpose:
+    // this exists to remove the two or three transition samples per sweep that sit on no curve at
+    // all, not to police ordinary variation.
+    maxTorqueSpanNm: 40,
     minBinSamples: 12,
-    // ~95 rpm/s of spread. Below this the fit cannot separate slope from intercept.
+    // ~95 rpm/s of spread. Below this the fit cannot separate slope from intercept. Easily met now
+    // that overrun samples are admitted: they sit at zero torque and 2000+ rpm/s of deceleration,
+    // which is the far end of the line from anything a pedal sweep produces.
     minAlphaSpan: 10,
     minR2: 0.75,
     minAcceptedBins: 3,
     maxJSpreadFraction: 0.20,
     minPlausibleJ: 0.10,
     maxPlausibleJ: 0.35,
-    // An S54's motoring torque. Wide, because this is a sanity rail and not a measurement —
-    // see the bias discussion in estimator.ts.
-    minPlausibleMLoss: 15,
-    maxPlausibleMLoss: 70,
+    // An S54's motoring torque. Widened at the top from 70: the measured free-deceleration rate on
+    // this car is 2200-2400 rpm/s, which at J ~ 0.22 implies ~50 Nm rather than the 25-35 assumed
+    // when this rail was first written. Still a sanity rail and not a measurement — see the bias
+    // discussion in estimator.ts.
+    minPlausibleMLoss: 20,
+    maxPlausibleMLoss: 80,
     freeDecelTolerance: 0.25,
 };

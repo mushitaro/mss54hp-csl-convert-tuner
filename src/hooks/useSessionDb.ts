@@ -18,7 +18,7 @@ import {
     getSessionBinaries,
     deleteSession,
 } from '@/lib/db/sessionRepository';
-import type { EgasMeasurement } from '@/lib/dme-link/types';
+import type { InertiaSample } from '@/lib/dme-link/types';
 
 export function useSessionDb() {
     const [sessions, setSessions] = useState<TuningSession[]>([]);
@@ -71,7 +71,7 @@ export function useSessionDb() {
     }, [refresh]);
 
     const saveResearch = useCallback(async (params: {
-        sessionId: string; process: ProcessId; log: LogDataPoint[]; egas?: EgasMeasurement[];
+        sessionId: string; process: ProcessId; log: LogDataPoint[]; inertia?: InertiaSample[];
     }) => {
         const s = await saveResearchRun(params);
         await refresh();

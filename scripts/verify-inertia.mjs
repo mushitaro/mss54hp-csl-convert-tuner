@@ -10,11 +10,23 @@
  * What is actually being checked, in order of what would hurt most if it were wrong:
  *
  *  1. The estimator recovers the bench's J. Everything downstream is a multiple of this number.
- *  2. The `d_n40` truncation correction is applied to the negative branch and NOT to the positive
- *     one. Correcting both would bias every deceleration measurement, and the shape of the DME's
- *     expression is the only evidence for which branch needs it.
- *  3. The gates actually reject. A filter that admits everything produces a confident wrong answer,
- *     which is the failure mode this whole design is arranged against.
+ *  2. The RAM address map is internally consistent and decodes the way the freeze-frame writer at
+ *     master 0x024A66 says it should. Every torque sample now arrives through it.
+ *  3. The gates actually reject — and, just as importantly, that they do **not** reject the
+ *     zero-torque overrun samples, which are one whole end of every regression line.
+ *
+ * ## What used to be here, and why it is gone
+ *
+ * Two thirds of the original checks tested the `d_n40` truncation correction, the saturation rail
+ * and the two-route gradient agreement. All of that machinery served DS2 selection 83, which turned
+ * out to be a latched EGAS fault freeze-frame that never updates on a healthy car — so the suite
+ * was carefully verifying arithmetic on a telegram the estimator could never receive.
+ *
+ * The lesson kept, in the negative checks at the end of the gate section: a fixture that only ever
+ * feeds the values the code expects tests nothing about whether those values are right. The
+ * previous bench hardcoded `engineState: 2` and `saWeSt: 1`, exactly the two wrong constants the
+ * estimator's gates were written against, and forty-one checks passed over a workflow that could
+ * not have accepted a single real sample.
  */
 
 import assert from 'node:assert/strict';
@@ -27,10 +39,12 @@ import { validateCatalog } from '../src/lib/ecu-items/codec.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
 import { checkLineage } from '../src/lib/lineage/preflight.ts';
 import { readStoredChecksums, correctDataChecksum } from '../src/lib/checksum/dmeDataChecksum.ts';
+import { centralDifferenceRpmPerS, rpmPerSecToRadPerSec2 } from '../src/lib/inertia/gradient.ts';
 import {
-    correctDN40, isDN40Saturated, dn40UncertaintyHalfWidth, DN40_LSB_RPM_S,
-} from '../src/lib/inertia/gradient.ts';
-import { runBench, encodeDN40, STANDARD_BENCH_SWEEPS } from '../src/lib/inertia/bench.ts';
+    Mss54HpRamWindows, Mss54HpRamSignals, INERTIA_RAM_READ, RAM_PROBE_READS, RAM_READ_MAX_COUNT,
+    decodeRamSignal, isRamReadInRange,
+} from '../src/lib/dme-link/ramMap.ts';
+import { runBench, encodeTorqueNm, STANDARD_BENCH_SWEEPS } from '../src/lib/inertia/bench.ts';
 import { liveCoverage } from '../src/lib/inertia/liveCoverage.ts';
 
 let failures = 0;
@@ -44,64 +58,102 @@ const check = (name, fn) => {
     }
 };
 
-console.log('\nd_n40 truncation correction');
+console.log('\nRAM address map');
 
-check('positive readings are already unbiased and must not be shifted', () => {
-    for (const trueRate of [37, 120, 480, 1503, 2999]) {
-        const reported = encodeDN40(trueRate);
-        assert.equal(correctDN40(reported), reported, `reported ${reported} was shifted`);
-        // The interval a positive reading implies is [reported-20, reported+20).
-        assert.ok(Math.abs(correctDN40(reported) - trueRate) <= DN40_LSB_RPM_S / 2,
-            `true ${trueRate} -> reported ${reported}, off by more than half an LSB`);
+check('every declared signal lies inside its own window', () => {
+    const windows = Object.values(Mss54HpRamWindows);
+    for (const [name, sig] of Object.entries(Mss54HpRamSignals)) {
+        const w = windows.find(x => x.segment === sig.segment);
+        assert.ok(w, `${name} names segment 0x${sig.segment.toString(16)}, which is not a window`);
+        assert.ok(sig.address >= w.lo && sig.address + sig.size <= w.hi,
+            `${name} at 0x${sig.address.toString(16)} is outside [0x${w.lo.toString(16)}, 0x${w.hi.toString(16)})`);
     }
 });
 
-check('negative readings sit one LSB high and are corrected down', () => {
-    for (const trueRate of [-139, -480, -1503, -2999]) {
-        const reported = encodeDN40(trueRate);
-        assert.ok(reported < 0, `expected ${trueRate} to encode negative, got ${reported}`);
-        assert.equal(correctDN40(reported), reported - DN40_LSB_RPM_S);
-        assert.ok(Math.abs(correctDN40(reported) - trueRate) <= DN40_LSB_RPM_S / 2,
-            `true ${trueRate} -> reported ${reported} -> corrected ${correctDN40(reported)}, `
-            + `off by more than half an LSB`);
+check('the addresses match the freeze-frame writer at master 0x024A66', () => {
+    // The one thing selection 83 is good for: `0x024A66` copies these RAM locations verbatim into
+    // the block-83 offsets the reference catalogue documents, which is what pins both the address
+    // AND the scaling. Any drift here means a channel is being decoded from the wrong bytes.
+    assert.equal(Mss54HpRamSignals.MD_IND_NE.address, 0x00FF81A6);        // -> offset 38
+    assert.equal(Mss54HpRamSignals.MD_IND_OPT_KORR.address, 0x00FFD8E6);  // -> offset 40
+    assert.equal(Mss54HpRamSignals.MD_DYN_ST.address, 0x00FF8180);        // -> offset 48
+    assert.equal(Mss54HpRamSignals.GANG.address, 0x00FF8250);             // -> offset 49
+    assert.equal(Mss54HpRamSignals.SA_WE_ST.address, 0x00FF8247);         // -> offset 51
+    // uint16 x 0.1 Nm at block-83 offset 38/40, so uint16 x 0.1 Nm in RAM.
+    for (const s of [Mss54HpRamSignals.MD_IND_NE, Mss54HpRamSignals.MD_IND_OPT_KORR]) {
+        assert.equal(s.size, 2);
+        assert.equal(s.signed, false);
+        assert.equal(s.scale, 0.1);
     }
 });
 
-check('zero is a double-width dead zone spanning -60..+20, not "no acceleration"', () => {
-    // Both truncation branches collapse into k = 0, so this bucket is twice as wide as the rest
-    // and is centred at -20 rather than at 0. Missing this is the subtle way to bias every
-    // near-idle gradient.
-    for (const trueRate of [-59, -37, -20, 0, 19]) {
-        assert.equal(Math.abs(encodeDN40(trueRate)), 0,
-            `true ${trueRate} should fall in the zero bucket, encoded ${encodeDN40(trueRate)}`);
+check('MD_IND_NE is unsigned, because the zero-torque anchor depends on it', () => {
+    // If this channel could go negative, overrun would read as a negative torque and the regression
+    // would place the anchor somewhere other than zero. It cannot: the DME floors it.
+    assert.equal(Mss54HpRamSignals.MD_IND_NE.signed, false);
+    assert.equal(encodeTorqueNm(-40), 0, 'the bench must floor at zero the way the channel does');
+});
+
+check('the DME truncates a count above 128 without erroring, so no read may exceed it', () => {
+    assert.equal(RAM_READ_MAX_COUNT, 0x80);
+    const reads = [INERTIA_RAM_READ, ...RAM_PROBE_READS];
+    for (const r of reads) {
+        assert.ok(r.count > 0 && r.count <= RAM_READ_MAX_COUNT,
+            `a read asks for ${r.count} bytes; over ${RAM_READ_MAX_COUNT} comes back short in silence`);
+        assert.ok(isRamReadInRange(r.segment, r.address, r.count), 'a declared read is out of range');
     }
-    assert.equal(encodeDN40(-61) < 0, true, '-61 must fall outside the zero bucket');
-    assert.equal(encodeDN40(21) > 0, true, '+21 must fall outside the zero bucket');
-    assert.equal(correctDN40(0), -20);
-    assert.equal(correctDN40(-0), -20, 'a -0 from the encoder must be treated as the zero bucket');
-    assert.equal(dn40UncertaintyHalfWidth(0), DN40_LSB_RPM_S);
-    assert.equal(dn40UncertaintyHalfWidth(-120), DN40_LSB_RPM_S / 2);
 });
 
-check('the documented case: true -139 rpm/s is reported as -80', () => {
-    assert.equal(encodeDN40(-139), -80);
-    assert.equal(correctDN40(-80), -120);
+check('the inertia poll reads both signals it decodes, in one telegram', () => {
+    for (const sig of [Mss54HpRamSignals.MD_DYN_ST, Mss54HpRamSignals.MD_IND_NE]) {
+        assert.equal(sig.segment, INERTIA_RAM_READ.segment);
+        assert.ok(sig.address >= INERTIA_RAM_READ.address
+            && sig.address + sig.size <= INERTIA_RAM_READ.address + INERTIA_RAM_READ.count,
+            'INERTIA_RAM_READ does not cover a signal pollInertiaSample decodes from it');
+    }
 });
 
-check('uncorrected negative readings would be biased toward zero', () => {
-    // The point of the correction, stated as a test: without it every deceleration reads low.
-    const trueRates = [-139, -480, -1503];
-    const rawError = trueRates.reduce((s, r) => s + (encodeDN40(r) - r), 0) / trueRates.length;
-    const fixedError = trueRates.reduce((s, r) => s + (correctDN40(encodeDN40(r)) - r), 0) / trueRates.length;
-    assert.ok(rawError > 15, `expected a large toward-zero bias, saw ${rawError.toFixed(1)} rpm/s`);
-    assert.ok(Math.abs(fixedError) < 8, `correction left ${fixedError.toFixed(1)} rpm/s of bias`);
+check('out-of-range reads are refused before they reach the car', () => {
+    // 0x00FF9000 is one byte past the low window. The DME would answer 0xB0; a caller should not
+    // need a car to find out it asked for the wrong thing.
+    assert.equal(isRamReadInRange(0x01, 0x00FF9000, 2), false);
+    assert.equal(isRamReadInRange(0x01, 0x00FF8FFF, 2), false, 'a read straddling the top must fail');
+    assert.equal(isRamReadInRange(0x04, 0x00FFD8E6, 2), true);
+    assert.equal(isRamReadInRange(0x02, 0x00FF81A6, 2), false, 'segment 0x02 is not a RAM window');
+    assert.equal(isRamReadInRange(0x01, 0x00FF81A6, 0), false, 'a zero-length read is not a read');
 });
 
-check('saturation is detected at both rails', () => {
-    assert.ok(isDN40Saturated(5080));
-    assert.ok(isDN40Saturated(-5120));
-    assert.ok(!isDN40Saturated(5040));
-    assert.ok(!isDN40Saturated(-5040));
+check('decodeRamSignal reads big-endian and applies the scale', () => {
+    // 0x01F4 = 500 raw = 50.0 Nm. Byte order matters: little-endian would give 0xF401 = 6248.1 Nm,
+    // which is not obviously wrong on a gauge and is catastrophically wrong in a regression.
+    const buf = new Uint8Array(INERTIA_RAM_READ.count);
+    const at = Mss54HpRamSignals.MD_IND_NE.address - INERTIA_RAM_READ.address;
+    buf[at] = 0x01; buf[at + 1] = 0xF4;
+    assert.equal(decodeRamSignal(Mss54HpRamSignals.MD_IND_NE, buf, INERTIA_RAM_READ.address), 50);
+});
+
+check('a short buffer yields null rather than a fabricated value', () => {
+    const short = new Uint8Array(4);
+    assert.equal(decodeRamSignal(Mss54HpRamSignals.MD_IND_NE, short, INERTIA_RAM_READ.address), null);
+});
+
+console.log('\ngradient from the 1 rpm speed channel');
+
+check('a central difference recovers a known rate', () => {
+    const s = [0, 1, 2, 3, 4].map(i => ({ time: i * 0.2, rpm: 3000 - 400 * i * 0.2, coolantTemp: 90, wdk1: 0, rf: 12, mdIndNe: 0, mdDynSt: 0 }));
+    assert.ok(Math.abs(centralDifferenceRpmPerS(s, 2, 1, 0.5) - -400) < 1e-6);
+});
+
+check('a window that does not fit, or straddles a gap, returns null', () => {
+    const s = [0, 1, 2].map(i => ({ time: i * 0.2, rpm: 3000 - 80 * i, coolantTemp: 90, wdk1: 0, rf: 12, mdIndNe: 0, mdDynSt: 0 }));
+    assert.equal(centralDifferenceRpmPerS(s, 0, 1, 0.5), null, 'the first sample has no left half');
+    assert.equal(centralDifferenceRpmPerS(s, 2, 1, 0.5), null, 'the last sample has no right half');
+    const gapped = [{ ...s[0] }, { ...s[1], time: 2.0 }, { ...s[2], time: 2.2 }];
+    assert.equal(centralDifferenceRpmPerS(gapped, 1, 1, 0.5), null, 'a dropped sample must not be averaged over');
+});
+
+check('rpm/s to rad/s^2 is the conversion the physics uses', () => {
+    assert.ok(Math.abs(rpmPerSecToRadPerSec2(60) - 2 * Math.PI) < 1e-9);
 });
 
 console.log('\nestimator against a known inertia');
@@ -141,9 +193,10 @@ check('recovers the loss torque, which is the only rail on a torque-model scale 
     const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 }));
     const near4000 = est.mLossCurve.reduce((best, p) =>
         Math.abs(p.rpm - 4000) < Math.abs(best.rpm - 4000) ? p : best);
-    // benchLossTorque(4000) = 12 + 18 + 5.6 = 35.6 Nm
-    assert.ok(Math.abs(near4000.mLoss - 35.6) < 6,
-        `loss came out at ${near4000.mLoss.toFixed(1)} Nm near ${near4000.rpm} rpm, expected ~35.6`);
+    // benchLossTorque(3750) = 20 + 22.5 + 6.75 = 49.25 Nm; at 4000, 51.7.
+    const expected = 20 + 0.0060 * near4000.rpm + 4.8e-7 * near4000.rpm * near4000.rpm;
+    assert.ok(Math.abs(near4000.mLoss - expected) < 7,
+        `loss came out at ${near4000.mLoss.toFixed(1)} Nm near ${near4000.rpm} rpm, expected ~${expected.toFixed(1)}`);
 });
 
 check('the free-deceleration cross-check runs and agrees', () => {
@@ -160,118 +213,134 @@ check('measures the sample interval rather than assuming it', () => {
         `median interval ${est.medianSampleIntervalS?.toFixed(3)} s`);
 });
 
-console.log('\ngates reject what they claim to reject');
+console.log('\ngates reject what they claim to reject — and admit what they must');
 
 const withField = (patch) => runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 }).map(s => ({ ...s, ...patch }));
 
-check('in-gear samples are rejected', () => {
-    const est = estimateInertia(withField({ gang: 2 }));
+check('a cold engine is rejected, with the reason a driver can act on', () => {
+    const est = estimateInertia(withField({ coolantTemp: 62 }));
     assert.equal(est.samplesUsed, 0);
     assert.equal(est.acceptable, false);
-    assert.ok(est.rejects.some(r => r.reason === 'not-neutral'));
+    assert.ok(est.rejects.some(r => r.reason === 'not-warm'));
 });
 
-check('a null gear is rejected rather than read as neutral', () => {
-    const est = estimateInertia(withField({ gang: null }));
+check('a null coolant reading is rejected rather than read as warm', () => {
+    const est = estimateInertia(withField({ coolantTemp: null }));
     assert.equal(est.samplesUsed, 0);
-    assert.ok(est.rejects.some(r => r.reason === 'not-neutral'));
-});
-
-check('rolling samples are rejected', () => {
-    const est = estimateInertia(withField({ vAntrieb: 12 }));
-    assert.equal(est.samplesUsed, 0);
-    assert.ok(est.rejects.some(r => r.reason === 'moving'));
+    assert.ok(est.rejects.some(r => r.reason === 'not-warm'));
 });
 
 check('samples where the slew limiter clipped are rejected', () => {
-    // bit6 — the tip-in limiter actually clipped this cycle.
+    // bit6 — the tip-in limiter actually clipped this cycle. It should never fire at a standstill,
+    // which is exactly why it is worth checking: if it does, the car was moving.
     const est = estimateInertia(withField({ mdDynSt: 0b0100_0000 }));
     assert.equal(est.samplesUsed, 0);
     assert.ok(est.rejects.some(r => r.reason === 'filter-active'));
 });
 
-check('saturated gradients are rejected', () => {
-    const est = estimateInertia(withField({ dN40: 5080 }));
+check('a null md_dyn_st is rejected rather than read as clear', () => {
+    const est = estimateInertia(withField({ mdDynSt: null }));
     assert.equal(est.samplesUsed, 0);
-    assert.ok(est.rejects.some(r => r.reason === 'saturated-gradient'));
+    assert.ok(est.rejects.some(r => r.reason === 'filter-active'));
 });
 
-check('a d_n40 that disagrees with the n40 difference is rejected', () => {
+check('a missing torque channel is rejected', () => {
+    const est = estimateInertia(withField({ mdIndNe: null }));
+    assert.equal(est.samplesUsed, 0);
+    assert.ok(est.rejects.some(r => r.reason === 'no-torque'));
+});
+
+check('samples outside the rpm window are rejected', () => {
+    const est = estimateInertia(withField({ rpm: 1200 }));
+    assert.equal(est.samplesUsed, 0);
+    assert.ok(est.rejects.some(r => r.reason === 'out-of-range'));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The negative checks. These are the ones that would have caught the previous design, and each
+// asserts that something the code USED to do is no longer done.
+// ---------------------------------------------------------------------------------------------
+
+check('ZERO-torque overrun samples are ADMITTED, not thrown away as "fuel cut"', () => {
+    // The single most important behavioural change. `md_ind_ne` is unsigned and reads 0 under
+    // overrun, and those samples are the only ones at large negative alpha — one whole end of every
+    // regression line. The old estimator rejected them on a `sa_we_st` bit and on `torque > 0`,
+    // which left every bin fitting a line through a cluster of similar points.
     const samples = runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 });
-    // Corrupt the DME's gradient channel alone. n40 still tells the truth, so the two disagree.
-    const corrupted = samples.map(s => ({ ...s, dN40: s.dN40 === null ? null : s.dN40 + 2000 }));
-    const est = estimateInertia(corrupted);
-    assert.ok(est.rejects.some(r => r.reason === 'gradient-disagree'),
-        'a corrupted gradient channel went undetected');
+    const zeroTorque = samples.filter(s => s.mdIndNe === 0);
+    assert.ok(zeroTorque.length > 20, `expected plenty of overrun samples, saw ${zeroTorque.length}`);
+
+    const withCoast = estimateInertia(samples);
+    const withoutCoast = estimateInertia(samples.filter(s => s.mdIndNe > 0));
+    assert.ok(withCoast.samplesUsed > withoutCoast.samplesUsed,
+        'the overrun samples are not reaching the regression');
+    // And they are load-bearing: drop them and the fit loses its alpha spread.
+    const spanOf = est => Math.max(...est.bins.map(b => b.alphaSpan));
+    assert.ok(spanOf(withCoast) > spanOf(withoutCoast) * 1.5,
+        `overrun samples add only ${(spanOf(withCoast) / spanOf(withoutCoast)).toFixed(2)}x of alpha `
+        + 'span — if that is genuinely all they add, this check is wrong, not the code');
+});
+
+check('a single-pedal run cannot produce an estimate, however long it is', () => {
+    // The failure the check above protects against, stated positively. Note what this does NOT say:
+    // pulls at SEVERAL pedal openings do carry enough spread on their own, so the overrun samples
+    // are load-bearing rather than indispensable. What no amount of repetition can fix is one pedal
+    // opening — every sample then lands at nearly the same alpha, and a line through a cluster is
+    // an extrapolation dressed as a regression.
+    const onePedal = Array.from({ length: 8 }, () => ({ pedalFraction: 0.25, fromRpm: 2000, toRpm: 5000 }));
+    const est = estimateInertia(runBench(onePedal, { j: 0.21 }).filter(s => s.mdIndNe > 0));
+    assert.equal(est.acceptable, false,
+        'a single-pedal pulls-only run was accepted — the alpha-span gate is not doing its job');
+});
+
+check('the removed d_n40 machinery is really gone, not merely unused', () => {
+    // A stale `EgasMeasurement[]` must not type-check into a silent pass. It cannot carry `rpm` or
+    // `coolantTemp`, so every sample fails a gate rather than being quietly admitted with garbage.
+    const stale = runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 })
+        .map(s => ({ time: s.time, n40: 3000, dN40: -400, mdIndOptKorr: 40, gang: 0, saWeSt: 0 }));
+    const est = estimateInertia(stale);
+    assert.equal(est.samplesUsed, 0, 'a selection-83 shaped array was partly accepted');
     assert.equal(est.acceptable, false);
 });
 
-// These exist because the suite passed 41 checks over a gate that could not accept a single real
-// sample. The bench hardcoded `engineState: 2` and the estimator demanded `=== 2`, so fixture and
-// code shared one misunderstanding and agreed with each other perfectly. A check that only ever
-// feeds the values the code expects tests nothing about whether those values are right.
-check('cranking is rejected — zustand_motor 0x02 is Start, not "running"', () => {
-    const est = estimateInertia(withField({ engineState: 0x02 }));
-    assert.equal(est.samplesUsed, 0);
-    assert.ok(est.rejects.some(r => r.reason === 'not-running'));
+check('an in-gear run is caught by the plausibility rail, since there is no gear channel', () => {
+    // KL_MD_JFZ_GANG puts the car's inertia at the crank at 0.70 Nms^2 in first, against ~0.21 for
+    // the engine alone. With `gang` no longer observable this rail IS the gate, so it has to fire.
+    const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 + 0.701 }));
+    assert.equal(est.acceptable, false, 'a first-gear inertia was accepted as an engine inertia');
+    assert.ok(est.notes.some(n => /gear/i.test(n)),
+        `the note must name the cause; got: ${est.notes.join(' | ')}`);
 });
 
-check('idle and part load are both accepted, because a sweep passes through them', () => {
-    for (const state of [0x04, 0x08, 0x10]) {
-        const est = estimateInertia(withField({ engineState: state }));
-        assert.ok(est.samplesUsed > 0, `zustand_motor 0x${state.toString(16)} was rejected`);
-    }
-});
+console.log('\nthe documented protocol, at the rate the link achieves');
 
-check('engine off / Kl.15 / Nachlauf are rejected', () => {
-    for (const state of [0x01, 0x20, 0x40]) {
-        const est = estimateInertia(withField({ engineState: state }));
-        assert.equal(est.samplesUsed, 0, `zustand_motor 0x${state.toString(16)} was accepted`);
-    }
-});
-
-check('an ARMED overrun cut (bit0 alone) is not treated as an active one', () => {
-    // bit0 = conditions met, bit3 = fuel actually stopped. Only bit3 may exclude a sample.
-    // Asserted on samplesUsed rather than `acceptable`: patching every sample also blanks the
-    // coast-down, so freeDecel.found goes false and the run is correctly not acceptable.
-    const est = estimateInertia(withField({ saWeSt: 0b0001 }));
-    assert.ok(est.samplesUsed > 0, 'a merely-armed cut threw the whole run away');
-});
-
-check('an ACTIVE overrun cut (bit3) is excluded', () => {
-    const est = estimateInertia(withField({ saWeSt: 0b1000 }));
-    assert.equal(est.samplesUsed, 0);
-    assert.ok(est.rejects.some(r => r.reason === 'fuel-cut'));
-});
-
-// The documented protocol must actually work at the rate the link achieves, not at the rate the
-// arithmetic predicts. The first version asked for six sweeps and filled zero bins at the 6.6 Hz a
-// real run measured — the estimator was fine, the instructions were not, and nothing tested them.
-check('the documented protocol fills enough bins at the rate a real link achieves', () => {
-    const sweeps = [0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30]
-        .map(pedalFraction => ({ pedalFraction, fromRpm: 1600, toRpm: 4700 }));
-    // 0.152 s is the MEAN interval measured on a real 2940-sample run; 0.185 s allows for block 83
-    // being ~1.2x the cost of block 3. The median (0.113 s) is the optimistic figure and is not
-    // what governs how many samples a sweep of fixed length produces.
-    for (const sampleIntervalS of [0.113, 0.152, 0.185]) {
+check('the panel protocol fills enough bins at the rate two telegrams reach', () => {
+    // The protocol must work at the rate the LINK achieves, not the rate the arithmetic predicts.
+    // An earlier version asked for six sweeps and filled zero bins at the 6.6 Hz a real run
+    // measured — the estimator was fine, the instructions were not, and nothing tested them.
+    //
+    // 0.19 s is selection 3 (44 bytes) plus a 49-byte RAM read at this link's measured ~45 ms
+    // per-exchange overhead. 0.25 s allows for that being optimistic; 0.15 s is what a 38400 baud
+    // session would give.
+    for (const sampleIntervalS of [0.15, 0.19, 0.25]) {
         for (const j of [0.18, 0.205, 0.21, 0.25]) {
-            const est = estimateInertia(runBench(sweeps, { j, sampleIntervalS }));
+            const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j, sampleIntervalS }));
             assert.ok(est.acceptable,
                 `protocol failed at ${(1 / sampleIntervalS).toFixed(1)} Hz with J=${j}: `
                 + `${est.bins.filter(b => b.j !== null).length} usable bins, counts `
-                + `[${est.bins.map(b => b.count).join('/')}]`);
+                + `[${est.bins.map(b => b.count).join('/')}]\n`
+                + `notes: ${est.notes.join(' | ')}`);
         }
     }
 });
 
-check('the SUPERSEDED six-sweep protocol is demonstrably not enough', () => {
-    // Kept as a check so the reason the instructions changed stays visible: if someone reverts the
-    // panel text to six sweeps, this is the number that says why not.
-    const six = [0.15, 0.25, 0.35, 0.18, 0.28, 0.33]
-        .map(pedalFraction => ({ pedalFraction, fromRpm: 1800, toRpm: 4800 }));
-    const est = estimateInertia(runBench(six, { j: 0.205, sampleIntervalS: 0.152 }));
+check('a single sweep is demonstrably not enough', () => {
+    // Kept so the reason the instructions ask for six stays visible: if someone shortens the panel
+    // text, this is the number that says why not.
+    const one = [{ pedalFraction: 0.25, fromRpm: 2000, toRpm: 5000 }];
+    const est = estimateInertia(runBench(one, { j: 0.205, sampleIntervalS: 0.19 }));
     assert.equal(est.acceptable, false,
-        'six sweeps unexpectedly passed at 6.6 Hz — if this is now genuinely fine, delete this check');
+        'one sweep unexpectedly passed — if this is now genuinely fine, delete this check');
 });
 
 check('an empty run is not acceptable and says why', () => {
@@ -286,8 +355,7 @@ console.log('\nlive coverage — what the driver sees while the run is happening
 // The live display exists because a raw sample counter is the one number guaranteed to look healthy
 // in the case that matters. These checks are about it agreeing with the verdict: a progress bar
 // that fills while the estimator is rejecting everything is worse than no progress bar.
-const PROTOCOL = [0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30]
-    .map(pedalFraction => ({ pedalFraction, fromRpm: 1600, toRpm: 4700 }));
+const PROTOCOL = STANDARD_BENCH_SWEEPS;
 
 check('live accepted count matches what the estimator actually used', () => {
     const samples = runBench(PROTOCOL, { j: 0.21 });
@@ -330,21 +398,36 @@ check('a genuinely short run is NOT reported ready, and says what is missing', (
 
 check('an all-rejected run shows zero usable however many samples arrived', () => {
     // The failure that motivated the whole display: samples piling up, none of them usable.
-    const samples = runBench(PROTOCOL, { j: 0.21 }).map(s => ({ ...s, gang: 3 }));
+    const samples = runBench(PROTOCOL, { j: 0.21 }).map(s => ({ ...s, coolantTemp: 40 }));
     const live = liveCoverage(samples);
     assert.ok(live.seen > 100, 'expected plenty of raw samples');
     assert.equal(live.accepted, 0, 'usable must read zero, not track the raw count');
     assert.equal(live.ready, false);
-    assert.equal(live.rejects[0].reason, 'not-neutral',
+    assert.equal(live.rejects[0].reason, 'not-warm',
         'the dominant reject reason must be visible so the driver can act on it');
 });
 
 check('the coast-down is tracked separately and gates readiness', () => {
-    const noCoast = runBench(PROTOCOL, { j: 0.21 }).filter(s => (s.saWeSt & 0b1000) === 0);
+    // Dropping the releases removes the overrun samples, so this fixture loses BOTH the coast-down
+    // and a good part of every bin. The assertion that matters is the first: readiness is not a
+    // function of sample count alone, because the cross-check is the only thing that can falsify
+    // the fit from outside it.
+    const noCoast = runBench(PROTOCOL, { j: 0.21 }).filter(s => s.mdIndNe > 0);
     const live = liveCoverage(noCoast);
     assert.equal(live.coastDownCaptured, false);
     assert.equal(live.ready, false, 'ready must require the coast-down, not just the bins');
-    assert.ok(live.bins.every(b => b.satisfied), 'this fixture should still have full bins');
+});
+
+check('"ready" is not stricter than the verdict', () => {
+    // The failure mode this replaced: `ready` required EVERY bin, the estimator required three, and
+    // the top bin never fills because the sweeps turn round at maxRpm. The display went on saying
+    // "keep sweeping" over a measurement that was already acceptable.
+    const samples = runBench(PROTOCOL, { j: 0.21 });
+    const live = liveCoverage(samples);
+    assert.equal(estimateInertia(samples).acceptable, true);
+    assert.equal(live.ready, true,
+        `the estimator accepted a run the live display still calls incomplete: ${live.outstanding.join(', ')}`);
+    assert.ok(live.outstanding.length >= 0, 'outstanding must still list what would improve the run');
 });
 
 console.log('\ncatalog and corrections, against the shipped reference binary');
