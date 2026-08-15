@@ -123,30 +123,17 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         const raw1 = pick(row, 'stft1');
         const raw2 = pick(row, 'stft2');
 
-        // User Requirement: Use Lambda Integrator (STFT) values as "Lambda" for display.
-        // HOWEVER, if the CSV only has 1 bank (STFT 1), STFT 2 is auto-filled with STFT 1 for
-        // calculation safety. For DISPLAY (Lambda columns), the user wants to see "Empty" if
-        // Bank 2 is missing, not a copy of Bank 1.
-        // No `both undefined` branch any more: the guard above rejects such a log outright rather
-        // than inventing 1.0 for it. A row that happens to be blank in an otherwise-populated
-        // column still lands here with both undefined, and leaving those NaN-free is what the
-        // `?? 1.0` at the end is for — a single blank row is not the same as a missing channel.
-        let s1 = raw1;
-        let s2 = raw2;
-        if (s1 === undefined) {
-            s1 = s2;
-        } else if (s2 === undefined) {
-            s2 = s1;
-        }
+        // NOT bank-filled any more. A single-bank Testo export used to have bank 1 copied into
+        // bank 2 "for calculation safety", which made the calculation average one measurement with
+        // itself and lost the fact that the second bank was never there. The average now takes
+        // whichever banks are present, so one bank weighs once and the log still says it had one.
 
         const point: LogDataPoint = {
             time,
             rpm,
             rawLoad: pick(row, 'rawLoad') ?? 0,
-            stft1: s1 ?? 1.0, // Used for Calc (bank-filled above; 1.0 only for a blank row)
-            stft2: s2 ?? 1.0,
-            lambda1: raw1, // Display: Only if physically present
-            lambda2: raw2, // Display: Only if physically present
+            stft1: raw1,
+            stft2: raw2,
             coolantTemp,
         };
 

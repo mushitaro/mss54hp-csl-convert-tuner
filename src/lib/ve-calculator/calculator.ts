@@ -219,7 +219,13 @@ export class VECalculator {
             // Use Corrected Load if available, else Raw Load
             const loadVal = point.correctedLoad ?? point.rawLoad;
             const rpmVal = point.rpm;
-            const avgStft = (point.stft1 + point.stft2) / 2;
+            // Whichever banks are present, not a fixed pair. A single-bank log weighs its one
+            // measurement once instead of averaging it with a copy of itself, and a sample with no
+            // trim at all — an EGT run, or a blank row — is not evidence of anything and is
+            // skipped. It used to arrive here as 1.0 and quietly vote for "this cell is perfect".
+            const banks = [point.stft1, point.stft2].filter((v): v is number => v !== undefined);
+            if (!banks.length) return;
+            const avgStft = banks.reduce((a, b) => a + b, 0) / banks.length;
 
             // Find 4 bounding cells
             const rpmInfo = this.findBoundingIndices(rpmVal, this.rpmAxis);

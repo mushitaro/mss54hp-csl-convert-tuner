@@ -8,9 +8,9 @@ import { LogDataPoint } from '@/lib/types';
  *
  * Optional columns are emitted only if the source actually had them. That matters because the parser
  * treats a *missing* column as information: with no Lambdaintegrator 2 it copies bank 1 into stft2
- * for the calculation but leaves lambda2 undefined, which is why lambda1/lambda2 — not stft1/stft2 —
- * are what say whether a column was physically there. Writing the filled-in stft values back would
- * hand a re-import two banks where the original had one.
+ * for the calculation. It does not any more: a bank the source did not carry stays undefined all the
+ * way through, so `stft1`/`stft2` are themselves what say whether a column was physically there and
+ * a re-import gets back the number of banks the original had.
  *
  * Only source columns are written. correctedLoad is derived from rawLoad by the app and the parser
  * ignores it, so exporting it would just be a column that reads back as nothing.
@@ -18,8 +18,8 @@ import { LogDataPoint } from '@/lib/types';
 export const serializeLogFile = (points: LogDataPoint[]): string => {
     const M = APP_CONFIG.CSV_MAPPING;
 
-    const hasBank1 = points.some(p => p.lambda1 !== undefined);
-    const hasBank2 = points.some(p => p.lambda2 !== undefined);
+    const hasBank1 = points.some(p => p.stft1 !== undefined);
+    const hasBank2 = points.some(p => p.stft2 !== undefined);
     const hasTemp = points.some(p => p.coolantTemp !== undefined);
     // The two EGT-correction channels. Without these the session-log download would silently drop
     // the only two columns the rf_korr work depends on, and a re-import could never re-derive it.
@@ -42,8 +42,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
             [M.RPM]: p.rpm,
             [M.RAW_LOAD]: p.rawLoad,
         };
-        if (hasBank1) row[M.STFT_1] = p.lambda1 ?? '';
-        if (hasBank2) row[M.STFT_2] = p.lambda2 ?? '';
+        if (hasBank1) row[M.STFT_1] = p.stft1 ?? '';
+        if (hasBank2) row[M.STFT_2] = p.stft2 ?? '';
         if (hasTemp) row[M.COOLANT_TEMP] = p.coolantTemp ?? '';
         if (hasRf) row[M.RF] = p.rf ?? '';
         if (hasEgt) row[M.EXHAUST_TEMP] = p.exhaustTemp ?? '';

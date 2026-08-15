@@ -48,8 +48,14 @@ export interface LiveMeasurement {
     time: number;
     rpm: number;
     rawLoad: number;
-    stft1: number;
-    stft2: number;
+    /** `la_f_regler1/2` — the lambda controller's output factor, DS2 selection 19.
+     *
+     *  OPTIONAL, and undefined means "block 19 was not read", which is what the EGT profile does.
+     *  It must never be defaulted to 1.0: that is a real measurement meaning "no correction wanted",
+     *  and handing it back for a block nobody fetched is the same lie as calling this channel
+     *  "Lambda". A log without it cannot produce a VE map, which is correct. */
+    stft1?: number;
+    stft2?: number;
     coolantTemp?: number;
     /** RF — the DME's relative filling AFTER the EGT correction. Same block as rpm/rawLoad. */
     rf?: number;

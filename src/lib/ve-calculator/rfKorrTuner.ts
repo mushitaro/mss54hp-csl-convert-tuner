@@ -428,7 +428,7 @@ export function tuneRfKorrTable(
         // than recomputing is what keeps the tuner and the VE calculation on the same Δ.
         const delta = p.tabgDelta
             ?? Math.max(0, tabgModelAt(egt, p.rpm, p.rf / 100) - p.exhaustTemp);
-        const stft = (p.stft1 + p.stft2) / 2;
+        const stft = ((p.stft1 ?? p.stft2 ?? 1) + (p.stft2 ?? p.stft1 ?? 1)) / 2;
         if (!(stft > 0)) { report.samplesNoMeasurement++; continue; }
 
         const load = p.correctedLoad ?? p.rawLoad;

@@ -1756,6 +1756,27 @@ export class WebSerialDmeLink implements DmeLink {
         return this.timing.finish(error);
     }
 
+    /**
+     * Which DS2 blocks a live sample is made of.
+     *
+     * Defaults to both, so anything that has not been taught about profiles keeps the behaviour it
+     * had. The EGT profile sets it to [3] alone and roughly doubles the sample rate by not asking
+     * for 90 bytes it has no use for — see lib/log-engine/logProfile.ts for the arithmetic.
+     */
+    private liveBlocks: number[] = [
+        STANDARD_MEASUREMENT_BLOCK.selection, OPERATING_MEASUREMENTS_BLOCK.selection,
+    ];
+
+    /** Block 3 is not optional: it carries rpm and load, without which there is no sample at all.
+     *  Passing a set that omits it is a caller error, so it is put back rather than obeyed. */
+    setLiveBlocks(selections: number[]): void {
+        const wanted = new Set(selections);
+        wanted.add(STANDARD_MEASUREMENT_BLOCK.selection);
+        this.liveBlocks = [...wanted];
+    }
+
+    getLiveBlocks(): number[] { return [...this.liveBlocks]; }
+
     async pollEgasMeasurement(): Promise<EgasMeasurement> {
         return this.withGate(() => this.pollEgasMeasurementInner());
     }
@@ -1869,8 +1890,18 @@ export class WebSerialDmeLink implements DmeLink {
         // is rejected or short, we fall back to neutral trim (1.0) and keep logging RPM/RO/temp rather
         // than killing the whole polling loop. (Neutral trim means the VE calc produces no lambda
         // correction, so the lambda channel must be validated before trusting tuning output.)
-        let stft1 = 1.0;
-        let stft2 = 1.0;
+        // Block 19 is SKIPPED entirely when the caller has not asked for it. That is the EGT
+        // profile: rf_korr is (rf/100) / rf_soll and every term is in block 3, so fetching 90 more
+        // bytes per sample to reach four unused ones costs 113 ms of a 244 ms sample for nothing.
+        //
+        // Skipping it leaves stft1/stft2 UNDEFINED rather than 1.0. The difference is the whole
+        // point: 1.0 means "the controller wanted no correction", which is a measurement, and
+        // handing that back for a block we did not read is the same class of lie as labelling
+        // la_f_regler "Lambda 1". Undefined means "not asked", and the VE map cannot be built from
+        // a log full of it — which is correct, because an EGT run is not a VE run.
+        const wantOperating = this.liveBlocks.includes(OPERATING_MEASUREMENTS_BLOCK.selection);
+        let stft1: number | undefined;
+        let stft2: number | undefined;
         // No neutral default for these three. Trim falls back to 1.0 because a missing trim has an
         // unambiguous "no correction" value; a missing purge duty does not — defaulting it to 0
         // would assert the valve was shut, which is exactly the claim the channel exists to test.
@@ -1878,12 +1909,12 @@ export class WebSerialDmeLink implements DmeLink {
         let tankVentCheckState: number | undefined;
         let tankVentDiag: number | undefined;
         let lambdaFreeze: number | undefined;
-        try {
+        if (wantOperating) try {
             const opFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([OPERATING_MEASUREMENTS_BLOCK.selection]));
             if (isPositiveResponse(opFrame)) {
                 const op = decodeOperatingMeasurementsBlock(opFrame.payload);
-                stft1 = op.stft1 ?? 1.0;
-                stft2 = op.stft2 ?? 1.0;
+                stft1 = op.stft1 ?? undefined;
+                stft2 = op.stft2 ?? undefined;
                 tankVent = op.tankVent ?? undefined;
                 tankVentCheckState = op.tankVentCheckState ?? undefined;
                 tankVentDiag = op.tankVentDiag ?? undefined;

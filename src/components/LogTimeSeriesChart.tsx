@@ -61,8 +61,8 @@ const BASE_LAYOUT: Partial<Layout> = {
     },
     // Lambda (right)
     yaxis2: {
-        title: { text: 'Lambda', font: { color: LOG_FIELD_REGISTRY.lambda1.color } },
-        tickfont: { color: LOG_FIELD_REGISTRY.lambda1.color },
+        title: { text: 'Lambda', font: { color: LOG_FIELD_REGISTRY.stft1.color } },
+        tickfont: { color: LOG_FIELD_REGISTRY.stft1.color },
         overlaying: 'y',
         side: 'right',
         range: [0.65, 1.35],
@@ -341,7 +341,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
     /** Always five traces, in a fixed order, with the axis each one belongs to already assigned.
      *
      *  Both properties are load-bearing. Pushing the lambda traces conditionally made the array 3, 4
-     *  or 5 long and shifted lambda2's index when lambda1 was toggled; Plotly cannot diff across a
+     *  or 5 long and shifted bank 2's index when bank 1 was toggled; Plotly cannot diff across a
      *  changed trace count and tears the figure down and rebuilds it, which is the "batch redraw" this
      *  looked like. Hiding via `visible` keeps every index put, so a toggle updates the figure.
      *
@@ -351,8 +351,8 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         const points = data ?? [];
         const times = points.map(d => d.time);
 
-        const showLambda1 = !!visibleFields.lambda1 && isFieldPresent('lambda1', presenceSource);
-        const showLambda2 = !!visibleFields.lambda2 && isFieldPresent('lambda2', presenceSource);
+        const showLambda1 = !!visibleFields.stft1 && isFieldPresent('stft1', presenceSource);
+        const showLambda2 = !!visibleFields.stft2 && isFieldPresent('stft2', presenceSource);
         const showEgt = !!visibleFields.exhaustTemp && isFieldPresent('exhaustTemp', presenceSource);
         const showRf = !!visibleFields.rf && isFieldPresent('rf', presenceSource);
         const showRfKorr = !!visibleFields.rfKorr && isFieldPresent('rfKorr', presenceSource);
@@ -391,21 +391,21 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             },
             {
                 x: times,
-                y: points.map(d => d.lambda1) as number[],
+                y: points.map(d => d.stft1) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.lambda1.symbol,
-                line: { color: LOG_FIELD_REGISTRY.lambda1.color, width: 1.5 },
+                name: LOG_FIELD_REGISTRY.stft1.symbol,
+                line: { color: LOG_FIELD_REGISTRY.stft1.color, width: 1.5 },
                 yaxis: 'y2',
                 visible: showLambda1,
             },
             {
                 x: times,
-                y: points.map(d => d.lambda2) as number[],
+                y: points.map(d => d.stft2) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.lambda2.symbol,
-                line: { color: LOG_FIELD_REGISTRY.lambda2.color, width: 1.5, dash: 'dash' },
+                name: LOG_FIELD_REGISTRY.stft2.symbol,
+                line: { color: LOG_FIELD_REGISTRY.stft2.color, width: 1.5, dash: 'dash' },
                 yaxis: 'y2',
                 visible: showLambda2,
             },
@@ -483,7 +483,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         ];
     }, [
         data, presenceSource,
-        visibleFields.lambda1, visibleFields.lambda2,
+        visibleFields.stft1, visibleFields.stft2,
         visibleFields.exhaustTemp, visibleFields.rf, visibleFields.rfKorr,
         visibleFields.egtFromRfKorr, visibleFields.rfKorrFromEgt,
     ]);

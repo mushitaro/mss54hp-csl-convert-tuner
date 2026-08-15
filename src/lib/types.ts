@@ -19,10 +19,20 @@ export interface LogDataPoint {
     rpm: number;
     rawLoad: number; // relativer Oeffnungsquerschnitt
     correctedLoad?: number; // AQ_REL_ALPHA_N (calculated)
-    stft1: number;
-    stft2: number;
-    lambda1?: number; // [NEW] Actual Lambda
-    lambda2?: number; // [NEW] Actual Lambda
+    /**
+     * `la_f_regler1/2` — the lambda controller's output factor, per bank.
+     *
+     * ONE pair, where there used to be two. `lambda1/lambda2` held the same numbers under a name
+     * that promised a measured lambda — which Testo puts on the sensor VOLTAGE, a different channel
+     * on a different block — and existed only to record whether the source physically carried the
+     * column. `undefined` says that directly, so the second pair is gone.
+     *
+     * Optional for the same reason it is on LiveMeasurement: an EGT run never reads block 19, and
+     * a bank a CSV did not carry is absent rather than copied. The VE correction averages whichever
+     * banks are present and refuses a sample with none.
+     */
+    stft1?: number;
+    stft2?: number;
     coolantTemp?: number; // [UPDATED] Optional
     correctionFactor?: number; // [NEW] For debugging validation
 

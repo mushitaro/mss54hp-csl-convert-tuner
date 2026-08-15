@@ -156,7 +156,13 @@ export function isOverLoadThreshold(limits: LambdaLimits, rf: number | undefined
  */
 export const STOP_TOLERANCE = 1e-4;
 
-export function isAtControllerStop(limits: LambdaLimits, stft1: number, stft2: number): boolean {
-    const pinned = (v: number) => v >= limits.fMax - STOP_TOLERANCE || v <= limits.fMin + STOP_TOLERANCE;
+export function isAtControllerStop(
+    limits: LambdaLimits, stft1: number | undefined, stft2: number | undefined,
+): boolean {
+    // A bank that is not there cannot be pinned. Same rule as the other two gates: silence is not
+    // evidence, and an EGT run — which never reads block 19 — must not have every sample rejected
+    // for a channel it deliberately did not fetch.
+    const pinned = (v: number | undefined) => v !== undefined
+        && (v >= limits.fMax - STOP_TOLERANCE || v <= limits.fMin + STOP_TOLERANCE);
     return pinned(stft1) || pinned(stft2);
 }

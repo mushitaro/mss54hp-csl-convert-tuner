@@ -11,7 +11,7 @@ import type { LogDataPoint } from '@/lib/types';
  * the DME. It is rendered as a fixed computed column by LogDataTable rather than a toggleable field.
  */
 export type FieldKey =
-    | 'rpm' | 'rawLoad' | 'correctedLoad' | 'lambda1' | 'lambda2' | 'coolantTemp'
+    | 'rpm' | 'rawLoad' | 'correctedLoad' | 'stft1' | 'stft2' | 'coolantTemp'
     // Read out of the same DS2 block as rpm/tmot/aq_rel, so they cost nothing extra to log.
     // `rfKorr` is the one derived member of the set — see calculator.ts for how it is measured.
     | 'exhaustTemp' | 'rf' | 'wdk1' | 'rfKorr'
@@ -129,19 +129,18 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
      * the same reason. And the cycle runs at roughly 1-2 Hz warm, against a 2.4 Hz sample rate,
      * which is why rate is a precision question and not a convenience one.
      *
-     * On the DS2 path `lambda1` holds the same number as `stft1`. That is not a duplicate by
-     * accident: `stft1/stft2` are the values the CALCULATION uses, bank-filled when a CSV supplies
-     * only one, while `lambda1/lambda2` record what the source physically carried. The CSV
-     * round-trip depends on that distinction (see log-engine/serializer.ts), so only one of the two
-     * is ever shown, and it is this one.
+     * There used to be a second copy of this pair called `lambda1/lambda2`, holding the same numbers
+     * so the CSV round-trip could tell which banks the source physically carried. It is gone:
+     * `undefined` says that directly now that the pair is optional, and one channel with one name is
+     * what stops the next reader wondering which of the two is real.
      */
-    lambda1: {
-        key: 'lambda1', symbol: 'la_f_regler1', name: 'Lambda controller factor, bank 1',
+    stft1: {
+        key: 'stft1', symbol: 'la_f_regler1', name: 'Lambda controller factor, bank 1',
         source: { selection: 19, offset: 40 }, unit: '', format: v => v.toFixed(3),
         relevance: 'optional', chartAxis: 'y2', color: '#B9A6EE', // M-violet 300 (9.8:1)
     },
-    lambda2: {
-        key: 'lambda2', symbol: 'la_f_regler2', name: 'Lambda controller factor, bank 2',
+    stft2: {
+        key: 'stft2', symbol: 'la_f_regler2', name: 'Lambda controller factor, bank 2',
         source: { selection: 19, offset: 42 }, unit: '', format: v => v.toFixed(3),
         relevance: 'optional', chartAxis: 'y2', color: '#CBBCF2', // lighter + dashed = 2nd sensor
     },
@@ -249,7 +248,7 @@ export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as
     .filter(key => LOG_FIELD_REGISTRY[key].relevance !== 'core');
 
 export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
-    rpm: true, rawLoad: true, correctedLoad: true, lambda1: true, lambda2: true, coolantTemp: true,
+    rpm: true, rawLoad: true, correctedLoad: true, stft1: true, stft2: true, coolantTemp: true,
     // On by default: the whole point of reading them is that the EGT correction is invisible
     // otherwise. They still only appear when the log actually carries them (isFieldPresent).
     exhaustTemp: true, rf: true, rfKorr: true,

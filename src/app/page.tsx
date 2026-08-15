@@ -1539,8 +1539,6 @@ export default function Home() {
           rawLoad: sample.rawLoad,
           stft1: sample.stft1,
           stft2: sample.stft2,
-          lambda1: sample.stft1,
-          lambda2: sample.stft2,
           coolantTemp: sample.coolantTemp,
           rf: sample.rf,
           exhaustTemp: sample.exhaustTemp,
@@ -2989,8 +2987,8 @@ const WOT_CRITERION =
                           : hzValueRef.current.toFixed(1),
                       color: 'text-slate-400',
                     },
-                    { label: 'STFT1', value: liveSample ? liveSample.stft1.toFixed(3) : '—', color: 'text-green-400' },
-                    { label: 'STFT2', value: liveSample ? liveSample.stft2.toFixed(3) : '—', color: 'text-green-400' },
+                    { label: 'STFT1', value: liveSample ? (liveSample.stft1 ?? NaN).toFixed(3) : '—', color: 'text-green-400' },
+                    { label: 'STFT2', value: liveSample ? (liveSample.stft2 ?? NaN).toFixed(3) : '—', color: 'text-green-400' },
                   ]).map(cell => (
                     <div key={cell.label} className="flex flex-col leading-none">
                       <span className="text-[8px] text-slate-600 uppercase tracking-wider">{cell.label}</span>

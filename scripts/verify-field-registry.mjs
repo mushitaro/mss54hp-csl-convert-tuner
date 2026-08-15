@@ -67,7 +67,7 @@ console.log('\n[a computed field must not impersonate one]');
 console.log('\n[value keys match the reference tool]');
 {
     // LiveValueKeys.Create(selection, symbol) => "13:la_f_regler1". Two-digit uppercase hex.
-    const la = LOG_FIELD_REGISTRY.lambda1;
+    const la = LOG_FIELD_REGISTRY.stft1;
     check('la_f_regler1 keys as 13:la_f_regler1', fieldValueKey(la) === '13:la_f_regler1', fieldValueKey(la));
     check('rpm keys as 03:n', fieldValueKey(LOG_FIELD_REGISTRY.rpm) === '03:n', fieldValueKey(LOG_FIELD_REGISTRY.rpm));
     check('a computed field keys as calc:',
@@ -85,6 +85,10 @@ console.log('\n[visibility stays in step with the field list]');
         !TOGGLEABLE_FIELDS.some(k => LOG_FIELD_REGISTRY[k].relevance === 'core'));
     // A channel whose meaning is unknown must not be on by default — see its registry entry.
     check('la_freeze_flag is off by default', DEFAULT_FIELD_VISIBILITY.lambdaFreeze === false);
+    // The one channel the VE correction cannot do without. Hiding it is fine; not having it is not,
+    // and the parser now refuses such a log outright.
+    check('the trim pair is on by default',
+        DEFAULT_FIELD_VISIBILITY.stft1 === true && DEFAULT_FIELD_VISIBILITY.stft2 === true);
     check('wdk1 is off by default (it is a gate input, not a gauge)',
         DEFAULT_FIELD_VISIBILITY.wdk1 === false);
 }
