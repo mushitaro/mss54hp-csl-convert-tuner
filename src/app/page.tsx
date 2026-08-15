@@ -3630,6 +3630,38 @@ The TIMING button still has the full record; save it before running another oper
                       </div>
                     </div>
 
+                    {/* ROW 4: TANK VENT STATUS.
+                        This column is PATCH and the things PATCH does — MAP off, LTFT floor at 100 —
+                        and since PATCH started arming the purge shut, this is one of them. It lived
+                        on the other wing as its own switch, which was the right home while it WAS a
+                        choice and became a lie the moment it stopped being one.
+
+                        Same shape as the two rows above and no pill of any kind: the first attempt
+                        left a toggle-shaped lamp here and, unsurprisingly, read as a toggle that had
+                        simply stopped working.
+
+                        RED where the others are amber, and that is deliberate. In this palette
+                        `amber-*` is aliased to the M-violet ramp, which means "derived diagnostic".
+                        MAP and LTFT are calibration changes you drive away from; this one leaves an
+                        emissions device disabled, and it is the only line on the hub that does. */}
+                    <div
+                      className="h-7 flex items-center gap-3 mr-1 opacity-90 transition-opacity shrink-0"
+                      title={'Armed by PATCH — a readout, not a switch.\n\n'
+                        + 'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
+                        + 'Why: purged vapour is fuel the DME did not inject, so the lambda controller trims for it — and that trim is the single input this app derives the VE correction from. Measured on this car (Session #902): the valve was open for 82.8% of a 657s drive, at up to 99.9% duty. Session #904, with this armed: TETV read 0 on all 1260 samples.\n\n'
+                        + 'Confirmed at instruction level: tetv_calc (slave 0x26ED6) is the only reader of this byte and the only writer of a non-zero duty, and zero forces exactly shut rather than a minimum.\n\n'
+                        + 'TUNING ONLY. The canister stops being purged and will saturate; DTC 24 is the code for a valve that will not open. Turn PATCH off and write once more before driving the tune. The filename carries _TEVOFF while it is armed.'}
+                    >
+                      <span className={`text-[10px] font-bold tracking-widest uppercase whitespace-nowrap ${applyTankVentDisable ? 'text-red-400/80' : 'text-slate-600'}`}>
+                        TANK VENT
+                      </span>
+                      <div className="flex items-center justify-end w-8">
+                        <span className={`text-[11px] font-mono font-bold tracking-wider ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
+                          {applyTankVentDisable ? 'SHUT' : 'OEM'}
+                        </span>
+                      </div>
+                    </div>
+
                   </div>
 
 
@@ -3695,47 +3727,6 @@ The TIMING button still has the full record; save it before running another oper
                       </span>
                       <span className={`text-[11px] font-mono font-bold tracking-wider ml-1 whitespace-nowrap ${applyWotDisable ? 'text-amber-500' : 'text-slate-500'}`}>
                         {applyWotDisable ? '102.3' : 'OEM'}
-                      </span>
-                    </div>
-
-                    {/* ROW 1b: TANK VENT — armed by PATCH, shown here.
-
-                        It used to be its own toggle, on the reasoning that the other two are
-                        reversible from the driver's seat and this one stops the charcoal canister
-                        being purged. That is still true of the CONSEQUENCE, and it is why the flag
-                        and the warnings stay separate — but it was never true of the DECISION. Once
-                        the EGT profile was retired the VE run became the only datalog, and it wants
-                        both patches every time; a switch that is only ever correct in one position
-                        is not a choice, it is a step you can forget.
-
-                        So: still red, still named, still counted separately by isRoadState and
-                        settingsDrift and the filename's _TEVOFF. Just not pressable.
-
-                        RED when armed, not amber. In this palette `amber-*` is aliased to the
-                        M-violet ramp (text-amber-400 resolves to #B9A6EE), and violet already means
-                        "derived diagnostic" — see globals.css and the log field registry. Blue means
-                        "tuning option", which this is not: it is the one switch on the hub that
-                        leaves an emissions device off. Red is the only honest step here. */}
-                    <div className="h-7 flex items-center gap-3 ml-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
-                      <div
-                        className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group"
-                        title={'Armed by PATCH — this row reports it, it is not a second decision.\n\n'
-                          + 'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
-                          + 'Why: purged vapour is fuel the DME did not inject, so the lambda controller trims for it — and that trim is the single input this app derives the VE correction from. Measured on this car (Session #902): the valve was open for 82.8% of a 657s drive, at up to 99.9% duty. The stock map asks 94-99.6% above 2500 rpm at mid load, which is exactly where a tune is worth having.\n\n'
-                          + 'Confirmed at instruction level: tetv_calc (slave 0x26ED6) is the only reader of this byte and the only writer of a non-zero duty, and zero forces exactly shut rather than a minimum.\n\n'
-                          + 'TUNING ONLY. The canister stops being purged and will saturate; DTC 24 is the code for a valve that will not open. Turn this back off and write once more before driving the tune. The filename carries _TEVOFF while it is armed.'}
-                      >
-                        {/* A lamp, not a switch. Same footprint as the toggle it replaced so the
-                            wing's rows still line up, but nothing to press: PATCH decides this. */}
-                        <div className={`w-9 h-5 rounded-full flex items-center transition-colors ${applyTankVentDisable ? 'bg-red-900/60 justify-end' : 'bg-slate-800 justify-start'}`}>
-                          <div className={`w-4 h-4 rounded-full border transition-colors mx-[2px] ${applyTankVentDisable ? 'bg-red-400 border-red-300' : 'bg-slate-600 border-slate-500'}`} />
-                        </div>
-                      </div>
-                      <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
-                        TANK VENT
-                      </span>
-                      <span className={`text-[11px] font-mono font-bold tracking-wider ml-1 whitespace-nowrap ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
-                        {applyTankVentDisable ? 'SHUT' : 'OEM'}
                       </span>
                     </div>
 
