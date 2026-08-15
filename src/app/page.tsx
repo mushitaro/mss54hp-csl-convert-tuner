@@ -2063,8 +2063,60 @@ export default function Home() {
     if (narrowPane === 'graph' && (!splitGraph || !graphHasContent)) setNarrowPane('dash');
   }, [narrowPane, splitGraph, graphHasContent]);
 
+/**
+ * What the derived WOT map is actually claiming, said where the switch is.
+ *
+ * karter16 asked what criteria this uses, noting that at WOT the S54 is not chasing stoich
+ * (thread 242281 #161). It is a fair question and the honest answer is short: it does not chase
+ * stoich either. It carries BMW's own enrichment ratio forward unchanged and moves the whole
+ * curve by however much the airflow estimate turned out to be wrong.
+ */
+const WOT_CRITERION =
+  'EXPERIMENTAL. NewWOT(rpm) = NewVE(rpm, 100 % RO) x ( StockWOT(rpm) / StockVE(rpm, 100 % RO) ).\n\n'
+  + 'It does NOT target lambda 1.0 at WOT. The ratio StockWOT/StockVE is the enrichment BMW chose, and it is preserved exactly — the only claim made is that an airflow error measured at the top of the part-throttle map is the same error at full throttle, so the WOT map moves by the same factor.\n\n'
+  + 'Two things it cannot promise. The scaling of 0xB5A is still unverified against a known-good binary. And it is only as good as the top load row: that row has to have been driven, with WOT TH on so the lambda integrator was still running up there. Both are gated — the switch stays locked until they hold.';
+
   const derivedTablesLocked = !newMap;
   const derivedTablesLockReason = 'Needs a tune first — these tables are derived from the tuned map. Record a log (START TUNE) or load one, then they unlock.';
+  /**
+   * WRITE WOT needs more than a tune, and what it needs is evidence in one specific row.
+   *
+   * `generateWOTMap` scales BMW's own WOT map by how far the tuned VE map moved at the TOP load
+   * row: NewWOT(rpm) = NewVE(rpm, maxLoad) x (StockWOT(rpm) / StockVE(rpm, maxLoad)). That is a
+   * defensible criterion — it preserves the enrichment ratio BMW chose and never chases lambda 1.0
+   * at WOT, which is what karter16 asked about (thread 242281 #161). But it is only worth anything
+   * if the top row actually moved for a measured reason.
+   *
+   * On a real drive it usually has not. Session #901 held RO >= 20 % for at most 3.5 s and #902 for
+   * 2.9 s; neither came close to filling the 100 % row. Multiplying stock by cells that never
+   * cleared the evidence gate is extrapolation wearing a measurement's clothes.
+   *
+   * Three cells, matching the rf_korr tuner's own `gridCellsUpdated >= 3` — the WOT map spans 700
+   * to 8000 rpm, and one lucky cell cannot speak for that.
+   */
+  const wotEvidenceCells = useMemo(() => {
+    if (!hitMap?.length) return 0;
+    const top = hitMap[hitMap.length - 1];          // maxLoad row: what interpolateMap reads at 100 %
+    const min = filterConfig.minVeCellSamples ?? 10;
+    return top.reduce((n, hits) => n + (hits >= min ? 1 : 0), 0);
+  }, [hitMap, filterConfig.minVeCellSamples]);
+
+  /**
+   * And the log has to have been recorded with VL suppressed.
+   *
+   * Without the WOT-threshold patch the DME declares full load and switches lambda control off, so
+   * the integrator freezes — `KF_BZ_WDK_VL` to 102.3 % is what keeps it running up there
+   * (docs/ecu-logic/60-tuning-logic.md 3.3). A top row built from a frozen integrator says nothing
+   * about mixture, and scaling BMW's WOT map by it would carry that nothing straight into the bytes.
+   */
+  const wotPatchWasOn = applyWotDisable || !!patchStatus?.wotDisabled;
+  const wotLocked = derivedTablesLocked || !wotPatchWasOn || wotEvidenceCells < 3;
+  const wotLockReason = derivedTablesLocked
+    ? derivedTablesLockReason
+    : !wotPatchWasOn
+      ? 'Needs a log recorded with WOT TH on (KF_BZ_WDK_VL = 102.3 %). Without it the DME enters full load, lambda control switches off and the integrator freezes — the top load row would be built from a number that stopped measuring.'
+      : `Needs evidence at the top load row: ${wotEvidenceCells} of ${hitMap?.[0]?.length ?? 0} cells there cleared the gate, and this needs 3. The WOT map is BMW's own map scaled by how far that row moved, so without it there is nothing to scale by. Hold 100 % RO for longer, or lower the gate in the log filter panel.`;
+
 
   /** Which destination the narrow layout is showing, wearing the tab row's own clothes: same height,
    *  same 10px letterspaced label, same 2px underline under the active one. It stands where the
@@ -3301,18 +3353,20 @@ The TIMING button still has the full record; save it before running another oper
                       </span>
                     </div>
 
-                    {/* ROW 3: WRITE WOT (Pushed Away/Far) */}
-                    <div className={`h-7 flex items-center gap-4 ml-8 pl-1 shrink-0 transition-opacity ${derivedTablesLocked ? 'opacity-40' : ''}`}>
+                    {/* ROW 3: WRITE WOT — locked harder than its neighbour above. WRITE WARMUP needs only a
+                        tune; this one also needs the top load row to have been measured, and the log to
+                        have been taken with VL suppressed. See wotLocked. */}
+                    <div className={`h-7 flex items-center gap-4 ml-8 pl-1 shrink-0 transition-opacity ${wotLocked ? 'opacity-40' : ''}`}>
                       <label
-                        className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${derivedTablesLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                        className={`py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group ${wotLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                        title={wotLocked ? wotLockReason : WOT_CRITERION}
                       >
-                        <input type="checkbox" className="sr-only peer" checked={!derivedTablesLocked && writeWot} disabled={derivedTablesLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />
+                        <input type="checkbox" className="sr-only peer" checked={!wotLocked && writeWot} disabled={wotLocked || dmeLink.state === 'writing'} onChange={(e) => setWriteWot(e.target.checked)} />
                         <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                       <span
-                        className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!derivedTablesLocked && writeWot ? 'text-blue-400' : 'text-slate-500'}`}
-                        title={derivedTablesLocked ? derivedTablesLockReason : undefined}
+                        className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${!wotLocked && writeWot ? 'text-blue-400' : 'text-slate-500'}`}
+                        title={wotLocked ? wotLockReason : WOT_CRITERION}
                       >
                         {compact ? 'WOT' : 'WRITE WOT'}
                       </span>
