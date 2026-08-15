@@ -31,7 +31,7 @@ const run = (log, opts) => new VECalculator().calculateNewVEMap(flat(), log, { a
 console.log('\n[one sample no longer moves a cell]');
 {
     const r = run(samples(1, 2700, 1.0, 1.20));
-    check('cell holds its stock value', at(r.newMap.data, 2700, 1.0) === 50, at(r.newMap.data, 2700, 1.0));
+    check('no cell cleared, so there is no map', r.newMap === null, typeof r.newMap);
     check('correction reported as 1.0', at(r.correctionMap, 2700, 1.0) === 1.0);
     // The whole point of the change.
     const old = run(samples(1, 2700, 1.0, 1.20), { minCellSamples: 1, minCellWeight: 0.1 });
@@ -39,14 +39,40 @@ console.log('\n[one sample no longer moves a cell]');
         at(old.newMap.data, 2700, 1.0));
 }
 
+/**
+ * A log that clears nothing must not produce a map at all.
+ *
+ * Every refused cell keeps its stock value, so zero cleared cells means a map byte-identical to the
+ * BASE — and returned as an object it was indistinguishable from a tune. The app offered SAVE and
+ * WRITE, `Boolean(newMap)` recorded `tuned: true`, and a flash slot would have gone on writing the
+ * BASE back to the car under a TUNED name.
+ *
+ * Session #903 is the real case: an EGT run reads block 3 alone, so it carries no lambda trim at
+ * all, so not one sample can be binned — and it was stored with a sha256 as though it were a tune.
+ */
+console.log('\n[a log that earns nothing is not a tune]');
+{
+    const noTrim = samples(400, 2700, 1.0, 1.20).map(s => ({ ...s, stft1: undefined, stft2: undefined }));
+    const r = run(noTrim);
+    check('an EGT-shaped log yields no map', r.newMap === null, typeof r.newMap);
+    check('...and says so in the coverage', r.coverage.withEvidence === 0, r.coverage.withEvidence);
+    // Not a rule about trim — an absence of one. 400 samples of a cell that is one short of the
+    // threshold reaches the same verdict for the same reason.
+    const thin = run(samples(9, 2700, 1.0, 1.20));
+    check('nine samples everywhere yields no map either', thin.newMap === null, typeof thin.newMap);
+}
+
 console.log('\n[a rejected cell still reports what it has]');
 {
-    const r = run(samples(9, 2700, 1.0, 1.20));
+    // Ten elsewhere so SOMETHING clears and a map exists to inspect — the nine-sample cell is the
+    // subject, and it has to be readable without the whole result being withheld.
+    const r = run([...samples(9, 2700, 1.0, 1.20), ...samples(10, 3100, 1.0, 1.10)]);
     check('9 samples: cell not moved', at(r.newMap.data, 2700, 1.0) === 50);
     check('hitMap reports 9, NOT 0', at(r.hitMap, 2700, 1.0) === 9, at(r.hitMap, 2700, 1.0));
     check('weightMap reports the real weight', at(r.weightMap, 2700, 1.0) > 8, at(r.weightMap, 2700, 1.0));
     const empty = run([]);
     check('a genuinely empty cell still reports 0', at(empty.hitMap, 2700, 1.0) === 0);
+    check('an empty log yields no map', empty.newMap === null, typeof empty.newMap);
 }
 
 console.log('\n[the gate opens at the threshold]');
@@ -61,8 +87,9 @@ console.log('\n[both conditions, not either]');
     // 20 samples midway between two rpm columns: plenty of count, weight split across neighbours.
     const mid = (RPM[RPM.indexOf(2700)] + RPM[RPM.indexOf(2900)]) / 2;
     const r = run(samples(20, mid, 1.0, 1.20), { minCellWeight: 15 });
-    const moved = at(r.newMap.data, 2700, 1.0) !== 50;
-    check('count alone does not open it when weight is short', !moved, 'weight ' + at(r.weightMap, 2700, 1.0).toFixed(1));
+    check('count alone does not open it when weight is short',
+        r.coverage.withEvidence === 0 && r.newMap === null,
+        'weight ' + at(r.weightMap, 2700, 1.0).toFixed(1) + ', cleared ' + r.coverage.withEvidence);
 }
 
 console.log('\n[the census is the cost of the threshold]');

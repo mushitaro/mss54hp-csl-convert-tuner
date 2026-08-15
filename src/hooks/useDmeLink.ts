@@ -126,6 +126,25 @@ export function useDmeLink() {
         setLastTransferTiming(report);
         setLastEventLog(events);
     }, []);
+    /**
+     * Closes a log run's timing window and publishes it, on the link object the run started with.
+     *
+     * Both run kinds need exactly this and neither could do it correctly through `linkRef`: STOP
+     * tears the connection down without waiting for the poll loop, so the ref is usually null by the
+     * time the loop's `finally` runs. Nothing ever noticed, because every call was optional-chained
+     * and a no-op reads the same as a success — which is why `kind: 'log'` has never once reached
+     * the diagnostics store despite the inertia run having armed the instrument since it was built.
+     *
+     * Guarded end to end: a run's report is a nice-to-have and must never be able to take down the
+     * teardown that follows it.
+     */
+    const closeLogTiming = useCallback((link: DmeLink | null, failure: string | null) => {
+        if (!link) return;
+        try {
+            link.endLogTiming?.(failure ?? undefined);
+            publishLast(link);
+        } catch { /* the run's own outcome is what matters; this is instrumentation */ }
+    }, [publishLast]);
     const [identity, setIdentity] = useState<DmeIdentity | null>(null);
     const [error, setError] = useState<string | null>(null);
     /**
@@ -439,14 +458,21 @@ export function useDmeLink() {
          */
         blocks?: number[],
     ) => {
-        if (!linkRef.current) { onEnd?.('Not connected to DME'); return; }
-        if (blocks) linkRef.current.setLiveBlocks?.(blocks);
+        const link = linkRef.current;
+        if (!link) { onEnd?.('Not connected to DME'); return; }
+        if (blocks) link.setLiveBlocks?.(blocks);
         // Every other operation clears the previous error first; this one didn't, so a failed
         // adaptation reset — the step designed to happen immediately before a log — left the status
         // dot red for the whole run and made the abort invisible.
         clearError();
         setState('tuning');
         pollingRef.current = true;
+        // Armed for the datalog too, not just the inertia run. Until now `kind: 'log'` was only ever
+        // emitted by startInertiaRun, so the path whose rate the whole profile exercise is about —
+        // the VE/EGT poll — had never been measured on the wire once. Session #903's 6.60 Hz had to
+        // be recovered by dividing samples by duration after the fact, which cannot separate the
+        // DME's turnaround from the host's; this can. Sized from the blocks actually being polled.
+        link.beginLogTiming?.(link.getLiveBlocks?.() ?? blocks);
 
         (async () => {
             let failure: string | null = null;
@@ -471,10 +497,21 @@ export function useDmeLink() {
             } finally {
                 // finally, not the catch: the loop's normal exit is the while condition / the break,
                 // so this is the only true single exit point — and it makes a double-fire impossible.
+                //
+                // Closed on the same terms as a read or a write: a drive that died part-way is the
+                // most informative timing report there is, so the failure is passed in rather than
+                // used as a reason to discard the window.
+                //
+                // `link`, not `linkRef.current`. STOP does not wait for this loop — handleStopTune
+                // runs the teardown itself so a dying cable cannot make the button look dead — and
+                // that teardown calls disconnect(), which NULLS linkRef. So by the time an in-flight
+                // poll settles and this finally runs, the ref is routinely already empty and an
+                // optional call through it is a silent no-op. The captured object is still there.
+                closeLogTiming(link, failure);
                 onEnd?.(failure);
             }
         })();
-    }, [clearError]);
+    }, [clearError, closeLogTiming]);
 
     const stopTuning = useCallback(() => {
         pollingRef.current = false;
@@ -528,12 +565,12 @@ export function useDmeLink() {
             } finally {
                 // Closed on every exit including the failed one: a run that died part-way is the
                 // most informative timing report there is, and discarding it would lose exactly the
-                // case worth having.
-                try { linkRef.current?.endLogTiming?.(failure ?? undefined); } catch { }
+                // case worth having. On the captured link rather than the ref — see closeLogTiming.
+                closeLogTiming(link, failure);
                 onEnd?.(failure);
             }
         })();
-    }, [clearError]);
+    }, [clearError, closeLogTiming]);
 
     /**
      * Adaptation read and clear. Both take the link to 'resetting' for the duration.

@@ -151,7 +151,7 @@ export class VECalculator {
         logData: LogDataPoint[],
         options: VeCalcOptions = {}
     ): {
-        newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
+        newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
         tunedUsedMap: boolean[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
@@ -272,7 +272,7 @@ export class VECalculator {
     public finalizeGrid(
         currentMap: VEMap, grid: GridCell[][], options: VeCalcOptions = {},
     ): {
-        newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
+        newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
         tunedUsedMap: boolean[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
@@ -387,11 +387,24 @@ export class VECalculator {
         }
 
         return {
-            newMap: {
+            /**
+             * Null when NOTHING cleared the gate — because then this is not a tune.
+             *
+             * Every refused cell keeps `oldVal`, so a log with no qualifying cell produces a map
+             * that is byte-identical to the BASE. Returned as an object it was indistinguishable
+             * from a real result: the app offered SAVE and WRITE, `Boolean(newMap)` recorded
+             * `tuned: true`, and a flash slot went on writing the BASE back to the car under a
+             * TUNED name. Session #903 — an EGT run, which carries no lambda trim at all and so can
+             * never bin a single sample — did exactly that.
+             *
+             * The other maps stay populated on purpose. `hitMap` still holds the real counts, so
+             * "you drove here but not enough" survives; it is only the ARTEFACT that is withheld.
+             */
+            newMap: cellsWithEvidence > 0 ? {
                 xAxis: [...currentMap.xAxis], // Preserve axes
                 yAxis: [...currentMap.yAxis],
                 data: newMapData,
-            },
+            } : null,
             diffMap,
             hitMap, // Returns Integer Hits
             correctionMap,

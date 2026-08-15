@@ -1,6 +1,9 @@
-import { LogDataPoint, VEMap } from '@/lib/types';
+import type { LogDataPoint, VEMap } from '@/lib/types';
 import { timeScaleSeconds } from '@/lib/log-engine/filter';
-import { EgtTables, gateOpen, tabgModelAt } from './egtTables';
+// `import type` for the interface: Node's type stripping cannot tell a type-only named import from
+// a value one, so a harness that loads this module directly fails on the missing export.
+import type { EgtTables } from './egtTables';
+import { gateOpen, tabgModelAt } from './egtTables';
 
 /**
  * Back-calculates KF_RF_KORR_DRREL from a data log.
@@ -189,6 +192,19 @@ export interface RfKorrTuneReport {
     samplesHysteresis: number;
     /** RF or TABG was still moving, so Δ is sensor lag rather than a density signal. */
     samplesNotSettled: number;
+    /**
+     * Carried no lambda trim on either bank, so the closed loop's residual is unknown.
+     *
+     * The derivation is `A(Δ)/A(0) = k_applied × STFT(Δ) / STFT(0)`. `k_applied` says what the DME
+     * DID; only STFT says whether it was RIGHT. Drop the trim and the ratio collapses to
+     * `k_applied(Δ)/k_applied(0)` — which is the table already in the ECU, handed back as though the
+     * drive had derived it.
+     *
+     * This counter exists because that used to happen silently: an absent trim was read as `1`, the
+     * exact fabrication the VE calculator was fixed for. An EGT-profile log has no trim on any row,
+     * so the whole of one lands here — see `trimMissing`.
+     */
+    samplesNoTrim: number;
     /** Qualified as nominal and went into an anchor. */
     anchorSamples: number;
     /** Carried a Δ above the anchor threshold and contributed a ratio. */
@@ -200,6 +216,9 @@ export interface RfKorrTuneReport {
     rejectedByReason: Record<RejectReason, number>;
     /** No log row carried an exhaust temperature. Without one nothing here can run. */
     sensorMissing: boolean;
+    /** No log row carried a lambda trim on either bank — the whole log, not some of it. True for
+     *  every EGT-profile run by construction, since that profile does not read block 19. */
+    trimMissing: boolean;
     /** Largest |tuned − stock| actually written, for a quick read on how far this log moved things. */
     largestChange: number;
 }
@@ -336,7 +355,7 @@ export function tuneRfKorrTable(
     const report: RfKorrTuneReport = {
         samplesTotal: annotatedLog.length,
         samplesNoMeasurement: 0, samplesNoDelta: 0,
-        samplesGateShut: 0, samplesHysteresis: 0, samplesNotSettled: 0,
+        samplesGateShut: 0, samplesHysteresis: 0, samplesNotSettled: 0, samplesNoTrim: 0,
         anchorSamples: 0, ratioSamples: 0, samplesNoAnchor: 0,
         veCellsWithAnchor: 0, gridCellsUpdated: 0,
         rejectedByReason: {
@@ -345,6 +364,7 @@ export function tuneRfKorrTable(
             'off-breakpoint': 0,
         },
         sensorMissing: true,
+        trimMissing: true,
         largestChange: 0,
     };
 
@@ -428,7 +448,22 @@ export function tuneRfKorrTable(
         // than recomputing is what keeps the tuner and the VE calculation on the same Δ.
         const delta = p.tabgDelta
             ?? Math.max(0, tabgModelAt(egt, p.rpm, p.rf / 100) - p.exhaustTemp);
-        const stft = ((p.stft1 ?? p.stft2 ?? 1) + (p.stft2 ?? p.stft1 ?? 1)) / 2;
+        // Whichever banks are present, averaged over those alone. It used to read
+        // `(p.stft1 ?? p.stft2 ?? 1)`, so a row with no trim at all silently became 1.000 — the same
+        // fabrication the VE calculator was fixed for, still live here.
+        //
+        // It is not a harmless default. `q = k_applied × STFT`, and STFT is the only term that says
+        // whether the correction the DME applied was CORRECT. Pin it at 1 and every ratio becomes
+        // `k_applied(Δ)/k_applied(0)`: the table already in the ECU, returned as a derivation of it.
+        // A run would report a confident tuned table that is just the stock one plus interpolation
+        // noise, and `largestChange` would say it barely moved — reading as agreement rather than as
+        // the tautology it is.
+        const banks: number[] = [];
+        if (p.stft1 !== undefined) banks.push(p.stft1);
+        if (p.stft2 !== undefined) banks.push(p.stft2);
+        if (!banks.length) { report.samplesNoTrim++; continue; }
+        report.trimMissing = false;
+        const stft = banks.reduce((a, b) => a + b, 0) / banks.length;
         if (!(stft > 0)) { report.samplesNoMeasurement++; continue; }
 
         const load = p.correctedLoad ?? p.rawLoad;
@@ -446,7 +481,14 @@ export function tuneRfKorrTable(
         });
     }
 
-    if (report.sensorMissing) return null;
+    // Both are "this log cannot answer the question", and both return nothing rather than something
+    // weak: the caller shows a table when it gets one, and a table is a thing that gets flashed.
+    //
+    // `trimMissing` is the EGT profile's own consequence. It reads block 3 alone for the rate, which
+    // is right for MEASURING rf_korr — `(rf/100) / rf_soll` needs nothing else — but deriving what
+    // the table SHOULD hold is a different calculation, and that one needs the closed loop's
+    // residual. Until this returned null, an EGT log produced a table anyway.
+    if (report.sensorMissing || report.trimMissing) return null;
 
     // --- Pass 1: the anchors, per VE cell ------------------------------------------------------
     const anchors: AnchorCell[][] = Array.from({ length: veRows }, () =>

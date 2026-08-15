@@ -100,6 +100,13 @@ const POLL_RETRY_ATTEMPTS = 2;
  * already drops anything past capacity, so overflowing this is a non-event.
  */
 const LOG_TIMING_WINDOW_EXCHANGES = 256;
+/** DS2 selection -> payload bytes, for the blocks a log run can be made of. Sizing the timing
+ *  window is the only thing that needs this, and it needs all three in one place. */
+const LIVE_BLOCK_LENGTHS: Record<number, number> = {
+    [STANDARD_MEASUREMENT_BLOCK.selection]: STANDARD_MEASUREMENT_BLOCK.expectedLength,
+    [OPERATING_MEASUREMENTS_BLOCK.selection]: OPERATING_MEASUREMENTS_BLOCK.expectedLength,
+    [EGAS_MEASUREMENT_BLOCK.selection]: EGAS_MEASUREMENT_BLOCK.expectedLength,
+};
 // Before the first adaptation exchange, wait for the K-line to fall silent so the echo read isn't
 // racing a prior operation's still-arriving response. One quiet window this long with nothing new
 // received counts as silent; give up after this many rounds rather than blocking forever.
@@ -1732,15 +1739,30 @@ export class WebSerialDmeLink implements DmeLink {
      * exchanges are what answers "what rate does this profile really achieve" — a rolling window
      * would cost memory forever to tell us the same thing.
      */
-    beginLogTiming(): void {
+    beginLogTiming(selections?: number[]): void {
+        // Sized from the blocks the run will actually poll. It used to be hard-wired to the EGAS
+        // block because the inertia run was the only caller; a VE sample is two exchanges of 35 and
+        // 90 bytes and would have been reported as two 52-byte ones.
+        //
+        // The MEAN payload, for a profile that reads more than one block. `turnaround` and
+        // `hostGap` — the two numbers this instrument exists for — are per-exchange and do not
+        // depend on size at all; only `theoreticalResponseWire` does, and the mean is what makes
+        // that figure times the exchange count come out as the run's true wire time. A single
+        // exchange's own figure is then an average rather than its exact size, which is worth
+        // saying out loud but is not a number anything reads.
+        const lengths = (selections ?? [EGAS_MEASUREMENT_BLOCK.selection])
+            .map(sel => LIVE_BLOCK_LENGTHS[sel])
+            .filter((n): n is number => n !== undefined);
+        const payload = lengths.length
+            ? lengths.reduce((a, b) => a + b, 0) / lengths.length
+            : EGAS_MEASUREMENT_BLOCK.expectedLength;
+
         this.timing.clearReport();
         this.timing.begin(LOG_TIMING_WINDOW_EXCHANGES, {
             kind: 'log',
-            // Sized for the EGAS block, because that is the profile this instrument exists to
-            // characterise. Same framing arithmetic as the bulk read above:
-            chunkSize: EGAS_MEASUREMENT_BLOCK.expectedLength,
-            // [addr][len][status][52 data][cksum].
-            responseBytes: EGAS_MEASUREMENT_BLOCK.expectedLength + 4,
+            chunkSize: payload,
+            // [addr][len][status][payload][cksum].
+            responseBytes: payload + 4,
             // [addr][len][0x0B][selection][cksum] — five bytes, so `write` and `echoLatency` are
             // meaningful here in the way they are on a read and are not on a write.
             requestBytes: 5,

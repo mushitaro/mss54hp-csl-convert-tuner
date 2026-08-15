@@ -44,7 +44,7 @@ import { useInstallPrompt } from '@/hooks/useInstallPrompt';
 import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
-import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud } from 'lucide-react';
+import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud, Gauge } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
@@ -949,10 +949,16 @@ export default function Home() {
         // A BASE with no tune yet is already on this device — setSessionBase writes it as the READ
         // finishes — so the honest state is "saved", not "nothing to record". SYNC is the control
         // that does something here, and describeSave's copy points at it.
-        : !newMap ? (currentSession.baseOrigin ? 'baseOnly' : 'nothing')
+        // A run with no VE map is not automatically nothing. An EGT log cannot move a VE cell — it
+        // has no lambda trim to move one with — and it is still the entire product of a drive that
+        // exists only in memory until it is written. Before this branch, saving it was impossible
+        // and the label said "there is nothing further to save", over exactly the data the run was
+        // for.
+        : !newMap ? (processedLog?.data.length ? 'logOnly'
+          : currentSession.baseOrigin ? 'baseOnly' : 'nothing')
           : isArchived ? 'archived'
             : 'ready',
-  }), [dmeLink.state, currentSession, newMap, isArchived]);
+  }), [dmeLink.state, currentSession, newMap, isArchived, processedLog]);
   const saveLook = describeSave(saveStatus);
 
   // Each tab states the data it needs, rather than a chain of exclusions. CURRENT MAP used to be
@@ -1273,7 +1279,26 @@ export default function Home() {
    *  untuned PATCH-ON BIN for the log run is a real step, and those bytes genuinely went to the ECU,
    *  so they have to be kept for flashHistory's hash to point at anything. */
   const handleSaveSession = async () => {
-    if (!newMap) return;
+    // No map, but a drive: keep the drive. This is the ONLY way an EGT run's log gets off the heap —
+    // its samples carry no lambda trim, so not one VE cell can clear the evidence gate and there is
+    // no tune for saveSessionTune to record. Routed to saveResearch for the reason that function
+    // exists: it stores BASE + log + process and deliberately sets no sha256, so the session never
+    // offers a downloadable TUNED it never derived.
+    if (!newMap) {
+      if (!processedLog?.data.length) return;
+      const target = await ensureDraft();
+      if (!target) return;
+      await sessionDb.saveResearch({
+        sessionId: target.id,
+        process: logProcess,
+        // `?? []` rather than a non-null assertion: the guard above tests `processedLog`, which is
+        // a different array from `rawLogData`, so the compiler is right that this can be null.
+        log: logFileState.rawLogData ?? [],
+      });
+      void discardLiveRun().catch(() => { /* a stale record only costs one declined offer */ });
+      liveRunIdRef.current = null;
+      return;
+    }
     const target = await ensureDraft();
     if (!target || !binaryBuffer) return;
     if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
@@ -1520,6 +1545,25 @@ export default function Home() {
 
   const handleStartTune = async () => {
     const profile = LOG_PROFILES[logProcess];
+    // INERTIA does not run from here, and must not silently try.
+    //
+    // This path polls `pollLiveMeasurement`, which reads block 3 unconditionally and consults the
+    // selected blocks for exactly one thing — whether to add block 19. Selection 83 in that array
+    // is inert: `setLiveBlocks` re-adds block 3 regardless, and nothing ever fetches 83. So an
+    // INERTIA run started here does not fail, it QUIETLY DEGRADES to a block-3 log — right sample
+    // count, right sample rate, session correctly labelled INERTIA, and not one of the channels the
+    // estimator reads. That is exactly how session #903 came to exist: a 2940-sample road log
+    // stamped `process: 'INERTIA'` that the estimator could only reject.
+    //
+    // Routing rather than refusing, because the driver pressing this button wants to measure and
+    // the panel is where measuring happens. Placed above every side effect below — `setProcess`,
+    // the sample-buffer clear, `beginLiveRun` — so a mis-press costs nothing and destroys no
+    // existing recovery record.
+    if (logProcess === 'INERTIA') {
+      goToTab('inertia');
+      setNarrowPane('map');
+      return;
+    }
     // Preflight, before a drive rather than after one. Overridable — see missingPatches for why —
     // but never silent, because the cost of finding out afterwards is the whole run.
     const missing = missingPatches(profile, { patched: bytesPatched, tankVentShut: bytesTankVentShut });
@@ -1600,12 +1644,33 @@ export default function Home() {
         scheduleFlush();
         void persistLiveSamples(false); // own throttle, far slower than the 500 ms UI flush
       },
-      (failure) => { void finishLogRef.current(failure); },
+      (failure) => {
+        // Publish BEFORE the teardown, not after. `finishLog` disconnects and then blocks on a
+        // dialog, and the record is built from live link state; the timing window is already closed
+        // and published by this point, so this is both the earliest and the last safe moment.
+        //
+        // This is the first time a datalog has ever produced a diagnostic record. The rate figures
+        // quoted through this whole exercise came from dividing sample count by wall-clock after the
+        // fact, which cannot tell the DME's turnaround apart from the app's own cost — the one
+        // question the profile work has been guessing at.
+        publishDiagnostics('log');
+        void finishLogRef.current(failure);
+      },
       // The profile's block set. An EGT run skips block 19, which roughly doubles the sample rate
       // and leaves `la_f_regler` undefined — so its log cannot produce a VE map, which is correct.
       profile.blocks,
     );
   };
+
+  /** The inertia run, with the same diagnostic publish the datalog now does. Wrapped here rather
+   *  than inside InertiaWorkflow because uploading a record is the page's job — the workflow owns an
+   *  EGAS run, not a session. */
+  const startInertiaRunWithDiagnostics = useCallback(
+    (onSample: Parameters<typeof dmeLink.startInertiaRun>[0], onEnd?: (failure: string | null) => void) =>
+      dmeLink.startInertiaRun(onSample, failure => { publishDiagnostics('log'); onEnd?.(failure); }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dmeLink.startInertiaRun],
+  );
 
   const handleStopTune = async () => {
     dmeLink.stopTuning();
@@ -2147,7 +2212,13 @@ export default function Home() {
       case 'disconnected': return { label: 'CONNECTION', Icon: PlugZap, onClick: handleDmeConnect, disabled: false, spin: false };
       case 'connecting': return { label: 'CONNECTING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
       case 'reading': return { label: 'READING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
-      case 'tuning': return { label: 'STOP', Icon: Square, onClick: handleStopTune, disabled: false, spin: false };
+      // An inertia run reaches 'tuning' through startInertiaRun, not through handleStartTune, so
+      // the ordinary STOP would run the VE teardown over it: finishLog flushes an empty sample
+      // buffer, reports a datalog that does not exist, and disconnects the link. Stopping the poll
+      // is all that is wanted — InertiaWorkflow's own onEnd then computes and stores the estimate.
+      case 'tuning': return logProcess === 'INERTIA'
+        ? { label: 'STOP', Icon: Square, onClick: () => { dmeLink.stopTuning(); goToTab('inertia'); setNarrowPane('map'); }, disabled: false, spin: false }
+        : { label: 'STOP', Icon: Square, onClick: handleStopTune, disabled: false, spin: false };
       case 'writing': return { label: 'WRITING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
       // The reset dialog owns the screen while this runs; the hub is disabled rather than hidden so
       // it's visible that the link is busy and START TUNE cannot be raced against the DS2 traffic.
@@ -2157,7 +2228,12 @@ export default function Home() {
           case 'write': return { label: 'WRITE', Icon: Zap, onClick: handleDmeWrite, disabled: false, spin: false };
           case 'writePatch': return { label: writePatchLabel, Icon: Zap, onClick: handleDmeWrite, disabled: false, spin: false };
           // Tuning is a draft-only act: an archived session must never re-derive its own map.
-          case 'tune': return { label: 'START TUNE', Icon: Play, onClick: handleStartTune, disabled: false, spin: false };
+          // Labelled for where it goes. handleStartTune refuses INERTIA and routes to the panel, but
+          // a button that says START TUNE and then navigates is a surprise — and the surprise is the
+          // whole failure mode being fixed here.
+          case 'tune': return logProcess === 'INERTIA'
+            ? { label: 'INERTIA PANEL', Icon: Gauge, onClick: handleStartTune, disabled: false, spin: false }
+            : { label: 'START TUNE', Icon: Play, onClick: handleStartTune, disabled: false, spin: false };
           case 'read': return { label: 'READ', Icon: Zap, onClick: handleDmeRead, disabled: false, spin: false };
         }
     }
@@ -2928,7 +3004,7 @@ const WOT_CRITERION =
               {activeTab === 'inertia' && (
                 <div className="h-full w-full overflow-y-auto p-3">
                   <InertiaWorkflow
-                    startRun={dmeLink.startInertiaRun}
+                    startRun={startInertiaRunWithDiagnostics}
                     stopRun={dmeLink.stopTuning}
                     baseImage={binaryFileState.binaryBuffer}
                     /**
@@ -2949,6 +3025,11 @@ const WOT_CRITERION =
                       void sessionDb.saveResearch({
                         sessionId: currentSession.id,
                         process: 'INERTIA',
+                        // The projection stays, because the log table and the CSV export read it.
+                        // What it must never be is the ONLY copy: it keeps `time` and engine speed
+                        // and drops the torque and the gradient — the two quantities the whole
+                        // estimate is a regression between — along with every admission gate. A run
+                        // stored only like this cannot be re-analysed, which cost a real drive.
                         log: samples.map(s => ({
                           time: s.time,
                           rpm: s.n40 ?? 0,
@@ -2956,6 +3037,10 @@ const WOT_CRITERION =
                           wdk1: s.wdk1 ?? undefined,
                           rf: s.rf ?? undefined,
                         })),
+                        // The samples as the DME sent them. Nulls preserved: `gang: null` is "the
+                        // DME did not say" and `gang: 0` is "neutral", and the first must never
+                        // become the second in a measurement whose first precondition is neutral.
+                        egas: samples,
                       }).catch(() => { /* the estimate is on screen either way */ });
                     }}
                   />

@@ -31,6 +31,7 @@ import {
     correctDN40, isDN40Saturated, dn40UncertaintyHalfWidth, DN40_LSB_RPM_S,
 } from '../src/lib/inertia/gradient.ts';
 import { runBench, encodeDN40, STANDARD_BENCH_SWEEPS } from '../src/lib/inertia/bench.ts';
+import { liveCoverage } from '../src/lib/inertia/liveCoverage.ts';
 
 let failures = 0;
 const check = (name, fn) => {
@@ -205,11 +206,145 @@ check('a d_n40 that disagrees with the n40 difference is rejected', () => {
     assert.equal(est.acceptable, false);
 });
 
+// These exist because the suite passed 41 checks over a gate that could not accept a single real
+// sample. The bench hardcoded `engineState: 2` and the estimator demanded `=== 2`, so fixture and
+// code shared one misunderstanding and agreed with each other perfectly. A check that only ever
+// feeds the values the code expects tests nothing about whether those values are right.
+check('cranking is rejected — zustand_motor 0x02 is Start, not "running"', () => {
+    const est = estimateInertia(withField({ engineState: 0x02 }));
+    assert.equal(est.samplesUsed, 0);
+    assert.ok(est.rejects.some(r => r.reason === 'not-running'));
+});
+
+check('idle and part load are both accepted, because a sweep passes through them', () => {
+    for (const state of [0x04, 0x08, 0x10]) {
+        const est = estimateInertia(withField({ engineState: state }));
+        assert.ok(est.samplesUsed > 0, `zustand_motor 0x${state.toString(16)} was rejected`);
+    }
+});
+
+check('engine off / Kl.15 / Nachlauf are rejected', () => {
+    for (const state of [0x01, 0x20, 0x40]) {
+        const est = estimateInertia(withField({ engineState: state }));
+        assert.equal(est.samplesUsed, 0, `zustand_motor 0x${state.toString(16)} was accepted`);
+    }
+});
+
+check('an ARMED overrun cut (bit0 alone) is not treated as an active one', () => {
+    // bit0 = conditions met, bit3 = fuel actually stopped. Only bit3 may exclude a sample.
+    // Asserted on samplesUsed rather than `acceptable`: patching every sample also blanks the
+    // coast-down, so freeDecel.found goes false and the run is correctly not acceptable.
+    const est = estimateInertia(withField({ saWeSt: 0b0001 }));
+    assert.ok(est.samplesUsed > 0, 'a merely-armed cut threw the whole run away');
+});
+
+check('an ACTIVE overrun cut (bit3) is excluded', () => {
+    const est = estimateInertia(withField({ saWeSt: 0b1000 }));
+    assert.equal(est.samplesUsed, 0);
+    assert.ok(est.rejects.some(r => r.reason === 'fuel-cut'));
+});
+
+// The documented protocol must actually work at the rate the link achieves, not at the rate the
+// arithmetic predicts. The first version asked for six sweeps and filled zero bins at the 6.6 Hz a
+// real run measured — the estimator was fine, the instructions were not, and nothing tested them.
+check('the documented protocol fills enough bins at the rate a real link achieves', () => {
+    const sweeps = [0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30]
+        .map(pedalFraction => ({ pedalFraction, fromRpm: 1600, toRpm: 4700 }));
+    // 0.152 s is the MEAN interval measured on a real 2940-sample run; 0.185 s allows for block 83
+    // being ~1.2x the cost of block 3. The median (0.113 s) is the optimistic figure and is not
+    // what governs how many samples a sweep of fixed length produces.
+    for (const sampleIntervalS of [0.113, 0.152, 0.185]) {
+        for (const j of [0.18, 0.205, 0.21, 0.25]) {
+            const est = estimateInertia(runBench(sweeps, { j, sampleIntervalS }));
+            assert.ok(est.acceptable,
+                `protocol failed at ${(1 / sampleIntervalS).toFixed(1)} Hz with J=${j}: `
+                + `${est.bins.filter(b => b.j !== null).length} usable bins, counts `
+                + `[${est.bins.map(b => b.count).join('/')}]`);
+        }
+    }
+});
+
+check('the SUPERSEDED six-sweep protocol is demonstrably not enough', () => {
+    // Kept as a check so the reason the instructions changed stays visible: if someone reverts the
+    // panel text to six sweeps, this is the number that says why not.
+    const six = [0.15, 0.25, 0.35, 0.18, 0.28, 0.33]
+        .map(pedalFraction => ({ pedalFraction, fromRpm: 1800, toRpm: 4800 }));
+    const est = estimateInertia(runBench(six, { j: 0.205, sampleIntervalS: 0.152 }));
+    assert.equal(est.acceptable, false,
+        'six sweeps unexpectedly passed at 6.6 Hz — if this is now genuinely fine, delete this check');
+});
+
 check('an empty run is not acceptable and says why', () => {
     const est = estimateInertia([]);
     assert.equal(est.j, null);
     assert.equal(est.acceptable, false);
     assert.ok(est.notes.length > 0);
+});
+
+console.log('\nlive coverage — what the driver sees while the run is happening');
+
+// The live display exists because a raw sample counter is the one number guaranteed to look healthy
+// in the case that matters. These checks are about it agreeing with the verdict: a progress bar
+// that fills while the estimator is rejecting everything is worse than no progress bar.
+const PROTOCOL = [0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30, 0.15, 0.20, 0.25, 0.30]
+    .map(pedalFraction => ({ pedalFraction, fromRpm: 1600, toRpm: 4700 }));
+
+check('live accepted count matches what the estimator actually used', () => {
+    const samples = runBench(PROTOCOL, { j: 0.21 });
+    assert.equal(liveCoverage(samples).accepted, estimateInertia(samples).samplesUsed,
+        'the live counter and the verdict disagree about how many samples are usable — '
+        + 'they must share admitSample, not reimplement it');
+});
+
+check('live per-bin counts match the verdict per-bin counts', () => {
+    const samples = runBench(PROTOCOL, { j: 0.21 });
+    const live = liveCoverage(samples), est = estimateInertia(samples);
+    assert.equal(live.bins.length, est.bins.length);
+    live.bins.forEach((b, i) => {
+        assert.equal(b.count, est.bins[i].count, `bin ${b.loRpm}-${b.hiRpm} disagrees`);
+        assert.equal(b.loRpm, est.bins[i].loRpm);
+    });
+});
+
+check('live rejects match the verdict rejects, reason for reason', () => {
+    const samples = runBench(PROTOCOL, { j: 0.21 });
+    const key = rs => rs.map(r => `${r.reason}=${r.count}`).sort().join(',');
+    assert.equal(key(liveCoverage(samples).rejects), key(estimateInertia(samples).rejects));
+});
+
+check('"ready" means the estimator would accept it', () => {
+    const samples = runBench(PROTOCOL, { j: 0.21 });
+    const live = liveCoverage(samples);
+    assert.equal(live.ready, true, `not ready: ${live.outstanding.join(', ')}`);
+    assert.equal(estimateInertia(samples).acceptable, true,
+        'live said ready but the estimator refused — the exact lie this display must not tell');
+});
+
+check('a genuinely short run is NOT reported ready, and says what is missing', () => {
+    const short = [{ pedalFraction: 0.20, fromRpm: 1600, toRpm: 2300 }];
+    const live = liveCoverage(runBench(short, { j: 0.21 }));
+    assert.equal(live.ready, false);
+    assert.ok(live.outstanding.length > 0, 'nothing listed as outstanding on an obviously short run');
+    assert.equal(estimateInertia(runBench(short, { j: 0.21 })).acceptable, false);
+});
+
+check('an all-rejected run shows zero usable however many samples arrived', () => {
+    // The failure that motivated the whole display: samples piling up, none of them usable.
+    const samples = runBench(PROTOCOL, { j: 0.21 }).map(s => ({ ...s, gang: 3 }));
+    const live = liveCoverage(samples);
+    assert.ok(live.seen > 100, 'expected plenty of raw samples');
+    assert.equal(live.accepted, 0, 'usable must read zero, not track the raw count');
+    assert.equal(live.ready, false);
+    assert.equal(live.rejects[0].reason, 'not-neutral',
+        'the dominant reject reason must be visible so the driver can act on it');
+});
+
+check('the coast-down is tracked separately and gates readiness', () => {
+    const noCoast = runBench(PROTOCOL, { j: 0.21 }).filter(s => (s.saWeSt & 0b1000) === 0);
+    const live = liveCoverage(noCoast);
+    assert.equal(live.coastDownCaptured, false);
+    assert.equal(live.ready, false, 'ready must require the coast-down, not just the bins');
+    assert.ok(live.bins.every(b => b.satisfied), 'this fixture should still have full bins');
 });
 
 console.log('\ncatalog and corrections, against the shipped reference binary');

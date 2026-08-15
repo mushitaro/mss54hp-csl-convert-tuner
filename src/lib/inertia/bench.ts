@@ -111,7 +111,13 @@ export function runBench(
     const emit = (rpm: number, trueRpmPerS: number, torqueNm: number, fuelCut: boolean) => {
         out.push({
             time: t,
-            engineState: 2,
+            // What the DME really sends, not what the gate happened to expect. `zustand_motor` is a
+            // one-hot bitfield: 0x08 = TL (part load) under throttle, 0x04 = LL (idle) on the
+            // overrun. It was hardcoded to 2 — cranking — which is exactly the value the estimator's
+            // gate was wrongly written against, so the bench agreed with the bug and forty checks
+            // passed over a workflow that could not accept a single real sample. A fixture that
+            // encodes the same misunderstanding as the code under test cannot fail with it.
+            engineState: fuelCut ? 0x04 : 0x08,
             wdk1: 0,
             n40: encodeN40(rpm),
             dN40: encodeDN40(trueRpmPerS),
@@ -126,7 +132,10 @@ export function runBench(
             mdDynSt: 0,
             gang: 0,
             sKrafts: 0,
-            saWeSt: fuelCut ? 1 : 0,
+            // bit0 armed + bit1 + bit3 active, which is what the ROM sets once fuel really stops.
+            // Bit 3 is the one that means "cut", and bit 0 alone means only "conditions met" — the
+            // estimator used to test bit 0, and this fixture used to set exactly bit 0.
+            saWeSt: fuelCut ? 0b1011 : 0,
         });
     };
 

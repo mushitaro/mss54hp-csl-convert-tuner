@@ -6,6 +6,10 @@ import { estimateInertia } from '@/lib/inertia/estimator';
 import { proposeCorrections } from '@/lib/inertia/corrections';
 import { InertiaPanel } from './InertiaPanel';
 
+/** How often the run publishes its samples for rendering. Same cadence the VE run uses for its
+ *  rate readout — live enough to steer by, cheap enough not to matter. */
+const PUBLISH_INTERVAL_MS = 250;
+
 /**
  * Owns the inertia run: collects EGAS samples, estimates J when the run stops, and asks for a
  * correction plan.
@@ -42,6 +46,8 @@ export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage,
     // batched and a poll loop running faster than a render would drop samples through a setState
     // closure. The array in state exists to drive the sample counter.
     const samplesRef = useRef<EgasMeasurement[]>([]);
+    /** Last time the sample array was published to React, for the throttle in onStart. */
+    const lastPublishRef = useRef(0);
     const [samples, setSamples] = useState<EgasMeasurement[]>([]);
     const [running, setRunning] = useState(false);
     const [estimate, setEstimate] = useState<InertiaEstimate | null>(null);
@@ -53,15 +59,30 @@ export const InertiaWorkflow: React.FC<Props> = ({ startRun, stopRun, baseImage,
 
     const onStart = useCallback(() => {
         samplesRef.current = [];
+        lastPublishRef.current = 0;
         setSamples([]);
         setEstimate(null);
         setRunning(true);
         startRun(
             sample => {
                 samplesRef.current.push(sample);
-                // Counter only, and throttled by count rather than by time: the panel shows a
-                // number, and re-rendering a number nine times a second is work for nothing.
-                if (samplesRef.current.length % 5 === 0) setSamples([...samplesRef.current]);
+                // Throttled by TIME, not by sample count.
+                //
+                // It was every fifth sample, which was fine when the panel showed only a counter.
+                // The panel now shows live per-bin coverage — the thing that tells the driver
+                // whether to keep sweeping — and a count-based throttle ties its refresh rate to
+                // the link's, so a slow link would also make the display sluggish exactly when the
+                // driver most needs to know the run is going badly.
+                //
+                // 250 ms is the same cadence the VE run publishes its Hz readout at: fast enough to
+                // feel live from the driver's seat, slow enough that the O(n) coverage pass behind
+                // it is nothing. The render is also what makes the copy — the ref stays the
+                // authoritative array, because the poll loop can outrun React's batching.
+                const now = performance.now();
+                if (now - lastPublishRef.current >= PUBLISH_INTERVAL_MS) {
+                    lastPublishRef.current = now;
+                    setSamples([...samplesRef.current]);
+                }
             },
             () => {
                 setRunning(false);

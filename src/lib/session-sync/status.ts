@@ -67,6 +67,20 @@ export type SavePhase =
      * screen, which is exactly what that wording invites you to conclude.
      */
     | 'baseOnly'
+    /**
+     * A finished drive that produced no VE map, and is worth keeping anyway.
+     *
+     * The normal case now, not an edge one: an EGT run reads block 3 alone so its samples carry no
+     * lambda trim, and an INERTIA run is not a VE log at all. Neither can move a single VE cell —
+     * and the LOG is what those runs exist to collect.
+     *
+     * Distinct from 'ready' because what gets written is different: a research run has no TUNED
+     * bytes and must not be given a sha256, or the session list starts offering a downloadable tune
+     * that was never derived. Distinct from 'baseOnly' because there IS something unsaved here, and
+     * saying "nothing further to save" over a drive that only exists in memory is the worst possible
+     * thing this label could say.
+     */
+    | 'logOnly'
     /** Archived sessions are read-only by design; their tune is already what was flashed. */
     | 'archived'
     /** A datalog is running. The map is still being rebuilt every few hundred ms. */
@@ -101,6 +115,15 @@ export function describeSave({ phase }: SaveStatus): SaveLook {
                     + 'save until a tune is derived from it. SYNC can send it to the store as it stands, which is '
                     + 'what to do if you want these bytes off the phone.',
                 disabled: true, tone: 'muted',
+            };
+        case 'logOnly':
+            return {
+                label: 'Save run to session',
+                title: 'This run produced no VE map — an EGT run carries no lambda trim, and an inertia run is '
+                    + 'not a VE log — so there is no tune to record. The DRIVE is what it collected, and it only '
+                    + 'exists in memory until this is pressed. Saved as a research run: no TUNED bytes, nothing '
+                    + 'to flash.',
+                disabled: false, tone: 'ready',
             };
         case 'archived':
             return {

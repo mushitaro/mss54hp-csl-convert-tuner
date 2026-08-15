@@ -1,5 +1,6 @@
 import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { LogDataPoint, VEMap } from '@/lib/types';
+import type { EgasMeasurement } from '@/lib/dme-link/types';
 import { sampleRateHz } from '@/lib/log-engine/rate';
 import {
     openDb,
@@ -203,6 +204,10 @@ export async function saveResearchRun(input: {
     sessionId: string;
     process: ProcessId;
     log: LogDataPoint[];
+    /** The unprojected DS2 selection-83 samples, when this is an inertia run. Written alongside
+     *  `log` rather than instead of it: `log` feeds the log table and the CSV export, this feeds
+     *  the estimator, and neither can be reconstructed from the other. */
+    egas?: EgasMeasurement[];
 }): Promise<TuningSession> {
     return withDb(async db => {
         const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE], 'readwrite');
@@ -218,8 +223,16 @@ export async function saveResearchRun(input: {
             averageHz: sampleRateHz(input.log),
         };
         store.put(updated);
-        if (input.log.length > 0) {
-            tx.objectStore(SESSION_LOGS_STORE).put({ sessionId: input.sessionId, data: input.log });
+        // Written whenever there is EITHER kind of sample, and deliberately not nested inside a
+        // `log.length` guard. The two arrays fail independently — a projection that produced
+        // nothing must not be allowed to discard the raw samples, which are the only copy the
+        // estimator can read.
+        if (input.log.length > 0 || (input.egas?.length ?? 0) > 0) {
+            tx.objectStore(SESSION_LOGS_STORE).put({
+                sessionId: input.sessionId,
+                data: input.log,
+                ...(input.egas?.length ? { egas: input.egas } : {}),
+            });
         }
         await txDone(tx);
         return updated;

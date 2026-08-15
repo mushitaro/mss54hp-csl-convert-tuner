@@ -118,8 +118,9 @@ export function useVeCalculation() {
 
     // [EXPERIMENTAL] Auto-gen Warmup Map for Visualization
     try {
-      const wMap = calc.generateWarmupMap(result.newMap);
-      setWarmupMap(wMap);
+      // Guarded, not assumed: finalizeGrid withholds the map when no cell cleared the gate, and a
+      // warmup map derived from nothing would be the BASE wearing a second name.
+      setWarmupMap(result.newMap ? calc.generateWarmupMap(result.newMap) : null);
     } catch (e) {
       console.error("Failed to gen warmup map", e);
     }

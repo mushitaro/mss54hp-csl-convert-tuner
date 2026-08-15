@@ -335,8 +335,12 @@ export interface DmeLink {
      * recalculation synchronously inside the sample callback, and it is also the path whose rate
      * has only ever been asserted. `TransferKind` has carried `'log'` since the write instrument
      * was built and nothing armed it until now, so both questions were open.
+     *
+     * `selections` are the DS2 blocks one sample is made of, which is what the exchange sizes have
+     * to be taken from — a VE sample is 35 + 90 bytes and an inertia sample is 52, and reporting
+     * either as the other makes the wire share of the time wrong. Omitted means the EGAS block.
      */
-    beginLogTiming?(): void;
+    beginLogTiming?(selections?: number[]): void;
     endLogTiming?(error?: unknown): TransferTimingReport | null;
     /**
      * Phase-level narrative of the last instrumented operation: what was sent, in what order, and
@@ -389,6 +393,10 @@ export interface DmeLink {
     /** Which DS2 selections a live sample is made of — see lib/log-engine/logProfile.ts. Optional
      *  so a mock link that only ever produces one shape of sample need not implement it. */
     setLiveBlocks?(selections: number[]): void;
+    /** What `setLiveBlocks` left in place, which is not always what the last caller asked for — a
+     *  run started without a profile keeps the previous set. The timing instrument sizes its
+     *  exchanges from this, so it has to read the link's answer rather than the request. */
+    getLiveBlocks?(): number[];
     /** Whether the link actually armed it. Not the same as what was asked for — a transport that
      *  cannot change rate on the open handle refuses, and the UI must report the link's answer. */
     getFastReadArmed?(): boolean;

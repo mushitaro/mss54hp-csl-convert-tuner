@@ -13,8 +13,14 @@ export type InertiaRejectReason =
     | 'not-neutral'
     /** Rolling. The measurement requires standstill so the tip-in/dashpot limiter is bypassed. */
     | 'moving'
-    /** Coolant/engine state says the engine is not warmed up and running normally. */
-    | 'not-warm'
+    /**
+     * `zustand_motor` says the engine is not running and making torque (LL/TL/VL).
+     *
+     * Named for what is actually checked. It used to be `not-warm`, which was wrong twice over: the
+     * gate never tested temperature, and block 83 carries no coolant channel at all — so a driver
+     * who saw it was being sent to warm up an already-warm engine.
+     */
+    | 'not-running'
     /** `md_dyn_st` says the torque-request slew limiter clipped this cycle, so the torque channel
      *  is not the driver's request and the sample is not on the free-running curve. */
     | 'filter-active'

@@ -38,12 +38,30 @@ const WIRE_MS_PER_BYTE = 11 / 9600 * 1000;
 const REQUEST_BYTES = 5;
 const RESPONSE_OVERHEAD = 4;
 
-/** What the DME spends thinking between the request and the response, per exchange.
+/**
+ * What the DME spends thinking between the request and the response, per exchange.
  *
- *  Measured, not assumed: session #902 took 244 ms for the {3, 19} pair against 164 ms of wire, so
- *  about 40 ms each. It is the floor this whole exercise runs into — once the blocks are small the
- *  turnaround is most of what is left, which is why dropping a block beats shaving bytes. */
-export const DME_TURNAROUND_MS = 40;
+ * Measured on the car, and revised once. The first figure — 40 ms — came from session #902, whose
+ * 410 ms/sample minus 164 ms of wire left 246 ms for two exchanges; but #902 ran the OLD whole-log
+ * derivation inside the sample callback, so an unknown share of that was the HOST, and attributing
+ * all of it to the DME made 40 ms a residual rather than a measurement.
+ *
+ * Session #903 settles it. Block 3 alone, after the derivation was made incremental, so host cost
+ * is O(1) per sample and no longer confounds the subtraction:
+ *
+ *     2940 samples / 446 s = 6.60 Hz  =  151.5 ms/sample
+ *     wire (44 B at 9600 8E1)         =   50.4 ms
+ *     -> non-wire                     =  101.1 ms, one exchange
+ *
+ * Applying 100 ms back to #902 predicts 2.75 Hz against 2.44 measured, leaving ~23 ms/exchange of
+ * host — which is exactly the whole-log derivation that #903 no longer pays. Two runs, one constant,
+ * and the residual lands where the code says it should.
+ *
+ * It is the floor this whole exercise runs into: at 100 ms of thinking against 50 ms of wire, the
+ * DME is two thirds of a block-3 sample. Dropping a block beats shaving bytes, and nothing short of
+ * leaving DS2 behind beats dropping a block.
+ */
+export const DME_TURNAROUND_MS = 100;
 
 export interface BlockCost { selection: number; payload: number }
 
@@ -106,10 +124,28 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
     },
     EGT: {
         id: 'EGT', label: 'EGT',
-        // Block 3 alone. rf_korr = (rf/100) / rf_soll, and every term is here.
+        // Block 3 alone. MEASURING rf_korr is `(rf/100) / rf_soll`, and every term is here.
         blocks: [3],
         requires: ['PATCH', 'TANK_VENT'],
-        produces: 'EGT correction table (KF_RF_KORR_DRREL)',
+        /**
+         * NOT the table itself, and the difference is the correction to a claim this profile
+         * carried when it was built.
+         *
+         * Measuring what the DME applied and deriving what it SHOULD apply are two calculations,
+         * and only the first fits in block 3. The derivation is
+         * `A(Δ)/A(0) = k_applied × STFT(Δ)/STFT(0)`: `k_applied` is `rf / rf_soll` and is here, but
+         * STFT is the lambda trim, which lives in block 19 — the block this profile drops to go
+         * 2.7× faster. Without it the ratio collapses to `k_applied(Δ)/k_applied(0)`, which is the
+         * table already in the ECU. `tuneRfKorrTable` now returns null rather than hand that back.
+         *
+         * So what an EGT run is FOR is the evidence the derivation has been starved of: sustained
+         * gate-open samples. The gate needs 55-80 % filling, which on this engine means pulling, and
+         * pulls are short — session #901 managed 100 gate-open samples in 0.3-3.5 s stabs, every one
+         * of them too brief for Δ to be anything but sensor lag. #903, at this profile's rate,
+         * returned 476 across nine pulls of 3 s or more. That is the input the table needs; it is
+         * just not the table.
+         */
+        produces: 'Sustained gate-open evidence for the EGT correction (needs a VE run to derive)',
     },
     INERTIA: {
         id: 'INERTIA', label: 'INERTIA',

@@ -56,21 +56,100 @@ import {
     correctDN40, isDN40Saturated, centralDifferenceRpmPerS, rpmPerSecToRadPerSec2,
 } from './gradient';
 
-/** `zustand_motor` value meaning "running normally". Anything else is start, stall or fault. */
-const ENGINE_STATE_RUNNING = 2;
+/**
+ * `zustand_motor` bits meaning "the engine is running and making torque": LL | TL | VL.
+ *
+ * **This is a one-hot BITFIELD, not an enum**, and getting that wrong is not a near miss — it is
+ * the difference between accepting a run and rejecting all of it. The states are
+ * `1 = Motor steht`, `2 = Start (cranking)`, `4 = LL (idle)`, `8 = TL (part load)`,
+ * `0x10 = VL (full load)`, `0x20 = Kl.15 aus`, `0x40 = Nachlauf`.
+ *
+ * This gate previously read `=== 2` and so demanded the engine be **cranking**. A warm engine on a
+ * part-throttle sweep is TL, and idling between sweeps it is LL; it is never 2 once it has started.
+ * Every sample of a correct measurement was therefore rejected — and, because the reason was
+ * labelled `not-warm`, the driver was told to warm the car up further.
+ *
+ * A mask rather than an equality against TL, because a sweep that crosses into full load moves to
+ * VL mid-run and must not be thrown away for it.
+ *
+ * Corroborated three ways: the ROM's own symbolic guards decode as `ZUSTAND_MOTOR & (VL|TL|LL)`;
+ * `zustand_motor_calc` builds the value from `moveq #$1/#$2/#$4/#$8/#$10/#$20/#$40`; and
+ * `docs/ecu-logic/00-glossary.md` has carried the table since before this file existed.
+ */
+const ENGINE_STATE_RUNNING_MASK = 0b0001_1100;
 /** Standstill threshold, km/h. Below `K_MD_DF_VMIN` (3) with margin for the 0.0625 km/h channel. */
 const STATIONARY_KMH = 1.5;
 /** `md_dyn_st` bits 4-6: the dashpot or the tip-in limiter actually clipped. */
 const MD_DYN_ST_LIMITER_MASK = 0b0111_0000;
-/** `sa_we_st` bit 0: overrun fuel cut active. */
-const SA_WE_ST_CUT_MASK = 0b0000_0001;
+/**
+ * `sa_we_st` bit 3: the overrun cut is ACTIVE — fuel has actually stopped.
+ *
+ * Bit 0 is a different fact: it means the cut is *armed*, i.e. the entry conditions are met. The
+ * cut itself is `026270: ori.b #$8,(a2)` in `sa_we_st_calc`, and every other consumer in the ROM
+ * (`md_res_calc`, `trg_calc`, `kats_calc`, `tz_sa_calc`) tests bit 3. Testing bit 0 draws the
+ * free-deceleration boundary one or two samples before fuel actually stops, which biases the one
+ * independent cross-check the estimate has.
+ *
+ * Bit 5 (Wiedereinsetzen) is deliberately NOT in this mask: it is sticky — set by
+ * `0262de: ori #$20` and cleared only by the next arming — so masking it would reject every sample
+ * after the first overrun of the run.
+ */
+const SA_WE_ST_CUT_MASK = 0b0000_1000;
 
-interface Accepted {
+export interface Accepted {
     rpm: number;
     /** rad/s^2, from the corrected `d_n40`. */
     alpha: number;
     /** Nm. */
     torque: number;
+}
+
+export type AdmitResult =
+    | { ok: true; accepted: Accepted }
+    | { ok: false; reason: InertiaRejectReason };
+
+/**
+ * Decides whether one sample may enter the regression, and why not when it may not.
+ *
+ * **Exported so the live display can call the same function the verdict calls.** This is not tidying:
+ * a progress bar that counts samples by its own rules is a progress bar that can fill up while the
+ * estimator is rejecting every one of them — which is precisely the failure that got a real drive
+ * thrown away. Two implementations of "is this sample usable" will drift, and the drift is invisible
+ * until someone has already driven.
+ *
+ * Takes the whole array and an index rather than a single sample, because the gradient cross-check
+ * needs a window either side of `i`. That is also why a sample cannot be judged the instant it
+ * arrives — the last `gradientHalfWindow` samples of a run are always pending.
+ */
+export function admitSample(
+    samples: readonly EgasMeasurement[],
+    i: number,
+    opts: InertiaEstimatorOptions,
+): AdmitResult {
+    const s = samples[i];
+
+    // Null is not zero. A DME that did not report a gear has not reported neutral.
+    if (s.gang === null || s.gang !== 0) return { ok: false, reason: 'not-neutral' };
+    if (s.vAntrieb === null || s.vAntrieb > STATIONARY_KMH) return { ok: false, reason: 'moving' };
+    if (s.engineState === null || (s.engineState & ENGINE_STATE_RUNNING_MASK) === 0) return { ok: false, reason: 'not-running' };
+    if (s.mdDynSt === null || (s.mdDynSt & MD_DYN_ST_LIMITER_MASK) !== 0) return { ok: false, reason: 'filter-active' };
+    if (s.saWeSt === null || (s.saWeSt & SA_WE_ST_CUT_MASK) !== 0) return { ok: false, reason: 'fuel-cut' };
+
+    if (s.n40 === null || s.n40 < opts.minRpm || s.n40 > opts.maxRpm) return { ok: false, reason: 'out-of-range' };
+    if (s.mdIndOptKorr === null || !(s.mdIndOptKorr > 0)) return { ok: false, reason: 'no-torque' };
+
+    if (s.dN40 === null) return { ok: false, reason: 'no-gradient' };
+    if (isDN40Saturated(s.dN40)) return { ok: false, reason: 'saturated-gradient' };
+
+    const fromDN40 = correctDN40(s.dN40);
+    const fromN40 = centralDifferenceRpmPerS(samples, i, opts.gradientHalfWindow, opts.maxSampleGapS);
+    if (fromN40 === null) return { ok: false, reason: 'no-gradient' };
+    if (Math.abs(fromDN40 - fromN40) > opts.gradientAgreementRpmPerS) return { ok: false, reason: 'gradient-disagree' };
+
+    // The DME's own channel is the one kept: it is a per-sample value, where the central difference
+    // is an average over the window and therefore lags a changing gradient. The window's job was to
+    // catch the case where `d_n40` is wrong, not to replace it.
+    return { ok: true, accepted: { rpm: s.n40, alpha: rpmPerSecToRadPerSec2(fromDN40), torque: s.mdIndOptKorr } };
 }
 
 /**
@@ -193,30 +272,9 @@ export function estimateInertia(
     // ---- Pass 0: admit samples -----------------------------------------------------------------
     const accepted: Accepted[] = [];
     for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-
-        // Null is not zero. A DME that did not report a gear has not reported neutral.
-        if (s.gang === null || s.gang !== 0) { reject('not-neutral'); continue; }
-        if (s.vAntrieb === null || s.vAntrieb > STATIONARY_KMH) { reject('moving'); continue; }
-        if (s.engineState === null || s.engineState !== ENGINE_STATE_RUNNING) { reject('not-warm'); continue; }
-        if (s.mdDynSt === null || (s.mdDynSt & MD_DYN_ST_LIMITER_MASK) !== 0) { reject('filter-active'); continue; }
-        if (s.saWeSt === null || (s.saWeSt & SA_WE_ST_CUT_MASK) !== 0) { reject('fuel-cut'); continue; }
-
-        if (s.n40 === null || s.n40 < opts.minRpm || s.n40 > opts.maxRpm) { reject('out-of-range'); continue; }
-        if (s.mdIndOptKorr === null || !(s.mdIndOptKorr > 0)) { reject('no-torque'); continue; }
-
-        if (s.dN40 === null) { reject('no-gradient'); continue; }
-        if (isDN40Saturated(s.dN40)) { reject('saturated-gradient'); continue; }
-
-        const fromDN40 = correctDN40(s.dN40);
-        const fromN40 = centralDifferenceRpmPerS(samples, i, opts.gradientHalfWindow, opts.maxSampleGapS);
-        if (fromN40 === null) { reject('no-gradient'); continue; }
-        if (Math.abs(fromDN40 - fromN40) > opts.gradientAgreementRpmPerS) { reject('gradient-disagree'); continue; }
-
-        // The DME's own channel is the one kept: it is a per-sample value, where the central
-        // difference is an average over the window and therefore lags a changing gradient. The
-        // window's job was to catch the case where `d_n40` is wrong, not to replace it.
-        accepted.push({ rpm: s.n40, alpha: rpmPerSecToRadPerSec2(fromDN40), torque: s.mdIndOptKorr });
+        const verdict = admitSample(samples, i, opts);
+        if (verdict.ok) accepted.push(verdict.accepted);
+        else reject(verdict.reason);
     }
 
     // ---- Pass 1: one independent fit per rpm bin -----------------------------------------------
