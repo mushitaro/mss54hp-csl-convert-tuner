@@ -12,6 +12,8 @@
     "verify:inertia": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-inertia.mjs",
     "//verify:tankvent": "Checks the tank-ventilation channels: the three DS2 offsets, and that an absent TETV reading never becomes a \"valve shut\" claim. Same runner as verify:inertia.",
     "verify:tankvent": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent.mjs",
+    "//verify:tankvent-patch": "Checks the K_TE_TVTE_GA patch at the byte level: exactly one byte moves, and turning it OFF restores stock rather than no-opping.",
+    "verify:tankvent-patch": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent-patch.mjs",
     "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
     "preview": "npm run build:preview && wrangler pages dev",
     "deploy:preview": "npm run build:preview && wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr",

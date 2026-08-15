@@ -449,6 +449,7 @@ export default function Home() {
   const {
     binaryFile, currentMap, binaryBuffer, patchStatus,
     applyPatch, setApplyPatch, applyWotDisable, setApplyWotDisable,
+    applyTankVentDisable, setApplyTankVentDisable,
     writeWarmup, setWriteWarmup, writeWot, setWriteWot, writeRfKorr, setWriteRfKorr,
   } = binaryFileState;
 
@@ -945,7 +946,7 @@ export default function Home() {
   }, [currentMap, newMap, correctionMap, processedLog, warmupMap, wotMap, tunedRfKorr, activeTab]);
 
   const buildSettings = (): TuneSettings => ({
-    filterConfig, interpolationTable, applyPatch, applyWotDisable, writeWarmup, writeWot,
+    filterConfig, interpolationTable, applyPatch, applyWotDisable, applyTankVentDisable, writeWarmup, writeWot,
     // The armed value, not the raw toggle: `rfKorrArmed` is what actually reached the bytes, and a
     // session must record what it did rather than what was switched on at the time.
     writeRfKorr: rfKorrArmed,
@@ -1001,6 +1002,7 @@ export default function Home() {
       session.tuneSettings && {
         applyPatch: session.tuneSettings.applyPatch,
         applyWotDisable: session.tuneSettings.applyWotDisable,
+        applyTankVentDisable: session.tuneSettings.applyTankVentDisable,
         writeWarmup: session.tuneSettings.writeWarmup,
         writeWot: session.tuneSettings.writeWot,
         writeRfKorr: storedWriteRfKorr(session.tuneSettings),
@@ -1468,6 +1470,9 @@ export default function Home() {
     };
     cmp('PATCH', s.applyPatch, applyPatch);
     cmp('WOT TH', s.applyWotDisable, applyWotDisable);
+    // Absent on every session saved before this existed, and `undefined !== false` would report a
+    // drift that never happened on all of them. Coerced, not compared loosely.
+    cmp('TANK VENT', !!s.applyTankVentDisable, applyTankVentDisable);
     cmp('WRITE WARMUP', s.writeWarmup, writeWarmup);
     cmp('WRITE WOT', s.writeWot, writeWot);
     cmp('WRITE RF KORR', storedWriteRfKorr(s), rfKorrArmed);
@@ -1525,6 +1530,7 @@ export default function Home() {
         // Same reasoning, higher stakes: this one changes what can go WRONG, and its failure mode
         // lands on an erased ECU. It is never implied.
         boostBaud: dmeLink.writeBaud !== 9600 ? dmeLink.writeBaud : null,
+        tankVentOff: applyTankVentDisable,
         // Android gets extra lines because the guarantees are weaker there: beforeunload is honored
         // inconsistently, so the "you will be asked to confirm" sentence above cannot be relied on,
         // and the screen or an app switch can take the connection down mid-write.
@@ -3191,6 +3197,39 @@ The TIMING button still has the full record; save it before running another oper
                       </span>
                       <span className={`text-[11px] font-mono font-bold tracking-wider ml-1 whitespace-nowrap ${applyWotDisable ? 'text-amber-500' : 'text-slate-500'}`}>
                         {applyWotDisable ? '102.3' : 'OEM'}
+                      </span>
+                    </div>
+
+                    {/* ROW 1b: TANK VENT — the emissions one, and the only switch here that leaves
+                        the car in a state it must not be driven in long-term.
+
+                        Beside WOT TH because they are the same shape of thing: both are calibration
+                        changes that exist to make a log measurable and both have to be put back.
+                        Given its own label rather than being folded into the patch pair, because
+                        those two are reversible from the driver's seat and this one stops the
+                        charcoal canister being purged.
+
+                        RED when armed, not amber. In this palette `amber-*` is aliased to the
+                        M-violet ramp (text-amber-400 resolves to #B9A6EE), and violet already means
+                        "derived diagnostic" — see globals.css and the log field registry. Blue means
+                        "tuning option", which this is not: it is the one switch on the hub that
+                        leaves an emissions device off. Red is the only honest step here. */}
+                    <div className="h-7 flex items-center gap-3 ml-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
+                      <label
+                        className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group"
+                        title={'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
+                          + 'Why: purged vapour is fuel the DME did not inject, so the lambda controller trims for it — and that trim is the single input this app derives the VE correction from. Measured on this car (Session #902): the valve was open for 82.8% of a 657s drive, at up to 99.9% duty. The stock map asks 94-99.6% above 2500 rpm at mid load, which is exactly where a tune is worth having.\n\n'
+                          + 'Confirmed at instruction level: tetv_calc (slave 0x26ED6) is the only reader of this byte and the only writer of a non-zero duty, and zero forces exactly shut rather than a minimum.\n\n'
+                          + 'TUNING ONLY. The canister stops being purged and will saturate; DTC 24 is the code for a valve that will not open. Turn this back off and write once more before driving the tune. The filename carries _TEVOFF while it is armed.'}
+                      >
+                        <input type="checkbox" className="sr-only peer" checked={applyTankVentDisable} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyTankVentDisable(e.target.checked)} />
+                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-900 peer-checked:after:bg-red-400"></div>
+                      </label>
+                      <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
+                        TANK VENT
+                      </span>
+                      <span className={`text-[11px] font-mono font-bold tracking-wider ml-1 whitespace-nowrap ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
+                        {applyTankVentDisable ? 'SHUT' : 'OEM'}
                       </span>
                     </div>
 

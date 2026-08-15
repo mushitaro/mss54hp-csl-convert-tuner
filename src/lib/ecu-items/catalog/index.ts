@@ -1,5 +1,6 @@
 import type { EcuItemDef } from '../types';
 import { EGT_ITEMS } from './egt';
+import { FUEL_ITEMS } from './fuel';
 import { IDLE_ITEMS } from './idle';
 import { INERTIA_ITEMS } from './inertia';
 
@@ -11,10 +12,10 @@ import { INERTIA_ITEMS } from './inertia';
  * warning that these addresses need verifying against the user's own BIN version, and this is the
  * mechanism for doing that at zero risk.
  */
-export const ECU_ITEMS: EcuItemDef[] = [...EGT_ITEMS, ...IDLE_ITEMS, ...INERTIA_ITEMS];
+export const ECU_ITEMS: EcuItemDef[] = [...EGT_ITEMS, ...FUEL_ITEMS, ...IDLE_ITEMS, ...INERTIA_ITEMS];
 
 export function findEcuItem(symbol: string): EcuItemDef | undefined {
     return ECU_ITEMS.find(i => i.symbol === symbol);
 }
 
-export { EGT_ITEMS, IDLE_ITEMS, INERTIA_ITEMS };
+export { EGT_ITEMS, FUEL_ITEMS, IDLE_ITEMS, INERTIA_ITEMS };

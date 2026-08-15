@@ -32,6 +32,18 @@ export interface TuneSettings {
     interpolationTable: InterpolationPoint[];
     applyPatch: boolean;
     applyWotDisable: boolean;
+    /**
+     * Tank ventilation held shut (K_TE_TVTE_GA = 0).
+     *
+     * Optional, and absent reads as false — which is correct here rather than merely convenient:
+     * no session saved before this field existed could have had the patch, because the code to
+     * write it did not exist. Unlike writeRfKorr, there is no legacy encoding to reconstruct from.
+     *
+     * Recorded because it changes what the log MEANS, not just what the bytes are. A run taken with
+     * purge disabled and one taken without are not comparable, and a year later the only way to
+     * know which a session was is that this was written down.
+     */
+    applyTankVentDisable?: boolean;
     writeWarmup: boolean;
     writeWot: boolean;
     /** Write the back-calculated KF_RF_KORR_DRREL into the binary. Beside writeWarmup and writeWot
@@ -48,7 +60,7 @@ export interface TuneSettings {
 export interface FlashRecord {
     at: number;
     sha256: string;
-    settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'writeWarmup' | 'writeWot'>;
+    settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'applyTankVentDisable' | 'writeWarmup' | 'writeWot'>;
     /** Did these bytes carry a derived map, or only the patches? `settings` cannot answer that — a
      *  patch-armed BASE and a patch-armed tune record identically — and the flash count is now a mix
      *  of both, so the history has to say which each one was.

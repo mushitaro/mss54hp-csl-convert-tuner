@@ -22,6 +22,7 @@ function getFormattedDate() {
 export type ToggleOverrides = {
   applyPatch?: boolean;
   applyWotDisable?: boolean;
+  applyTankVentDisable?: boolean;
   writeWarmup?: boolean;
   writeWot?: boolean;
   writeRfKorr?: boolean;
@@ -52,12 +53,15 @@ export function useBinaryFile() {
   // What the LOADED BYTES say, as opposed to what the toggles are asking for. Keeping wotDisabled
   // here — it used to be computed in uploadBinary and thrown away after seeding the toggle — is what
   // lets the hub compare the two and offer a write when they disagree.
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean } | null>(null);
+  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean } | null>(null);
   const [debugHex, setDebugHex] = useState<string>('');
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
   // [EXPERIMENTAL] UI Controls
   const [applyWotDisable, setApplyWotDisable] = useState<boolean>(false); // Default OFF
+  /** Tank ventilation held shut. Default OFF — this is an emissions device, and the only reason to
+   *  touch it is a tuning run that has to be put back afterwards. */
+  const [applyTankVentDisable, setApplyTankVentDisable] = useState<boolean>(false);
   const [writeWarmup, setWriteWarmup] = useState<boolean>(false); // Default OFF
   const [writeWot, setWriteWot] = useState<boolean>(false); // Default OFF
   // Default OFF like the two above. This one rewrites KF_RF_KORR_DRREL, which changes fuelling
@@ -93,11 +97,15 @@ export function useBinaryFile() {
 
       // Check WOT status
       const isWotDisabled = parser.getWOTThresholdStatus();
+      // Detectable in the bytes, exactly like the WOT threshold — so a BIN that came off the car
+      // with purge already disabled says so on the hub instead of quietly looking stock.
+      const isTankVentDisabled = parser.getTankVentDisabled();
 
       setPatchStatus({
         mapOff: isMapOff, // True if OFF
         tempLimit: isTempHigh,
         wotDisabled: isWotDisabled,
+        tankVentDisabled: isTankVentDisabled,
       });
 
       // Detection off the bytes is right when a BASE arrives fresh (upload / DME read), but wrong
@@ -105,6 +113,7 @@ export function useBinaryFile() {
       // detected value would silently overwrite the settings the tune was actually built with.
       setApplyPatch(overrides?.applyPatch ?? (isMapOff && isTempHigh));
       setApplyWotDisable(overrides?.applyWotDisable ?? isWotDisabled);
+      setApplyTankVentDisable(overrides?.applyTankVentDisable ?? isTankVentDisabled);
       // These two leave no detectable trace in the bytes, so there is nothing to fall back on:
       // default them OFF on every load. Otherwise they persist from the previous session and
       // silently inject derived warmup/WOT tables into an unrelated binary.
@@ -136,6 +145,7 @@ export function useBinaryFile() {
 
     const usePatch = settings?.applyPatch ?? applyPatch;
     const useWotDisable = settings?.applyWotDisable ?? applyWotDisable;
+    const useTankVentDisable = settings?.applyTankVentDisable ?? applyTankVentDisable;
     const useWarmup = settings?.writeWarmup ?? writeWarmup;
     const useWot = settings?.writeWot ?? writeWot;
 
@@ -169,6 +179,13 @@ export function useBinaryFile() {
     // [EXPERIMENTAL] WOT Threshold Patch (Independent of Logic Patch)
     patcher.setWOTThreshold(useWotDisable);
 
+    // Tank ventilation. Written unconditionally in BOTH directions, like the WOT threshold above
+    // and unlike the derived maps: `false` restores the stock gain rather than leaving whatever
+    // was there. That is what makes turning the toggle off an actual restore — the whole safety
+    // story here is that the valve goes back, and a patch that only ever writes one way could not
+    // deliver it. Before applyChecksumCorrection, with everything else.
+    patcher.setTankVentDisable(useTankVentDisable);
+
     // The back-calculated EGT correction. Threaded in explicitly rather than read off hook state
     // for the same reason `settings` is: a caller that rebuilds inside one handler would otherwise
     // hash a value the render has not caught up with.
@@ -200,7 +217,7 @@ export function useBinaryFile() {
     // prefixes have to be stripped, or re-downloading a file this function already named would
     // nest them ("Tune_..._Base_...") and the outer prefix would win while the inner one lingers.
     baseName = baseName.replace(/^(?:Tune|Base)_\d{12}_/, '');
-    baseName = baseName.replace(/(_PatchON|_PatchOFF|_LTFT&MAPOFFPached)$/, '');
+    baseName = baseName.replace(/(_PatchON|_PatchOFF|_LTFT&MAPOFFPached)(_TEVOFF)?$/, '');
 
     // PATCH or WOT TH: both rewrite DME logic in place, so either one alone means these bytes are
     // patched and the name has to say so. This is the same expression that decides whether the
@@ -209,11 +226,16 @@ export function useBinaryFile() {
     // TABLES rather than patching logic, and they are already implied by the `Tune_` prefix, since
     // buildPatchedBuffer only ever applies them when there is a map to derive them from.
     const patchSuffix = (applyPatch || applyWotDisable) ? '_PatchON' : '_PatchOFF';
+    // Its own marker, not folded into _PatchON. The MAP/LTFT and WOT patches are reversible from
+    // the driver's seat and affect nothing outside the tune; this one leaves an emissions device
+    // switched off. A file that gets emailed around, or found on a disk a year later, should say so
+    // in the one piece of metadata that always travels with it.
+    const tevSuffix = applyTankVentDisable ? '_TEVOFF' : '';
     // Without a derived map buildPatchedBuffer returns the BASE with the toggles applied. That is a
     // real artifact — it is the PATCH-ON BIN you flash for a log run — but it is not a tune, and a
     // `Tune_` prefix would be the one claim about these bytes that the file itself cannot support.
     const prefix = newMap ? 'Tune' : 'Base';
-    return `${prefix}_${dateStr}_${baseName}${patchSuffix}.bin`;
+    return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}.bin`;
   };
 
   const downloadBin = (newMap: VEMap | null, extras?: PatchExtras) => {
@@ -265,6 +287,8 @@ export function useBinaryFile() {
     applyPatch,
     setApplyPatch,
     applyWotDisable,
+    applyTankVentDisable,
+    setApplyTankVentDisable,
     setApplyWotDisable,
     writeWarmup,
     setWriteWarmup,

@@ -99,7 +99,7 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean }) =>
         'DMEへ書き込みます。\n\n' +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
@@ -120,6 +120,13 @@ const JA = {
             + '  ⚠ どちらのレートでも応答しなくなった場合、データ領域が消去されたまま中断します。\n'
             + '    復旧は「イグニッション OFF → 10 秒 → ON → 再接続 → WRITE をやり直し」です。\n'
             + '    WRITE は必ず消去からやり直すので、再実行は安全です。\n'
+            : '') +
+        (a.tankVentOff
+            ? `\n⚠ TANK VENT: SHUT — タンク換気を無効にしたまま書き込みます。\n`
+            + '  目的はチューニング走行中の再現性です。この BIN はそのまま走り続けるためのものではありません。\n'
+            + '  キャニスタがパージされなくなり、飽和すれば燃料臭や DTC 24（タンク換気バルブ）の原因になります。\n'
+            + '  ログを取り終えたら TANK VENT を OEM に戻してもう一度書き込んでください。\n'
+            + '  ファイル名に _TEVOFF が付き、セッションにも記録されます。\n'
             : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
@@ -312,7 +319,7 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean }) =>
         'Writing to the DME.\n\n' +
         `What will be written: ${a.tuned
             ? 'the tuned map'
@@ -332,6 +339,14 @@ const EN: NativeDialogText = {
             + '  ⚠ If the ECU answers at neither rate, the write stops with the data area erased.\n'
             + '    Recovery: ignition OFF, wait 10 s, back ON, reconnect, and run WRITE again.\n'
             + '    WRITE always restarts from the erase, so re-running it is safe.\n'
+            : '') +
+        (a.tankVentOff
+            ? `\n⚠ TANK VENT: SHUT — writing with tank ventilation disabled.\n`
+            + '  This is for reproducibility during a tuning run. It is not a BIN to keep driving.\n'
+            + '  The charcoal canister stops being purged; once saturated it can cause a fuel smell,\n'
+            + '  and DTC 24 (tank-venting valve) is the code for a valve that will not open.\n'
+            + '  When the logging is done, set TANK VENT back to OEM and write once more.\n'
+            + '  The filename carries _TEVOFF, and the session records it.\n'
             : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +

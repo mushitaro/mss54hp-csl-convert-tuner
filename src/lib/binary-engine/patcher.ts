@@ -1,6 +1,6 @@
 import { BinaryParser } from './parser';
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP } from '@/config/constants';
-import { VEMap } from '@/lib/types';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP, TANK_VENT_GAIN } from '@/config/constants';
+import type { VEMap } from '@/lib/types';
 import type { EcuMapDef } from '@/lib/ecu-items/types';
 import { analyzeDataChecksum, correctDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import type { ChecksumSlotResult } from '@/lib/checksum/dmeDataChecksum';
@@ -177,6 +177,26 @@ export class BinaryPatcher extends BinaryParser {
                 offset++;
             }
         }
+    }
+
+    /**
+     * Holds the tank-vent (evaporative purge) valve shut, or puts it back to stock.
+     *
+     * One byte. `K_TE_TVTE_GA` is the gain on the duty that `tetv_calc` computes, and its only
+     * reader in the binary is that function; with the gain at zero the result falls to K_TE_TV_MIN
+     * and the `<= K_TE_TV_MIN` branch forces exactly zero, so this is "shut", not "minimum duty".
+     *
+     * Why a tuning tool touches an emissions device: purged vapour is fuel the DME did not inject,
+     * so the lambda controller trims for it — and `la_f_regler` is the single input this app derives
+     * the whole VE correction from. Session #902 measured the valve open for 82.8 % of a drive. The
+     * trims from a run like that are correct for a reason the VE map cannot reproduce.
+     *
+     * TUNING ONLY, and the toggle that reaches this says so. Restoring stock is the same call with
+     * `disable = false`, which is why the stock value is a named constant rather than a literal at
+     * the call site: the restore path must not be able to drift from the disable path.
+     */
+    public setTankVentDisable(disable: boolean): void {
+        this.setUint8(TANK_VENT_GAIN.ADDRESS, disable ? TANK_VENT_GAIN.DISABLED_RAW : TANK_VENT_GAIN.STOCK_RAW);
     }
 
     public setWOTThreshold(disable: boolean): void {

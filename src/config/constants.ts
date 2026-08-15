@@ -235,6 +235,23 @@ export const EXPERIMENTAL_CONFIG = {
     ADDRESS_WOT_THRESHOLD_MAP: 0xAC54 // KF_BZ_WDK_VL (4x4)
 };
 
+/**
+ * `K_TE_TVTE_GA` — the tank-vent duty gain, slave `0xBF1`, one byte.
+ *
+ * Not in EXPERIMENTAL_CONFIG, because it is not experimental in the way those three are. Their
+ * scaling is unverified (see docs/ecu-logic/60-tuning-logic.md §7); this one is confirmed twice
+ * over — at instruction level in tetv_calc (slave 0x26ED6), and by karter16 logging the valve on a
+ * real car. What it shares with them is being TUNING ONLY, which is a different property and is
+ * enforced by the toggle rather than by where the constant lives.
+ *
+ * Stock is 0x80 = 1.0 with the XDF's x/128 conversion. Zero holds the valve shut.
+ */
+export const TANK_VENT_GAIN = {
+    ADDRESS: 0xBF1,
+    STOCK_RAW: 0x80,
+    DISABLED_RAW: 0x00,
+} as const;
+
 // Stock WOT Threshold Map (4x4) - Transcribed
 // Scaling: x/10 (Raw = Val * 10)
 export const CSL_STOCK_WOT_THRESHOLD_MAP: number[][] = [

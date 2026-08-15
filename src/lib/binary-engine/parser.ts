@@ -1,4 +1,4 @@
-import { APP_CONFIG, EXPERIMENTAL_CONFIG } from '@/config/constants';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN } from '@/config/constants';
 import type { VEMap } from '@/lib/types';
 import type { EcuItemDef, EcuItemValue, EcuNumericDef } from '@/lib/ecu-items/types';
 
@@ -19,6 +19,18 @@ export class BinaryParser {
         const val = this.getUint16(addr);
         // If > 1000 (100%), it's disabled. Stock is usually much lower or specific map.
         return val > 1000;
+    }
+
+    /**
+     * Whether this binary has the tank-vent valve held shut.
+     *
+     * Tests for exactly zero rather than "below stock". The byte is a gain and the DME's own
+     * threshold is `<= K_TE_TV_MIN`, so intermediate values are legitimate calibration — a BIN
+     * carrying 0x40 is running purge at half gain, not "sort of disabled", and reporting it as
+     * disabled would put the wrong word on the hub and in the write dialog.
+     */
+    public getTankVentDisabled(): boolean {
+        return this.getUint8(TANK_VENT_GAIN.ADDRESS) === TANK_VENT_GAIN.DISABLED_RAW;
     }
 
     public getBuffer(): ArrayBuffer {
