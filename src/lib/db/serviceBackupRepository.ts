@@ -21,6 +21,9 @@
  * existing. Nothing here can touch saved sessions.
  */
 
+import { computeNonErasedSpans, type SeedMap } from '@/lib/dme-link/fastEntry';
+import { ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH } from '@/lib/dme-link/flashCounter';
+
 export const BACKUP_DB_NAME = 'mss54hp-tuner-backups';
 export const BACKUP_DB_VERSION = 1;
 export const SERVICE_BLOCKS_STORE = 'serviceBlocks';
@@ -152,4 +155,37 @@ export async function loadServiceBackup(at: number): Promise<ServiceBackupRecord
     } finally {
         db.close();
     }
+}
+
+/**
+ * The FAST READ seed, derived from a stored service-block backup rather than kept as its own record.
+ *
+ * No new store and no schema change, because the thing a seed needs to be is exactly what that
+ * backup already holds: the 16384 bytes of both Free Identifiers sectors, keyed by VIN, with the
+ * real-vs-PRACTICE guard already enforced (see listRestorableBackups). The span map is a pure
+ * function of those bytes, so storing it separately would create a second copy that could disagree
+ * with the first.
+ *
+ * That reuse also means a seed doubles as the recovery artefact: the same bytes that let fast entry
+ * know what to preserve are the ones the Service Info restore would write back if it went wrong.
+ */
+export async function loadFastEntrySeed(
+    vin: string | undefined,
+    mock: boolean,
+): Promise<SeedMap | null> {
+    const backups = await listRestorableBackups(vin, mock);
+    if (!backups.length) return null;
+    const record = await loadServiceBackup(backups[0].at);      // newest first
+    if (!record || record.buffer.byteLength !== SERVICE_BLOCK_PAIR_LENGTH) return null;
+    const pair = new Uint8Array(record.buffer);
+    const half = ServiceBlockLayout.master.length;
+    return {
+        // Master first, then slave — the order programServiceBlocks and readServiceBlocks both use.
+        spans: [
+            ...computeNonErasedSpans(pair.subarray(0, half), 'master'),
+            ...computeNonErasedSpans(pair.subarray(half), 'slave'),
+        ],
+        hasMaster: true,
+        hasSlave: true,
+    };
 }

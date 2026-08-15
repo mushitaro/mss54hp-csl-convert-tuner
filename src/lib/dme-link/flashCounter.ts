@@ -47,6 +47,20 @@ export const SERVICE_BLOCK_PAIR_LENGTH = ServiceBlockLayout.master.length + Serv
  */
 export const CLEAR_PREP_MARKER = new Uint8Array([0x4B, 0x31, 0x36, 0x2E]);
 
+/**
+ * `50 60 70 33` — the OTHER marker at the same `prepMarkerOffset`, used by FAST READ entry and by
+ * the Service Info restore.
+ *
+ * The comment above has described this byte string since the flash-counter work landed, as the
+ * thing not to confuse `K16.` with. It finally has a caller. Same address, different payload,
+ * different operation: `K16.` prepares a counter CLEAR, this prepares an erase whose contents are
+ * going straight back.
+ *
+ * Written only when the four bytes there are still erased — a DME that has had fast entry run
+ * before already carries it, and rewriting a programmed cell is what the verify byte rejects.
+ */
+export const FAST_ENTRY_PREP_MARKER = new Uint8Array([0x50, 0x60, 0x70, 0x33]);
+
 /** What the first non-consumed marker says the boot field is doing (DmeFlashCounter.DecodeState). */
 export type FlashCounterState =
     | 'available'                 // 0xFFFF — closed and ready to accept another programming session

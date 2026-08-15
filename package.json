@@ -16,6 +16,8 @@
     "verify:tankvent-patch": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent-patch.mjs",
     "//verify:coverage": "Checks the VE evidence gate: one sample no longer moves a cell, both conditions are required, and a REJECTED cell still reports the samples it has rather than 0.",
     "verify:coverage": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-coverage.mjs",
+    "//verify:fastentry": "Checks the FAST READ preservation plan: what must survive an erase of the Free Identifiers sector, including the flash counter and the 0x4884 boot vector, and that an un-enumerable plan refuses rather than guesses.",
+    "verify:fastentry": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-fastentry.mjs",
     "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
     "preview": "npm run build:preview && wrangler pages dev",
     "deploy:preview": "npm run build:preview && wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr",

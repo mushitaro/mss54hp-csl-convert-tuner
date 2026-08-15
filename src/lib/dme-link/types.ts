@@ -2,6 +2,7 @@ import { AdaptationSnapshot } from './adaptationBlocks';
 import { FlashCounterInfo } from './flashCounter';
 import { ServiceBlockPointers } from './serviceBlockReport';
 import type { Ds2EncodingChecksum, Ds2SupportedBaud } from './ds2';
+import type { SeedMap } from './fastEntry';
 import type { LinkEventLogSnapshot } from './linkEventLog';
 import type { TransferTimingReport } from './transferTiming';
 
@@ -359,6 +360,30 @@ export interface DmeLink {
      * The caller reads this back so the control can never show a rate the link declined to take.
      */
     getWriteBaud?(): Ds2SupportedBaud;
+
+    /**
+     * Arms FAST READ with the seed map it needs, or disarms with `null`.
+     *
+     * FAST READ erases and restores the DME's Free Identifiers sector to reach a programming
+     * session, where 125000 baud is a rate this ECU actually implements — turning a 123-second read
+     * into 15-30. The seed is a map of ADDRESSES, never bytes; every byte written back is read live
+     * immediately before the erase. See fastEntry.ts.
+     *
+     * Optional on the interface so the mock does not have to implement it: PRACTICE has no sector to
+     * erase and nothing to gain, and a mock that pretended otherwise would be teaching a procedure
+     * that does not exist.
+     */
+    setFastRead?(seed: SeedMap | null): void;
+    /** Whether the link actually armed it. Not the same as what was asked for — a transport that
+     *  cannot change rate on the open handle refuses, and the UI must report the link's answer. */
+    getFastReadArmed?(): boolean;
+    /**
+     * DS2 reboot (service 0x12), returning whether the DME acknowledged.
+     *
+     * The way back out of the state FAST READ leaves behind: at 125000 the DME will not serve live
+     * values, adaptations or error memory until it is restarted or the session is reconnected.
+     */
+    rebootDme?(): Promise<boolean>;
 }
 
 export class DmeLinkError extends Error {

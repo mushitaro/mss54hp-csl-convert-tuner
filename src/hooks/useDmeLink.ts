@@ -7,6 +7,7 @@ import {
 import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
+import { loadFastEntrySeed } from '@/lib/db/serviceBackupRepository';
 import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport';
 import { analyzeDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { dialogText } from '@/lib/dialog-text';
@@ -185,6 +186,9 @@ export function useDmeLink() {
      * emit Japanese into HTML that an English client then has to reconcile.
      */
     const [transportKind, setTransportKind] = useState<TransportKind | null>(null);
+    /** Whether FAST READ is armed on the live link. Set by connect() from what the seed lookup
+     *  found, so the UI reports the link's own answer rather than an intention. */
+    const [fastReadArmed, setFastReadArmed] = useState(false);
     useEffect(() => { setTransportKind(detectTransportKind()); }, []);
 
     // Progress fires once per DS2 chunk (hundreds of times per read/write). Throttle the React state
@@ -225,6 +229,20 @@ export function useDmeLink() {
             const id = await link.connect();
             linkRef.current = link;
             setIdentity(id);
+            // FAST READ, armed here rather than at read time, because the seed is keyed by VIN and
+            // the VIN only exists once identify() has run. A DME with no stored service-block backup
+            // simply stays disarmed and reads at 9600 — the first backup is created by the flash
+            // counter dialog's own inspect/backup path, which is where reading those 16 KB already
+            // belongs. Never in PRACTICE: `mock` is part of the backup's identity for the same
+            // reason it gates a restore, and a mock seed must never describe a real ECU.
+            try {
+                const seed = mockMode ? null : await loadFastEntrySeed(id.vin, false);
+                link.setFastRead?.(seed);
+                setFastReadArmed(link.getFastReadArmed?.() ?? false);
+            } catch {
+                // A seed that cannot be loaded is a slow read, not a failed connect.
+                setFastReadArmed(false);
+            }
             // Just 'connected'. What the button then offers follows from the workspace, so there is
             // no landing target to pass in and none to get wrong.
             setState('connected');
@@ -270,17 +288,24 @@ export function useDmeLink() {
 
     const read = useCallback(async (): Promise<ArrayBuffer | null> => {
         if (!linkRef.current) return null;
+        // Pinned, because the FAST READ path REPLACES linkRef.current before this function returns:
+        // it reboots the DME and reconnects, which builds a new link with an empty event log and no
+        // timing report. Publishing from `linkRef.current` in the finally would hand over that empty
+        // one — silently losing the diagnostic for the read that just ran, which is the exact failure
+        // the comment down there says was already paid for with a vehicle session. The old object
+        // still holds its report after disconnect; nothing here needs it to be live.
+        const readLink = linkRef.current;
         clearError();
         setState('reading');
         setTransferProgress(0);
         const startedAt = performance.now();
         try {
-            const buffer = await linkRef.current.readPartialBin(makeThrottledProgress());
+            const buffer = await readLink.readPartialBin(makeThrottledProgress());
             // Always report the measured result, not just failures. "It didn't feel faster" is not
             // something a baud rate can be judged on — that guess already cost three rates being
             // deleted on a wrong conclusion — so the read states its own elapsed time and throughput.
             const seconds = (performance.now() - startedAt) / 1000;
-            const actual = linkRef.current.getLastReadBaud?.() ?? null;
+            const actual = readLink.getLastReadBaud?.() ?? null;
             // Kept short on purpose: the notice line is one truncating row, so a sentence-shaped
             // message loses its tail — which is exactly where the numbers were. Baud comes first
             // because "which rate did this actually run at" is the question being answered.
@@ -313,6 +338,36 @@ export function useDmeLink() {
                 : refused
                     ? `${readBaud} REFUSED — ran at ${actual} · ${measured}`
                     : `${actual !== null ? `${actual} baud` : 'link'} · ${measured}`);
+            // Come back down from 125000 before handing control back.
+            //
+            // A read at that rate only happened because the DME is in a programming session, and in
+            // that state it will not serve live values, adaptations or error memory — the reference
+            // simply forbids all three until the user reconnects. This app's whole workflow is READ
+            // then LOG then WRITE in one sitting, so "reconnect now" would land in the middle of it,
+            // standing next to a car. A reboot and a fresh connect cost a few seconds and put the
+            // link back where every other feature expects to find it.
+            //
+            // Deliberately after the warning above is set and after the buffer is in hand: the read
+            // has already succeeded, and nothing here is allowed to turn that into a failure. If the
+            // reboot or the reconnect does not take, the bytes are still returned and the notice
+            // tells the user to reconnect by hand.
+            if (actual === 125000) {
+                const rebooted = await readLink.rebootDme?.() ?? false;
+                let recovered = false;
+                if (rebooted) {
+                    try {
+                        await readLink.disconnect();
+                        linkRef.current = null;
+                        await connect();
+                        recovered = linkRef.current !== null;
+                    } catch { recovered = false; }
+                }
+                if (!recovered) {
+                    setWarningKind('warn');
+                    setWarning('Read OK at 125000, but the DME is still in programming mode — '
+                        + 'live logging and adaptations need a reconnect. Disconnect and connect again.');
+                }
+            }
             // Idle again. The caller loads these bytes as the BASE, which is what turns the button
             // into START TUNE — it isn't this function's business to say so.
             setState('connected');
@@ -335,11 +390,15 @@ export function useDmeLink() {
             // every read attempt, so this state always describes the read that just ran or nothing at
             // all. Keeping a stale report because the new one is missing is the exact failure being
             // fixed here — silently saving the wrong run is far worse than having nothing to save.
-            publishLast(linkRef.current);
+            publishLast(readLink);
             setTransferProgress(null);
             setTransferPhase(null);
         }
-    }, [clearError, failWith, publishLast]);
+        // `connect` and `readBaud` are both real inputs now and both were missing. `connect` because
+        // the 125000 path reconnects through it, and a stale copy would rebuild the link with an
+        // out-of-date mockMode; `readBaud` because the "REFUSED" comparison below is against it, so
+        // a stale copy would report the previous selection's rate as the one that was refused.
+    }, [clearError, failWith, publishLast, connect, readBaud]);
 
     // Aborts an in-progress partial-BIN read (the read() promise rejects with a cancel error,
     // which read()'s catch treats as a clean return to 'connected').
@@ -733,6 +792,7 @@ export function useDmeLink() {
         transferProgress,
         transferPhase,
         transportKind,
+        fastReadArmed,
         connect,
         disconnect,
         read,

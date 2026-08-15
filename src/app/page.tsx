@@ -3087,6 +3087,22 @@ The TIMING button still has the full record; save it before running another oper
                             <option value="full">FULL</option>
                           </select>
                         </label>
+                        {/* FAST READ. A readout, not a control — it is armed by whether a service-block
+                            backup exists for this VIN, which is a fact about the DME rather than a
+                            preference. Shown even when off, because "why was my read still 2 minutes"
+                            is exactly the question this answers. */}
+                        {dmeLink.state === 'connected' && !dmeLink.mockMode && (
+                          <span
+                            className={`text-[9px] font-mono ${dmeLink.fastReadArmed ? 'text-emerald-400' : 'text-slate-600'}`}
+                            title={dmeLink.fastReadArmed
+                              ? 'FAST READ armed. The bulk read will erase and immediately restore the Free Identifiers sector to reach a programming session, where the DME accepts 125000 baud — about 123s down to 15-30s.\n\n'
+                                + 'Every byte put back is read live seconds before the erase; the stored backup supplies addresses only. The restore is verified byte for byte BEFORE the baud switch is attempted, so a refused switch costs the speed and nothing else.\n\n'
+                                + 'Afterwards the DME is rebooted and reconnected automatically, because at 125000 it will not serve live values or adaptations.'
+                              : 'FAST READ not armed — this DME has no stored service-block backup yet, so there is no map of what the Free Identifiers sector must keep. Take one from the FLASH dialog (inspect / backup) and it arms itself on the next connect. Reads run at 9600 until then.'}
+                          >
+                            FAST {dmeLink.fastReadArmed ? 'ON' : 'OFF'}
+                          </span>
+                        )}
                         {/* The write-path baud boost. Rendered ONLY on the transport that can change
                             rate on the open handle, because this switch can only be sent after the
                             erase — the one moment a port close/reopen could desync the link is the

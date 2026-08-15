@@ -31,8 +31,11 @@ import {
 import {
     FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, CLEAR_PREP_MARKER,
     analyzeFlashCounter, extractCounterFromServiceBlock, buildResetServiceBlockImage,
-    shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED,
+    shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED, FAST_ENTRY_PREP_MARKER,
 } from './flashCounter';
+import {
+    type Span, type SeedMap, buildPreservationPlan, toDs2Address, planBytes,
+} from './fastEntry';
 import { TransferTiming, TransferTimingReport } from './transferTiming';
 import { CHECKSUM_OFFSET_WITHIN_HALF, CHECKSUM_SLOT_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { LinkEventLog, LinkEventLogSnapshot, describeEncodingChecksum } from './linkEventLog';
@@ -237,6 +240,18 @@ export class WebSerialDmeLink implements DmeLink {
      * — has it *ever* boosted, not what the baud is now). A fresh connect() builds a new link, which
      * is exactly the reference's "reconnect" remedy.
      */
+    /**
+     * The cached non-0xFF map of this DME's Free Identifiers sector, if one has been loaded.
+     *
+     * ADDRESSES ONLY — see fastEntry.ts. Supplied by the caller from the session store rather than
+     * read here, because deciding which stored backup belongs to which DME is a question about VIN
+     * and PRACTICE-vs-real that the link layer has no business answering.
+     */
+    private fastEntrySeed: SeedMap | null = null;
+    /** Whether to attempt the erase-and-restore entry on the next bulk read. Only ever true when a
+     *  seed exists AND the transport can change rate on the open handle — see setFastRead. */
+    private fastRead = false;
+
     private hasBoostedThisSession = false;
     /** The rate the last bulk read ran at — see DmeLink.getLastReadBaud. */
     private lastReadBaud: number | null = null;
@@ -289,6 +304,24 @@ export class WebSerialDmeLink implements DmeLink {
 
     getWriteBaud(): Ds2SupportedBaud {
         return this.writeBaud;
+    }
+
+    /**
+     * Arms FAST READ, and supplies the seed map it needs.
+     *
+     * Both together, because they are not independent: arming without a seed is a no-op that would
+     * look like a broken switch, and a seed with nothing armed is dead weight. Passing `null`
+     * disarms. The caller owns the decision about WHICH stored backup belongs to this DME — that is
+     * a question about VIN and PRACTICE-vs-real, and the link layer must not be the thing that
+     * answers it.
+     */
+    setFastRead(seed: SeedMap | null): void {
+        this.fastEntrySeed = seed;
+        this.fastRead = seed !== null && this.transport.reopenIsInPlace();
+    }
+
+    getFastReadArmed(): boolean {
+        return this.fastRead;
     }
 
     /**
@@ -753,6 +786,218 @@ export class WebSerialDmeLink implements DmeLink {
         }
     }
 
+
+    /**
+     * Puts the DME into a programming session by erasing and restoring the Free Identifiers sector,
+     * then raises the link to 125000 for the bulk read.
+     *
+     * This is the most consequential thing in the app after a flash write, and the ordering is the
+     * safety argument. Read it as three phases:
+     *
+     *   1. **Reversible.** Build the plan, live-read every span, check the prep marker. Anything
+     *      that fails here is recorded and the read continues at 9600 — no telegram sent so far has
+     *      changed a byte.
+     *   2. **Destructive.** recycle-only, erase master, erase slave, restore every span, verify
+     *      every span byte for byte. `eraseStarted` marks the door; past it a failure goes to the
+     *      recovery path rather than to a shrug.
+     *   3. **Free.** recycle-off, finalize, then 0x91. By the time the baud switch is attempted the
+     *      sector is back and PROVEN back, so a refused or silent switch costs the read and nothing
+     *      else. That is the opposite of the write path, where the switch happens with the data area
+     *      erased — and it is why this is the safer of the two boosts despite erasing more.
+     *
+     * Returns whether the link is now at 125000. Before the erase it never throws: the caller's job
+     * is to read, and reading slowly is a better answer than not reading.
+     */
+    private async enterFastReadMode(): Promise<boolean> {
+        const { prepMarkerOffset } = ServiceBlockLayout;
+        const plan = buildPreservationPlan(this.fastEntrySeed, this.pointers);
+        if (!plan.safe) {
+            this.events.push(`FAST READ skipped: ${plan.reason}`);
+            return false;
+        }
+        this.events.push(`FAST READ plan: ${plan.spans.length} span(s), ${planBytes(plan.spans)} byte(s)`);
+
+        // --- Phase 1: reversible ---------------------------------------------------------------
+        // Live, every time. The seed supplies addresses and never bytes, so a stale map can only
+        // make us preserve too much — never write yesterday's identity over today's.
+        const live: Array<{ span: Span; data: Uint8Array }> = [];
+        try {
+            for (const span of plan.spans) {
+                live.push({ span, data: await this.readRange(toDs2Address(span.processor, span.start), span.length) });
+            }
+        } catch (e) {
+            this.events.push(`FAST READ skipped: could not read the spans to preserve (${(e as Error).message})`);
+            return false;
+        }
+
+        let eraseStarted = false;
+        let recycleOffSent = false;
+        let finalizeSent = false;
+        const restored = new Set<number>();
+        try {
+            // The marker the DME wants before it will let this sector be erased. Read first: on a
+            // DME that has had fast entry run before it is already there, and programming an
+            // already-programmed cell is exactly what the verify byte rejects.
+            for (const processor of ['master', 'slave'] as const) {
+                const address = ServiceBlockLayout[processor].address + prepMarkerOffset;
+                const present = await this.readMemoryChunkWithRetry(
+                    Mss54HpDataTuneLayout.readSegment, address, FAST_ENTRY_PREP_MARKER.length);
+                if (isAllErased(present)) {
+                    await this.writeMemoryChunk(address, FAST_ENTRY_PREP_MARKER, PREP_MARKER_TIMEOUT_MS);
+                    this.events.push(`FAST READ ${processor} prep marker written`);
+                } else {
+                    this.events.push(`FAST READ ${processor} prep marker already present`);
+                }
+            }
+
+            // --- Phase 2: destructive ----------------------------------------------------------
+            await this.sendProgrammingControl(
+                Ds2ProgrammingControl.RecyclingSegment, Ds2ProgrammingControl.RecycleOnlyAddress,
+                WRITE_RESPONSE_TIMEOUT_MS, false);
+
+            eraseStarted = true;
+            // BOTH processors, unlike programServiceBlocks which sends one erase at the master
+            // address. That path verifies byte-for-byte afterwards and passes on a real car, but
+            // that is not evidence the slave was erased: NOR flash accepts a write of the same
+            // value it already holds, and the slave sector is 99.3 % 0xFF with the rest unchanged,
+            // so both the write and the verify would pass either way. The reference sends two, so
+            // this does too — and whether one is enough for the counter reset is left as its own
+            // question rather than inferred from a test that could not have failed.
+            for (const processor of ['master', 'slave'] as const) {
+                await this.sendProgrammingControl(
+                    Ds2ProgrammingControl.EraseSegment, ServiceBlockLayout[processor].address,
+                    ERASE_TIMEOUT_MS, true);
+            }
+            this.events.push('FAST READ erased both Free Identifiers sectors');
+
+            for (let i = 0; i < live.length; i++) {
+                const { span, data } = live[i];
+                await this.writeBlock(toDs2Address(span.processor, span.start), data, 0, 1);
+                restored.add(i);
+            }
+
+            // Byte for byte, span by span, and BEFORE the session is closed. A mismatch here is the
+            // one failure worth stopping everything for: identity records cannot be rebuilt.
+            for (const { span, data } of live) {
+                const back = await this.readRange(toDs2Address(span.processor, span.start), span.length);
+                if (!arraysEqual(back, data)) {
+                    throw new DmeLinkError(
+                        `Fast-entry restore verify failed for ${span.processor} `
+                        + `0x${span.start.toString(16)}+${span.length}`);
+                }
+            }
+            this.events.push('FAST READ restore verified');
+
+            // --- Phase 3: free -----------------------------------------------------------------
+            await this.sendProgrammingControl(
+                Ds2ProgrammingControl.RecyclingSegment, Ds2ProgrammingControl.RecycleOffAddress,
+                WRITE_RESPONSE_TIMEOUT_MS, false);
+            recycleOffSent = true;
+            await this.sendProgrammingControl(
+                Ds2ProgrammingControl.FinishSegment, 0,
+                WRITE_RESPONSE_TIMEOUT_MS, true);
+            finalizeSent = true;
+        } catch (e) {
+            if (!eraseStarted) {
+                this.events.push(`FAST READ skipped before erase: ${(e as Error).message}`);
+                return false;
+            }
+            await this.recoverFastEntry(live, restored, recycleOffSent, finalizeSent, e);
+            // Rethrown. Past the erase this is no longer "read slowly instead" — the sector has
+            // been touched, and the operator has to know that before anything else happens.
+            throw new DmeLinkError(
+                `Fast-entry preparation failed after the erase started: ${(e as Error).message}. `
+                + `The Free Identifiers sector was erased and an attempt was made to put it back. `
+                + `Do not write to this DME until the service info has been inspected.`,
+                e);
+        }
+
+        // The switch, last. Everything above is committed and verified, so a refusal costs the
+        // speed and nothing else.
+        const boosted = await this.trySwitchBaud(ds2BaudSpecFor(125000));
+        if (boosted && !(await this.linkRespondsAfterSwitch())) {
+            const wasAccepted = this.lastSwitchOutcome ?? 'accepted';
+            try { await this.trySwitchBaud(Ds2BaudRate.Baud9600); } catch { }
+            try { await this.transport.reopen(Ds2BaudRate.Baud9600.baudRate); } catch { }
+            await this.resyncTransport();
+            this.lastSwitchOutcome = `${wasAccepted}, then the link went silent — fell back to 9600`;
+            this.events.push('FAST READ switch accepted then silent; back at 9600');
+            return false;
+        }
+        this.hasBoostedThisSession ||= boosted;
+        this.events.push(`FAST READ ${boosted ? 'complete: session now at 125000' : 'switch refused; reading at 9600'}`);
+        return boosted;
+    }
+
+    /**
+     * Best effort to put the sector back after a failure past the erase.
+     *
+     * Every step has its own try/catch, because this runs when something has already gone wrong and
+     * the worst outcome would be an exception here masking the original one. The caller rethrows
+     * that original whatever happens here.
+     */
+    private async recoverFastEntry(
+        live: Array<{ span: Span; data: Uint8Array }>,
+        restored: Set<number>,
+        recycleOffSent: boolean,
+        finalizeSent: boolean,
+        cause: unknown,
+    ): Promise<void> {
+        this.events.push(`FAST READ recovery started after: ${(cause as Error).message}`);
+        for (let i = 0; i < live.length; i++) {
+            const { span, data } = live[i];
+            try {
+                if (restored.has(i)) {
+                    const back = await this.readRange(toDs2Address(span.processor, span.start), span.length);
+                    if (arraysEqual(back, data)) continue;
+                }
+                await this.writeBlock(toDs2Address(span.processor, span.start), data, 0, 1);
+            } catch (e) {
+                this.events.push(
+                    `FAST READ recovery could not restore ${span.processor} `
+                    + `0x${span.start.toString(16)}: ${(e as Error).message}`);
+            }
+        }
+        if (!recycleOffSent) {
+            try {
+                await this.sendProgrammingControl(
+                    Ds2ProgrammingControl.RecyclingSegment, Ds2ProgrammingControl.RecycleOffAddress,
+                    WRITE_RESPONSE_TIMEOUT_MS, false);
+            } catch { /* the caller is about to throw with the original cause */ }
+        }
+        if (!finalizeSent) {
+            try {
+                await this.sendProgrammingControl(
+                    Ds2ProgrammingControl.FinishSegment, 0,
+                    WRITE_RESPONSE_TIMEOUT_MS, true);
+            } catch { /* same */ }
+        }
+        this.events.push('FAST READ recovery finished');
+    }
+
+    /**
+     * DS2 reboot — service 0x12.
+     *
+     * Entering 125000 leaves the DME in a state where live values, adaptations and error memory are
+     * all unavailable; the reference simply forbids them until the user reconnects. This app reboots
+     * instead, because its whole workflow is READ then LOG then WRITE in one session, and
+     * "reconnect now" in the middle of that is a step performed standing next to a car.
+     *
+     * Best effort by construction. The read has already succeeded by the time this runs, so a
+     * failure here must not turn a good read into a failed operation — it returns false and the
+     * caller tells the user to reconnect.
+     */
+    async rebootDme(): Promise<boolean> {
+        try {
+            await this.exchange(Ds2Control.REBOOT, new Uint8Array(0), WRITE_RESPONSE_TIMEOUT_MS);
+            this.events.push('DS2 reboot sent');
+            return true;
+        } catch (e) {
+            this.events.push(`DS2 reboot failed: ${(e as Error).message}`);
+            return false;
+        }
+    }
+
     private async readRange(address: number, length: number, onProgress?: (readSoFar: number, total: number) => void): Promise<Uint8Array> {
         const out = new Uint8Array(length);
         let done = 0;
@@ -791,9 +1036,26 @@ export class WebSerialDmeLink implements DmeLink {
         // reopen — the proven path), because a boost the hardware doesn't actually follow desyncs the
         // link for the rest of the session.
         this.lastSwitchOutcome = null;
-        let boosted = this.readBaud !== 9600
+        // FAST READ first, because it is a different mechanism from the plain 0x91 below rather
+        // than a faster version of it. The plain switch asks a DME in normal mode to change rate,
+        // which is exactly what 38400 proved this ECU will accept and then not honour. This one
+        // erases and restores the Free Identifiers sector to put the DME into a programming session,
+        // where 125000 is a rate it actually implements. Armed by the caller; skipped silently when
+        // there is no seed backup for this DME or the plan cannot be built.
+        let boosted = false;
+        let fastReadBaud = 0;
+        if (this.fastRead) {
+            boosted = await this.enterFastReadMode();
+            // Recorded separately because the line further down derives lastReadBaud from
+            // `this.readBaud`, which is the rate the SELECTOR asked for and is 9600 on this path —
+            // fast entry reaches 125000 without anyone having selected it. Reporting 9600 for a read
+            // that ran at 125000 would put the wrong number in the diagnostic that exists to prove
+            // this feature works.
+            if (boosted) fastReadBaud = 125000;
+        }
+        boosted = boosted || (this.readBaud !== 9600
             ? await this.trySwitchBaud(ds2BaudSpecFor(this.readBaud))
-            : false;
+            : false);
         // A positive ACK to 0x91 is the DME agreeing to switch. It is NOT evidence that both ends
         // ended up at the same rate, and until now nothing checked: a switch that did not really hold
         // was discovered 2% into a 538-chunk read, as a failure, having thrown away the whole read.
@@ -815,7 +1077,7 @@ export class WebSerialDmeLink implements DmeLink {
         }
         // Recorded so the UI can state what happened. A refused switch is not an error and must not
         // become one, but it must not be invisible either.
-        this.lastReadBaud = boosted ? this.readBaud : 9600;
+        this.lastReadBaud = fastReadBaud || (boosted ? this.readBaud : 9600);
         this.hasBoostedThisSession ||= boosted;
         this.events.push(`BAUD ran at ${this.lastReadBaud}${this.lastSwitchOutcome ? ` (switch: ${this.lastSwitchOutcome})` : ' (no switch attempted)'}`);
         // Held so the finally can tell finish() whether the read completed. A read that dies part-way
