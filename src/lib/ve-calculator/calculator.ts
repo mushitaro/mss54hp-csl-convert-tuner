@@ -156,8 +156,6 @@ export class VECalculator {
         tunedUsedMap: boolean[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
-        const rows = this.loadAxis.length;
-        const cols = this.rpmAxis.length;
         // Defaults to RF ÷ rf_soll — the route that needs no sensor. A caller that forgets to pass
         // options lands on the same arithmetic the app has always done.
         const plan = resolveRfKorr(options);
@@ -171,18 +169,27 @@ export class VECalculator {
         const tuned = options.writeRfKorr && options.tunedRfKorr?.acceptable
             ? options.tunedRfKorr : null;
 
-        const minSamples = options.minCellSamples ?? 10;
-        const minWeight = options.minCellWeight ?? 5.0;
-        // Counted so the UI can say how much of the map this log actually earned. A threshold the
-        // user cannot see the cost of is a threshold they cannot choose.
-        let cellsWithEvidence = 0;
-        let cellsWithSomeData = 0;
+        const grid = this.createGrid();
 
-        // Initialize accumulation grid
-        const grid: GridCell[][] = Array(rows)
+        // 1. Binning / Aggregation (Weighted)
+        for (const point of logData) this.accumulatePoint(grid, point, plan, tuned);
+
+        return this.finalizeGrid(currentMap, grid, options);
+    }
+
+    /**
+     * An empty accumulation grid.
+     *
+     * Split out of `calculateNewVEMap` so a live log can hold one across samples instead of building
+     * a new one every flush. The batch path builds it, fills it and discards it exactly as before —
+     * the point of the split is that the three steps are now separately callable, not that any of
+     * them changed.
+     */
+    public createGrid(): GridCell[][] {
+        return Array(this.loadAxis.length)
             .fill(null)
             .map(() =>
-                Array(cols)
+                Array(this.rpmAxis.length)
                     .fill(null)
                     .map(() => ({
                         sumStftWeighted: 0, weightSum: 0, rawCount: 0,
@@ -191,9 +198,24 @@ export class VECalculator {
                         sumTunedWeighted: 0, weightSumTuned: 0,
                     }))
             );
+    }
 
-        // 1. Binning / Aggregation (Weighted)
-        for (const point of logData) {
+    /**
+     * One sample into the grid.
+     *
+     * Every accumulator in a cell is a SUM, which is what makes a live log able to add samples one
+     * at a time and get the same answer as a batch pass over all of them. That is not a coincidence
+     * to rely on quietly — `verify:incremental` asserts the two agree cell for cell on a real drive.
+     *
+     * `tuned` is the one input that is not per-sample: it comes from the rf_korr tuner, which reads
+     * the whole log. A live caller must therefore either hold it fixed or rebuild the grid when it
+     * changes; see IncrementalRun for which of those it does and why.
+     */
+    public accumulatePoint(
+        grid: GridCell[][], point: LogDataPoint,
+        plan: ReturnType<typeof resolveRfKorr>, tuned: RfKorrTuneResult | null,
+    ): void {
+        {
             // Use Corrected Load if available, else Raw Load
             const loadVal = point.correctedLoad ?? point.rawLoad;
             const rpmVal = point.rpm;
@@ -203,7 +225,7 @@ export class VECalculator {
             const rpmInfo = this.findBoundingIndices(rpmVal, this.rpmAxis);
             const loadInfo = this.findBoundingIndices(loadVal, this.loadAxis);
 
-            if (!rpmInfo || !loadInfo) continue;
+            if (!rpmInfo || !loadInfo) return;
 
             // The chosen route. Both annotated in the same pass by annotateRfKorr, so switching
             // between them re-derives from the same log without re-reading anything.
@@ -229,9 +251,34 @@ export class VECalculator {
             }
 
             // Distribute to up to 4 neighbors
-            this.distributeWeight(grid, rows, cols, rpmInfo, loadInfo, correction, rfKorr,
-                tunedCorrection);
+            this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
+                correction, rfKorr, tunedCorrection);
         }
+    }
+
+    /**
+     * The grid to the maps — O(cells), not O(samples).
+     *
+     * This is the half a live log runs on every flush. 480 cells is a fixed cost whatever the drive
+     * has cost so far, which is the whole reason the split exists: the old arrangement paid for the
+     * entire log again twice a second, so the sample rate fell as the run went on.
+     */
+    public finalizeGrid(
+        currentMap: VEMap, grid: GridCell[][], options: VeCalcOptions = {},
+    ): {
+        newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
+        weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
+        tunedUsedMap: boolean[][];
+        coverage: { withEvidence: number; withAnyData: number; total: number };
+    } {
+        const rows = this.loadAxis.length;
+        const cols = this.rpmAxis.length;
+        const minSamples = options.minCellSamples ?? 10;
+        const minWeight = options.minCellWeight ?? 5.0;
+        // Counted so the UI can say how much of the map this log actually earned. A threshold the
+        // user cannot see the cost of is a threshold they cannot choose.
+        let cellsWithEvidence = 0;
+        let cellsWithSomeData = 0;
 
         // 2. Calculation
         const newMapData: number[][] = [];
@@ -393,7 +440,16 @@ export class VECalculator {
     public annotateRfKorr(
         currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
     ): LogDataPoint[] {
-        return logData.map(point => {
+        return logData.map(point => this.annotateRfKorrPoint(currentMap, point, egt));
+    }
+
+    /** One sample's worth of the above. Split out so a live run can annotate the samples that
+     *  arrived rather than the whole drive again; the batch call is this in a `.map`, so the two
+     *  cannot produce different numbers. */
+    public annotateRfKorrPoint(
+        currentMap: VEMap, point: LogDataPoint, egt?: EgtTables | null,
+    ): LogDataPoint {
+        {
             if (point.rf === undefined) return point;
 
             const loadVal = point.correctedLoad ?? point.rawLoad;
@@ -437,7 +493,7 @@ export class VECalculator {
             }
 
             return out;
-        });
+        }
     }
 
     private findBoundingIndices(value: number, axis: number[]): { idx1: number; idx2: number; w1: number; w2: number } | null {

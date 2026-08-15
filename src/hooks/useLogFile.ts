@@ -135,6 +135,31 @@ export function useLogFile() {
     return processed;
   };
 
+  /**
+   * The live path: the same log, a few samples longer.
+   *
+   * Resumes from the previous result instead of re-filtering the drive, which is what stops the
+   * sample rate falling as the run goes on. Everything else — a CSV import, reopening a session,
+   * dragging a filter — starts fresh, because those are the cases where the whole log genuinely has
+   * to be reconsidered.
+   *
+   * Correctness comes from the resume being a continuation of the SAME loop rather than a second
+   * implementation of it (see FilterResume), and the resume is taken from whatever produced the
+   * current result — so a mid-run filter change reprocesses in full and the next append simply
+   * carries on from that.
+   */
+  const appendRawLog = (rawData: LogDataPoint[], fileName: string): ProcessedLog | null => {
+    if (rawData.length === 0) return null;
+    const prior = processedLog?.resume;
+    // A resume is only valid against the log it was taken from. If the array got shorter, or this
+    // is a different log, the prefix it describes is not there any more — fall back to a full pass.
+    const usable = prior && rawData.length >= prior.consumed ? prior : undefined;
+    setRawLogData(rawData);
+    const processed = processLogData(rawData, fileName, filterConfig, interpolationTable, lambdaLimits, usable);
+    setProcessedLog(processed);
+    return processed;
+  };
+
   // Re-processes the currently-loaded raw data with a new filter config
   const reprocess = (newConfig: LogFilterConfig): ProcessedLog | null => {
     setFilterConfig(newConfig);
@@ -182,6 +207,7 @@ export function useLogFile() {
     windowedLogData,
     LOG_WINDOW_SIZE,
     parseAndSetLog,
+    appendRawLog,
     loadRawLog,
     reprocess,
     reprocessWithTable,

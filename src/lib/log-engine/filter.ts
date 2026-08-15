@@ -5,6 +5,24 @@ import {
     isFullLoad, isOverLoadThreshold, isAtControllerStop,
 } from './lambdaGates';
 
+/**
+ * What one pass over a log leaves behind, so the next pass can continue instead of starting again.
+ *
+ * Held by the caller and handed back — this module stays a pure function of (log, config, state),
+ * which is what lets the batch path keep calling it with no state at all and get the answer it
+ * always got.
+ */
+export interface FilterResume {
+    /** Raw samples already accounted for. The next call starts here. */
+    consumed: number;
+    validData: LogDataPoint[];
+    rfKorrData: LogDataPoint[];
+    droppedCount: number;
+    census: DropCensus;
+    /** The cat-protection arming time — see where it is used. */
+    lastKatsHotTime: number;
+}
+
 export const processLogData = (
     rawData: LogDataPoint[],
     fileName: string,
@@ -17,12 +35,32 @@ export const processLogData = (
      * reason that came from nowhere.
      */
     lambdaLimits?: LambdaLimits | null,
+    /**
+     * Everything a previous call over the same log already worked out, so this one can start where
+     * that one stopped.
+     *
+     * This is the whole of the incremental path, and it is a resume rather than a rewrite on
+     * purpose. The loop below is unchanged, the rules are unchanged, and a resumed call visits
+     * exactly the samples a fresh call would visit after the prefix — so "incremental agrees with
+     * batch" is true by construction rather than by a second implementation being kept in step.
+     * `verify:incremental` still checks it against a real drive, because "by construction" is a
+     * claim and claims get tested.
+     *
+     * `rawData` must be the FULL log either way, not just the new tail: the transient test looks
+     * back `transientWindow` samples INCLUDING ones earlier filters dropped, so the prefix has to
+     * still be addressable even though it is not re-examined.
+     */
+    resume?: FilterResume,
 ): ProcessedLog => {
-    const validData: LogDataPoint[] = [];
+    // Reused, not copied. A live run appends to these arrays across hundreds of flushes and copying
+    // them each time would put back the O(n) this exists to remove — so the caller gets the same
+    // array objects it had last time, wrapped in a fresh ProcessedLog. Anything memoising on the
+    // ARRAY identity would therefore miss an update; everything here keys on the wrapper.
+    const validData: LogDataPoint[] = resume?.validData ?? [];
     // Same prerequisites as validData, but WITHOUT the transient test. See ProcessedLog.rfKorrData
     // for why the rf_korr table needs its own sample set, and rfKorrTuner for what it does with it.
-    const rfKorrData: LogDataPoint[] = [];
-    let droppedCount = 0;
+    const rfKorrData: LogDataPoint[] = resume?.rfKorrData ?? [];
+    let droppedCount = resume?.droppedCount ?? 0;
     /**
      * Not just how many samples were dropped, but why.
      *
@@ -32,7 +70,7 @@ export const processLogData = (
      * counting them apart is the whole point — the census is what turns a filtered log into an
      * instruction for the next run.
      */
-    const census: DropCensus = { ...EMPTY_CENSUS };
+    const census: DropCensus = resume?.census ?? { ...EMPTY_CENSUS };
     const drop = (reason: DropReason) => { droppedCount++; census[reason]++; };
 
     // Use provided config or defaults
@@ -69,7 +107,10 @@ export const processLogData = (
     const katsTail = cfg.katsTailSec ?? 20;
     const katsExclusionOn = (cfg.enableOpenLoopExclusion ?? true);
     // Time of the last sample seen at or above the arming threshold; -Infinity = never armed.
-    let lastKatsHotTime = -Infinity;
+    // Carried across a resume: it is the only scalar in this loop that depends on samples before
+    // the current one, and losing it would re-arm the cat-protection window from scratch every
+    // flush — quietly keeping samples that a batch pass would have dropped.
+    let lastKatsHotTime = resume?.lastKatsHotTime ?? -Infinity;
 
     // Tank ventilation. Off by default — see LogFilterConfig for why this one is opt-in while the
     // cat-protection exclusion is not.
@@ -79,7 +120,7 @@ export const processLogData = (
     // Use custom table or default
     const interpTable = customTable || APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
 
-    for (let i = 0; i < rawData.length; i++) {
+    for (let i = resume?.consumed ?? 0; i < rawData.length; i++) {
         const current = rawData[i];
 
         // 1. Temperature Filter
@@ -238,6 +279,7 @@ export const processLogData = (
         droppedCount,
         dropCensus: census,
         rfKorrData,
+        resume: { consumed: rawData.length, validData, rfKorrData, droppedCount, census, lastKatsHotTime },
     };
 };
 

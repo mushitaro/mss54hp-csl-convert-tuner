@@ -1,6 +1,7 @@
 // The census lives with the gates that produce it rather than here, so the reason list and the
 // rules that assign a reason cannot drift apart. Type-only, so this stays a leaf import.
 import type { DropCensus } from '@/lib/log-engine/lambdaGates';
+import type { FilterResume } from '@/lib/log-engine/filter';
 
 export interface VEMap {
     xAxis: number[]; // RPM
@@ -104,6 +105,10 @@ export interface ProcessedLog {
      *  away; this says what to do about it. See lambdaGates.ts for the reason list and the rule
      *  that decides which one a sample gets when several apply. */
     dropCensus: DropCensus;
+    /** Hand this back to `processLogData` with the same log to continue instead of starting again.
+     *  See FilterResume — it is what makes a live run cost the samples that arrived rather than the
+     *  samples so far. */
+    resume: FilterResume;
 
     /**
      * The samples the rf_korr TABLE derivation is allowed to see — a different set from `data`, on

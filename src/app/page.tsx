@@ -1408,13 +1408,36 @@ export default function Home() {
     if (ric) ric(run, { timeout: 400 }); else setTimeout(run, 0);
   };
 
-  const flushLiveSamples = (force: boolean) => {
+  /**
+   * Rebuilds the live view from the samples so far.
+   *
+   * `authoritative` picks which engine does it, and the distinction is the whole of W4:
+   *
+   *   false (during the run)  resume the filter, bin only the new samples, finalise the grid.
+   *                           Per-sample cost is per-sample and the rest is O(cells), so a flush
+   *                           costs the same at minute ten as at minute one. What it leaves out is
+   *                           the rf_korr tuner and the route-agreement check, both of which read
+   *                           the whole log by nature — so the map on screen is the nominal one.
+   *
+   *   true (at STOP, and at SAVE)  the full five-pass runCalculation. This is the map that gets
+   *                           stored and written, and it is produced by the same code that has
+   *                           always produced it. Live is allowed to be an approximation; the
+   *                           artefact is not.
+   *
+   * The two agree wherever they overlap — see verify:incremental, which requires the resumed filter
+   * and the drip-fed grid to match a single batch pass cell for cell.
+   */
+  const flushLiveSamples = (force: boolean, authoritative = false) => {
     const now = Date.now();
     if (!force && now - lastFlushRef.current < 500) return null;
     lastFlushRef.current = now;
-    const processed = logFileState.loadRawLog([...liveSamplesRef.current], 'live-session.csv');
+    const samples = [...liveSamplesRef.current];
+    const processed = authoritative
+      ? logFileState.loadRawLog(samples, 'live-session.csv')
+      : logFileState.appendRawLog(samples, 'live-session.csv');
     if (processed && currentMap) {
-      veCalc.runCalculation(currentMap, processed, veCalcOptions);
+      if (authoritative) veCalc.runCalculation(currentMap, processed, veCalcOptions);
+      else veCalc.appendCalculation(currentMap, processed, veCalcOptions);
       return processed;
     }
     return null;
@@ -1440,7 +1463,9 @@ export default function Home() {
   const finishLog = async (failure: string | null) => {
     if (finishedRef.current) return;
     finishedRef.current = true;
-    const flushed = flushLiveSamples(true);
+    // Authoritative: the run is over, and everything downstream of here — the stored TUNED, the
+    // bytes a WRITE sends — comes from this pass rather than from the live approximation.
+    const flushed = flushLiveSamples(true, true);
 
     // Flush the tail into the recovery store and mark the run stopped — but do NOT discard it. The
     // samples are still only in memory until SAVE, so a stopped-and-unsaved run is exactly as

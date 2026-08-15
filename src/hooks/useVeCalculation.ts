@@ -1,11 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { VECalculator, VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { tuneRfKorrTable, RfKorrTuneResult } from '@/lib/ve-calculator/rfKorrTuner';
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
-import { VEMap, LogDataPoint, ProcessedLog } from '@/lib/types';
+import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import { MAP_DIMENSIONS, CSL_STOCK_WOT_RPM, CSL_STOCK_WOT_LOAD, APP_CONFIG } from '@/config/constants';
 
 export function useVeCalculation() {
+  /**
+   * The live accumulator: the grid so far, the annotated samples so far, and how many of the
+   * filtered log they account for.
+   *
+   * A ref, not state, for the same reason liveSamplesRef is one — it is written on every sample and
+   * nothing renders from it directly. Keyed on the map object so a different BASE cannot inherit a
+   * grid built against the previous one.
+   */
+  const liveRef = useRef<{ map: VEMap; grid: ReturnType<VECalculator['createGrid']>; consumed: number; annotated: LogDataPoint[] } | null>(null);
   const [newMap, setNewMap] = useState<VEMap | null>(null);
   const [mapData, setMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
   const [hitMap, setHitMap] = useState<number[][] | null>(null);
@@ -116,7 +125,60 @@ export function useVeCalculation() {
     }
   };
 
+  /**
+   * The live counterpart to runCalculation: annotate and bin only the samples that arrived.
+   *
+   * runCalculation makes five passes over the whole log — two annotations, the rf_korr tuner, the
+   * binning, and the route-agreement check — and at two flushes a second on a growing drive that is
+   * what made the DS2 loop slow down as the run went on. Here the per-sample work is per-sample and
+   * the rest is O(cells), so a flush costs the same at minute ten as at minute one.
+   *
+   * TWO things are deliberately NOT done here, and both are done at STOP instead:
+   *
+   *  - **The rf_korr tuner.** It reads the whole log by nature, and its output feeds back into the
+   *    binning per sample — so a table that changed mid-run would make the grid a mixture of two
+   *    calibrations with no way to unpick it. Live binning therefore uses the nominal correction.
+   *  - **Route agreement.** A whole-log statistic; nothing reads it during a run.
+   *
+   * So the map on screen during a run is the nominal one. The map that gets SAVED or WRITTEN is not
+   * this one: finishLog runs the full runCalculation once, and that is the pass whose output leaves
+   * the app. Live is allowed to be an approximation; the artefact is not.
+   */
+  const appendCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
+    const calc = new VECalculator();
+    const st = liveRef.current;
+    // A new log, a new map, or a reprocess that shortened the valid set: start over. Cheap to
+    // detect and the only way a stale grid could survive into a different drive.
+    if (!st || st.map !== map || processed.data.length < st.consumed) {
+      liveRef.current = { map, grid: calc.createGrid(), consumed: 0, annotated: [] };
+    }
+    const live = liveRef.current!;
+    const plan = resolveRfKorr(options);
+    for (let i = live.consumed; i < processed.data.length; i++) {
+      const point = calc.annotateRfKorrPoint(map, processed.data[i], options.egt);
+      live.annotated.push(point);
+      // `null`, not options.tunedRfKorr — see the note above about mixing two calibrations.
+      calc.accumulatePoint(live.grid, point, plan, null);
+    }
+    live.consumed = processed.data.length;
+
+    const result = calc.finalizeGrid(map, live.grid, { ...options, tunedRfKorr: null });
+    // A fresh array, not the accumulator itself. Handing back the same object every flush would
+    // make React see no change, and any memoised child keyed on it would stop updating mid-run.
+    // It is a copy of references, not of samples — cheap next to the work it protects.
+    setAnnotatedLog([...live.annotated]);
+    setNewMap(result.newMap);
+    setMapData(result.diffMap);
+    setHitMap(result.hitMap);
+    setCorrectionMap(result.correctionMap);
+    setWeightMap(result.weightMap);
+    setRfKorrMap(result.rfKorrMap);
+    setRfKorrSpreadMap(result.rfKorrSpreadMap);
+    setCoverage(result.coverage);
+  };
+
   const reset = () => {
+    liveRef.current = null;
     setNewMap(null);
     setWeightMap(null);
     setWarmupMap(null);
@@ -145,6 +207,7 @@ export function useVeCalculation() {
     warmupMap,
     wotMap,
     runCalculation,
+    appendCalculation,
     reset,
   };
 }
