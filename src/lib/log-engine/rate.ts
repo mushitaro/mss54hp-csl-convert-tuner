@@ -1,4 +1,6 @@
-import { LogDataPoint } from '@/lib/types';
+// `import type`: Node's type stripping cannot tell a type-only named import from a value one, so a
+// harness that loads this module directly fails on the missing export.
+import type { LogDataPoint } from '@/lib/types';
 
 /**
  * Sample rate a run of log points implies, in Hz.

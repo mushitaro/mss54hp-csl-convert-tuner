@@ -64,7 +64,7 @@ import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/dow
 import { dialogText } from '@/lib/dialog-text';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
-import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
+import { sampleRateHz, sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { sha256Hex, markSessionSynced } from '@/lib/db/sessionRepository';
 import { useBinaryFile } from '@/hooks/useBinaryFile';
 import { useLogFile } from '@/hooks/useLogFile';
@@ -503,6 +503,42 @@ export default function Home() {
   /** The coverage bands every grid in this page tints with, resolved once from the session's filter
    *  config. Passed explicitly rather than let each MapEditor fall back to its own default, so a
    *  changed setting reaches all four grids or none. */
+  /**
+   * The sample rate, measured against what this profile should manage.
+   *
+   * Computed once and read by both stats blocks — the wide one and the `min-[900px]:hidden` row —
+   * because two copies of "what rate is this" would be two numbers that can disagree, on the one
+   * figure every other count in that row depends on. 561 valid samples means one thing at 6.6 Hz
+   * and another at 2.9.
+   *
+   * Live during a run, the log's own average otherwise, so a reopened session reports the rate it
+   * was recorded at rather than a dash. The expected figure rides along because logProfile's comment
+   * has been promising it ("Shown next to the measured rate during a run precisely so that gap is
+   * visible") and nothing ever showed it.
+   *
+   * Not memoised on purpose: `hzValueRef` is a ref, so a memo would freeze the live value at
+   * whatever it held when the deps last changed. This is three arithmetic operations on an array
+   * the surrounding block already re-renders for.
+   */
+  const logRate = (() => {
+    if (!processedLog) return null;
+    const live = dmeLink.state === 'tuning' ? hzValueRef.current : null;
+    const hz = live ?? sampleRateHz(processedLog.data) ?? null;
+    if (hz === null) return null;
+    const profile = LOG_PROFILES[logProcess];
+    const want = expectedHz(profile.blocks);
+    return {
+      hz, want,
+      title: `Measured ${hz.toFixed(2)} Hz against ${want.toFixed(2)} Hz expected for the `
+        + `${profile.label} profile (blocks ${profile.blocks.join('+')}).\n\n`
+        + 'Expected counts the wire at 9600 8E1 and the DME\'s own 83 ms turnaround per exchange, and '
+        + 'nothing else. The host is out of it — the datalog instrument measures hostGap at 0.3 ms — '
+        + 'so the shortfall is transport latency, most likely the FTDI 16 ms timer.\n\n'
+        + 'This is the number every other count here depends on: the same drive at half the rate is '
+        + 'half the evidence.',
+    };
+  })();
+
   const coverageBands = {
     coverageThin: filterConfig.coverageThin ?? COVERAGE_THIN_DEFAULT,
     coverageOk: filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT,
@@ -2720,6 +2756,30 @@ const WOT_CRITERION =
                     <span className="text-slate-600">TOTAL</span>
                     <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
                   </div>
+                  {/* RATE, beside the counts it governs.
+                      It already existed as a DASH tile, which is the wrong place for it: the DASH is
+                      live channels and disappears with them, while sample rate is the property that
+                      decides what every one of these counts is worth. A 561-sample drive means one
+                      thing at 6.6 Hz and another at 2.9.
+
+                      Live value during a run, the log's own average otherwise, so a reopened session
+                      still reports the rate it was recorded at instead of a dash.
+
+                      The expected figure sits beside it deliberately — logProfile's own comment
+                      promises this ("Shown next to the measured rate during a run precisely so that
+                      gap is visible"), and until now nothing showed it. The gap is the transport:
+                      the model states the DME's turnaround and the wire, and what is left over is
+                      the cable. */}
+                  {logRate && (
+                    <div
+                      className="flex items-center gap-2 text-[9px] font-mono leading-none mt-1"
+                      title={logRate.title}
+                    >
+                      <span className="text-slate-600">RATE</span>
+                      <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
+                      <span className="text-slate-700">{`/ ${logRate.want.toFixed(1)} Hz`}</span>
+                    </div>
+                  )}
                   {/* The difference between the two numbers above, itemised. Without this the pair
                       says "half your drive is gone" and stops there. */}
                   <DropCensusLine census={processedLog.dropCensus} className="justify-end mt-1" />
@@ -3938,6 +3998,19 @@ The TIMING button still has the full record; save it before running another oper
               <span className="text-slate-600">TOTAL</span>
               <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
             </span>
+            {/* The narrow-screen twin of the RATE row in the wide stats block. This is the one that
+                is actually read in the car — the block above is `min-[900px]` and a phone in
+                landscape does not always clear that. */}
+            {logRate && (
+              <span
+                className="flex items-center gap-1.5 text-[9px] font-mono leading-none"
+                title={logRate.title}
+              >
+                <span className="text-slate-600">RATE</span>
+                <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
+                <span className="text-slate-700">{`/ ${logRate.want.toFixed(1)} Hz`}</span>
+              </span>
+            )}
           </div>
         )}
         {/* One row again.
