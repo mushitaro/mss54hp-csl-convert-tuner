@@ -16,6 +16,8 @@
     "verify:tankvent-patch": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent-patch.mjs",
     "//verify:coverage": "Checks the VE evidence gate: one sample no longer moves a cell, both conditions are required, and a REJECTED cell still reports the samples it has rather than 0.",
     "verify:coverage": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-coverage.mjs",
+    "//verify:route": "Checks the run profiles and the campaign route: the expected rate matches the measured 244 ms/sample, preflight names exactly what is missing, and only route B carries the k_new division no car has checked.",
+    "verify:route": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-route.mjs",
     "//verify:incremental": "Requires the live path to equal the batch path exactly: the resuming filter and the drip-fed grid must produce the same samples, the same census and the same map as one pass over the whole log.",
     "verify:incremental": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-incremental.mjs",
     "//verify:lambda-gates": "Checks the FR 5.01 sample gates: the full-load test reads the binary's own table (so the WOT patch disables it), a missing channel never rejects, and the drop census sums to the drop count.",

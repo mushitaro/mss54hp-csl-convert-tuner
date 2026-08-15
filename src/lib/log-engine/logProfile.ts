@@ -133,3 +133,62 @@ export function processesSupportedBy(hasTrim: boolean, hasRf: boolean): ProcessI
     if (hasRf) out.push('EGT');
     return out;
 }
+
+/** What the ECU is holding, as the hub already derives it from the loaded binary. */
+export interface ArmedPatches {
+    patched: boolean;
+    tankVentShut: boolean;
+}
+
+/**
+ * Which of this profile's prerequisites are not in the ECU.
+ *
+ * Reported, not enforced. The same reasoning the lineage check states out loud — overridable
+ * deliberately, because there are legitimate reasons to run without one (comparing against a purge
+ * window on purpose, for instance) and a check that cannot be overridden gets worked around instead
+ * of heeded. What it must never be is silent, and a run costs a drive to repeat.
+ */
+export function missingPatches(profile: LogProfile, armed: ArmedPatches): RequiredPatch[] {
+    return profile.requires.filter(r =>
+        (r === 'PATCH' && !armed.patched) || (r === 'TANK_VENT' && !armed.tankVentShut));
+}
+
+/**
+ * Which campaign shape the next WRITE belongs to.
+ *
+ * DERIVED, never stored — the same rule `idleAction` follows, and for the same reason. A stored
+ * "route" would be a second answer to a question `rfKorrSource` and `writeRfKorr` already answer,
+ * and the two could disagree. Here the route is a NAME for a combination the operator has already
+ * chosen by other means, which is why picking it is impossible and getting it wrong is too.
+ *
+ *   CONSERVATIVE  VE map only. BMW's correction table is left exactly as it is — the safest
+ *                 workflow there is, and the one that needs no EGT run at all.
+ *   A1            The correction table alone, no VE map. First half of the sequential campaign.
+ *   A2            VE map only, on a BASE whose table this campaign already replaced. Second half.
+ *   B             Both together, with the VE map divided by k_new. One flash slot instead of two,
+ *                 at the cost of depending on a division that no car has yet checked.
+ *   NONE          Nothing has been derived, so there is nothing to write.
+ */
+export type RouteId = 'CONSERVATIVE' | 'A1' | 'A2' | 'B' | 'NONE';
+
+export function deriveRoute(input: {
+    process: ProcessId;
+    /** Is the back-calculated KF_RF_KORR_DRREL armed for writing? */
+    writeRfKorr: boolean;
+    /** Has a VE map been derived from this session's log? */
+    hasVeMap: boolean;
+    /** The process of the session this one's BASE came from, if any. */
+    parentProcess?: ProcessId;
+}): RouteId {
+    const { process, writeRfKorr, hasVeMap, parentProcess } = input;
+    if (process === 'INERTIA') return 'NONE';
+    if (process === 'EGT') return writeRfKorr ? 'A1' : 'NONE';
+    if (!hasVeMap) return 'NONE';
+    if (writeRfKorr) return 'B';
+    return parentProcess === 'EGT' ? 'A2' : 'CONSERVATIVE';
+}
+
+/** Does this route rest on the k_new division that has never been checked on a car? */
+export function routeNeedsUnverifiedDivision(route: RouteId): boolean {
+    return route === 'B';
+}
