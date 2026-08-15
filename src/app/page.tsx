@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'; // Added dynamic import
 import { ChartLoading } from '@/components/ChartLoading';
 import { DropZone } from '@/components/DropZone';
-import { MapEditor } from '@/components/MapEditor';
+import { MapEditor, COVERAGE_THIN_DEFAULT, COVERAGE_OK_DEFAULT } from '@/components/MapEditor';
 import { RfKorrTable } from '@/components/RfKorrTable';
 
 // Dynamic imports for heavy components
@@ -486,6 +486,13 @@ export default function Home() {
   );
 
   const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap, tunedRfKorr } = veCalc;
+  /** The coverage bands every grid in this page tints with, resolved once from the session's filter
+   *  config. Passed explicitly rather than let each MapEditor fall back to its own default, so a
+   *  changed setting reaches all four grids or none. */
+  const coverageBands = {
+    coverageThin: filterConfig.coverageThin ?? COVERAGE_THIN_DEFAULT,
+    coverageOk: filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT,
+  };
   const { diffSubject, setDiffSubject, diffReference, setDiffReference, diffMapForVisualization } = comparison;
 
   // Runs the VE calculation and refreshes the comparison defaults. Does NOT change the active tab —
@@ -527,6 +534,14 @@ export default function Home() {
     // state here for the same reason `config` is: the archived-session handlers run in a render
     // scope whose state is one step behind what they just asked to load.
     writeRfKorr: write,
+    // The evidence gate, and the rf_korr tuner's own. Both travel in the filter config so a session
+    // replays under the thresholds it was built with rather than under today's defaults.
+    minCellSamples: config.minVeCellSamples,
+    minCellWeight: config.minVeCellWeight,
+    rfKorrThresholds: {
+      minCellSamples: config.rfKorrMinCellSamples,
+      minCellWeight: config.rfKorrMinCellWeight,
+    },
     egt,
   });
 
@@ -549,7 +564,10 @@ export default function Home() {
     // to be here or a toggle change re-renders without re-deriving. `applyRfKorr` alone was enough
     // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr, egtTables, writeRfKorr]);
+    [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
+      filterConfig.minVeCellSamples, filterConfig.minVeCellWeight,
+      filterConfig.rfKorrMinCellSamples, filterConfig.rfKorrMinCellWeight,
+      egtTables, writeRfKorr]);
 
   const runCalculation = (map: NonNullable<typeof currentMap>, processed: ProcessedLog) => {
     veCalc.runCalculation(map, processed, veCalcOptions);
@@ -2553,14 +2571,35 @@ export default function Home() {
           <div className="flex-1 overflow-auto relative">
             {/* Content */}
             <div className="absolute inset-0 pt-2 pb-2 px-4">
-              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} weightData={weightMap ?? undefined} zoom={mapZoom.zoom} />}
+              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} {...coverageBands} weightData={weightMap ?? undefined} zoom={mapZoom.zoom} />}
               {(activeTab === 'new' && newMap) && (
-                <MapEditor
-                  mapData={newMap}
-                  hitData={hitMap || undefined}
-                  weightData={weightMap || undefined}
-                  zoom={mapZoom.zoom}
-                />
+                <div className="h-full w-full flex flex-col">
+                  {/* What this log actually earned. The same shape of census RfKorrTable puts under
+                      its grid, and here for the same reason: the evidence gate is adjustable, and a
+                      threshold you cannot see the cost of is not one you can choose. Three numbers,
+                      because "40 cells written" means nothing without knowing the log touched 120
+                      and the map has 480. */}
+                  {veCalc.coverage && (
+                    <div className="shrink-0 px-3 py-1.5 bg-slate-900/50 border-b border-slate-800 text-[10px] font-mono text-slate-500">
+                      <span className={veCalc.coverage.withEvidence === 0 ? 'text-red-400' : 'text-slate-300'}>
+                        {veCalc.coverage.withEvidence}
+                      </span>
+                      {` of ${veCalc.coverage.total} cells met the evidence gate`}
+                      <span className="text-slate-600">
+                        {`  ·  ${veCalc.coverage.withAnyData} touched by this log`}
+                        {`  ·  gate ${filterConfig.minVeCellSamples ?? 10} samples / weight ${filterConfig.minVeCellWeight ?? 5}`}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex-1 min-h-0">
+                    <MapEditor
+                      mapData={newMap}
+                      hitData={hitMap || undefined} {...coverageBands}
+                      weightData={weightMap || undefined}
+                      zoom={mapZoom.zoom}
+                    />
+                  </div>
+                </div>
               )}
               {(activeTab === 'diff' && mapData) && ( // Changed from diffMap
                 <div className="h-full w-full flex flex-col">
@@ -2611,7 +2650,7 @@ export default function Home() {
                     <MapEditor
                       mapData={diffVisualMap!}
                       diffData={diffMapForVisualization || undefined}
-                      hitData={hitMap || undefined}
+                      hitData={hitMap || undefined} {...coverageBands}
                       weightData={weightMap || undefined}
                       zoom={mapZoom.zoom}
                     />
@@ -2621,7 +2660,7 @@ export default function Home() {
               {(activeTab === 'lambda' && correctionMap && newMap) && (
                 <MapEditor
                   mapData={lambdaVisualMap!}
-                  hitData={hitMap || undefined}
+                  hitData={hitMap || undefined} {...coverageBands}
                   weightData={weightMap || undefined}
                   zoom={mapZoom.zoom}
                 />

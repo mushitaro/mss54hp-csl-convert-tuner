@@ -29,6 +29,10 @@ interface Props {
     cellNote?: (row: number, col: number) => string | undefined;
     /** Cells to render as inert — present, readable, and not part of the result. */
     mutedCells?: boolean[][];
+    /** Coverage band edges. Defaults to COVERAGE_THIN/OK_DEFAULT; the session's filter config
+     *  overrides them, so the map and the panel that sets them cannot disagree. */
+    coverageThin?: number;
+    coverageOk?: number;
 }
 
 /**
@@ -54,12 +58,18 @@ const PAD_CELL = 4; // p-1 on the data cells
 // max made the whole map fade as one cell filled up — the map got darker the longer
 // you drove, which is backwards for spotting the gaps you still need to cover.
 //
-// These are a DISPLAY threshold, not a calculation one. calculator.ts only needs
-// weightSum > 0.1, so a cell with a single sample still produces a correction. The
-// bands say how thin the evidence under that correction is, which is exactly the
-// "should I go drive this area more" signal.
-const COVERAGE_THIN = 10;   // below this: some data, not enough to trust
-const COVERAGE_OK = 30;     // at or above this: enough samples to act on
+// Still a DISPLAY threshold, and still not the calculation's — but the relationship
+// between the two changed on 2026-08-15. calculator.ts now has a real gate
+// (minCellSamples, default 10) where before it had only `weightSum > 0.1`, i.e. none.
+// So these bands sit ABOVE the gate on purpose: the gate answers "may this cell move",
+// and the bands answer "should I go drive this area more", which is a higher bar. A
+// cell can legitimately be tinted thin and still have been written.
+//
+// Defaults, overridable per session — see LogFilterConfig.coverageThin. Named constants
+// rather than inline numbers because InertiaPanel shows the same bands over a different
+// pipeline and the two must not drift apart.
+export const COVERAGE_THIN_DEFAULT = 30;   // below this: some data, not enough to trust
+export const COVERAGE_OK_DEFAULT = 100;    // at or above this: enough samples to act on
 
 // One ice blue (#8FD8F2) over the table's slate-900, separated by lightness only —
 // the palette rule in globals.css. Kept inside the original 0–0.30 alpha range: this
@@ -81,6 +91,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
     rowFormat = (v: number) => v.toFixed(2),
     valueFormat = (v: number) => v.toFixed(3),
     cellNote, mutedCells,
+    coverageThin = COVERAGE_THIN_DEFAULT, coverageOk = COVERAGE_OK_DEFAULT,
 }) {
     // Render a scrollable grid
     // Styles: Dark mode table
@@ -147,8 +158,8 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
                                     // with the lean-diff fill below: the guard above means a cell can never
                                     // paint both, and diffData is all-or-nothing for the whole table.
                                     const alpha =
-                                        hits >= COVERAGE_OK ? COVERAGE_ALPHA_FULL
-                                            : hits >= COVERAGE_THIN ? COVERAGE_ALPHA_OK
+                                        hits >= coverageOk ? COVERAGE_ALPHA_FULL
+                                            : hits >= coverageThin ? COVERAGE_ALPHA_OK
                                                 : COVERAGE_ALPHA_THIN;
                                     style = { backgroundColor: `rgba(143, 216, 242, ${alpha})` };
                                     // Every band stays dark enough for the light text the rest of the

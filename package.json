@@ -14,6 +14,8 @@
     "verify:tankvent": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent.mjs",
     "//verify:tankvent-patch": "Checks the K_TE_TVTE_GA patch at the byte level: exactly one byte moves, and turning it OFF restores stock rather than no-opping.",
     "verify:tankvent-patch": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-tankvent-patch.mjs",
+    "//verify:coverage": "Checks the VE evidence gate: one sample no longer moves a cell, both conditions are required, and a REJECTED cell still reports the samples it has rather than 0.",
+    "verify:coverage": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-coverage.mjs",
     "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
     "preview": "npm run build:preview && wrangler pages dev",
     "deploy:preview": "npm run build:preview && wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr",

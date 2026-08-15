@@ -5,9 +5,19 @@ import type { InertiaEstimate } from '@/lib/inertia/types';
 import type { CorrectionPlan, Proposal } from '@/lib/inertia/corrections';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
-/** Same three bands MapEditor tints VE coverage with, so "enough samples" means one thing here. */
-const COVERAGE_THIN = 10;
-const COVERAGE_OK = 30;
+/**
+ * The same bands MapEditor tints VE coverage with, imported rather than restated so that
+ * "enough samples" means one thing across the app.
+ *
+ * They were duplicated as literals here and drifted the moment the VE bands were raised from 10/30
+ * to 30/100 — the inertia panel would have gone on calling 30 hits "well covered" while the map
+ * beside it called the same number thin.
+ *
+ * Not configurable here, unlike the VE map's. This pipeline bins rpm sweeps rather than a log's
+ * (rpm, load) plane, so the session's filter config does not describe it; the shared default is the
+ * honest thing to follow and the wrong thing to let a VE-shaped setting override.
+ */
+import { COVERAGE_THIN_DEFAULT as COVERAGE_THIN, COVERAGE_OK_DEFAULT as COVERAGE_OK } from './MapEditor';
 
 const TEXT = {
     ja: {

@@ -38,6 +38,9 @@ export function useVeCalculation() {
     useState<RfKorrRouteAgreement | undefined>(undefined);
 
   // [EXPERIMENTAL]
+  /** How many VE cells cleared the evidence gate. Null until a calculation has run — distinct from
+   *  a run that cleared zero, which is a result and needs saying out loud. */
+  const [coverage, setCoverage] = useState<{ withEvidence: number; withAnyData: number; total: number } | null>(null);
   const [warmupMap, setWarmupMap] = useState<VEMap | null>(null);
   const [wotMap, setWotMap] = useState<VEMap | null>(null);
 
@@ -81,7 +84,11 @@ export function useVeCalculation() {
     const annotatedForRfKorr = calc.annotateRfKorr(map, processed.rfKorrData, options.egt);
     const rfKorr = options.egt
       ? tuneRfKorrTable(map, annotatedForRfKorr, options.egt,
-        { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD })
+        { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
+        // The tuner has always had proper thresholds and no way to reach them — this was the only
+        // production call site and it passed nothing. Only the two the panel exposes are forwarded;
+        // the other seventeen keep their defaults, which is the point of having defaults.
+        options.rfKorrThresholds ?? {})
       : null;
     // The tuned table comes from THIS run, not from the caller. It is derived from the same log
     // the map is about to be built from, so passing it in would mean the caller had to run the
@@ -98,6 +105,7 @@ export function useVeCalculation() {
     setWeightMap(result.weightMap);
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
+    setCoverage(result.coverage);
 
     // [EXPERIMENTAL] Auto-gen Warmup Map for Visualization
     try {
@@ -119,6 +127,7 @@ export function useVeCalculation() {
     setAnnotatedLog(null);
     setTunedRfKorr(null);
     setRouteAgreement(undefined);
+    setCoverage(null);
   };
 
   return {
@@ -129,6 +138,7 @@ export function useVeCalculation() {
     weightMap,
     rfKorrMap,
     rfKorrSpreadMap,
+    coverage,
     annotatedLog,
     tunedRfKorr,
     routeAgreement,

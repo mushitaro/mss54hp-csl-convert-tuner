@@ -1,10 +1,10 @@
-import { LogDataPoint, VEMap, RfKorrMode, RfKorrSource, resolveRfKorr } from '@/lib/types';
+import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr } from '@/lib/types';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WOT_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD, CSL_STOCK_WOT_RPM } from '@/config/constants';
 import {
-    EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, interpMap2d, invertRfKorrProfile, rfKorrAt,
+    type EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, interpMap2d, invertRfKorrProfile, rfKorrAt,
     rfKorrProfileAt, tabgModelAt,
 } from './egtTables';
-import type { RfKorrTuneResult } from './rfKorrTuner';
+import type { RfKorrTuneResult, RfKorrTuneOptions } from './rfKorrTuner';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -75,6 +75,32 @@ export interface VeCalcOptions {
     applyRfKorr?: boolean;
 
     /**
+     * How much evidence a VE cell needs before it may move. Defaults 10 samples AND weight 5.0 —
+     * the same discipline rfKorrTuner already applies to its own grid.
+     *
+     * There was no count threshold here at all until 2026-08-15. The only test was
+     * `weightSum > 0.1`, and weightSum is a sum of bilinear corner weights, so ONE sample landing
+     * squarely on a cell scores 1.0 and moved it. The 10/30 pair that looked like thresholds were
+     * heatmap bands in MapEditor and gated nothing. karter16 (thread 242281 #161) suggested raising
+     * the thresholds; the more useful half of that advice turned out to be that the map had none.
+     *
+     * Both conditions, not either: ten samples spread over four corners can carry very little
+     * weight, and a big weight can come from very few samples sitting dead centre.
+     */
+    minCellSamples?: number;
+    minCellWeight?: number;
+
+    /**
+     * Overrides for the rf_korr tuner's own grid thresholds, forwarded untouched.
+     *
+     * Separate from the two above because they gate different tables with different economics: the
+     * VE map has 480 cells and the correction table has 72, so one rf_korr cell carries far more of
+     * the result and deserves to be harder to move. Not merged into one pair of numbers for exactly
+     * that reason.
+     */
+    rfKorrThresholds?: Partial<RfKorrTuneOptions>;
+
+    /**
      * The DME's own EGT tables, decoded from the loaded binary. Optional throughout: without them
      * every derived column is simply absent and the calculation behaves exactly as it did before
      * they existed. `null` means the binary could not be decoded — treated the same as absent,
@@ -128,6 +154,7 @@ export class VECalculator {
         newMap: VEMap; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
         tunedUsedMap: boolean[][];
+        coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
         const rows = this.loadAxis.length;
         const cols = this.rpmAxis.length;
@@ -143,6 +170,13 @@ export class VECalculator {
         // separately, and a calculation is not where to raise that.
         const tuned = options.writeRfKorr && options.tunedRfKorr?.acceptable
             ? options.tunedRfKorr : null;
+
+        const minSamples = options.minCellSamples ?? 10;
+        const minWeight = options.minCellWeight ?? 5.0;
+        // Counted so the UI can say how much of the map this log actually earned. A threshold the
+        // user cannot see the cost of is a threshold they cannot choose.
+        let cellsWithEvidence = 0;
+        let cellsWithSomeData = 0;
 
         // Initialize accumulation grid
         const grid: GridCell[][] = Array(rows)
@@ -234,8 +268,11 @@ export class VECalculator {
                     rfKorrSpreadRow.push(0);
                 }
 
-                // Check sufficient weight data
-                if (cell.weightSum > 0.1) {
+                // The evidence gate. Both conditions — see VeCalcOptions.minCellSamples for why,
+                // and for what this replaced.
+                if (cell.rawCount > 0) cellsWithSomeData++;
+                if (cell.rawCount >= minSamples && cell.weightSum >= minWeight) {
+                    cellsWithEvidence++;
                     // Calculation uses Weighted Average
                     // Avg = Sum(Value * Weight) / Sum(Weight)
                     const nominal = cell.sumStftWeighted / cell.weightSum;
@@ -276,9 +313,13 @@ export class VECalculator {
                 } else {
                     newRow.push(oldVal); // No change
                     diffRow.push(100); // Ratio % (No change = 100%)
-                    hitRow.push(0);
+                    // The REAL count and weight, not zero. Before the gate existed these could only
+                    // be reached with no samples at all, so zero was the truth; now a cell can hold
+                    // nine samples and still be refused, and reporting that as 0 would erase the one
+                    // signal that says "drive here again" rather than "you have never been here".
+                    hitRow.push(cell.rawCount);
                     correctionRow.push(1.0); // No correction
-                    weightRow.push(0);
+                    weightRow.push(cell.weightSum);
                     tunedUsedRow.push(false);
                 }
             }
@@ -304,7 +345,11 @@ export class VECalculator {
             weightMap, // Returns Weight Sum
             tunedUsedMap, // Which cells actually took the 'tuned' correction
             rfKorrMap, // Weighted-mean rf_korr the cell's samples were taken under
-            rfKorrSpreadMap // max-min rf_korr across those samples
+            rfKorrSpreadMap, // max-min rf_korr across those samples
+            /** How many cells cleared the evidence gate, out of how many the log touched at all and
+             *  how many exist. The three numbers together are what makes a threshold adjustable:
+             *  raising it is only a decision you can make if you can see what it costs. */
+            coverage: { withEvidence: cellsWithEvidence, withAnyData: cellsWithSomeData, total: rows * cols }
         };
     }
 

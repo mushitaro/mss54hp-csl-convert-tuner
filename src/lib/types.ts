@@ -159,6 +159,43 @@ export interface LogFilterConfig {
     // answer; disabling the valve is the first. This exists so a log taken WITHOUT that patch can
     // still be salvaged, and so a log taken WITH it can be checked for having actually worked.
 
+    // --- Coverage thresholds ----------------------------------------------------------------
+    // How much evidence a cell needs before this app is willing to move it.
+    //
+    // These decide what gets WRITTEN, not what gets discarded, which is why they sit apart from
+    // the row filters above: everything before this point answers "is this sample usable", and
+    // these answer "is this cell's pile of usable samples big enough to act on".
+    //
+    // They exist because karter16 pointed out the thresholds were too low (thread 242281 #161:
+    // "it might be worth bumping up the samples thresholds ... I think users might get better
+    // results if they collect some more hits") — and looking properly, the VE map had no count
+    // threshold at all. Its only test was `weightSum > 0.1`, and weightSum is a sum of bilinear
+    // corner weights, so a single sample landing squarely on a cell scores 1.0 and moved it. The
+    // 10/30 numbers that looked like thresholds were heatmap bands and gated nothing.
+    //
+    // Optional, and the `??` defaults below restore the shipped values. A session saved before
+    // these existed replays under today's defaults rather than under the old no-gate behaviour —
+    // deliberately: the old behaviour is the bug, and reproducing a map built by it is not a
+    // promise worth keeping. What IS kept is that the numbers travel with the session, so a
+    // re-opened tune says which thresholds produced it.
+
+    /** Samples that must land in a VE cell before it may move. Default 10. */
+    minVeCellSamples?: number;
+    /** Bilinear weight that must accumulate in a VE cell before it may move. Default 5.0.
+     *  Both are required: 10 samples spread across four corners can carry very little weight. */
+    minVeCellWeight?: number;
+    /** Heatmap band edges — display only, and deliberately higher than the gate. The gate says
+     *  "enough to act on"; these say "enough to stop driving this area". Defaults 30 / 100. */
+    coverageThin?: number;
+    coverageOk?: number;
+
+    /** The rf_korr tuner's own grid thresholds. Separate numbers because that table has 72 cells
+     *  against the VE map's 480, so one of its cells carries far more of the result. Defaults are
+     *  RF_KORR_TUNE_DEFAULTS (10 samples / weight 5.0) — until now unreachable from the UI, because
+     *  the only production call site passed no options at all. */
+    rfKorrMinCellSamples?: number;
+    rfKorrMinCellWeight?: number;
+
     /** Drop samples recorded while the tank-vent valve was open. Default false. */
     enableTankVentExclusion?: boolean;
     /**
