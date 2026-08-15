@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { VECalculator, VeCalcOptions } from '@/lib/ve-calculator/calculator';
-import { tuneRfKorrTable, RfKorrTuneResult } from '@/lib/ve-calculator/rfKorrTuner';
+import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } from '@/lib/ve-calculator/rfKorrTuner';
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import { MAP_DIMENSIONS, CSL_STOCK_WOT_RPM, CSL_STOCK_WOT_LOAD, APP_CONFIG } from '@/config/constants';
@@ -35,6 +35,16 @@ export function useVeCalculation() {
   // read and the log carries an exhaust temperature, REGARDLESS of what the session asks to be
   // done with it: choosing not to act on the result is not a reason to be unable to look at it.
   const [tunedRfKorr, setTunedRfKorr] = useState<RfKorrTuneResult | null>(null);
+
+  /**
+   * The correction-table census DURING a run — why samples are being kept or thrown away, live.
+   *
+   * The table itself is deliberately not built live (see appendCalculation), but the CENSUS is the
+   * part that has to be visible while there is still time to act on it. Two complete drives have now
+   * been lost to the same thing: the gate opened, nothing was held steady long enough, no anchor was
+   * ever recorded, and nobody could know until the drive was over and the tab was opened.
+   */
+  const [rfKorrLive, setRfKorrLive] = useState<RfKorrTuneReport | null>(null);
 
   // How far the two routes to rf_korr land apart — the standing check on DS2 offset 8.
   //
@@ -176,6 +186,19 @@ export function useVeCalculation() {
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
     setCoverage(result.coverage);
+
+    // The census, not the table. `rfKorrData` is the tuner's own sample set (it skips the transient
+    // test the VE map needs), so it has to be annotated separately — and re-annotated whole, which
+    // is O(n) of plain arithmetic on a few thousand rows a couple of times a second. That is nothing
+    // beside what it prevents: driving for seven minutes to be told afterwards that none of it
+    // counted. The same argument the inertia side already made for recomputing rather than
+    // accumulating, and the same conclusion.
+    if (options.egt) {
+      const annR = calc.annotateRfKorr(map, processed.rfKorrData, options.egt);
+      setRfKorrLive(rfKorrCensus(annR, options.egt,
+        { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
+        options.rfKorrThresholds ?? {}).report);
+    }
   };
 
   const reset = () => {
@@ -191,6 +214,7 @@ export function useVeCalculation() {
     setTunedRfKorr(null);
     setRouteAgreement(undefined);
     setCoverage(null);
+    setRfKorrLive(null);
   };
 
   return {
@@ -202,6 +226,7 @@ export function useVeCalculation() {
     rfKorrMap,
     rfKorrSpreadMap,
     coverage,
+    rfKorrLive,
     annotatedLog,
     tunedRfKorr,
     routeAgreement,

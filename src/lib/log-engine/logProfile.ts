@@ -17,10 +17,21 @@
  *   block 19   90 B payload, 99 B on the wire   ~113 ms    la_f_regler1/2 tetv tefc_* la_freeze
  *   block 83   52 B payload, 61 B on the wire    ~70 ms    md_ind_* d_n40 gang v_antrieb ...
  *
- * The EGT process is the point of the exercise. Measuring `rf_korr` is `(rf/100) / rf_soll`, all of
- * which is in block 3 — the lambda trim contributes nothing to it. Reading block 19 anyway costs
- * 113 ms of every sample to fetch four bytes that go unused, which is why the run that is currently
- * blocked on evidence has been collecting it at 2.4 Hz instead of 11.
+ * ## The EGT profile, and why it is retired
+ *
+ * It was the point of the exercise, and the reasoning was wrong. MEASURING `rf_korr` really is
+ * `(rf/100) / rf_soll`, every term in block 3, so dropping the 90-byte trim block really did more
+ * than double the rate — #903 collected at 6.60 Hz against #902's 2.44.
+ *
+ * But DERIVING what the correction table SHOULD hold is a different calculation:
+ *
+ *     A(delta)/A(0) = k_applied x STFT(delta) / STFT(0)
+ *
+ * `k_applied` says what the DME DID; only STFT says whether it was RIGHT, and STFT is `la_f_regler`,
+ * in block 19. Two logs cannot be combined either — separate drives do not correspond sample by
+ * sample. So the faster profile could only ever produce a drive that had to be driven again, and it
+ * did exactly that once. It stays in the type for records that name it; `runnable: false` keeps it
+ * out of the menu.
  *
  * ## Why the channel list is the enforcement
  *
@@ -126,6 +137,16 @@ export interface LogProfile {
     requires: RequiredPatch[];
     /** One line, shown where the process is chosen. */
     produces: string;
+    /**
+     * Whether a drive can still be STARTED as this process.
+     *
+     * EGT is false, and the entry stays because sessions recorded before it was retired still name
+     * it and a log with rf but no trim is still honestly described by it. What it cannot do is be
+     * chosen for a new run: the correction table needs the lambda trim, block 3 does not carry it,
+     * and so the faster profile could only ever produce a drive that has to be driven again. A
+     * retired option left in a menu is a trap with a label on it.
+     */
+    runnable: boolean;
 }
 
 export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
@@ -136,7 +157,8 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // trim is supposed to reveal: k_rf_cfg turns MAP compensation off and K_LAA_TMOT_MIN stops
         // long-term adaptation learning around it.
         requires: ['PATCH'],
-        produces: 'VE map (kf_rf_soll)',
+        produces: 'VE map (kf_rf_soll) and the KF_RF_KORR_DRREL evidence',
+        runnable: true,
     },
     EGT: {
         id: 'EGT', label: 'EGT',
@@ -161,7 +183,8 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
          * returned 476 across nine pulls of 3 s or more. That is the input the table needs; it is
          * just not the table.
          */
-        produces: 'Sustained gate-open evidence for the EGT correction (needs a VE run to derive)',
+        produces: 'Retired — block 3 carries no lambda trim, so no correction table can come out of it',
+        runnable: false,
     },
     INERTIA: {
         id: 'INERTIA', label: 'INERTIA',
@@ -171,6 +194,7 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // None. The estimate reads torque and speed gradient, which the patches do not touch.
         requires: [],
         produces: 'Flywheel inertia estimate and a calibration proposal',
+        runnable: true,
     },
 };
 

@@ -309,6 +309,11 @@ const JA = {
     titleLineage: '系譜の確認',
     btnFlashAnyway: '承知のうえで書き込む',
 
+    // Shown live, only while the run has gate-open samples it is throwing away for want of a settle.
+    // Names the remedy rather than the symptom: the gate is open, so the load is high enough — what
+    // is missing is holding it still, and holding it long enough for the exhaust to catch up.
+    rfKorrNoAnchorHint: 'アンカー未取得。加速し続けず、アクセル開度を固定して RF を一定に保ってください（上り坂・3〜4速）。'
+        + '整定に 3 秒、排気がモデルに追いつくまで 10 秒以上。同じ回転域で繰り返すこと。',
     titleLogFinished: 'データログ終了',
     titleWriteConfirm: 'DMEへ書き込みます',
     titleWriteFailed: '書き込みに失敗しました',
@@ -508,6 +513,9 @@ const EN: NativeDialogText = {
     titleLineage: 'Lineage check',
     btnFlashAnyway: 'Write anyway',
 
+    rfKorrNoAnchorHint: 'No anchor yet. Stop accelerating through the load — hold the pedal still and keep RF '
+        + 'steady (uphill, 3rd or 4th). Three seconds to settle, ten or more for the exhaust to catch up. '
+        + 'Repeat in the same rpm band.',
     titleLogFinished: 'Data log finished',
     titleWriteConfirm: 'Write to the DME',
     titleWriteFailed: 'The write failed',

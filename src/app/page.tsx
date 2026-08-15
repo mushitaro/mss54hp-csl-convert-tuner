@@ -2723,6 +2723,33 @@ const WOT_CRITERION =
                   {/* The difference between the two numbers above, itemised. Without this the pair
                       says "half your drive is gone" and stops there. */}
                   <DropCensusLine census={processedLog.dropCensus} className="justify-end mt-1" />
+                  {/* The correction table's own census, WHILE DRIVING.
+                      Two complete drives were thrown away because this number existed only after the
+                      run: #903 and #904 both reached the end with zero anchors, and both times the
+                      remedy — hold a steady load instead of accelerating through it — was still
+                      available at the time and invisible. ANCHORS is the one that decides the run, so
+                      it is the one that goes red. */}
+                  {veCalc.rfKorrLive && (
+                    <div className="flex items-center justify-end gap-2 text-[9px] font-mono leading-none mt-1">
+                      <span className="text-slate-600">RF_KORR</span>
+                      <span className={veCalc.rfKorrLive.anchorSamples === 0 ? 'text-red-400' : 'text-emerald-400'}>
+                        {`anchors ${veCalc.rfKorrLive.anchorSamples}`}
+                      </span>
+                      <span className="text-slate-500">{`ratios ${veCalc.rfKorrLive.ratioSamples}`}</span>
+                      <span className="text-slate-600">
+                        {`gate-shut ${veCalc.rfKorrLive.samplesGateShut} · unsettled ${veCalc.rfKorrLive.samplesNotSettled}`}
+                      </span>
+                    </div>
+                  )}
+                  {/* Said out loud, because "anchors 0" only reads as a problem if you know what an
+                      anchor is. It is the warm-exhaust half of the ratio, and it is the half that has
+                      never once been collected. */}
+                  {veCalc.rfKorrLive && veCalc.rfKorrLive.anchorSamples === 0
+                    && veCalc.rfKorrLive.samplesNotSettled > 0 && (
+                      <div className="text-[9px] font-mono leading-tight text-amber-500/80 text-right mt-0.5 max-w-[22rem] ml-auto">
+                        {dialogText().rfKorrNoAnchorHint}
+                      </div>
+                    )}
                 </div>
               )}
               <div className="flex items-center gap-2">
@@ -3402,9 +3429,10 @@ The TIMING button still has the full record; save it before running another oper
                             className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
                             title={'What this run measures, which decides which DS2 blocks a sample is made of.\n\n'
                               + `VE — blocks 3+19. The lambda trim is the input. ${LOG_PROFILES.VE.produces}.\n`
-                              + `EGT — block 3 only. rf_korr is (rf/100)/rf_soll and every term is in block 3, so the 90-byte trim block is 113ms per sample spent on four unused bytes. ${LOG_PROFILES.EGT.produces}.\n`
                               + `INERTIA — block 83 alone. ${LOG_PROFILES.INERTIA.produces}.\n\n`
-                              + 'The channels are the enforcement: an EGT log has no la_f_regler, so no VE map can come out of it.'}
+                              + 'EGT (block 3 only) is retired. It was more than twice as fast, but deriving the correction '
+                              + 'table needs the lambda trim from block 19 — k_applied says what the DME did, only STFT says '
+                              + 'whether it was right — so that profile could only ever produce a drive you had to repeat.'}
                           >
                             RUN
                             <select
@@ -3416,11 +3444,18 @@ The TIMING button still has the full record; save it before running another oper
                               }}
                               className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
                             >
-                              {(Object.keys(LOG_PROFILES) as ProcessId[]).map(id => (
-                                <option key={id} value={id}>
-                                  {LOG_PROFILES[id].label} ~{expectedHz(LOG_PROFILES[id].blocks).toFixed(1)}Hz
-                                </option>
-                              ))}
+                              {/* Runnable profiles only, plus whatever this session already is —
+                                  a retired option left in the menu is a trap with a label on it,
+                                  but silently rewriting a reopened session's process would be
+                                  worse. */}
+                              {(Object.keys(LOG_PROFILES) as ProcessId[])
+                                .filter(id => LOG_PROFILES[id].runnable || id === logProcess)
+                                .map(id => (
+                                  <option key={id} value={id}>
+                                    {LOG_PROFILES[id].label} ~{expectedHz(LOG_PROFILES[id].blocks).toFixed(1)}Hz
+                                    {LOG_PROFILES[id].runnable ? '' : ' (retired)'}
+                                  </option>
+                                ))}
                             </select>
                           </label>
                         )}

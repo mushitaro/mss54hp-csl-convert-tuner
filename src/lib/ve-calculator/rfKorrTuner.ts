@@ -338,19 +338,43 @@ function corners(
     return out;
 }
 
-export function tuneRfKorrTable(
-    currentMap: VEMap,
+/** Everything one accepted sample contributes, computed once. */
+export interface RfKorrPrepared {
+    rpm: number;
+    q: number;                                   // k_applied x STFT
+    delta: number;
+    veCorners: Array<{ r: number; c: number; w: number }>;
+    /** Index of the VE cell this sample sits closest to, used only to count how many distinct
+     *  cells agreed on a grid entry. */
+    veKey: number;
+    isAnchor: boolean;
+}
+
+/**
+ * Which samples of a log can contribute to the correction table, and why the rest cannot.
+ *
+ * Split out of `tuneRfKorrTable` so a run can show this WHILE IT IS HAPPENING, by calling the same
+ * function the final verdict calls. That is the whole point and it is not tidying: two runs have now
+ * been driven to completion and thrown away, and in both cases the number that would have saved them
+ * — anchors, zero — existed only after the drive was over. The inertia side already learned this
+ * (see lib/inertia/liveCoverage.ts); this is the same lesson on the side that needed it more.
+ *
+ * A second implementation would drift, and the drift would be invisible until someone had already
+ * driven. So there is one implementation, and the live display and the table are both downstream of
+ * it.
+ *
+ * Cheap enough to call on a throttle: O(n) over the log, n a few thousand, no allocation per cell.
+ * It does NOT build the table — that stays in `tuneRfKorrTable`, because a table that changed
+ * mid-run would feed back into the VE binning and make the grid a mixture of two calibrations.
+ */
+export function rfKorrCensus(
     annotatedLog: LogDataPoint[],
     egt: EgtTables,
     veAxes: { rpm: number[]; load: number[] },
     opts: Partial<RfKorrTuneOptions> = {},
-): RfKorrTuneResult | null {
+): { report: RfKorrTuneReport; prepared: RfKorrPrepared[] } {
     const o: RfKorrTuneOptions = { ...RF_KORR_TUNE_DEFAULTS, ...opts };
-
-    const rpmAxis = egt.rfKorr.rpm;
-    const deltaAxis = egt.rfKorr.delta;
-    const rows = deltaAxis.length, cols = rpmAxis.length;
-    const veRows = veAxes.load.length, veCols = veAxes.rpm.length;
+    const veCols = veAxes.rpm.length;
 
     const report: RfKorrTuneReport = {
         samplesTotal: annotatedLog.length,
@@ -394,17 +418,7 @@ export function tuneRfKorrTable(
     // Held rather than recomputed because pass 2 needs the same Δ, the same q and the same VE
     // corners pass 1 used. Deriving them twice is how the anchor and the ratio end up disagreeing
     // about which cell a sample belongs to.
-    interface Prepared {
-        rpm: number;
-        q: number;                                   // k_applied x STFT
-        delta: number;
-        veCorners: Array<{ r: number; c: number; w: number }>;
-        /** Index of the VE cell this sample sits closest to, used only to count how many distinct
-         *  cells agreed on a grid entry. */
-        veKey: number;
-        isAnchor: boolean;
-    }
-    const prepared: Prepared[] = [];
+    const prepared: RfKorrPrepared[] = [];
 
     for (let i = 0; i < annotatedLog.length; i++) {
         const p = annotatedLog[i];
@@ -489,13 +503,30 @@ export function tuneRfKorrTable(
         });
     }
 
+    return { report, prepared };
+}
+
+export function tuneRfKorrTable(
+    currentMap: VEMap,
+    annotatedLog: LogDataPoint[],
+    egt: EgtTables,
+    veAxes: { rpm: number[]; load: number[] },
+    opts: Partial<RfKorrTuneOptions> = {},
+): RfKorrTuneResult | null {
+    const o: RfKorrTuneOptions = { ...RF_KORR_TUNE_DEFAULTS, ...opts };
+
+    const rpmAxis = egt.rfKorr.rpm;
+    const deltaAxis = egt.rfKorr.delta;
+    const rows = deltaAxis.length, cols = rpmAxis.length;
+    const veRows = veAxes.load.length, veCols = veAxes.rpm.length;
+
+    const { report, prepared } = rfKorrCensus(annotatedLog, egt, veAxes, o);
+
     // Both are "this log cannot answer the question", and both return nothing rather than something
     // weak: the caller shows a table when it gets one, and a table is a thing that gets flashed.
     //
-    // `trimMissing` is the EGT profile's own consequence. It reads block 3 alone for the rate, which
-    // is right for MEASURING rf_korr — `(rf/100) / rf_soll` needs nothing else — but deriving what
-    // the table SHOULD hold is a different calculation, and that one needs the closed loop's
-    // residual. Until this returned null, an EGT log produced a table anyway.
+    // The census above is still returned to a live caller in both cases — refusing to build a table
+    // is not a reason to refuse to say why.
     if (report.sensorMissing || report.trimMissing) return null;
 
     // --- Pass 1: the anchors, per VE cell ------------------------------------------------------

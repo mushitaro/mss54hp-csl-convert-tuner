@@ -45,6 +45,19 @@ console.log('\n[the rate a profile can expect, from the blocks it reads]');
     check('an unknown selection contributes nothing', expectedHz([3, 999]) === expectedHz([3]));
 }
 
+console.log('\n[EGT is retired, and retired means unstartable rather than deleted]');
+{
+    check('VE can be run', LOG_PROFILES.VE.runnable);
+    check('INERTIA can be run', LOG_PROFILES.INERTIA.runnable);
+    // The whole point. Block 3 carries no la_f_regler, so `A(d)/A(0) = k_applied x STFT(d)/STFT(0)`
+    // has no STFT term and the profile can only produce a drive that has to be driven again. It
+    // did exactly that once (#903), which is why this is a hard flag and not a note in a tooltip.
+    check('EGT cannot be run', !LOG_PROFILES.EGT.runnable);
+    // Kept in the type on purpose: sessions recorded before it was retired still name it, and a log
+    // with rf but no trim is still honestly DESCRIBED by it even though it cannot be started.
+    check('EGT still names what an rf-only log is', processesSupportedBy(false, true).join() === 'EGT');
+}
+
 console.log('\n[preflight names what is missing, and nothing else]');
 {
     const none = { patched: false, tankVentShut: false };
