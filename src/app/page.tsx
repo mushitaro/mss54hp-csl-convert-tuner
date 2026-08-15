@@ -3033,6 +3033,7 @@ const WOT_CRITERION =
                   <InertiaWorkflow
                     startRun={startInertiaRunWithDiagnostics}
                     stopRun={dmeLink.stopTuning}
+                    probeRam={dmeLink.probeRam}
                     baseImage={binaryFileState.binaryBuffer}
                     /**
                      * An inertia run is research in its own session — the samples used to live in a
@@ -3043,8 +3044,8 @@ const WOT_CRITERION =
                      * sha256 means the list never offers FINAL, Finalize or From TUNED for it, which
                      * is right and needs no special case anywhere.
                      *
-                     * EGAS samples are not LogDataPoints and deliberately cannot be — see
-                     * EgasMeasurement. They are mapped onto the log record's shape here, at the one
+                     * Inertia samples are not LogDataPoints and deliberately cannot be — see
+                     * InertiaSample. They are mapped onto the log record's shape here, at the one
                      * boundary that knows both, keeping `time` and the channels the estimator reads.
                      */
                     onSaveRun={(samples) => {
@@ -3054,20 +3055,22 @@ const WOT_CRITERION =
                         process: 'INERTIA',
                         // The projection stays, because the log table and the CSV export read it.
                         // What it must never be is the ONLY copy: it keeps `time` and engine speed
-                        // and drops the torque and the gradient — the two quantities the whole
-                        // estimate is a regression between — along with every admission gate. A run
-                        // stored only like this cannot be re-analysed, which cost a real drive.
+                        // and drops the torque — one of the two quantities the whole estimate is a
+                        // regression between. A run stored only like this cannot be re-analysed,
+                        // which cost a real drive.
                         log: samples.map(s => ({
                           time: s.time,
-                          rpm: s.n40 ?? 0,
+                          rpm: s.rpm ?? 0,
                           rawLoad: s.rf ?? 0,
+                          coolantTemp: s.coolantTemp ?? undefined,
                           wdk1: s.wdk1 ?? undefined,
                           rf: s.rf ?? undefined,
                         })),
-                        // The samples as the DME sent them. Nulls preserved: `gang: null` is "the
-                        // DME did not say" and `gang: 0` is "neutral", and the first must never
-                        // become the second in a measurement whose first precondition is neutral.
-                        egas: samples,
+                        // The samples as the DME sent them. Nulls preserved: `mdIndNe: null` is "the
+                        // RAM read came back short" and `mdIndNe: 0` is "overrun, no combustion
+                        // torque", and the first must never become the second — zero torque is the
+                        // anchor point of every regression line in the run.
+                        inertia: samples,
                       }).catch(() => { /* the estimate is on screen either way */ });
                     }}
                   />
@@ -3580,13 +3583,29 @@ The TIMING button still has the full record; save it before running another oper
                       from the first frame is the same rule the sub-action row already follows. */}
                   <div className={`justify-self-end flex flex-col items-end gap-[18px] mr-3 shrink-0 ${patchStatus ? '' : 'invisible'}`}>
 
-                    {/* ROW 1: PATCH TOGGLE (Close to Ring) */}
+                    {/* ROW 1: PATCH TOGGLE (Close to Ring)
+                        One switch, two patches. It arms TANK VENT with it — see that row, which is
+                        now a readout of this decision rather than a second decision. */}
                     <div className="h-7 flex items-center gap-3 mr-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
                       <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyPatch ? 'text-blue-400' : 'text-slate-500'}`}>
                         PATCH
                       </span>
                       <label className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group">
-                        <input type="checkbox" className="sr-only peer" checked={applyPatch} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyPatch(e.target.checked)} />
+                        <input type="checkbox" className="sr-only peer" checked={applyPatch} disabled={dmeLink.state === 'writing'} onChange={(e) => {
+                          // Both, always. Since the EGT profile was retired the VE run is the only
+                          // datalog there is, and it wants both: k_rf_cfg so the DME stops hiding the
+                          // error the trim is supposed to reveal, and K_TE_TVTE_GA so the trim is not
+                          // partly compensating for purged vapour. Two switches that are only ever
+                          // correct in the same position are one switch wearing a disguise.
+                          //
+                          // The FLAGS stay separate, and that is not an oversight. isRoadState checks
+                          // all three independently, settingsDrift reports them by name, and the two
+                          // do not fail the same way if they are left on: PATCH costs driveability
+                          // and adaptation, TANK VENT vents fuel vapour to atmosphere. One control,
+                          // two facts, two warnings.
+                          setApplyPatch(e.target.checked);
+                          setApplyTankVentDisable(e.target.checked);
+                        }} />
                         <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-900 peer-checked:after:bg-blue-400"></div>
                       </label>
                     </div>
@@ -3679,14 +3698,18 @@ The TIMING button still has the full record; save it before running another oper
                       </span>
                     </div>
 
-                    {/* ROW 1b: TANK VENT — the emissions one, and the only switch here that leaves
-                        the car in a state it must not be driven in long-term.
+                    {/* ROW 1b: TANK VENT — armed by PATCH, shown here.
 
-                        Beside WOT TH because they are the same shape of thing: both are calibration
-                        changes that exist to make a log measurable and both have to be put back.
-                        Given its own label rather than being folded into the patch pair, because
-                        those two are reversible from the driver's seat and this one stops the
-                        charcoal canister being purged.
+                        It used to be its own toggle, on the reasoning that the other two are
+                        reversible from the driver's seat and this one stops the charcoal canister
+                        being purged. That is still true of the CONSEQUENCE, and it is why the flag
+                        and the warnings stay separate — but it was never true of the DECISION. Once
+                        the EGT profile was retired the VE run became the only datalog, and it wants
+                        both patches every time; a switch that is only ever correct in one position
+                        is not a choice, it is a step you can forget.
+
+                        So: still red, still named, still counted separately by isRoadState and
+                        settingsDrift and the filename's _TEVOFF. Just not pressable.
 
                         RED when armed, not amber. In this palette `amber-*` is aliased to the
                         M-violet ramp (text-amber-400 resolves to #B9A6EE), and violet already means
@@ -3694,16 +3717,20 @@ The TIMING button still has the full record; save it before running another oper
                         "tuning option", which this is not: it is the one switch on the hub that
                         leaves an emissions device off. Red is the only honest step here. */}
                     <div className="h-7 flex items-center gap-3 ml-1 opacity-90 hover:opacity-100 transition-opacity shrink-0">
-                      <label
-                        className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center cursor-pointer group"
-                        title={'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
+                      <div
+                        className="py-3 -my-3 px-2 -mx-2 relative inline-flex items-center group"
+                        title={'Armed by PATCH — this row reports it, it is not a second decision.\n\n'
+                          + 'Holds the tank-vent (evaporative purge) valve shut, by writing K_TE_TVTE_GA = 0 at slave 0xBF1 (stock 0x80).\n\n'
                           + 'Why: purged vapour is fuel the DME did not inject, so the lambda controller trims for it — and that trim is the single input this app derives the VE correction from. Measured on this car (Session #902): the valve was open for 82.8% of a 657s drive, at up to 99.9% duty. The stock map asks 94-99.6% above 2500 rpm at mid load, which is exactly where a tune is worth having.\n\n'
                           + 'Confirmed at instruction level: tetv_calc (slave 0x26ED6) is the only reader of this byte and the only writer of a non-zero duty, and zero forces exactly shut rather than a minimum.\n\n'
                           + 'TUNING ONLY. The canister stops being purged and will saturate; DTC 24 is the code for a valve that will not open. Turn this back off and write once more before driving the tune. The filename carries _TEVOFF while it is armed.'}
                       >
-                        <input type="checkbox" className="sr-only peer" checked={applyTankVentDisable} disabled={dmeLink.state === 'writing'} onChange={(e) => setApplyTankVentDisable(e.target.checked)} />
-                        <div className="relative w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-900 peer-checked:after:bg-red-400"></div>
-                      </label>
+                        {/* A lamp, not a switch. Same footprint as the toggle it replaced so the
+                            wing's rows still line up, but nothing to press: PATCH decides this. */}
+                        <div className={`w-9 h-5 rounded-full flex items-center transition-colors ${applyTankVentDisable ? 'bg-red-900/60 justify-end' : 'bg-slate-800 justify-start'}`}>
+                          <div className={`w-4 h-4 rounded-full border transition-colors mx-[2px] ${applyTankVentDisable ? 'bg-red-400 border-red-300' : 'bg-slate-600 border-slate-500'}`} />
+                        </div>
+                      </div>
                       <span className={`text-[10px] font-bold tracking-widest uppercase transition-colors whitespace-nowrap ${applyTankVentDisable ? 'text-red-400' : 'text-slate-500'}`}>
                         TANK VENT
                       </span>
