@@ -67,7 +67,8 @@ const JA = {
     noValidCsvData: 'CSVから有効なデータを読み取れませんでした。',
 
     saved:
-        'セッションを保存しました。\n\n' +
+        'セッションを保存しました。DRAFT のままです — フィルターを変えて再計算し、保存し直せます。\n' +
+        '読み取り専用になるのは ECU に WRITE したときだけです。\n\n' +
         'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
         'キャンセル = ワークスペースを閉じてセッション一覧に戻る',
 
@@ -290,7 +291,8 @@ const EN: NativeDialogText = {
     noValidCsvData: 'No valid data found in CSV.',
 
     saved:
-        'Session saved.\n\n' +
+        'Session saved. It stays a DRAFT — change the filters, re-derive and save again.\n' +
+        'Only writing to the ECU makes a session read-only.\n\n' +
         'OK     = keep it loaded (you can WRITE it now)\n' +
         'Cancel = close the workspace and return to the session list',
 

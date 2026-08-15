@@ -68,8 +68,20 @@ const PAD_CELL = 4; // p-1 on the data cells
 // Defaults, overridable per session — see LogFilterConfig.coverageThin. Named constants
 // rather than inline numbers because InertiaPanel shows the same bands over a different
 // pipeline and the two must not drift apart.
-export const COVERAGE_THIN_DEFAULT = 30;   // below this: some data, not enough to trust
-export const COVERAGE_OK_DEFAULT = 100;    // at or above this: enough samples to act on
+//
+// The numbers come from a measurement, not from taste. Session #902 — 657 s of driving,
+// 1600 raw samples, 751 surviving the filters at 2.44 Hz — put 155 of the 480 cells above
+// zero and produced this tail:
+//
+//     >= 10: 82 cells    >= 50: 16 cells    >= 150: 0 cells
+//     >= 30: 33 cells    >= 100: 4 cells    (busiest cell: 130)
+//
+// So the old 10/30 pair painted a third of the map "covered" after one drive, which is the
+// flattery karter16 was pointing at. 50/200 says what he meant instead: one good run gets a
+// handful of cells to the middle band, and the top band is a multi-run target. Reachable —
+// 200 samples is ~82 s of valid time in one cell at this rate — but not by accident.
+export const COVERAGE_THIN_DEFAULT = 50;   // below this: some data, not enough to trust
+export const COVERAGE_OK_DEFAULT = 200;    // at or above this: enough samples to act on
 
 // One ice blue (#8FD8F2) over the table's slate-900, separated by lightness only —
 // the palette rule in globals.css. Kept inside the original 0–0.30 alpha range: this

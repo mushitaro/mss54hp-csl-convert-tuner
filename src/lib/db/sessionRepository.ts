@@ -127,11 +127,18 @@ export interface SaveTuneInput {
 
 /** Records the tuned output of a draft: the bytes, the map, and the settings that produced them.
  *
- *  This is also the one moment a session stops being a workspace. Producing a TUNED is what ends it:
- *  the record now describes a specific set of bytes, and tuning on top of them would silently make it
- *  describe something else. Continue with "Use as base -> TUNED", which starts a new branch.
- *  (Status used to be a side effect of creating the *next* session, which meant a saved-but-unflashed
- *  session stayed an editable draft forever.) */
+ *  Deliberately does NOT change `status`. Saving is not committing: nothing has left the machine, so
+ *  the honest thing is to overwrite the stored TUNED next time rather than to freeze the workspace.
+ *  This used to archive, on the reasoning that "the record now describes a specific set of bytes" —
+ *  true, but the bytes are re-derivable and the record is the derivation, so a re-save simply
+ *  re-describes them. What it cost was the case that actually happens: SAVE is the only way to
+ *  persist a data log (a live run exists in memory until then), so saving a run to keep it locked
+ *  RAW FILTER and every other setting the log would be re-derived through — the session was read-only
+ *  before anyone had looked at the map it produced.
+ *
+ *  A flash is what ends a session, and only a flash: see handleDmeWrite, which calls this and then
+ *  archive(). At that point the bytes are in an ECU, re-deriving would drift the record away from
+ *  them, and "Use as base -> TUNED" is the way to continue. */
 export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
     const sha256 = await sha256Hex(input.tunedBinaryBuffer);
     return withDb(async db => {
@@ -143,7 +150,6 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
         const hasLog = !!input.log && input.log.length > 0;
         const updated: TuningSession = {
             ...existing,
-            status: 'archived',
             binaryFileName: input.binaryFileName,
             tunedSize: input.tunedBinaryBuffer.byteLength,
             sha256,

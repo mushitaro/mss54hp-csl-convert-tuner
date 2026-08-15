@@ -574,6 +574,19 @@ export default function Home() {
     comparison.applyDefaultsAfterCalculation();
   };
 
+  /**
+   * Are the loaded bytes a session's stored TUNED, armed for the patch-off flash?
+   *
+   * A fact that cannot be derived, which is why it is recorded. handleFinalizeSession loads a tune
+   * that is already inside the bytes, so it produces no `newMap` — and handleDmeWrite reads the
+   * absence of a map as "these bytes carry only patches" and files the flash as PATCH ONLY. That is
+   * wrong for the single most important flash a session ever does: the finalize IS the tune reaching
+   * the road, and a history that calls it a patch write cannot tell it apart from arming a bare BASE.
+   *
+   * Cleared by resetDerived, i.e. by every path that swaps the working binary.
+   */
+  const finalizeArmedRef = useRef(false);
+
   // Wipes everything derived from the previously-loaded binary. Mandatory on every path that swaps
   // the BASE: newMap is otherwise only reset by handleClearLog, so a stale tune from the last
   // session would be grafted onto the new binary by buildPatchedBuffer.
@@ -582,6 +595,7 @@ export default function Home() {
     veCalc.reset();
     logFileState.clear();
     liveSamplesRef.current = [];
+    finalizeArmedRef.current = false;
     // The workspace this move was armed for is going away, so the move has to go with it — otherwise
     // it fires later against whatever gets loaded next.
     pendingTabRef.current = null;
@@ -865,9 +879,16 @@ export default function Home() {
       session.binaryFileName ?? 'tuned.bin',
       // Explicit, not detected: detection would read the patch back OFF the bytes and re-arm the very
       // toggles this is here to clear, leaving nothing for the hub to notice.
-      { applyPatch: false, applyWotDisable: false, writeWarmup: false, writeWot: false },
+      //
+      // TANK VENT is in the list because finalising is where the promise to put the evaporative
+      // system back gets kept. Leaving it out meant a tune logged with the purge valve held shut
+      // went to the road that way, and the FINAL badge said road state.
+      { applyPatch: false, applyWotDisable: false, applyTankVentDisable: false, writeWarmup: false, writeWot: false },
     );
     if (!map) return;
+    // After loadFromBuffer, and after the resetDerived above that clears it. These bytes are the
+    // session's tune, so the flash they are heading for has to be recorded as a tune.
+    finalizeArmedRef.current = true;
     // CURRENT MAP, not TUNED MAP: nothing was derived, so `newMap` is null and the TUNED MAP tab is
     // disabled. The map to check before flashing is the one inside the bytes just loaded, and that
     // is what CURRENT MAP shows.
@@ -1004,16 +1025,13 @@ export default function Home() {
     resetDerived();
     setActiveSessionId(session.id);
 
-    if (session.status === 'draft') {
-      // Continue where it left off: the BASE is the working map.
-      const map = await binaryFileState.loadFromBuffer(bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin');
-      if (!map) return;
-      goToTab('current');
-      return;
-    }
-
-    // Archived: rebuild the tune FROM THE BASE. Re-running the log against the stored tuned map
-    // (what the old code did) would apply the same correction a second time — V0*C^2.
+    // One path for both, which it did not used to be: the draft branch loaded the BASE and stopped,
+    // because a draft could not have a stored log — saving archived it. Saving no longer does, so a
+    // draft is now the ordinary home of a saved run, and stopping here would hand back a session
+    // whose log and filters are in the database and not on the screen.
+    //
+    // Rebuild the tune FROM THE BASE. Re-running the log against the stored tuned map (what the old
+    // code did) would apply the same correction a second time — V0*C^2.
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
       session.baseFileName ?? 'base.bin',
@@ -1058,7 +1076,11 @@ export default function Home() {
 
     // WRITE only appears because the rebuild produced a tune; buildPatchedBuffer(null) does not
     // no-op — it returns the BASE — so an unreconstructed session must not offer it.
-    if (!rebuilt) alert(dialogText().notReconstructed);
+    //
+    // Silent for a draft that has no log yet: that is "continue where I left off", the most ordinary
+    // thing in the app, and there is nothing to reconstruct. A session that HAS a log and could not
+    // replay it gets the warning whichever status it holds.
+    if (!rebuilt && (session.hasLog || session.status === 'archived')) alert(dialogText().notReconstructed);
     goToTab('current');
   };
 
@@ -1239,16 +1261,13 @@ export default function Home() {
     void discardLiveRun().catch(() => { /* a stale record only costs one declined offer */ });
     liveRunIdRef.current = null;
 
-    // saveTune archives the session — the record now describes a specific set of bytes. But the
-    // workspace does not know that: newMap is still loaded, so idleAction stays 'write' and the hub
-    // keeps offering WRITE against a session the DB considers closed. That is the "button says the
-    // wrong thing" class idleAction was written to eliminate, arriving through the one door it did
-    // not cover, and it is the state the user described as frightening.
+    // The session stays a DRAFT — saveTune no longer archives, so the log, the filters and the map
+    // are all still editable and a re-save just overwrites. Keeping it loaded is therefore the
+    // ordinary answer now rather than the risky one: WRITE still refers to a session the DB agrees
+    // is open, and adjusting RAW FILTER and saving again is a supported move, not a leak.
     //
-    // Ask rather than decide, at the one moment the answer is known — the same idiom handleDmeWrite
-    // already uses for the re-tune question. Keeping it loaded is a legitimate answer: save-then-flash
-    // is a real sequence, and forcing a reopen would tax it for no safety gain while the user is
-    // standing right there.
+    // The question is still asked, because the other answer is also real: a run that is finished
+    // with wants to go back to the list, and this is the one moment that is known.
     const keepLoaded = confirm(dialogText().saved);
     if (keepLoaded) return;
 
@@ -1623,13 +1642,26 @@ export default function Home() {
       // session becomes and where you go next. The key-cycle steps themselves live in dialog-text,
       // quoted into both messages there, so the two cannot drift apart or out of language.
       if (!newMap) {
-        // Patch-only flash. Deliberately NOT saveSessionTune and NOT archive:
+        // No derived map. Two different flashes arrive here and they are NOT the same event:
+        //
+        //   - arming a bare BASE for the log run (WRITE PATCH-ON), which carries no tune, and
+        //   - finalising a session (WRITE PATCH-OFF), where the tune is already inside the bytes.
+        //
+        // `finalizeArmedRef` is the only thing that separates them, because the absence of newMap
+        // does not. Filing the second as `tuned: false` made the FINAL badge unable to mean what it
+        // says, and made a bare-BASE patch-off write claim a tune it never had.
+        //
+        // Deliberately NOT saveSessionTune and NOT archive either way:
         //  - saveSessionTune would record a TUNED whose map is just the BASE's, which is precisely
         //    the "BASE dressed as a TUNED" that handleSaveSession's doc describes removing.
         //  - archive would end the session before it has tuned anything — !isArchived is what makes
         //    the hub offer START TUNE, so archiving here would strand the whole point of the step.
+        //    (A finalize is already archived; archiving again would be a no-op.)
         // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
-        if (target) await sessionDb.recordFlash(target.id, { at: flashedAt, sha256, settings: flashedSettings, tuned: false, verifyMode: verification.mode });
+        if (target) await sessionDb.recordFlash(target.id, {
+          at: flashedAt, sha256, settings: flashedSettings,
+          tuned: finalizeArmedRef.current, verifyMode: verification.mode,
+        });
 
         alert(dialogText().patchWriteDone(verification));
         await dmeLink.disconnect();
@@ -1964,7 +1996,14 @@ export default function Home() {
    *  use the same pair — testing mapOff alone would call a half-patched BIN patched. */
   const bytesPatched = !!patchStatus && patchStatus.mapOff && patchStatus.tempLimit;
   const bytesWotDisabled = !!patchStatus && patchStatus.wotDisabled;
-  const patchDrift = !!patchStatus && (bytesPatched !== applyPatch || bytesWotDisabled !== applyWotDisable);
+  const bytesTankVentShut = !!patchStatus && patchStatus.tankVentDisabled;
+  // All three, because all three are things that have to come back OFF before the car is handed back
+  // to the road. TANK VENT was missing here while being listed in the write confirm and the flash
+  // record, so a tune logged with the purge valve shut had no route to a patch-off write at all: no
+  // drift, no WRITE PATCH-OFF, nothing to finalize with.
+  const patchDrift = !!patchStatus && (bytesPatched !== applyPatch
+    || bytesWotDisabled !== applyWotDisable
+    || bytesTankVentShut !== applyTankVentDisable);
 
   /** A draft is a workspace, so drift in either direction there is you arming something. An archived
    *  session is a record, and the only legitimate reason to send it to the ECU again is finalising —
@@ -1972,7 +2011,7 @@ export default function Home() {
    *  replayed would raise drift by accident (its stored settings say PATCH ON, its BASE bytes are
    *  unpatched) and the hub would offer a patch write in place of READ, which is the one thing that
    *  state actually needs. */
-  const patchWriteAllowed = !isArchived || (!applyPatch && !applyWotDisable);
+  const patchWriteAllowed = !isArchived || (!applyPatch && !applyWotDisable && !applyTankVentDisable);
 
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
    *  render, never stored.
@@ -1996,7 +2035,7 @@ export default function Home() {
 
   // Names the bytes by what they will carry once written, not by what is in the ECU now — the label
   // is a promise about the file being sent, the same rule DOWNLOAD PATCH-ON follows.
-  const writePatchLabel = (applyPatch || applyWotDisable) ? 'WRITE PATCH-ON' : 'WRITE PATCH-OFF';
+  const writePatchLabel = (applyPatch || applyWotDisable || applyTankVentDisable) ? 'WRITE PATCH-ON' : 'WRITE PATCH-OFF';
 
   const dmeButtonConfig = (() => {
     switch (dmeLink.state) {

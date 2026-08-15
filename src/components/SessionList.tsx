@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Trash2, Database, Plus, Upload, Cable, GitBranch, Check, Pencil, Play, Eye, Download, UploadCloud } from 'lucide-react';
 import { TuningSession, FlashRecord } from '@/lib/db/schema';
+import { isRoadState, isTuneOnTheRoad } from '@/lib/db/flashState';
 import { DropZone } from '@/components/DropZone';
 import { dialogText } from '@/lib/dialog-text';
 
@@ -97,8 +98,9 @@ function describeFlashHistory(history: FlashRecord[]): string {
         const patches = [
             f.settings.applyPatch ? 'PATCH ON' : 'PATCH OFF',
             f.settings.applyWotDisable ? 'WOT TH ON' : null,
+            f.settings.applyTankVentDisable ? 'TANK VENT SHUT' : null,
         ].filter(Boolean).join(' · ');
-        const final = !f.settings.applyPatch && !f.settings.applyWotDisable ? '  (FINAL)' : '';
+        const final = (f.tuned ?? true) && isRoadState(f) ? '  (FINAL)' : '';   // same rule as the badge
         return `${i + 1}. ${formatDate(f.at)}  ${kind.padEnd(10)} ${patches}${final}`;
     });
     return `Written to the DME ${history.length} time${history.length > 1 ? 's' : ''}:\n${lines.join('\n')}`;
@@ -284,16 +286,11 @@ export const SessionList: React.FC<Props> = ({
                             // same start is exactly what it is good for.
                             const canFromTuned = !!session.sha256;
                             const canFromBase = !!session.baseOrigin;
-                            // What is in the ECU *now* — the LAST flash, not any of them. Re-flashing
-                            // patch-on afterwards must take the badge away again, which is the whole
-                            // reason this reads the tail rather than searching the history.
-                            // Both patches, matching the definition the PATCH-ON export uses: WOT TH
-                            // rewrites DME logic just as PATCH does, so a tune still carrying it has
-                            // not been handed back to the road yet.
-                            const lastFlash = session.flashHistory.at(-1);
-                            const isFinal = !!lastFlash && !lastFlash.settings.applyPatch && !lastFlash.settings.applyWotDisable;
+                            // What is in the ECU *now* — see flashState.ts, which owns the rule and
+                            // is where the harness asks it questions.
+                            const isFinal = isTuneOnTheRoad(session);
                             // Nothing to finalize without stored TUNED bytes, and nothing to finalize
-                            // if the patches are already off in the ECU.
+                            // if that tune is already in the ECU with the patches off.
                             const canFinalize = canFromTuned && !isFinal;
                             return (
                                 <tr key={session.id} className="text-xs border-b border-slate-900 hover:bg-slate-900/40 transition-colors group align-top">
@@ -316,15 +313,17 @@ export const SessionList: React.FC<Props> = ({
                                                         DRAFT
                                                     </span>
                                                 )}
-                                                {/* Mutually exclusive with DRAFT by construction — a flash archives the
-                                                    session, so nothing that has reached the ECU is still a draft. They can
-                                                    share a slot without ever colliding.
+                                                {/* Mutually exclusive with DRAFT by construction, still: FINAL needs a flash
+                                                    that carried the tune, and both routes to one (the tuned branch, and a
+                                                    finalize on an already-archived session) end with the session archived.
+                                                    Saving no longer archives, so a DRAFT can now hold a stored TUNED — but
+                                                    not a flashed one. They share a slot without ever colliding.
                                                     emerald is the OK/verified role in this palette, which is what this says:
                                                     the tune is on the road with the patches off. */}
                                                 {isFinal && (
                                                     <span
                                                         className="text-[8px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-1 py-px shrink-0"
-                                                        title="Last flashed with PATCH and WOT TH off — this tune is in the ECU in its road state."
+                                                        title="This session's tune was flashed with PATCH, WOT TH and TANK VENT all off — it is in the ECU in its road state."
                                                     >
                                                         FINAL
                                                     </span>

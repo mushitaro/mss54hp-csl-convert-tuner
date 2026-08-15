@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Filter } from 'lucide-react';
 import { LogFilterConfig, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
+import { COVERAGE_THIN_DEFAULT, COVERAGE_OK_DEFAULT } from './MapEditor';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 /**
@@ -13,7 +14,7 @@ import { useDialogLang } from '@/hooks/useDialogLang';
 const TEXT = {
     ja: {
         settings: 'フィルター設定',
-        locked: '固定 — 保存済みチューンはこの設定で作られています。別のフィルターで調整するには新しいセッションを開始してください。',
+        locked: '固定 — このセッションは ECU に書き込み済みで、その ECU に入っているバイト列はこの設定から作られました。ここを動かすと記録が実物と食い違います。別のフィルターで調整するには「Use as base」で新しいセッションを開始してください。（保存しただけなら固定されません。）',
         idleHint: 'RPMが下限未満 かつ RO≤1.0 の点を除外',
         tpsHint: 'スロットル開度の変化量(絶対値)',
         immediate: '変更は即時反映されます',
@@ -27,11 +28,11 @@ const TEXT = {
         covRf: 'RF KORR セル採用',
         covRfHint: '補正テーブル側の同じ門番。VE マップ 480 セルに対しこちらは 72 セルなので、1 セルが結果に効く度合いが桁で違います。だから別の数字。',
         covBands: '表示バンド（薄い / 十分）',
-        covBandsHint: 'ヒートマップの色分けだけを決めます。計算のゲートより高く置いてあります — ゲートは「動かしてよいか」、バンドは「もう走らなくてよいか」で、後者のほうが高い基準だからです。',
+        covBandsHint: 'ヒートマップの色分けだけを決めます。計算のゲートより高く置いてあります — ゲートは「動かしてよいか」、バンドは「もう走らなくてよいか」で、後者のほうが高い基準だからです。既定 50 / 200 は実測から: セッション #902（657 秒・有効 751 点・2.44 Hz）で 480 セル中 155 セルに点が入り、最も濃いセルで 130 点、100 点以上はわずか 4 セルでした。「十分」は 1 回の走行では届かず、数回のキャンペーンで届く水準に置いてあります。',
     },
     en: {
         settings: 'Filter Settings',
-        locked: 'Locked — these are the settings this saved tune was built with. Start a new session to tune with different filters.',
+        locked: 'Locked — this session has been written to the ECU, and the bytes in it were built from these settings. Changing them here would make the record disagree with the car. Use as base to start a new session and tune with different filters. (Saving alone does not lock anything.)',
         idleHint: 'Exclude if RPM < Limit & RO≤1.0',
         tpsHint: 'Absolute Change in Opening %',
         immediate: 'Adjustments apply immediately',
@@ -45,15 +46,19 @@ const TEXT = {
         covRf: 'RF KORR cell',
         covRfHint: 'The same gate on the correction table. It has 72 cells against the 480 of the VE map, so one of its cells carries far more of the result — which is why it gets its own numbers.',
         covBands: 'Heatmap bands (thin / covered)',
-        covBandsHint: 'Display only. Deliberately above the gate: the gate answers "may this cell move", the bands answer "can I stop driving this area", and the second is a higher bar.',
+        covBandsHint: 'Display only. Deliberately above the gate: the gate answers "may this cell move", the bands answer "can I stop driving this area", and the second is a higher bar. The 50/200 defaults are measured, not chosen: session #902 (657 s, 751 valid samples at 2.44 Hz) put samples in 155 of 480 cells, peaked at 130 in the busiest, and cleared 100 in only four. "Covered" is therefore a multi-run target rather than something one drive reaches.',
     },
 };
 
 interface Props {
     config: LogFilterConfig;
     onConfigChange: (newConfig: LogFilterConfig) => void;
-    /** Archived sessions show the settings their tune was built with, but must not re-derive it —
-     *  changing a filter here would be tuning, which only a draft session may do. */
+    /** Archived — i.e. FLASHED — sessions show the settings their tune was built with, but must not
+     *  re-derive it: those bytes are in an ECU and the record has to keep describing them.
+     *
+     *  A saved-but-unflashed session is NOT archived and NOT read-only. Saving is how a live run is
+     *  persisted at all, so locking on save meant the only way to keep a drive was to give up
+     *  adjusting the filters it would be read through. */
     readOnly?: boolean;
     /** Open above the trigger instead of below it. The mobile footer sits at the bottom edge, so a
      *  popover hanging `top-10` off a control down there opens off-screen. */
@@ -313,9 +318,9 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                 />
                                 <NumberPair
                                     label={t.covBands} hint={t.covBandsHint}
-                                    a={{ value: localConfig.coverageThin ?? 30, min: 1, max: 500, step: 1, unit: 'thin',
+                                    a={{ value: localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT, min: 1, max: 1000, step: 5, unit: 'thin',
                                         onChange: v => handleChange('coverageThin', v) }}
-                                    b={{ value: localConfig.coverageOk ?? 100, min: 1, max: 1000, step: 1, unit: 'covered',
+                                    b={{ value: localConfig.coverageOk ?? COVERAGE_OK_DEFAULT, min: 1, max: 2000, step: 10, unit: 'covered',
                                         onChange: v => handleChange('coverageOk', v) }}
                                 />
                             </div>
