@@ -102,7 +102,9 @@ export const RfKorrSourceControl: React.FC<{
      * nobody has confirmed on a car.
      */
     routeGap?: number;
-}> = ({ source, onChange, hasTabg, readOnly = false, routeGap }) => {
+    /** How many samples the gap was measured over. See the note beside where it renders. */
+    routeSamples?: number;
+}> = ({ source, onChange, hasTabg, readOnly = false, routeGap, routeSamples }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
     const selected = ROUTES.find(r => r.id === source) ?? ROUTES[0];
@@ -169,6 +171,13 @@ export const RfKorrSourceControl: React.FC<{
                             <span className={gapOk ? 'text-emerald-400/80' : 'text-red-400'}>
                                 {gapOk ? t.agreeGood : t.agreeBad}
                             </span>
+                            {/* The sample count is not decoration. This is measured only where the
+                                DME's correction was actually running, and on a normal road drive
+                                that is a handful of samples out of thousands — a tight Δ over n=3
+                                is not a confirmation of anything. */}
+                            {routeSamples !== undefined && (
+                                <span className="font-mono text-slate-600">{' '}n={routeSamples}</span>
+                            )}
                         </>
                     )}
             </p>

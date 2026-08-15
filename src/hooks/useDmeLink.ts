@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
+    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
     DmeLinkError, DmeErrorKind, isServiceBlockErasedCause, ServiceBlockDump,
     WriteVerifyMode, WriteVerification,
 } from '@/lib/dme-link/types';
@@ -405,6 +405,60 @@ export function useDmeLink() {
     }, []);
 
     /**
+     * The inertia run: polls DS2 selection 83 alone until stopped.
+     *
+     * A sibling of startTuning rather than a mode of it, because the two produce different sample
+     * types and answer different questions — a VE log has no torque or gear, an inertia log has no
+     * exhaust temperature or lambda trim, and neither can be used for the other's analysis. Keeping
+     * them apart at the type level means a mismatched log is a compile error rather than a
+     * confident wrong answer downstream.
+     *
+     * Shares `pollingRef` deliberately: both drive the same transport, so they must be mutually
+     * exclusive, and one flag is the simplest thing that guarantees it. STOP stops whichever is
+     * running.
+     *
+     * The timing instrument is armed here and closed on exit, which is the first time anything has
+     * measured the datalog path on the wire — see `beginLogTiming`.
+     */
+    const startInertiaRun = useCallback((
+        onSample: (sample: EgasMeasurement) => void,
+        onEnd?: (failure: string | null) => void,
+    ) => {
+        const link = linkRef.current;
+        if (!link) { onEnd?.('Not connected to DME'); return; }
+        clearError();
+        setState('tuning');
+        pollingRef.current = true;
+        link.beginLogTiming?.();
+
+        (async () => {
+            let failure: string | null = null;
+            try {
+                while (pollingRef.current && linkRef.current) {
+                    try {
+                        const sample = await linkRef.current.pollEgasMeasurement();
+                        if (!pollingRef.current) break;
+                        onSample(sample);
+                    } catch (e) {
+                        if (!pollingRef.current) break;
+                        failure = e instanceof Error ? e.message : String(e);
+                        setError(failure);
+                        pollingRef.current = false;
+                        setState('connected');
+                        break;
+                    }
+                }
+            } finally {
+                // Closed on every exit including the failed one: a run that died part-way is the
+                // most informative timing report there is, and discarding it would lose exactly the
+                // case worth having.
+                try { linkRef.current?.endLogTiming?.(failure ?? undefined); } catch { }
+                onEnd?.(failure);
+            }
+        })();
+    }, [clearError]);
+
+    /**
      * Adaptation read and clear. Both take the link to 'resetting' for the duration.
      *
      * That state is doing real work, not decoration: exchange() has no mutex (the reference
@@ -472,6 +526,24 @@ export function useDmeLink() {
         } finally {
             setState('connected');
         }
+    }, []);
+
+    /**
+     * The two CRCs the calibration currently in the ECU stores.
+     *
+     * Throws rather than returning null, unlike readEngineRpm above, and the difference matters:
+     * that one is a precondition probe whose failure has a safe interpretation, while this one
+     * exists to decide whether a flash would destroy someone else's work. "Could not tell" must
+     * reach the caller as a failure it has to handle, not as a value it can compare — see
+     * `checkLineage`, which turns the throw into a blocking `unknown` verdict.
+     *
+     * Two four-byte reads, so no 'reading' state and no progress: it is over before a spinner
+     * would render.
+     */
+    const readDataChecksums = useCallback(async (): Promise<{ slave: number; master: number }> => {
+        const link = linkRef.current;
+        if (!link) throw new Error('Not connected to DME');
+        return link.readDataChecksums();
     }, []);
 
     /**
@@ -667,6 +739,7 @@ export function useDmeLink() {
         cancelRead,
         startTuning,
         stopTuning,
+        startInertiaRun,
         write,
         readAdaptations,
         resetAdaptations,
@@ -676,5 +749,6 @@ export function useDmeLink() {
         resetFlashCounter,
         restoreServiceBlock,
         readEngineRpm,
+        readDataChecksums,
     };
 }

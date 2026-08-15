@@ -271,18 +271,48 @@ export const Ds2AdaptationMask2 = {
 } as const;
 
 /**
- * The only clear this app performs: the adaptations a re-tune needs zeroed so the next log is
- * captured from a known base — lambda trim, knock, VANOS, and the idle/fuel demand values.
+ * What a re-tune needs zeroed so the next log is captured from a known base: lambda trim, knock, and
+ * the idle/fuel demand values.
  *
  * Deliberately NOT the reference's "Clear All" (0xF7 / 0x32), which also wipes throttle/pedal/EGAS,
  * SMG, detected-equipment and crank-wheel adaptations. Those are irrelevant to a tune and expensive
  * to lose: the CSL is SMG-II only, so clearing SMG adaptation forces a clutch re-adaptation
- * procedure. This mask is exactly the twelve values the reset dialog shows, so nothing is cleared
- * that the user wasn't shown first.
+ * procedure.
+ *
+ * **VANOS left this mask on 2026-08-15** (was 0x47). karter16, thread 242281 #161: "There's nothing
+ * in this tuning process that impacts them, and it's probably just a distraction to reset them and
+ * force the DME to re-learn them. I'd suggest dropping this and removing one more potential variable
+ * in the process." The stronger form of that argument is the reason it went: the re-learn moves cam
+ * phase, cam phase moves filling, and filling is the quantity the log exists to measure — so
+ * clearing VANOS does not merely fail to help, it perturbs the measurement. The two VANOS rows are
+ * still *read* and still shown; see adaptationBlocks.ts.
+ *
+ * Everything this clears is shown in the reset dialog first, with one exception that predates this
+ * change: IDLE_FUEL (bit 0) has no display row in either block, so four values are cleared that the
+ * dialog never lists. That is a real gap, recorded here rather than papered over — the old comment
+ * claimed this mask was "exactly the twelve values the reset dialog shows", which was never true.
  */
 export const TUNE_ADAPTATION_CLEAR = {
     mask1: Ds2AdaptationMask1.IDLE_FUEL | Ds2AdaptationMask1.KNOCK
-        | Ds2AdaptationMask1.LAMBDA | Ds2AdaptationMask1.VANOS,   // 0x47
+        | Ds2AdaptationMask1.LAMBDA,   // 0x07
+    mask2: 0,
+} as const;
+
+/**
+ * VANOS adaptation, on its own, for the one workflow that genuinely needs it gone.
+ *
+ * The max-power cam sweep drives VANOS targets over DS2 control 0x0C and requires a clean adaptation
+ * state — a learned offset shifts the actual cam position away from the commanded one, which
+ * corrupts the whole sweep (docs/ecu-logic/70-max-power-methodology.md). Until now the tune reset
+ * supplied that as a side effect; removing VANOS from it would have quietly removed a documented
+ * prerequisite.
+ *
+ * A second constant rather than a mask parameter, for the same reason clearTuneAdaptations() takes
+ * none (see DmeLink): which adaptations a tuning tool may clear is a product decision, and there are
+ * now two such decisions — not an open door.
+ */
+export const VANOS_ADAPTATION_CLEAR = {
+    mask1: Ds2AdaptationMask1.VANOS,   // 0x40
     mask2: 0,
 } as const;
 

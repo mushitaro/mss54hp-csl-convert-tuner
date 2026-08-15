@@ -66,6 +66,24 @@ export interface ProcessedLog {
     data: LogDataPoint[];
     validCount: number;
     droppedCount: number;
+
+    /**
+     * The samples the rf_korr TABLE derivation is allowed to see — a different set from `data`, on
+     * purpose.
+     *
+     * `data` is filtered for the VE map, which needs the lambda loop to have converged, so the
+     * transient test throws away everything that is still accelerating. That is correct for VE and
+     * fatal for rf_korr: the DME only applies the correction above 55-80 % filling, which on this
+     * engine only happens while the car is pulling. Measured on a real drive, the transient test
+     * removed 97 % of the samples where the DME's gate was open (100 in the raw log, 3 survived) —
+     * so the table was being derived from the one region where the correction is provably inactive.
+     *
+     * This set therefore skips the transient test and keeps everything else: the same coolant, idle
+     * and cat-protection prerequisites, and the same `correctedLoad`. Selecting more samples is not
+     * the same as trusting them — rfKorrTuner applies its own gate and settling requirements on top,
+     * and rejects far more than this hands it.
+     */
+    rfKorrData: LogDataPoint[];
 }
 
 export interface LogFilterConfig {

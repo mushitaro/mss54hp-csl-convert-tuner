@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Eraser, Loader2, AlertTriangle } from 'lucide-react';
-import { AdaptationSnapshot, AdaptationReading } from '@/lib/dme-link/adaptationBlocks';
+import { AdaptationSnapshot, AdaptationReading, isClearedByTuneReset } from '@/lib/dme-link/adaptationBlocks';
 import { DmeErrorKind } from '@/lib/dme-link/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { DialogFrame, PhaseStack, PhaseLayer, DialogActions } from './DialogFrame';
@@ -51,7 +51,8 @@ const TEXT = {
         expectedNote: (<>期待値: ラムダ学習係数は<span className="text-slate-500">乗算</span>のため中立は 1(0ではありません)。他は加算のため 0。</>),
         confirmQuestion: 'リセットしていいですか？',
         reset: 'リセット',
-        warn: (<>上の12項目をDMEから消去します。取り消せません。<span className="text-slate-500">{' '}スロットル/ペダル・SMGクラッチ・検出装備の学習値は消えません。</span></>),
+        warn: (<>上の<span className="text-slate-100 font-bold">10項目</span>をDMEから消去します。取り消せません。<span className="text-slate-500">{' '}VANOS・スロットル/ペダル・SMGクラッチ・検出装備の学習値は消えません。</span></>),
+        vanosNote: 'VANOS はクリアしません。このチューニング手順は VANOS 学習値に影響せず、消すと DME が再学習を始めてカム位相が動く — 充填を測っている最中に測定対象が動くことになるため。',
         cancel: 'やめる',
         runReset: 'リセット実行',
         clearing: '学習値をクリア中… DMEの反映を待っています(約2秒)',
@@ -60,7 +61,7 @@ const TEXT = {
         // moment. It is now also offered on the STARTUP tab whenever the link is connected — after a
         // write, after a cancel, or with nothing loaded at all — where naming a next step that the
         // hub is not offering would just be wrong.
-        done: '✅ リセット完了。DMEの学習値は初期状態に戻りました。',
+        done: '✅ リセット完了。ラムダとノックの学習値が初期状態に戻りました（VANOS は対象外）。',
     },
     en: {
         title: 'RESET ADAPT — DME Adaptations',
@@ -84,11 +85,12 @@ const TEXT = {
         expectedNote: (<>Expected: the lambda factors are <span className="text-slate-500">multiplicative</span>, so neutral is 1 (not 0). The others are additive, so 0.</>),
         confirmQuestion: 'Reset these values?',
         reset: 'Reset',
-        warn: (<>This erases the 12 items above from the DME. It cannot be undone.<span className="text-slate-500">{' '}Throttle/pedal, SMG clutch, and detected-equipment adaptations are not cleared.</span></>),
+        warn: (<>This erases the <span className="text-slate-100 font-bold">10 items</span> above from the DME. It cannot be undone.<span className="text-slate-500">{' '}VANOS, throttle/pedal, SMG clutch, and detected-equipment adaptations are not cleared.</span></>),
+        vanosNote: 'VANOS is not cleared. Nothing in this tuning process affects it, and clearing it makes the DME re-learn cam phase — which moves filling, the quantity the log exists to measure.',
         cancel: 'Cancel',
         runReset: 'Run Reset',
         clearing: 'Clearing adaptations… waiting for the DME to apply (~2s).',
-        done: '✅ Reset complete. The DME is back to its unlearned state.',
+        done: '✅ Reset complete. Lambda and knock adaptations are back to their unlearned state. VANOS was not touched.',
     },
 };
 
@@ -208,6 +210,13 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                             {groupReadings(shown.readings).map(group => (
                                 <div key={group.name} className="mt-3">
                                     <div className="text-[10px] uppercase tracking-widest text-slate-600 mb-1">{group.name}</div>
+                                    {/* Said at the group, because "not cleared" is a property of the whole
+                                        group and repeating it on both rows would read as two separate facts.
+                                        Without it the VANOS rows are two values that visibly do not change
+                                        during a reset, with nothing on screen explaining why. */}
+                                    {group.rows.every(r => !isClearedByTuneReset(r)) && (
+                                        <p className="text-[10px] text-slate-600 leading-relaxed mb-1">{t.vanosNote}</p>
+                                    )}
                                     {group.rows.map(row => {
                                         const beforeValue = before?.readings.find(r => r.symbol === row.symbol)?.value ?? null;
                                         return (
@@ -223,7 +232,12 @@ export const AdaptationResetDialog: React.FC<Props> = ({ onRead, onReset, onClos
                                                         {formatValue(afterBySymbol.get(row.symbol) ?? null)}
                                                     </span>
                                                 )}
-                                                <span className="w-[64px] text-right text-slate-600">{formatValue(row.cleared)}</span>
+                                                {/* Blank, not 0, for rows the reset does not touch. An
+                                                    "expected" value beside a row that will not move is a
+                                                    promise the reset never made. */}
+                                                <span className="w-[64px] text-right text-slate-600">
+                                                    {isClearedByTuneReset(row) ? formatValue(row.cleared) : '—'}
+                                                </span>
                                             </div>
                                         );
                                     })}

@@ -44,9 +44,10 @@ interface Props {
     /** Mean gap between the two rf_korr routes over this log, or undefined when they cannot be
      *  compared. The one check the app has on a DS2 offset nobody has confirmed on a car. */
     routeGap?: number;
+    routeSamples?: number;
 }
 
-export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false, openUp, hasTabg = false, routeGap }) => {
+export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false, openUp, hasTabg = false, routeGap, routeSamples }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
     const t = TEXT[useDialogLang()];
@@ -224,6 +225,7 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                                 hasTabg={hasTabg}
                                 readOnly={readOnly}
                                 routeGap={routeGap}
+                                routeSamples={routeSamples}
                             />
 
                             {/* Transient Header */}

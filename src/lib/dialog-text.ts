@@ -233,6 +233,26 @@ const JA = {
     // 上の長文のうち4本は、ネイティブの alert/confirm ではなくアプリ内ダイアログ(MessageDialog)で
     // 出す。683x400 のヘッドユニットではネイティブ側が本文の長さぶんだけ縦に伸び、選択肢が
     // 折り返しの下に隠れるため。ネイティブはボタン文言を自前で用意するので、ここに無かった。
+    /**
+     * 系譜チェック。書き込みは常に 65536 バイト全体を消して書き直すので、
+     * ECU に今入っている較正がこのチューンの BASE でない場合、
+     * **アドレスが 1 バイトも重なっていなくても**相手の変更が丸ごと消える。
+     * 「少ししか変えていない」という表示は両方のセッションに出るので、これは目視では気づけない。
+     */
+    lineageBlocked: (summary: string, verdict: 'diverged' | 'unknown' | 'match') =>
+        `${summary}\n\n` +
+        (verdict === 'diverged'
+            ? '書き込みは 65536 バイト全体の消去＋再書き込みです。\n' +
+            'いま車両に入っている変更は、**アドレスが重なっていなくても**すべて失われます。\n' +
+            '例: VE セッションと慣性セッションを同じ BASE から分岐させると、\n' +
+            '  互いに別の領域しか触っていなくても、後から書いた方が先の方を打ち消します。\n\n' +
+            '正しい手順: ECU を READ し直し、その READ を BASE に新しいセッションを作る。\n\n'
+            : '確認できないことは「問題なし」ではありません。\n' +
+            '半分書き込まれた ECU の復旧など、承知のうえで進める理由がある場合のみ続行してください。\n\n') +
+        'それでも書き込みますか？',
+    titleLineage: '系譜の確認',
+    btnFlashAnyway: '承知のうえで書き込む',
+
     titleLogFinished: 'データログ終了',
     titleWriteConfirm: 'DMEへ書き込みます',
     titleWriteFailed: '書き込みに失敗しました',
@@ -394,6 +414,22 @@ const EN: NativeDialogText = {
         'Note: the connection was released here.',
 
     // --- titles and buttons ---
+    lineageBlocked: (summary: string, verdict: 'diverged' | 'unknown' | 'match') =>
+        `${summary}\n\n` +
+        (verdict === 'diverged'
+            ? 'A write erases and rewrites all 65536 bytes.\n' +
+            'Whatever is in the car now would be lost — INCLUDING changes at addresses this tune\n' +
+            'does not touch at all.\n' +
+            'Example: branch a VE session and an inertia session off the same BASE, and even though\n' +
+            '  they edit completely separate regions, the second one flashed undoes the first.\n\n' +
+            'The correct step: re-READ the ECU and build this tune on that read.\n\n'
+            : 'Not being able to tell is not the same as it being fine.\n' +
+            'Continue only if you have a reason to write over an unknown state — recovering a\n' +
+            'half-flashed ECU, for instance.\n\n') +
+        'Write anyway?',
+    titleLineage: 'Lineage check',
+    btnFlashAnyway: 'Write anyway',
+
     titleLogFinished: 'Data log finished',
     titleWriteConfirm: 'Write to the DME',
     titleWriteFailed: 'The write failed',

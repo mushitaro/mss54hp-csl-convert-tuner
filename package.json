@@ -8,6 +8,8 @@
     "build": "next build && node scripts/build-id.mjs && node scripts/gen-sw.mjs",
     "start": "next start",
     "lint": "eslint",
+    "//verify:inertia": "Checks the inertia estimator against a simulated engine of known J. No test framework: Node 22 strips types natively, and ts-resolve.mjs supplies the extensionless-import resolution the bundler normally does.",
+    "verify:inertia": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-inertia.mjs",
     "//preview": "Cloudflare Pages preview target — see wrangler.jsonc. Production is untouched: it stays on GitHub Pages from main.",
     "preview": "npm run build:preview && wrangler pages dev",
     "deploy:preview": "npm run build:preview && wrangler pages deploy --project-name mss54hp-tuner-preview --branch rf-korr",

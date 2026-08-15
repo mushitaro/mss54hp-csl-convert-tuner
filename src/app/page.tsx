@@ -11,6 +11,7 @@ import { RfKorrTable } from '@/components/RfKorrTable';
 const MapVisualizer = dynamic(() => import('@/components/MapVisualizer').then(mod => mod.MapVisualizer), { ssr: false, loading: () => <ChartLoading /> });
 const LogTimeSeriesChart = dynamic(() => import('@/components/LogTimeSeriesChart').then(mod => mod.LogTimeSeriesChart), { ssr: false, loading: () => <ChartLoading /> });
 import { FilterConfigPanel } from '@/components/FilterConfigPanel';
+import { InertiaWorkflow } from '@/components/InertiaWorkflow';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich, UploadState } from '@/components/SessionList';
@@ -24,11 +25,13 @@ import { describeSave, describeSync } from '@/lib/session-sync/status';
 import { DiagnosticRecord, uploadDiagnostic } from '@/lib/session-sync/diagnostics';
 import type { WriteVerifyMode } from '@/lib/dme-link/types';
 import { initialVerifyMode, recordQuickVerifyProven } from '@/lib/dme-link/verifyPolicy';
+import { checkLineage } from '@/lib/lineage/preflight';
 import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
+import { CreditsDialog } from '@/components/CreditsDialog';
 import { MobileMenu } from '@/components/MobileMenu';
 import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
@@ -39,8 +42,7 @@ import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud } from 'lucide-react';
 import { PRIVACY_POLICY_URL } from '@/config/links';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint, RfKorrSource, resolveRfKorr } from '@/lib/types';
-import { rfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import {
@@ -71,7 +73,7 @@ import { useScreenWakeLock } from '@/hooks/useScreenWakeLock';
 import { useHiddenWitness } from '@/hooks/useHiddenWitness';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
 
-type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'rfkorr' | 'warmup' | 'wot';
+type TabId = 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log' | 'rfkorr' | 'warmup' | 'wot' | 'inertia';
 
 /** Live Hz readout tuning. 24 samples is ~3 s of history on the cable (two DS2 exchanges each) and
  *  ~0.5 s under PRACTICE — long enough to ride out one retried exchange either way. Publishing at
@@ -389,6 +391,7 @@ export default function Home() {
   const [adaptDialogOpen, setAdaptDialogOpen] = useState(false);
   const [flashDialogOpen, setFlashDialogOpen] = useState(false);
   const [identityDialogOpen, setIdentityDialogOpen] = useState(false);
+  const [creditsDialogOpen, setCreditsDialogOpen] = useState(false);
   /** Which pane the narrow (stacked) layout shows. Inert above 900px, where both are on screen.
    *  Starts on the map because that is what a stacked layout was failing to show: the two panes
    *  split 38.2/61.8 regardless of how little height there was, so on a 360x800 phone the VE grid
@@ -547,8 +550,8 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr, egtTables, writeRfKorr]);
 
-  const runCalculation = (map: NonNullable<typeof currentMap>, data: any[]) => {
-    veCalc.runCalculation(map, data, veCalcOptions);
+  const runCalculation = (map: NonNullable<typeof currentMap>, processed: ProcessedLog) => {
+    veCalc.runCalculation(map, processed, veCalcOptions);
     comparison.applyDefaultsAfterCalculation();
   };
 
@@ -585,7 +588,7 @@ export default function Home() {
   const handleLogUpload = async (file: File) => {
     const processed = await logFileState.parseAndSetLog(file);
     if (processed && currentMap) {
-      runCalculation(currentMap, processed.data);
+      runCalculation(currentMap, processed);
       goToTab('diff'); // jump to the result only on the initial CSV load
     }
   };
@@ -593,14 +596,14 @@ export default function Home() {
   const handleConfigChange = (newConfig: LogFilterConfig) => {
     const processed = logFileState.reprocess(newConfig);
     if (processed && currentMap) {
-      runCalculation(currentMap, processed.data); // stay on the current tab
+      runCalculation(currentMap, processed); // stay on the current tab
     }
   };
 
   const handleTableChange = (newTable: InterpolationPoint[]) => {
     const processed = logFileState.reprocessWithTable(newTable);
     if (processed && currentMap && processed.validCount > 0) {
-      runCalculation(currentMap, processed.data); // stay on the current tab
+      runCalculation(currentMap, processed); // stay on the current tab
     }
   };
 
@@ -623,10 +626,14 @@ export default function Home() {
     [processedLog]);
 
   /** How far apart the two routes land on this log — the check on DS2 offset 8, which is still
-   *  unconfirmed against a real DME. Undefined when they cannot be compared at all. */
-  const routeGap = useMemo(
-    () => (processedLog ? rfKorrRouteAgreement(processedLog.data)?.meanAbsGap : undefined),
-    [processedLog]);
+   *  unconfirmed against a real DME. Undefined when they cannot be compared at all, which now
+   *  includes the common case of a drive that never took the engine above the correction's filling
+   *  floor: there, both routes read 1.000 for reasons that have nothing to do with offset 8.
+   *
+   *  Comes from useVeCalculation because the comparison needs the annotated log. Computing it here
+   *  off `processedLog.data` is what made it silently undefined on every run. */
+  const routeGap = veCalc.routeAgreement?.meanAbsGap;
+  const routeSamples = veCalc.routeAgreement?.n;
 
   /** Whether the RF KORR write is a legal answer for this session, and why not when it is not.
    *
@@ -897,6 +904,11 @@ export default function Home() {
     { id: 'rfkorr', label: 'RF KORR (TUNED / EXP.)', enabled: !!tunedRfKorr },
     { id: 'warmup', label: 'WARMUP (DERIVED / EXP.)', enabled: !!warmupMap },
     { id: 'wot', label: 'WOT (DERIVED / EXP.)', enabled: !!wotMap },
+    // Enabled on the LINK plus a loaded image, not on a log or a map. This workflow produces its
+    // own samples from a different DS2 block and reads its current values straight out of the
+    // binary, so it shares no prerequisite with the VE chain above it — and it is the one tab that
+    // is useful before any tuning has happened at all.
+    { id: 'inertia', label: 'INERTIA (EXP.)', enabled: !!binaryFileState.binaryBuffer },
   ];
 
   /** A tab move armed before its target exists, released the moment it does.
@@ -1014,7 +1026,7 @@ export default function Home() {
           // filterConfig.rfKorrMode === 'tuned', which resolveRfKorr surfaces as `legacyWrite` —
           // reading the absent field as plain false would drop the table write from every archived
           // 'tuned' session and its sha256 check would fail against bytes that were correct.
-          veCalc.runCalculation(map, processed.data, veCalcOptionsFor(
+          veCalc.runCalculation(map, processed, veCalcOptionsFor(
             session.tuneSettings?.filterConfig ?? filterConfig,
             readEgtTables(bins.baseBinaryBuffer),
             storedWriteRfKorr(session.tuneSettings)));
@@ -1129,7 +1141,7 @@ export default function Home() {
       // Same stale-scope reason as the archived rebuild: `loadFromBuffer` above only scheduled
       // the binary swap, so the egtTables memo still describes whatever was loaded before. The
       // filter config is NOT reloaded here, so the live one is the right one.
-      veCalc.runCalculation(map, processed.data,
+      veCalc.runCalculation(map, processed,
         veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr));
       comparison.applyDefaultsAfterCalculation();
       goToTab('new');
@@ -1299,7 +1311,7 @@ export default function Home() {
     lastFlushRef.current = now;
     const processed = logFileState.loadRawLog([...liveSamplesRef.current], 'live-session.csv');
     if (processed && currentMap) {
-      veCalc.runCalculation(currentMap, processed.data, veCalcOptions);
+      veCalc.runCalculation(currentMap, processed, veCalcOptions);
       return processed;
     }
     return null;
@@ -1462,6 +1474,34 @@ export default function Home() {
     // Pin the settings that produced these exact bytes. Reading the toggles again after the write
     // would record whatever they say ~4 minutes later, which is not necessarily what went to the ECU.
     const flashedSettings = buildSettings();
+
+    // Lineage, before anything else and before the erase.
+    //
+    // A flash rewrites all 65536 bytes — writePartialBin refuses any other length — so a tune built
+    // on a BASE the car no longer holds does not merge with what is there, it replaces it. Two
+    // sessions branched off one BASE therefore revert each other silently, and they can do it with
+    // no overlapping addresses at all: a VE tune and a drivability tune touch entirely different
+    // regions and still wipe one another out. Neither session's own diff can show that, which is
+    // why the check has to happen against the car rather than against the record.
+    //
+    // Eight bytes, not a re-read: see lib/lineage/preflight.ts for why, and for what the CRC
+    // comparison does and does not prove.
+    const lineage = await checkLineage(
+      binaryFileState.binaryBuffer,
+      () => dmeLink.readDataChecksums(),
+    );
+    if (lineage.blocking) {
+      const tLin = dialogText();
+      const proceed = await ask({
+        title: tLin.titleLineage, icon: <AlertCircle className="w-3 h-3" />,
+        body: tLin.lineageBlocked(lineage.summary, lineage.verdict),
+        confirmLabel: tLin.btnFlashAnyway, cancelLabel: tLin.btnCancel, danger: true,
+      });
+      // Overridable, deliberately. There are legitimate reasons to write over an unknown state —
+      // recovering a half-flashed ECU is the obvious one — and a check that cannot be overridden
+      // gets worked around instead of heeded. What it must never be is silent.
+      if (!proceed) return;
+    }
 
     const drift = settingsDrift();
     // Gate: single safety confirmation before flashing the ECU. The DME itself also rejects the
@@ -2107,7 +2147,17 @@ export default function Home() {
               PREVIEW
             </span>
           )}
-          <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">V2.1.1 β</span>
+          {/* The version doubles as the way in to CREDITS. It is the one label in this strip that is
+              pure identity and carries no state, so nothing is lost by making it a control — and
+              attribution has to be reachable from a phone that has only ever seen the installed PWA,
+              never the README. Not in the disclaimer: that has a "don't show again" box. */}
+          <button
+            onClick={() => setCreditsDialogOpen(true)}
+            title="CREDITS"
+            className="shrink-0 text-[9px] font-mono text-slate-500 hover:text-slate-300 whitespace-nowrap transition-colors cursor-pointer"
+          >
+            V2.1.1 β
+          </button>
           {/* VIN/AIF/SW are readouts and may clip; FLASH is a control and may not — it is the only
               entry to the flash-counter dialog, so clipping it removes a feature rather than a
               label. This strip is overflow-hidden, so what clips is whatever sits at its END:
@@ -2336,7 +2386,7 @@ export default function Home() {
                   onToggle={(enabled) => handleConfigChange({ ...filterConfig, enableCorrection: enabled })}
                   readOnly={isArchived}
                 />
-                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} />
+                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} routeSamples={routeSamples} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -2581,6 +2631,16 @@ export default function Home() {
 
               {(activeTab === 'wot' && wotMap) && (
                 <MapEditor mapData={wotMap} zoom={mapZoom.zoom} />
+              )}
+
+              {activeTab === 'inertia' && (
+                <div className="h-full w-full overflow-y-auto p-3">
+                  <InertiaWorkflow
+                    startRun={dmeLink.startInertiaRun}
+                    stopRun={dmeLink.stopTuning}
+                    baseImage={binaryFileState.binaryBuffer}
+                  />
+                </div>
               )}
 
               {(activeTab === 'log' && processedLog) && (
@@ -3370,7 +3430,7 @@ The TIMING button still has the full record; save it before running another oper
               readOnly={isArchived}
               openUp
             />
-            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} openUp />
+            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} routeSamples={routeSamples} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}
@@ -3456,6 +3516,13 @@ The TIMING button still has the full record; save it before running another oper
               ? [{ label: 'Download LOG CSV', kind: 'log' as const, onClick: () => handleDownloadSessionLog(currentSession),
                    hint: "This session's stored log" }] : []),
           ]}
+        />
+      )}
+
+      {creditsDialogOpen && (
+        <CreditsDialog
+          onClose={() => setCreditsDialogOpen(false)}
+          buildLabel={buildLabel ?? null}
         />
       )}
 

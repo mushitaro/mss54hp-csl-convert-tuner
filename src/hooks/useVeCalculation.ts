@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { VECalculator, VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { tuneRfKorrTable, RfKorrTuneResult } from '@/lib/ve-calculator/rfKorrTuner';
-import { VEMap, LogDataPoint } from '@/lib/types';
+import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
+import { VEMap, LogDataPoint, ProcessedLog } from '@/lib/types';
 import { MAP_DIMENSIONS, CSL_STOCK_WOT_RPM, CSL_STOCK_WOT_LOAD, APP_CONFIG } from '@/config/constants';
 
 export function useVeCalculation() {
@@ -25,6 +26,16 @@ export function useVeCalculation() {
   // read and the log carries an exhaust temperature, REGARDLESS of what the session asks to be
   // done with it: choosing not to act on the result is not a reason to be unable to look at it.
   const [tunedRfKorr, setTunedRfKorr] = useState<RfKorrTuneResult | null>(null);
+
+  // How far the two routes to rf_korr land apart — the standing check on DS2 offset 8.
+  //
+  // Computed here rather than by the page, because it needs the ANNOTATED log and the page only has
+  // the processed one. It used to be a useMemo over `processedLog.data`, whose points never carry
+  // `rfKorr` (annotateRfKorr returns copies), so every sample failed the first guard, the function
+  // returned undefined for want of anything to compare, and the panel showed its "not compared"
+  // state for the entire life of the feature. The check reads the same array the tuner does now.
+  const [routeAgreement, setRouteAgreement] =
+    useState<RfKorrRouteAgreement | undefined>(undefined);
 
   // [EXPERIMENTAL]
   const [warmupMap, setWarmupMap] = useState<VEMap | null>(null);
@@ -53,15 +64,23 @@ export function useVeCalculation() {
     }
   }, [newMap]);
 
-  const runCalculation = (map: VEMap, data: LogDataPoint[], options: VeCalcOptions = {}) => {
+  const runCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
     const calc = new VECalculator();
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
-    const annotated = calc.annotateRfKorr(map, data, options.egt);
+    const annotated = calc.annotateRfKorr(map, processed.data, options.egt);
     // Between the two: the tuner reads the annotated log and the VE calculation may go on to
     // consume the tuner's output, so this is the only order in which one pass can serve all three.
+    //
+    // The tuner gets a DIFFERENT set of samples — rfKorrData, which skips the transient test. The
+    // correction only runs above 55-80 % filling, which on this engine only happens while the car
+    // is accelerating, so the VE map's steady-state requirement removes essentially all of it: on
+    // the first real drive, 97 % of the gate-open samples. Annotated separately rather than by
+    // re-filtering the annotated log, because `annotated` must stay index-aligned with
+    // processed.data for the log table and chart.
+    const annotatedForRfKorr = calc.annotateRfKorr(map, processed.rfKorrData, options.egt);
     const rfKorr = options.egt
-      ? tuneRfKorrTable(map, annotated, options.egt,
+      ? tuneRfKorrTable(map, annotatedForRfKorr, options.egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD })
       : null;
     // The tuned table comes from THIS run, not from the caller. It is derived from the same log
@@ -71,6 +90,7 @@ export function useVeCalculation() {
 
     setAnnotatedLog(annotated);
     setTunedRfKorr(rfKorr);
+    setRouteAgreement(rfKorrRouteAgreement(annotatedForRfKorr, options.egt));
     setNewMap(result.newMap);
     setMapData(result.diffMap); // Use mapData for diffMap
     setHitMap(result.hitMap);
@@ -98,6 +118,7 @@ export function useVeCalculation() {
     setRfKorrSpreadMap(null);
     setAnnotatedLog(null);
     setTunedRfKorr(null);
+    setRouteAgreement(undefined);
   };
 
   return {
@@ -110,6 +131,7 @@ export function useVeCalculation() {
     rfKorrSpreadMap,
     annotatedLog,
     tunedRfKorr,
+    routeAgreement,
     warmupMap,
     wotMap,
     runCalculation,

@@ -9,7 +9,10 @@ import { crc16Arc } from './crc16';
  */
 export const DATA_PAIR_LENGTH = 65536;
 const HALF_LENGTH = 32768;
-const CHECKSUM_OFFSET_WITHIN_HALF = 16380;
+/** Where each half keeps its stored CRC: 2 bytes of checksum then 0xFF 0xFF of padding. */
+export const CHECKSUM_OFFSET_WITHIN_HALF = 16380;
+/** Bytes occupied by one slot — the CRC pair plus its padding. */
+export const CHECKSUM_SLOT_LENGTH = 4;
 
 export interface ChecksumSlotResult {
     name: string;
@@ -58,6 +61,25 @@ export function analyzeDataChecksum(image: Uint8Array): ChecksumSlotResult[] {
         createSlot('Slave data', image, CHECKSUM_OFFSET_WITHIN_HALF, crc16Arc(buildSlaveInput(image))),
         createSlot('Master data', image, HALF_LENGTH + CHECKSUM_OFFSET_WITHIN_HALF, crc16Arc(buildMasterInput(image))),
     ];
+}
+
+/**
+ * The two CRCs an image stores, without recomputing anything.
+ *
+ * Read rather than calculated on purpose. This is used to answer "is the calibration in the ECU the
+ * one this tune was derived from?", and the honest comparison for that is stored-against-stored:
+ * eight bytes off the car against eight bytes in the image. Recalculating would answer a different
+ * question — whether the image is internally consistent — which `analyzeDataChecksum` already does.
+ */
+export function readStoredChecksums(image: Uint8Array): { slave: number; master: number } {
+    if (image.length !== DATA_PAIR_LENGTH) {
+        throw new Error(`Expected a ${DATA_PAIR_LENGTH}-byte MSS54HP partial BIN, got ${image.length} bytes.`);
+    }
+    const at = (offset: number) => (image[offset] << 8) | image[offset + 1];
+    return {
+        slave: at(CHECKSUM_OFFSET_WITHIN_HALF),
+        master: at(HALF_LENGTH + CHECKSUM_OFFSET_WITHIN_HALF),
+    };
 }
 
 /** Writes the recalculated checksum (+ 0xFF 0xFF padding) for both slots directly into `image`. */

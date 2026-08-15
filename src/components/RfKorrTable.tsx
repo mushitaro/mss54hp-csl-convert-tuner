@@ -37,6 +37,14 @@ const REASON_TEXT: Record<RejectReason, { en: string; ja: string }> = {
         en: 'BMW pinned this rpm column at 1.000 — measured, deliberately not written',
         ja: 'BMW が 1.000 に固定した列。測定はするが書き換えない',
     },
+    'identity-row': {
+        en: 'the zero-delta row every other row is measured against — never written',
+        ja: '他の全行の基準となる Δ=0 行。書き換えない',
+    },
+    'off-breakpoint': {
+        en: 'the samples sat too far from this delta to speak for it — extrapolation, not measurement',
+        ja: 'サンプルがこの Δ から離れすぎ（測定ではなく外挿になる）',
+    },
 };
 
 const TEXT = {
@@ -50,6 +58,12 @@ const TEXT = {
         veCells: (n: number) => `${n} VE cells anchored`,
         noAnchor: (n: number) => `${n} samples had no anchor in their own VE cell`,
         hysteresis: (n: number) => `${n} dropped in the hysteresis band`,
+        gateShut: (n: number) => `${n} below the filling floor (correction not running)`,
+        notSettled: (n: number) => `${n} with RF or EGT still moving`,
+        noGateOpen: 'This drive never held the engine above the correction\'s filling floor for '
+            + 'long enough to measure it, so nothing here was derived from the log. rf_korr only '
+            + 'runs above 55-80 % filling and above 20 km/h — it needs sustained load, held for '
+            + 'seconds, not throttle stabs.',
         thin: 'Nothing here is written unless a cell had samples from at least two VE cells that '
             + 'agreed to within 15 %. Everything else keeps its stock value byte for byte.',
         provisional: 'PROVISIONAL — too few cells moved to be worth writing',
@@ -66,6 +80,11 @@ const TEXT = {
         veCells: (n: number) => `アンカーの立った VE セル ${n} 個`,
         noAnchor: (n: number) => `自セルにアンカーが無く使えなかったサンプル ${n} 個`,
         hysteresis: (n: number) => `ヒステリシス帯で除外 ${n} 個`,
+        gateShut: (n: number) => `充填率下限未満で除外 ${n} 個（補正が動いていない領域）`,
+        notSettled: (n: number) => `RF / 排気温が整定しておらず除外 ${n} 個`,
+        noGateOpen: 'この走行では補正の充填率下限を十分な時間超えていないため、'
+            + 'ログからは何も導出していません。rf_korr は充填率 55〜80 % 以上かつ 20 km/h 以上でしか'
+            + '作動しません。数秒間持続する高負荷が必要で、短いアクセル煽りでは測定できません。',
         thin: '2 つ以上の VE セルから来たサンプルが 15 % 以内で一致したセルだけを書き換えます。'
             + 'それ以外は純正値のままバイト単位で不変です。',
         provisional: 'PROVISIONAL — 書き込むには更新セルが少なすぎます',
@@ -211,7 +230,15 @@ export const RfKorrTable: React.FC<{
                     <span>{t.veCells(report.veCellsWithAnchor)}</span>
                     {report.samplesNoAnchor > 0 && <span>{t.noAnchor(report.samplesNoAnchor)}</span>}
                     {report.samplesHysteresis > 0 && <span>{t.hysteresis(report.samplesHysteresis)}</span>}
+                    {report.samplesGateShut > 0 && <span>{t.gateShut(report.samplesGateShut)}</span>}
+                    {report.samplesNotSettled > 0 && <span>{t.notSettled(report.samplesNotSettled)}</span>}
                 </div>
+                {/* The one thing a reader needs told rather than counted. Every other line here is
+                    an "of which"; this is the case where the drive did not contain the experiment
+                    at all, and a grid of untouched cells does not say so on its own. */}
+                {report.ratioSamples === 0 && (
+                    <p className="text-amber-400/90">{t.noGateOpen}</p>
+                )}
                 <p>{t.thin}</p>
             </div>
         </div>

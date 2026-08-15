@@ -1,4 +1,5 @@
 import { LogDataPoint } from '@/lib/types';
+import { EgtTables, gateOpen } from './egtTables';
 
 /**
  * How far apart the two routes to rf_korr land, over one log.
@@ -18,15 +19,29 @@ import { LogDataPoint } from '@/lib/types';
  * sample, the correction would vanish from the derivation, and nothing anywhere would complain.
  * The table route does not share that failure, so the comparison catches it.
  *
+ * ## Only where the gate was open
+ *
+ * Below the filling floor BOTH routes return 1.000 by construction — `rfKorrFromEgt` because
+ * annotateRfKorr reproduces the gate, and `rfKorr` because RF really is just rf_soll there. Two
+ * numbers that are pinned to the same constant agree perfectly and confirm nothing.
+ *
+ * That is not a hypothetical. On the first real drive, over the whole log this reported a mean gap
+ * of 0.0115 — a comfortable pass against the 0.02 tolerance — while over the 100 samples where the
+ * DME's correction was actually running it was 0.0587, three times the tolerance. Averaging the
+ * informative samples into a much larger pile of trivially-agreeing ones turned a signal into a
+ * pass. So the caller passes only the samples that could disagree, and `n` says how many there
+ * were: a small `n` is itself the finding, and reads as "this drive did not test the question".
+ *
  * ## What a gap does NOT prove
  *
- * The two are allowed to differ where the DME's correction was gated off by road speed: below
+ * The two are still allowed to differ where the DME's correction was gated off by ROAD SPEED: below
  * 20 km/h the DME applies 1.000 while the table still reads high. No logged channel carries road
  * speed, so those samples cannot be excluded — which is why this reports a distribution rather than
  * a verdict, and why the caller shows the number instead of a pass/fail lamp.
  */
 export interface RfKorrRouteAgreement {
-    /** Samples where both routes produced a value. */
+    /** Samples where both routes produced a value AND the load gate was open — the only ones that
+     *  could have disagreed. Small means the drive never asked the question. */
     n: number;
     meanAbsGap: number;
     maxAbsGap: number;
@@ -40,10 +55,15 @@ export interface RfKorrRouteAgreement {
  *  contamination would produce, so it separates "same thing" from every failure worth catching. */
 export const ROUTE_AGREEMENT_TOLERANCE = 0.02;
 
-export function rfKorrRouteAgreement(log: LogDataPoint[]): RfKorrRouteAgreement | undefined {
+export function rfKorrRouteAgreement(
+    log: LogDataPoint[], egt?: EgtTables | null,
+): RfKorrRouteAgreement | undefined {
     let n = 0, sum = 0, max = 0, flat = 0;
     for (const p of log) {
         if (p.rfKorr === undefined || p.rfKorrFromEgt === undefined) continue;
+        // `egt` optional so a caller without the binary's tables still gets the old whole-log
+        // number rather than nothing. It is the worse measurement, not a broken one.
+        if (egt && (p.rfSoll === undefined || !gateOpen(egt, p.rpm, p.rfSoll))) continue;
         const gap = Math.abs(p.rfKorr - p.rfKorrFromEgt);
         n++;
         sum += gap;

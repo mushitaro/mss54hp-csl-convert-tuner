@@ -56,6 +56,46 @@ export interface LiveMeasurement {
     exhaustTemp?: number;
 }
 
+/**
+ * One sample of DS2 selection 83 (EGAS) — the drivability block.
+ *
+ * **Deliberately not a `LiveMeasurement`, and deliberately not convertible to one.** The two carry
+ * disjoint channels: this block has torque, gear, speed gradient and the slew-limiter state but no
+ * `aq_rel`, no `tabg` and no `la_f_regler`; the VE pair has those and none of these. A run recorded
+ * for one purpose cannot answer the other's question, and the cheapest place to discover that is
+ * the compiler rather than a VE map quietly rebuilt from samples that never carried a trim.
+ *
+ * So the separation is the type, not a flag. `estimateInertia` takes `EgasMeasurement[]` and
+ * `calculateNewVEMap` takes `LogDataPoint[]`, and neither will accept the other's array.
+ *
+ * Every channel is `number | null` because `decodeField` returns null on a short block and null is
+ * a different fact from zero — see `decodeEgasMeasurementBlock`.
+ */
+export interface EgasMeasurement {
+    /** Seconds since this run started. Host clock, taken after the single exchange returns. Because
+     *  only one block is polled there is no inter-block skew for this stamp to hide. */
+    time: number;
+    engineState: number | null;
+    wdk1: number | null;
+    /** Engine speed, 40 rpm resolution. */
+    n40: number | null;
+    /** Speed gradient as the DME reports it, 40 rpm/s resolution, **uncorrected**. The truncation
+     *  bias is left in deliberately: this is the wire value, and correcting on the way in would put
+     *  a derived number into something named like a measurement. Correct it at use — `correctDN40`. */
+    dN40: number | null;
+    dPwg: number | null;
+    dWdk: number | null;
+    rf: number | null;
+    mdIndWunsch: number | null;
+    mdIndNe: number | null;
+    mdIndOptKorr: number | null;
+    vAntrieb: number | null;
+    mdDynSt: number | null;
+    gang: number | null;
+    sKrafts: number | null;
+    saWeSt: number | null;
+}
+
 /** Which stage a long transfer is in. Surfaced in the UI so a slow-but-working stage (notably a FULL
  *  post-write read-back, measured at 122.9 s at 9600 baud) doesn't look like a freeze. */
 export type TransferPhase = 'erasing' | 'reading' | 'writing' | 'verifying';
@@ -127,6 +167,35 @@ export interface DmeLink {
      */
     queryEncodingChecksum(): Promise<Ds2EncodingChecksum>;
     pollLiveMeasurement(): Promise<LiveMeasurement>;
+    /**
+     * Polls DS2 selection 83 (EGAS) alone — one exchange, one block, no cross-block skew.
+     *
+     * Separate from `pollLiveMeasurement` rather than a mode of it, for the same reason
+     * `EgasMeasurement` is a separate type: the caller is running a different experiment. The VE
+     * datalog wants two blocks and tolerates the second failing; this wants one block and cannot
+     * substitute anything for it, so a failure here is fatal to the sample rather than something to
+     * paper over with a neutral default.
+     */
+    pollEgasMeasurement(): Promise<EgasMeasurement>;
+    /**
+     * The two CRCs the calibration currently in the ECU stores, one per processor half.
+     *
+     * Exists so a flash can prove what it is about to overwrite. **Every write erases and rewrites
+     * all 65536 bytes** — `writePartialBinInner` refuses any other length — so a TUNED built from a
+     * stale BASE does not merge with what is in the car, it replaces it wholesale. Two tunes
+     * branched from one BASE therefore silently revert each other, with no overlapping addresses
+     * required and nothing in either one's own diff to hint at it.
+     *
+     * Eight bytes rather than a re-read of all 65536: a full read is ~123 s at 9600 and would
+     * double the time every flash takes, which is the kind of cost that gets a safety check turned
+     * off. Two four-byte reads are effectively free.
+     *
+     * The trade is honest and worth stating: a CRC-16 per half means two different calibrations
+     * could collide, at roughly one in 2^32 for the pair. That is ample for the real question —
+     * "did something else get flashed in between?" — and it is not a defence against a deliberate
+     * forgery. Nothing here needs it to be.
+     */
+    readDataChecksums(): Promise<{ slave: number; master: number }>;
     /** Reads the DME's learned adaptation values (DS2 blocks 0x06 and 0x16). */
     readAdaptations(): Promise<AdaptationSnapshot>;
     /**
@@ -230,6 +299,19 @@ export interface DmeLink {
      * operation produced none — it can never mean "here is the previous one's".
      */
     getLastTransferTiming?(): TransferTimingReport | null;
+    /**
+     * Arms the per-exchange instrument for a datalog run, and closes it again.
+     *
+     * Optional because only the real link has a wire to measure — the mock's timings are `delay()`
+     * calls and reporting them as if they described a cable would be worse than reporting nothing.
+     *
+     * The log is the one path where `hostGap` is not ~0, because `flushLiveSamples` runs a full VE
+     * recalculation synchronously inside the sample callback, and it is also the path whose rate
+     * has only ever been asserted. `TransferKind` has carried `'log'` since the write instrument
+     * was built and nothing armed it until now, so both questions were open.
+     */
+    beginLogTiming?(): void;
+    endLogTiming?(error?: unknown): TransferTimingReport | null;
     /**
      * Phase-level narrative of the last instrumented operation: what was sent, in what order, and
      * what the DME answered. Paired with the timing report when a diagnostic record is uploaded.

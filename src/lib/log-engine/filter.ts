@@ -8,6 +8,9 @@ export const processLogData = (
     customTable?: InterpolationPoint[]
 ): ProcessedLog => {
     const validData: LogDataPoint[] = [];
+    // Same prerequisites as validData, but WITHOUT the transient test. See ProcessedLog.rfKorrData
+    // for why the rf_korr table needs its own sample set, and rfKorrTuner for what it does with it.
+    const rfKorrData: LogDataPoint[] = [];
     let droppedCount = 0;
 
     // Use provided config or defaults
@@ -33,7 +36,7 @@ export const processLogData = (
     // ~6-7 Hz (delta ~0.15) and a Testo log at ~150-250 (ms), which is a 30x separation that holds
     // for a log of any length. Guessing wrong here would either disable the exclusion or swallow
     // the whole log, so it is worth measuring.
-    const secondsPerTimeUnit = medianStep(rawData) >= 5 ? 0.001 : 1;
+    const secondsPerTimeUnit = timeScaleSeconds(rawData);
 
     const katsOn = cfg.katsTabgOn ?? 850;
     // Derived from katsOn rather than fixed at 840, and clamped below it. The stock calibration
@@ -92,14 +95,51 @@ export const processLogData = (
         // means this never engages — the condition below is simply never true.
         if (katsExclusionOn && current.exhaustTemp !== undefined) {
             if (current.exhaustTemp >= katsOn) lastKatsHotTime = current.time;
+            // `armed` is load-bearing, not defensive. Without it the `>= katsOff` test fires on its
+            // own, and katsOff is BELOW katsOn — so a sample sitting anywhere in the 840-850 °C band
+            // is excluded even though the DME never entered cat protection and the lambda loop is
+            // still closed. That is the release threshold being used as an entry threshold, which
+            // is the opposite of what it is for. Only the unwind after a real crossing is excluded.
+            const armed = lastKatsHotTime > -Infinity;
             const secondsSinceHot = (current.time - lastKatsHotTime) * secondsPerTimeUnit;
-            if (current.exhaustTemp >= katsOff || secondsSinceHot < katsTail) {
+            if (armed && (current.exhaustTemp >= katsOff || secondsSinceHot < katsTail)) {
                 droppedCount++;
                 continue;
             }
         }
 
-        // 3. Transient Filter
+        // 3. Correction (Interpolation)
+        // Computed BEFORE the transient test, because both output sets carry it: the sample that is
+        // too transient for the VE map is still a sample the rf_korr tuner has to be able to bin on
+        // the load axis, and re-deriving the factor in a second place is how the two end up
+        // disagreeing about which cell a sample belongs to.
+        // If disabled (user supplied processed CSV), use raw directly.
+        let corrected = current.rawLoad;
+        if (cfg.enableCorrection) {
+            const factor = interpolateFactor(current.rpm, interpTable);
+            const f = factor === 0 ? 1.0 : factor;
+            corrected = current.rawLoad / f;
+
+            // DEBUG: Log first few corrections to verify
+            if (i < 5) {
+                console.log(`[Corrector] RPM:${current.rpm} Raw:${current.rawLoad} Factor:${factor} Corrected:${corrected}`);
+            }
+        } else {
+            if (i < 5) console.log(`[Corrector] Correction DISABLED. RPM:${current.rpm}`);
+        }
+
+        const point: LogDataPoint = {
+            ...current,
+            correctedLoad: corrected,
+            correctionFactor: cfg.enableCorrection ? (current.rawLoad / corrected) : 1.0 // Derive used factor for display
+        };
+
+        // Everything that got this far is rf_korr evidence. The transient test below is about the
+        // lambda loop having converged, which the VE map needs and the rf_korr ratio does not ask
+        // for in the same way — see ProcessedLog.rfKorrData.
+        rfKorrData.push(point);
+
+        // 4. Transient Filter
         // Check back N frames
         if (cfg.enableTransient && i >= cfg.transientWindow) {
             const prev = getAt(i - cfg.transientWindow);
@@ -120,27 +160,7 @@ export const processLogData = (
             }
         }
 
-        // 4. Correction (Interpolation)
-        // If disabled (user supplied processed CSV), use raw directly.
-        let corrected = current.rawLoad;
-        if (cfg.enableCorrection) {
-            const factor = interpolateFactor(current.rpm, interpTable);
-            const f = factor === 0 ? 1.0 : factor;
-            corrected = current.rawLoad / f;
-
-            // DEBUG: Log first few corrections to verify
-            if (i < 5) {
-                console.log(`[Corrector] RPM:${current.rpm} Raw:${current.rawLoad} Factor:${factor} Corrected:${corrected}`);
-            }
-        } else {
-            if (i < 5) console.log(`[Corrector] Correction DISABLED. RPM:${current.rpm}`);
-        }
-
-        validData.push({
-            ...current,
-            correctedLoad: corrected,
-            correctionFactor: cfg.enableCorrection ? (current.rawLoad / corrected) : 1.0 // Derive used factor for display
-        });
+        validData.push(point);
     }
 
     return {
@@ -148,8 +168,20 @@ export const processLogData = (
         data: validData,
         validCount: validData.length,
         droppedCount,
+        rfKorrData,
     };
 };
+
+/**
+ * Seconds per unit of the `time` column: 1 for a live DS2 run, 0.001 for a Testo CSV.
+ *
+ * Exported because rfKorrTuner needs the same answer for its settling window, and two independent
+ * guesses at the unit is exactly the bug this discrimination exists to avoid — one of them being
+ * wrong would silently make a 3-second requirement into a 3-millisecond one, which every sample
+ * passes.
+ */
+export const timeScaleSeconds = (data: LogDataPoint[]): number =>
+    medianStep(data) >= 5 ? 0.001 : 1;
 
 /**
  * Median gap between consecutive timestamps, used only to tell a seconds log from a milliseconds

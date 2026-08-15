@@ -1,4 +1,4 @@
-import { EcuItemDef } from '../types';
+import type { EcuItemDef } from '../types';
 import { IDENTITY, divideBy, minus } from '../codec';
 
 /**

@@ -1,4 +1,4 @@
-import { EcuItemDef, EcuScaling } from './types';
+import type { EcuItemDef, EcuScaling } from './types';
 
 /** Checksum slots, from docs/implementation-notes.md §5. Nothing in the catalog may overlap them:
  *  they are rewritten by applyChecksumCorrection() after every other patch, so an item living
@@ -19,6 +19,18 @@ export const IDENTITY: EcuScaling = {
 /** `X / d`, the most common XDF form. */
 export function divideBy(d: number): EcuScaling {
     return { math: `X/${d}`, toPhysical: raw => raw / d, toRaw: v => v * d };
+}
+
+/**
+ * `X * m`, the coarse-quantisation form.
+ *
+ * Worth naming separately from `divideBy` because the direction of the quantisation trap reverses:
+ * a `divideBy(1024)` item resolves finely and a `multiplyBy(40)` one cannot express anything
+ * between its steps at all. Every SA/WE speed threshold is `X * 40`, so "raise it by 70 rpm" is not
+ * a writable instruction — see `quantise` in lib/inertia/corrections.ts.
+ */
+export function multiplyBy(m: number): EcuScaling {
+    return { math: `X*${m}`, toPhysical: raw => raw * m, toRaw: v => v / m };
 }
 
 /** `X - offset`, used by every temperature that stores °C + 48. */
@@ -42,6 +54,8 @@ function runs(def: EcuItemDef): Array<[number, number]> {
     switch (def.kind) {
         case 'constant':
             return [span(def.address, 1, def.bits)];
+        case 'series':
+            return [span(def.values.address, def.values.n, def.values.bits)];
         case 'curve':
             return [span(def.x.address, def.x.n, def.x.bits),
             span(def.values.address, def.values.n, def.values.bits)];
@@ -76,6 +90,9 @@ export function validateCatalog(defs: EcuItemDef[]): string[] {
 
         if (def.kind === 'curve' && def.values.n !== def.x.n) {
             problems.push(`${at}: ${def.values.n} values against a ${def.x.n}-point axis`);
+        }
+        if (def.kind === 'series' && def.indexNames.length !== def.values.n) {
+            problems.push(`${at}: ${def.indexNames.length} index names against ${def.values.n} values`);
         }
         if (def.kind === 'map') {
             if (def.values.cols !== def.x.n) {

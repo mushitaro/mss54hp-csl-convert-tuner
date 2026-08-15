@@ -40,7 +40,7 @@ export interface EcuScaling {
 /** Prose, in both display languages. Control shorthand is NOT in here — see `label`. */
 export interface EcuProse { en: string; ja: string; }
 
-export type EcuCategory = 'egt' | 'idle' | 'fuel' | 'load';
+export type EcuCategory = 'egt' | 'idle' | 'fuel' | 'load' | 'inertia';
 
 /** One contiguous run of same-width numbers: a constant (n = 1), an axis, or a value grid. */
 export interface EcuNumericDef {
@@ -91,11 +91,35 @@ export interface EcuMapDef extends EcuItemBase {
     values: EcuNumericDef & { rows: number; cols: number };
 }
 
-export type EcuItemDef = EcuConstantDef | EcuCurveDef | EcuMapDef;
+/**
+ * A bare run of values with no axis stored anywhere in the file.
+ *
+ * Not a degenerate curve — the distinction is real. A `curve` reads its breakpoints out of the
+ * binary; a series is indexed by position and the meaning of each position lives only in the code
+ * that reads it (gear number, cylinder number, a state enum). Modelling one as the other would
+ * mean pointing an axis at bytes that are not an axis.
+ *
+ * This exists because the XDF does not define everything the calibration contains. The two gear
+ * weighting tables behind the tip-in and dashpot slew limiters are the case in point: 8 x 16-bit
+ * at master 0x927C and 0x929E, recovered from the disassembly, absent from the XDF. See
+ * `CSL_0401_Binary_Disassembly_Notes/docs/finding_xdf_undefined_calibration.md` — it is a category
+ * of finding, not a one-off, so it gets a representation rather than a workaround.
+ */
+export interface EcuSeriesDef extends EcuItemBase {
+    kind: 'series';
+    /** What the index means — 'gear', 'cylinder'. Prose, because there is no axis to label. */
+    indexLabel: string;
+    /** Names for each position, in order. Length must equal `values.n`. */
+    indexNames: string[];
+    values: EcuNumericDef & { n: number };
+}
+
+export type EcuItemDef = EcuConstantDef | EcuCurveDef | EcuMapDef | EcuSeriesDef;
 
 /** A decoded item. Raw is kept alongside the physical values because raw is what is actually in the
  *  bytes: a later correction to `scaling` should re-label an old reading, not falsify it. */
 export type EcuItemValue =
     | { kind: 'constant'; symbol: string; value: number; raw: number }
     | { kind: 'curve'; symbol: string; x: number[]; values: number[]; raw: number[] }
-    | { kind: 'map'; symbol: string; x: number[]; y: number[]; values: number[][]; raw: number[][] };
+    | { kind: 'map'; symbol: string; x: number[]; y: number[]; values: number[][]; raw: number[][] }
+    | { kind: 'series'; symbol: string; indexNames: string[]; values: number[]; raw: number[] };

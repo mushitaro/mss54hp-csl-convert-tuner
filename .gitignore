@@ -50,3 +50,9 @@ next-env.d.ts
 # The run-store upload token. Generated locally, never committed; the authoritative
 # copy lives in \`wrangler pages secret\`. Read it from here to type into the phone.
 .upload-token.local
+
+# esbuild output from the verify-rf-korr scripts. They bundle src/ so they can run the real
+# pipeline rather than a model of it; the bundle is a build artefact of whatever src/ said
+# at the time, which is exactly the thing not to commit.
+scripts/.rf-korr-*.mjs
+scripts/.rf-korr-*.ts

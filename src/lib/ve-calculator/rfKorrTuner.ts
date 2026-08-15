@@ -1,4 +1,5 @@
 import { LogDataPoint, VEMap } from '@/lib/types';
+import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { EgtTables, gateOpen, tabgModelAt } from './egtTables';
 
 /**
@@ -48,6 +49,29 @@ export interface RfKorrTuneOptions {
      *  computed at a different operating point and so no longer corresponds to this sample's Δ. */
     gateMargin: number;
 
+    /**
+     * Seconds RF must have been steady before a sample's Δ means anything.
+     *
+     * kf_rf_tabg_modell is read at the INSTANTANEOUS RF, while TABG arrives through a Pt200's
+     * thermal mass and the DME's own PT1. Step the load and the model jumps immediately while the
+     * sensor has not moved, so Δ = model − TABG reads as a huge cold offset that is entirely lag.
+     * Measured on a real drive: every sample where the gate was open sat in a 0.3-3.5 s throttle
+     * stab, and Δ came out at 125-351 °C — "the exhaust is 300 °C colder than nominal at full
+     * load", which is not a thing. Feeding those to the table is how a lag artefact becomes a
+     * calibration.
+     */
+    settleSec: number;
+    /** How far RF may drift across `settleSec` and still count as steady, in %RF. */
+    maxRfDrift: number;
+    /**
+     * How fast TABG may still be moving, °C per second, averaged over `settleSec`.
+     *
+     * The channel quantises at 16 °C, so over a 3 s window the smallest observable non-zero rate is
+     * 5.3 °C/s. 8 admits one LSB step per window and rejects two, which is the finest distinction
+     * the channel can actually support — asking for less would just be asking for zero.
+     */
+    maxEgtRatePerSec: number;
+
     /** Evidence a VE cell needs before its anchor may be used as a DENOMINATOR. Far above the
      *  `weightSum > 0.1` the VE map itself runs on: that threshold is adequate for a mean, and a
      *  divisor built from one sample would propagate its noise into every entry it feeds. */
@@ -65,6 +89,30 @@ export interface RfKorrTuneOptions {
      *  more than this are saying it does not, here. */
     maxSpread: number;
 
+    /**
+     * How far a bin's evidence may sit from the breakpoint it writes, as a fraction of that row's
+     * spacing to its nearest neighbour.
+     *
+     * Bilinear binning lets a sample vote on a breakpoint it is nowhere near, with a small weight.
+     * `minCellWeight` is not a defence against that: a sample 90 °C away carries weight 0.1, so a
+     * few hundred of them clear a threshold of 5.0 without one of them having been anywhere near
+     * the row. What gets written is then an extrapolation wearing a measurement's clothes, and
+     * because the correction is convex in Δ it extrapolates LOW — the lean direction.
+     *
+     * Caught in PRACTICE, where the answer is known: the Δ = 200 row at 2200 rpm was written to
+     * 1.089 against a truth of 1.104, entirely from samples sitting near Δ = 110.
+     */
+    maxDeltaOffsetFrac: number;
+    /**
+     * Floor under that tolerance, in °C, whatever the axis spacing says.
+     *
+     * The Y axis opens 30, 40 — a 10 °C gap on a channel that arrives in 16 °C counts. A pure
+     * fraction of the spacing asks for Δ to be known to ±3.5 °C there, which is finer than the
+     * sensor can express, so the row could never be written by any drive however good. One TABG
+     * count is the smallest tolerance that means anything.
+     */
+    minDeltaTolerance: number;
+
     /** Never below 1.000: a correction under 1 leans the mixture at exactly the condition BMW
      *  chose to enrich. Never above the ceiling: the stock peak is 1.371. */
     floor: number;
@@ -81,23 +129,38 @@ export interface RfKorrTuneOptions {
     /** A column flatter than this across Δ is an identity column. Same number as the inverter's
      *  minSpan, and for the same reason. */
     identitySpan: number;
+    /**
+     * Write the identity Δ ROW as well — the row every rpm column pins at 1.000, which is the
+     * baseline the whole table is measured against. Off, and separately from the columns, because
+     * the failure mode is different: pass 2 skips anchors, but a sample at Δ = 35 still lands part
+     * of its bilinear weight on the Δ = 30 row, so that row collects evidence from samples the
+     * anchor logic deliberately excluded. On a real log this wrote 1.009 into the 2200 rpm cell —
+     * a 0.9 % enrichment at zero delta, which shifts what every other row is relative to.
+     */
+    writeIdentityRow: boolean;
 }
 
 export const RF_KORR_TUNE_DEFAULTS: RfKorrTuneOptions = {
     anchorDeltaMax: 30,
     gateMargin: 0.05,
+    settleSec: 3.0,
+    maxRfDrift: 5.0,
+    maxEgtRatePerSec: 8.0,
     minAnchorSamples: 5,
     minAnchorWeight: 3.0,
     minCellSamples: 10,
     minCellWeight: 5.0,
     minDistinctVeCells: 2,
     maxSpread: 0.15,
+    maxDeltaOffsetFrac: 0.35,
+    minDeltaTolerance: 16,
     floor: 1.0,
     ceiling: 1.40,
     maxStepUp: 0.10,
     maxStepDown: 0.05,
     writeIdentityColumns: false,
     identitySpan: 0.010,
+    writeIdentityRow: false,
 };
 
 export type RejectReason =
@@ -106,7 +169,9 @@ export type RejectReason =
     | 'thin-count'
     | 'single-ve-cell'
     | 'spread'
-    | 'identity-column';
+    | 'identity-column'
+    | 'identity-row'
+    | 'off-breakpoint';
 
 export interface RfKorrTuneReport {
     samplesTotal: number;
@@ -114,8 +179,16 @@ export interface RfKorrTuneReport {
     samplesNoMeasurement: number;
     /** No exhaust-temperature channel on the row, so no Δ. */
     samplesNoDelta: number;
+    /**
+     * Below the filling floor, so the DME's gate was SHUT and it applied 1.000 no matter what the
+     * exhaust was doing. These samples carry no information about this table, and on a normal road
+     * log they are almost all of them — 1173 of 1176 on the drive this counter was added for.
+     */
+    samplesGateShut: number;
     /** Inside the hysteresis band: the applied correction belongs to another operating point. */
     samplesHysteresis: number;
+    /** RF or TABG was still moving, so Δ is sensor lag rather than a density signal. */
+    samplesNotSettled: number;
     /** Qualified as nominal and went into an anchor. */
     anchorSamples: number;
     /** Carried a Δ above the anchor threshold and contributed a ratio. */
@@ -157,10 +230,61 @@ interface AnchorCell { sumQw: number; weight: number; count: number }
 interface GridBin {
     sumDw: number; weight: number; count: number;
     min: number; max: number; veCells: Set<number>;
+    /** Σ(Δ x w), so the bin can say where its evidence actually SAT — not merely how much of it
+     *  there was. See maxDeltaOffsetFrac. */
+    sumDeltaW: number;
 }
 
 const zeros = (rows: number, cols: number) =>
     Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+
+/**
+ * Per sample: had RF been still, and TABG stopped chasing it, for `settleSec` beforehand?
+ *
+ * Both halves are needed and they are not the same question. Steady RF says the load step is over,
+ * which is what gives the exhaust a chance to catch up; a bounded TABG rate says it actually has.
+ * A long pull fails the second one for as long as the exhaust is genuinely still heating — which is
+ * correct, because Δ is not a density measurement while the temperature is a moving target.
+ *
+ * A sample with less than `settleSec` of log behind it is not settled: there is no evidence either
+ * way, and "no evidence" must not read as "steady". That alone disqualifies the first few seconds
+ * of every log, which is the right answer for a car that has just been started.
+ */
+function settledFlags(log: LogDataPoint[], o: RfKorrTuneOptions): boolean[] {
+    const out = new Array<boolean>(log.length).fill(false);
+    if (log.length === 0) return out;
+    const perUnit = timeScaleSeconds(log);
+    const window = o.settleSec / perUnit;   // in the log's own time units
+
+    // The window start only moves forward, so the inner scan below covers `settleSec` of samples
+    // rather than the whole log — a few seconds at any realistic rate, and independent of how long
+    // the drive was.
+    let start = 0;
+    for (let i = 0; i < log.length; i++) {
+        while (start < i && (log[i].time - log[start].time) > window) start++;
+        // `start` is now the oldest sample still inside the window. If it never fell behind, the
+        // log does not reach back far enough to say anything.
+        if (start === 0 && (log[i].time - log[0].time) < window) continue;
+
+        let rfMin = Infinity, rfMax = -Infinity, egtMin = Infinity, egtMax = -Infinity;
+        let ok = true;
+        for (let j = start; j <= i; j++) {
+            const rf = log[j].rf, egt = log[j].exhaustTemp;
+            if (rf === undefined || egt === undefined) { ok = false; break; }
+            if (rf < rfMin) rfMin = rf;
+            if (rf > rfMax) rfMax = rf;
+            if (egt < egtMin) egtMin = egt;
+            if (egt > egtMax) egtMax = egt;
+        }
+        if (!ok) continue;
+
+        const span = (log[i].time - log[start].time) * perUnit;
+        if (!(span > 0)) continue;
+        out[i] = (rfMax - rfMin) <= o.maxRfDrift
+            && (egtMax - egtMin) / span <= o.maxEgtRatePerSec;
+    }
+    return out;
+}
 
 /**
  * Bracketing weights on an ascending axis, clamped to the ends — the same rule as the DME's
@@ -211,16 +335,31 @@ export function tuneRfKorrTable(
 
     const report: RfKorrTuneReport = {
         samplesTotal: annotatedLog.length,
-        samplesNoMeasurement: 0, samplesNoDelta: 0, samplesHysteresis: 0,
+        samplesNoMeasurement: 0, samplesNoDelta: 0,
+        samplesGateShut: 0, samplesHysteresis: 0, samplesNotSettled: 0,
         anchorSamples: 0, ratioSamples: 0, samplesNoAnchor: 0,
         veCellsWithAnchor: 0, gridCellsUpdated: 0,
         rejectedByReason: {
             'no-evidence': 0, 'thin-weight': 0, 'thin-count': 0,
-            'single-ve-cell': 0, 'spread': 0, 'identity-column': 0,
+            'single-ve-cell': 0, 'spread': 0, 'identity-column': 0, 'identity-row': 0,
+            'off-breakpoint': 0,
         },
         sensorMissing: true,
         largestChange: 0,
     };
+
+    // Which samples have had RF still and TABG caught up for long enough that Δ describes this
+    // operating point. Precomputed over the whole array rather than tested inline, so the window
+    // can reach backwards past samples pass 0 is about to reject: a sample is settled or not by what
+    // the car was doing beforehand, not by what else survived this function.
+    //
+    // It cannot see rows the LOG FILTER already removed (coolant, idle, cat-protection). The window
+    // is bounded on timestamps rather than on indices, so a removal longer than settleSec falls out
+    // of the window rather than being silently spanned; a shorter one would be spanned, which needs
+    // the car to have dropped below 1000 rpm at a closed throttle and come back inside three
+    // seconds, between two samples that both cleared the 55-80 % filling gate. Not worth the second
+    // array to defend against.
+    const settled = settledFlags(annotatedLog, o);
 
     // --- Pass 0: everything each sample contributes, computed once -----------------------------
     // Held rather than recomputed because pass 2 needs the same Δ, the same q and the same VE
@@ -238,7 +377,8 @@ export function tuneRfKorrTable(
     }
     const prepared: Prepared[] = [];
 
-    for (const p of annotatedLog) {
+    for (let i = 0; i < annotatedLog.length; i++) {
+        const p = annotatedLog[i];
         const rfKorr = p.rfKorr;
         const rfSoll = p.rfSoll;
         if (rfKorr === undefined || rfSoll === undefined || !(rfSoll > 0)) {
@@ -251,11 +391,36 @@ export function tuneRfKorrTable(
         }
         report.sensorMissing = false;
 
+        // The gate itself. Below kl_rf_korr_rf_min the DME applies rf_korr = 1.000 whatever the
+        // exhaust is doing, so the sample says nothing about THIS table — it is a measurement of a
+        // correction that was not running.
+        //
+        // The header above argues the derivation survives a shut gate because k_applied is measured
+        // rather than assumed. That is true of the arithmetic and false of the experiment. Every
+        // cell of KF_RF_KORR_DRREL is READ by the DME only above 55-80 % filling; deriving those
+        // cells from samples taken at 13 % filling extrapolates a high-load density effect from
+        // light-cruise data, and the answer it gives is "no effect" — which then clamps the stock
+        // 1.019-1.161 down to 1.000, i.e. LEAN, at exactly the condition BMW chose to enrich.
+        //
+        // Ordered before the hysteresis test because it is the strictly stronger statement: shut is
+        // shut, whereas the band below is about a value that is real but belongs to another point.
+        if (!gateOpen(egt, p.rpm, rfSoll)) {
+            report.samplesGateShut++;
+            continue;
+        }
+
         // The hysteresis band. The measurement of what was applied is still exact here — it is
         // the correspondence with THIS sample's Δ that is broken, because the held value was
         // computed somewhere else. Excluded as a data-quality matter, not a safety one.
-        if (!gateOpen(egt, p.rpm, rfSoll, o.gateMargin) && gateOpen(egt, p.rpm, rfSoll)) {
+        if (!gateOpen(egt, p.rpm, rfSoll, o.gateMargin)) {
             report.samplesHysteresis++;
+            continue;
+        }
+
+        // Δ has to be a temperature difference, not a sensor that has not caught up yet. See
+        // RfKorrTuneOptions.settleSec.
+        if (!settled[i]) {
+            report.samplesNotSettled++;
             continue;
         }
 
@@ -314,6 +479,7 @@ export function tuneRfKorrTable(
         Array.from({ length: cols }, () => ({
             sumDw: 0, weight: 0, count: 0,
             min: Infinity, max: -Infinity, veCells: new Set<number>(),
+            sumDeltaW: 0,
         })));
 
     for (const s of prepared) {
@@ -343,6 +509,7 @@ export function tuneRfKorrTable(
             const bin = bins[g.r][g.c];
             const w = g.w * confidence;
             bin.sumDw += ratio * w;
+            bin.sumDeltaW += s.delta * w;
             bin.weight += w;
             bin.count++;
             if (ratio < bin.min) bin.min = ratio;
@@ -373,9 +540,32 @@ export function tuneRfKorrTable(
         return hi - lo < o.identitySpan;
     };
 
+    // The same test along the other axis, and read from the bytes for the same reason. In stock
+    // this is the Δ = 30 row: 1.000 at every rpm, the zero of the whole table. Everything else is a
+    // departure FROM it, so moving it moves all six rows at once relative to nothing.
+    const isIdentityRow = (r: number) => {
+        let lo = Infinity, hi = -Infinity;
+        for (let c = 0; c < cols; c++) {
+            lo = Math.min(lo, stock[r][c]);
+            hi = Math.max(hi, stock[r][c]);
+        }
+        return hi - lo < o.identitySpan;
+    };
+
+    // How far a bin's weighted-mean Δ may sit from its own breakpoint, per row. Derived from the
+    // axis rather than fixed, because the Y axis is far from uniform — 30/40/100/200/300/400, so
+    // 10 °C is the whole gap at the bottom and a tenth of it further up.
+    const deltaTolerance = deltaAxis.map((d, r) => {
+        const gaps: number[] = [];
+        if (r > 0) gaps.push(d - deltaAxis[r - 1]);
+        if (r < rows - 1) gaps.push(deltaAxis[r + 1] - d);
+        return Math.max(Math.min(...gaps) * o.maxDeltaOffsetFrac, o.minDeltaTolerance);
+    });
+
     for (let c = 0; c < cols; c++) {
         const identity = isIdentityColumn(c);
         for (let r = 0; r < rows; r++) {
+            const identityRow = isIdentityRow(r);
             const bin = bins[r][c];
             countMap[r][c] = bin.count;
             weightMap[r][c] = bin.weight;
@@ -384,7 +574,8 @@ export function tuneRfKorrTable(
                 measuredMap[r][c] = bin.weight > 0 ? bin.sumDw / bin.weight : 0;
             }
 
-            const reason = rejectionFor(bin, identity, o);
+            const reason = rejectionFor(
+                bin, identity, identityRow, deltaAxis[r], deltaTolerance[r], o);
             if (reason) { rejected[r][c] = reason; report.rejectedByReason[reason]++; continue; }
 
             const raw = bin.sumDw / bin.weight;
@@ -405,17 +596,33 @@ export function tuneRfKorrTable(
         anchorMap, anchorWeightMap,
         // One updated cell is a curiosity, not a calibration. Requiring a handful keeps a log that
         // happened to clip one corner of the grid from presenting itself as a tune.
-        acceptable: report.gridCellsUpdated >= 3,
+        //
+        // The two evidence terms are very nearly implied by the first now that pass 0 refuses shut
+        // gates — no ratios means no bins means no updates. They are stated anyway because the
+        // implication runs through three passes and one of them is a bilinear spread: this used to
+        // return `acceptable: true` off a log that contained not one sample where the correction was
+        // running, and the invariant that says why it cannot belongs where it is read.
+        acceptable: report.gridCellsUpdated >= 3
+            && report.ratioSamples > 0
+            && report.veCellsWithAnchor > 0,
         report,
     };
 }
 
-function rejectionFor(bin: GridBin, identity: boolean, o: RfKorrTuneOptions): RejectReason | null {
+function rejectionFor(
+    bin: GridBin, identity: boolean, identityRow: boolean,
+    breakpoint: number, tolerance: number, o: RfKorrTuneOptions,
+): RejectReason | null {
     if (bin.count === 0) return 'no-evidence';
     if (identity && !o.writeIdentityColumns) return 'identity-column';
+    if (identityRow && !o.writeIdentityRow) return 'identity-row';
     if (bin.count < o.minCellSamples) return 'thin-count';
     if (bin.weight < o.minCellWeight) return 'thin-weight';
     if (bin.veCells.size < o.minDistinctVeCells) return 'single-ve-cell';
+    // Where the evidence sat, not just how much of it there was.
+    if (bin.weight > 0 && Math.abs(bin.sumDeltaW / bin.weight - breakpoint) > tolerance) {
+        return 'off-breakpoint';
+    }
     if (bin.max - bin.min > o.maxSpread) return 'spread';
     return null;
 }

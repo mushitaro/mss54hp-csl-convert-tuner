@@ -60,6 +60,84 @@ export const OPERATING_MEASUREMENTS_BLOCK = {
     },
 };
 
+/**
+ * Selection 83 (0x53) "EGAS Measurements" (52 bytes) — the drivability block.
+ *
+ * This block exists for the inertia workflow, and it is polled ALONE rather than added to the
+ * {3, 19} pair the VE datalog uses. Two reasons, and both are load-bearing:
+ *
+ * 1. **Rate.** Every selected block is its own DS2 round trip, so adding this one to the existing
+ *    pair would take the VE sample from ~4 Hz to ~2 Hz. Polled by itself it is one exchange, which
+ *    is the fastest this link can produce anything at all.
+ * 2. **Skew.** DS2 is request/response, so signals from different blocks are sampled at different
+ *    instants but land in one timestamped sample. Fitting torque against a speed gradient is
+ *    exactly the calculation that skew corrupts: at 2000 rpm/s, a 110 ms inter-block gap is 220 rpm
+ *    of drift between the two numbers being regressed. Inside one block there is no gap.
+ *
+ * The consequence is that this block cannot feed the VE pipeline — it carries no `aq_rel`, no
+ * `tabg`, no `la_f_regler` — and the VE blocks cannot feed the inertia estimator. That is why
+ * `EgasMeasurement` below is a separate type from `LiveMeasurement` rather than more optional
+ * fields on it: the two runs are not interchangeable, and a type error is a better place to find
+ * that out than a plausible wrong answer.
+ *
+ * Offsets and scalings are from the reference catalog (DmeLiveValueCatalog.cs, selection 83).
+ */
+export const EGAS_MEASUREMENT_BLOCK = {
+    selection: 83,
+    expectedLength: 52,
+    fields: {
+        /** Engine operating state. */
+        engineState: { symbol: 'zustand_motor', offset: 3, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        /** Throttle plate 1 position. */
+        wdk1: { symbol: 'wdk1', offset: 4, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** Engine speed, 40 rpm/LSB. Coarse next to block 3's `n` (1 rpm), and that is the price of
+         *  having it in the same frame as the torque. The estimator differences it over a window
+         *  rather than per sample, which is what makes 40 rpm tolerable. */
+        n40: { symbol: 'n40', offset: 18, format: 'uint8', scale: 40, add: 0 } as FieldDef,
+        /**
+         * Engine speed gradient, 40 rpm/s per LSB, signed, saturating at +/-5080 rpm/s.
+         *
+         * **This channel is biased and the bias is not symmetric.** The DME computes
+         * `D_N40 = (D_N_SEGMENT + 0x14) / 0x28` with a division that truncates toward zero, so
+         * rounding is half-up on the positive side and lands a whole extra step short on the
+         * negative side: a true -139 rpm/s is reported as -80. See `correctDN40` in
+         * `src/lib/inertia/gradient.ts` for the correction and its residual.
+         */
+        dN40: { symbol: 'd_n40', offset: 19, format: 'int7', scale: 40, add: 0 } as FieldDef,
+        /** Pedal gradient, %/20 ms (note: not %/s — this is the raw two-sample difference). */
+        dPwg: { symbol: 'd_pwg', offset: 20, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        /** Throttle gradient, %/s. */
+        dWdk: { symbol: 'd_wdk', offset: 22, format: 'int15', scale: 5.0, add: 0 } as FieldDef,
+        /** Relative filling (%). Same quantity as block 3's `rf`, different block. */
+        rf: { symbol: 'rf', offset: 30, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** Driver torque request after the tip-in/tip-out slew limiter, Nm. */
+        mdIndWunsch: { symbol: 'md_ind_wunsch', offset: 34, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** Torque after intervention (ASC/SMG/limiter), Nm. */
+        mdIndNe: { symbol: 'md_ind_ne', offset: 38, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** Actual indicated torque, Nm — the DME's own torque model output. This is the regressand
+         *  the inertia estimate is built on, so its absolute accuracy is the estimate's absolute
+         *  accuracy; see the bias discussion in `src/lib/inertia/estimator.ts`. */
+        mdIndOptKorr: { symbol: 'md_ind_opt_korr', offset: 40, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** Rear-axle average speed, km/h. Present in this same block, which is what lets the
+         *  estimator check the "stationary" precondition without a second round trip. */
+        vAntrieb: { symbol: 'v_antrieb', offset: 42, format: 'uint16', scale: 0.0625, add: 0 } as FieldDef,
+        /** Dynamic filter status. bit6 = the tip-in limiter actually clipped this cycle, bit4/5 =
+         *  the dashpot did. The only direct evidence available over DS2 that the slew limiter was
+         *  the thing shaping the torque — `MD_LS_DELTA` itself is written and never read, so it is
+         *  not on any block. */
+        mdDynSt: { symbol: 'md_dyn_st', offset: 48, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        /** Calculated gear. 0 = neutral. */
+        gang: { symbol: 'gang', offset: 49, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        /** Powertrain engaged. Note this is decided by road speed alone on a 0x40 gearbox —
+         *  `s_kraftschluss_calc` compares against K_LLR_V_MAX (2 km/h) and has no clutch input, so
+         *  it does NOT mean "clutch is out". */
+        sKrafts: { symbol: 's_krafts', offset: 50, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        /** Overrun fuel cutoff state — how the estimator knows combustion torque is zero during a
+         *  free deceleration. */
+        saWeSt: { symbol: 'sa_we_st', offset: 51, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+    },
+};
+
 export function decodeStandardMeasurementBlock(payload: Uint8Array) {
     const f = STANDARD_MEASUREMENT_BLOCK.fields;
     return {
@@ -76,5 +154,34 @@ export function decodeOperatingMeasurementsBlock(payload: Uint8Array) {
     return {
         stft1: decodeField(payload, f.stft1),
         stft2: decodeField(payload, f.stft2),
+    };
+}
+
+/**
+ * Every field of selection 83, each `number | null`.
+ *
+ * Null means "the block was shorter than this offset", which a DME on a different software version
+ * can legitimately produce. Callers must keep that distinct from a decoded 0 — `gang: 0` is
+ * neutral, `gang: null` is "this DME did not tell us", and treating the second as the first would
+ * silently admit in-gear samples into a measurement that requires neutral.
+ */
+export function decodeEgasMeasurementBlock(payload: Uint8Array) {
+    const f = EGAS_MEASUREMENT_BLOCK.fields;
+    return {
+        engineState: decodeField(payload, f.engineState),
+        wdk1: decodeField(payload, f.wdk1),
+        n40: decodeField(payload, f.n40),
+        dN40: decodeField(payload, f.dN40),
+        dPwg: decodeField(payload, f.dPwg),
+        dWdk: decodeField(payload, f.dWdk),
+        rf: decodeField(payload, f.rf),
+        mdIndWunsch: decodeField(payload, f.mdIndWunsch),
+        mdIndNe: decodeField(payload, f.mdIndNe),
+        mdIndOptKorr: decodeField(payload, f.mdIndOptKorr),
+        vAntrieb: decodeField(payload, f.vAntrieb),
+        mdDynSt: decodeField(payload, f.mdDynSt),
+        gang: decodeField(payload, f.gang),
+        sKrafts: decodeField(payload, f.sKrafts),
+        saWeSt: decodeField(payload, f.saWeSt),
     };
 }

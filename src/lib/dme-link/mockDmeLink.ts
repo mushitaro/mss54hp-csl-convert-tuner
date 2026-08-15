@@ -1,15 +1,16 @@
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
     ServiceBlockDump, WriteOptions, WriteVerification,
 } from './types';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
-    STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK,
+    STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK, isClearedByTuneReset,
 } from './adaptationBlocks';
 import { FlashCounterInfo, ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH, analyzeFlashCounter } from './flashCounter';
 import { Mss54HpDataTuneLayout, Ds2EncodingChecksum, parseEncodingChecksum } from './ds2';
-import { correctDataChecksum } from '@/lib/checksum/dmeDataChecksum';
+import { correctDataChecksum, readStoredChecksums } from '@/lib/checksum/dmeDataChecksum';
 import { MockDrive } from './mockDrive';
+import { MockInertiaBench } from '@/lib/inertia/bench';
 
 const PARTIAL_BIN_LENGTH = 65536;
 // Imported, not redeclared: this used to be an independent `const CHUNK_SIZE = 122`, so the mock's
@@ -34,7 +35,8 @@ const ADAPTATION_FIELDS: AdaptationFieldDef[] = [
  * A DME that has plausibly learned something, in decoded engineering units. Values are made up but
  * shaped like real ones: the two lambda factors straddle their 1.0 neutral, the offsets are small
  * and opposite-signed, and knock adaptation is negative on every cylinder because it only ever
- * retards. Picked so a mock reset visibly changes all twelve rows.
+ * retards. Picked so a mock reset visibly changes every row it is supposed to change — and, since
+ * VANOS left the clear mask, visibly leaves the two VANOS rows where they were.
  */
 const MOCK_LEARNED_VALUES: Record<string, number> = {
     laa_f1: 1.031,
@@ -117,6 +119,16 @@ export class MockDmeLink implements DmeLink {
     /** The simulated drive, computed from `buffer`. See mockDrive.ts for what it models and why. */
     private drive = new MockDrive();
     private driveReady = false;
+    /**
+     * The stationary-neutral inertia bench, answering `pollEgasMeasurement`.
+     *
+     * Separate from `drive` because it models something `drive` does not: rotational dynamics. The
+     * drive cycle is a scripted rpm/load trace with no relationship between torque and speed
+     * gradient, so an estimator run against it would find nothing. This has a known J, which makes
+     * PRACTICE mode a genuine rehearsal of the inertia workflow — the answer at the end is
+     * checkable, not merely plausible.
+     */
+    private readonly inertiaBench = new MockInertiaBench();
     private connected = false;
     private measurementStartTime = 0;
     private aborted = false;
@@ -278,6 +290,29 @@ export class MockDmeLink implements DmeLink {
         });
     }
 
+    async readDataChecksums(): Promise<{ slave: number; master: number }> {
+        this.assertConnected();
+        await delay(40); // two small reads
+        // Off the mock's own image, so a PRACTICE write really does change the answer. Modelling
+        // it as state rather than returning a fixed pair is what lets the lineage guard be
+        // rehearsed offline: flash in PRACTICE, and a session built on the pre-flash BASE is
+        // correctly refused afterwards, exactly as it would be on the car.
+        return readStoredChecksums(new Uint8Array(this.buffer!));
+    }
+
+    async pollEgasMeasurement(): Promise<EgasMeasurement> {
+        this.assertConnected();
+        await delay(20); // one DS2 round trip — the EGAS profile polls a single block
+        if (this.measurementStartTime === 0) this.measurementStartTime = performance.now();
+        return this.inertiaBench.sample((performance.now() - this.measurementStartTime) / 1000);
+    }
+
+    /** The J the offline bench is simulating, so PRACTICE mode can say whether the estimate is
+     *  right rather than only whether it is plausible. Not part of DmeLink — no car knows this. */
+    get mockTrueInertia(): number {
+        return this.inertiaBench.trueJ;
+    }
+
     async pollLiveMeasurement(): Promise<LiveMeasurement> {
         this.assertConnected();
         await delay(20); // simulate a single DS2 request/response round trip
@@ -325,6 +360,11 @@ export class MockDmeLink implements DmeLink {
             group: field.group,
             value: this.adaptations.get(field.symbol) ?? field.cleared,
             cleared: field.cleared,
+            // Carried through, not defaulted. This mapping duplicates decodeBlock in
+            // adaptationBlocks.ts, and the first version of it silently dropped this flag — PRACTICE
+            // then showed "expected 0" against the two VANOS rows while the real link showed nothing,
+            // which is the exact disagreement the flag was added to remove.
+            clearedByTuneReset: field.clearedByTuneReset,
         }));
         return { at: Date.now(), readings };
     }
@@ -340,7 +380,13 @@ export class MockDmeLink implements DmeLink {
         await delay(60);
         // Each value drops to its own neutral — 1.0 for the multiplicative lambda factors, 0 for the
         // additive rest — rather than a blanket zero. See AdaptationFieldDef.cleared.
-        for (const field of ADAPTATION_FIELDS) this.adaptations.set(field.symbol, field.cleared);
+        //
+        // And only the rows the real mask actually clears: VANOS is read but not cleared, so PRACTICE
+        // has to leave its two rows sitting at their seeded values. A mock that clears more than the
+        // car does is a mock that teaches the wrong expectation.
+        for (const field of ADAPTATION_FIELDS) {
+            if (isClearedByTuneReset(field)) this.adaptations.set(field.symbol, field.cleared);
+        }
         await delay(ADAPT_SETTLE_MS);
         return this.snapshot();
     }

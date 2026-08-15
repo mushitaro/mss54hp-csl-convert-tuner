@@ -1,5 +1,5 @@
 import {
-    DmeLink, DmeIdentity, LiveMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
+    DmeLink, DmeIdentity, LiveMeasurement, EgasMeasurement, TransferProgress, DmeLinkError, ServiceBlockErasedCause,
     ServiceBlockDump, WriteOptions, WriteVerification,
 } from './types';
 import { ServiceBlockPointers } from './serviceBlockReport';
@@ -10,7 +10,7 @@ import {
     buildDs2Frame, parseDs2Frame, frameToBytes, isPositiveResponse,
     buildSeedRequestPayload, buildKeyPayload, isAlreadyUnlockedResponse, isSeedResponse, calculateLoginKey,
     buildReadMemoryPayload, buildWriteMemoryPayload, parseWriteResult, describeVerifyByte,
-    TUNE_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
+    TUNE_ADAPTATION_CLEAR, VANOS_ADAPTATION_CLEAR, buildClearAdaptationsPayload, classifyEchoMismatch, Ds2Status,
     programmingWriteTimeoutFor,
     Ds2EncodingChecksum, parseEncodingChecksum, faultedAreas, DATA_TUNE_CHECKSUM_BITS,
     Ds2ReadBlockSize,
@@ -19,7 +19,10 @@ import {
     parseSystemAddressTable, findPointer, parseAifEntries, latestPopulatedAifEntry,
     parseZifProgramNumber, AIF_TOTAL_LENGTH,
 } from './identity';
-import { STANDARD_MEASUREMENT_BLOCK, OPERATING_MEASUREMENTS_BLOCK, decodeStandardMeasurementBlock, decodeOperatingMeasurementsBlock } from './liveValueBlocks';
+import {
+    STANDARD_MEASUREMENT_BLOCK, OPERATING_MEASUREMENTS_BLOCK, EGAS_MEASUREMENT_BLOCK,
+    decodeStandardMeasurementBlock, decodeOperatingMeasurementsBlock, decodeEgasMeasurementBlock,
+} from './liveValueBlocks';
 import { FieldDef } from './blockDecoder';
 import {
     AdaptationSnapshot, STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK, buildAdaptationSnapshot,
@@ -31,6 +34,7 @@ import {
     shouldWriteClearPrepMarker, hasIntactAif, FLASH_COUNTER_RESET_ENABLED,
 } from './flashCounter';
 import { TransferTiming, TransferTimingReport } from './transferTiming';
+import { CHECKSUM_OFFSET_WITHIN_HALF, CHECKSUM_SLOT_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { LinkEventLog, LinkEventLogSnapshot, describeEncodingChecksum } from './linkEventLog';
 
 // DS2 system-address-table pointer indices (Ds2KnownSystemAddressLengths / IdentifyService)
@@ -82,6 +86,17 @@ const ADAPT_RETRY_DELAY_MS = 300;
 // must never block long enough to starve the poll cadence, and this is a mitigation for transient
 // glitches, not a cure for a bad line.
 const POLL_RETRY_ATTEMPTS = 2;
+
+/**
+ * How many datalog exchanges the timing instrument sizes its lanes for.
+ *
+ * A run has no chunk count to derive this from, so it is a fixed window rather than the read's
+ * `ceil(total / chunkSize)`. 256 exchanges is ~30 s at the rate the EGAS profile is expected to
+ * reach — long enough for the median turnaround and the `hostGap` distribution to settle, and
+ * bounded so a twenty-minute drive does not allocate for twenty minutes. `TransferTiming.end()`
+ * already drops anything past capacity, so overflowing this is a non-event.
+ */
+const LOG_TIMING_WINDOW_EXCHANGES = 256;
 // Before the first adaptation exchange, wait for the K-line to fall silent so the echo read isn't
 // racing a prior operation's still-arriving response. One quiet window this long with nothing new
 // received counts as silent; give up after this many rounds rather than blocking forever.
@@ -1441,6 +1456,105 @@ export class WebSerialDmeLink implements DmeLink {
         });
     }
 
+    /**
+     * Arms the per-exchange instrument for a datalog run.
+     *
+     * The log is the one path where `hostGap` is not ~0 — `flushLiveSamples` runs a full
+     * `processLogData` and VE recalculation synchronously inside the sample callback — and it is
+     * also the path whose sample rate has only ever been asserted, never measured. `TransferKind`
+     * has carried `'log'` since the write instrument was built and nothing ever armed it, so both
+     * questions stayed open.
+     *
+     * Bounded rather than open-ended: a run has no chunk count to size the lanes from, so it takes a
+     * fixed window and lets `end()`'s existing bounds check drop the overflow. The first few hundred
+     * exchanges are what answers "what rate does this profile really achieve" — a rolling window
+     * would cost memory forever to tell us the same thing.
+     */
+    beginLogTiming(): void {
+        this.timing.clearReport();
+        this.timing.begin(LOG_TIMING_WINDOW_EXCHANGES, {
+            kind: 'log',
+            // Sized for the EGAS block, because that is the profile this instrument exists to
+            // characterise. Same framing arithmetic as the bulk read above:
+            chunkSize: EGAS_MEASUREMENT_BLOCK.expectedLength,
+            // [addr][len][status][52 data][cksum].
+            responseBytes: EGAS_MEASUREMENT_BLOCK.expectedLength + 4,
+            // [addr][len][0x0B][selection][cksum] — five bytes, so `write` and `echoLatency` are
+            // meaningful here in the way they are on a read and are not on a write.
+            requestBytes: 5,
+            requestedBaud: null,
+            switchOutcome: null,
+            baud: this.lastReadBaud ?? 9600,
+            maxTelegramLength: this.maxTelegramLength,
+        });
+    }
+
+    /** Closes the datalog timing window and returns what it collected, or null if DIAG was off. */
+    endLogTiming(error?: unknown): TransferTimingReport | null {
+        return this.timing.finish(error);
+    }
+
+    async pollEgasMeasurement(): Promise<EgasMeasurement> {
+        return this.withGate(() => this.pollEgasMeasurementInner());
+    }
+
+    async readDataChecksums(): Promise<{ slave: number; master: number }> {
+        return this.withGate(async () => {
+            this.assertConnected();
+            const { slave, master } = Mss54HpDataTuneLayout;
+            // Each half keeps its CRC at the same offset within itself, so one expression serves
+            // both banks. Four bytes each: the CRC pair and its 0xFF 0xFF padding.
+            const read = async (base: number) => {
+                const bytes = await this.readRange(base + CHECKSUM_OFFSET_WITHIN_HALF, CHECKSUM_SLOT_LENGTH);
+                return (bytes[0] << 8) | bytes[1];
+            };
+            return {
+                slave: await read(slave.address),
+                master: await read(master.address),
+            };
+        });
+    }
+
+    /**
+     * One exchange, one block, no fallback.
+     *
+     * Where `pollLiveMeasurementInner` treats its second block as best-effort and substitutes
+     * neutral trim, this substitutes nothing. There is no neutral value for a torque or a gear that
+     * would leave the sample honest, and the estimator's whole defence against a wrong answer is
+     * that every sample it sees really came off the DME. A failed exchange is a failed sample.
+     *
+     * The retry is the same bounded, resync-first retry block 3 gets, and is safe for the same
+     * reason: READ_IO_STATUS with a selection byte is an idempotent read.
+     */
+    private async pollEgasMeasurementInner(): Promise<EgasMeasurement> {
+        this.assertConnected();
+        if (this.startTime === 0) this.startTime = performance.now();
+
+        let frame: Ds2Frame | null = null;
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= POLL_RETRY_ATTEMPTS; attempt++) {
+            try {
+                await this.resyncTransport();
+                frame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([EGAS_MEASUREMENT_BLOCK.selection]));
+                lastError = undefined;
+                break;
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        if (!frame) throw lastError instanceof Error ? lastError : new DmeLinkError(String(lastError));
+        if (!isPositiveResponse(frame)) throw new DmeLinkError('EGAS measurement block (selection 83) read rejected by DME');
+
+        const egas = decodeEgasMeasurementBlock(frame.payload);
+        // n40 is the one field with no useful reading if it is missing: every downstream calculation
+        // is indexed on engine speed. The rest stay null and are rejected per-sample by the
+        // estimator, which reports WHY it dropped them.
+        if (egas.n40 === null) {
+            throw new DmeLinkError('EGAS block response was shorter than expected (no engine speed)');
+        }
+        return { time: (performance.now() - this.startTime) / 1000, ...egas };
+    }
+
     private async pollLiveMeasurementInner(): Promise<LiveMeasurement> {
         this.assertConnected();
         if (this.startTime === 0) this.startTime = performance.now();
@@ -1679,13 +1793,32 @@ export class WebSerialDmeLink implements DmeLink {
         return this.withGate(() => this.clearTuneAdaptationsInner());
     }
 
-    private async clearTuneAdaptationsInner(): Promise<AdaptationSnapshot> {
+    /**
+     * Clears VANOS adaptation only — the prerequisite for the max-power cam sweep, which drives cam
+     * targets over DS2 and cannot tolerate a learned offset between commanded and actual position.
+     *
+     * Separate from clearTuneAdaptations because it is a separate decision with a separate reason,
+     * not a parameterisation of the same one. A re-tune must NOT clear this (see
+     * TUNE_ADAPTATION_CLEAR); the cam sweep must.
+     */
+    async clearVanosAdaptations(): Promise<AdaptationSnapshot> {
+        return this.withGate(() => this.clearAdaptationsInner(VANOS_ADAPTATION_CLEAR, 'VANOS adaptation clear'));
+    }
+
+    private clearTuneAdaptationsInner(): Promise<AdaptationSnapshot> {
+        return this.clearAdaptationsInner(TUNE_ADAPTATION_CLEAR, 'Adaptation clear');
+    }
+
+    private async clearAdaptationsInner(
+        set: { readonly mask1: number; readonly mask2: number },
+        describe: string,
+    ): Promise<AdaptationSnapshot> {
         this.assertAdaptationsAvailable();
         await this.drainUntilQuiet();
-        const { mask1, mask2 } = TUNE_ADAPTATION_CLEAR;
+        const { mask1, mask2 } = set;
         await this.adaptationExchangeWithRetry(
             Ds2Control.CLEAR_ADAPTATIONS, buildClearAdaptationsPayload(mask1, mask2), ADAPT_CLEAR_TIMEOUT_MS,
-            'Adaptation clear',
+            describe,
         );
         // A flat wait, kept deliberately. The tempting replacement — poll the block and stop as soon
         // as the read succeeds — does not work: a premature read does not fail, it succeeds and hands

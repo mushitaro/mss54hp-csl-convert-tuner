@@ -1,6 +1,6 @@
 import { APP_CONFIG, EXPERIMENTAL_CONFIG } from '@/config/constants';
-import { VEMap } from '@/lib/types';
-import { EcuItemDef, EcuItemValue, EcuNumericDef } from '@/lib/ecu-items/types';
+import type { VEMap } from '@/lib/types';
+import type { EcuItemDef, EcuItemValue, EcuNumericDef } from '@/lib/ecu-items/types';
 
 export class BinaryParser {
     protected buffer: ArrayBuffer;
@@ -72,6 +72,13 @@ export class BinaryParser {
             case 'constant': {
                 const raw = this.readRun(def, 1)[0];
                 return { kind: 'constant', symbol: def.symbol, raw, value: def.scaling.toPhysical(raw) };
+            }
+            case 'series': {
+                const raw = this.readRun(def.values, def.values.n);
+                return {
+                    kind: 'series', symbol: def.symbol, indexNames: def.indexNames,
+                    values: raw.map(def.values.scaling.toPhysical), raw,
+                };
             }
             case 'curve': {
                 const raw = this.readRun(def.values, def.values.n);
