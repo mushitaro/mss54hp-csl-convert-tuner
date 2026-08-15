@@ -91,6 +91,10 @@ export const APP_CONFIG = {
         TANK_VENT: 'Tankentlueftung Ventil',
         TANK_VENT_CHECK: 'Tankentlueftung Funktionspruefung',
         TANK_VENT_DIAG: 'Tankentlueftung Diagnose',
+        // Throttle position, and the lambda freeze byte. Same rule as the three above: a channel the
+        // live link produces has to survive the CSV round trip or downloading a run silently loses it.
+        WDK1: 'Drosselklappe Istwert',
+        LAMBDA_FREEZE: 'Lambda Freeze Flag',
     },
 
     /**
@@ -133,6 +137,8 @@ export const APP_CONFIG = {
         tankVent: ['tankentlueftung ventil'] as string[],
         tankVentCheckState: ['tankentlueftung funktionspruefung'] as string[],
         tankVentDiag: ['tankentlueftung diagnose'] as string[],
+        wdk1: ['drosselklappe istwert'] as string[],
+        lambdaFreeze: ['lambda freeze flag'] as string[],
     },
 
     /**

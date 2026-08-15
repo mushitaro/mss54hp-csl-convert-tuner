@@ -33,6 +33,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     const hasTankVent = points.some(p => p.tankVent !== undefined);
     const hasTankVentCheck = points.some(p => p.tankVentCheckState !== undefined);
     const hasTankVentDiag = points.some(p => p.tankVentDiag !== undefined);
+    const hasWdk1 = points.some(p => p.wdk1 !== undefined);
+    const hasLambdaFreeze = points.some(p => p.lambdaFreeze !== undefined);
 
     const rows = points.map(p => {
         const row: Record<string, number | string> = {
@@ -48,6 +50,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasTankVent) row[M.TANK_VENT] = p.tankVent ?? '';
         if (hasTankVentCheck) row[M.TANK_VENT_CHECK] = p.tankVentCheckState ?? '';
         if (hasTankVentDiag) row[M.TANK_VENT_DIAG] = p.tankVentDiag ?? '';
+        if (hasWdk1) row[M.WDK1] = p.wdk1 ?? '';
+        if (hasLambdaFreeze) row[M.LAMBDA_FREEZE] = p.lambdaFreeze ?? '';
         return row;
     });
 

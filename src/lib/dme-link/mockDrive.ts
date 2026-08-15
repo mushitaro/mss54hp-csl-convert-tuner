@@ -288,6 +288,11 @@ export class MockDrive {
             coolantTemp: 92 + wobble(t, 2.2) * 0.6,
             rf: rf * 100,
             exhaustTemp: Math.round(this.tabg / TABG_STEP) * TABG_STEP,
+            // Throttle, modelled from the load the cycle is asking for rather than invented
+            // separately, so a rehearsal that reaches high load also reaches a high plate angle and
+            // the full-load gate has something to act on. Alpha-N means load IS mostly throttle on
+            // this engine, which is why one can stand in for the other here.
+            wdk1: Math.min(100, aqRelRf * 90),
         };
     }
 }

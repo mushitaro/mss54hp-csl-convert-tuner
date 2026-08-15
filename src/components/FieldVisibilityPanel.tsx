@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { SlidersHorizontal, X } from 'lucide-react';
-import { FieldKey, LOG_FIELD_REGISTRY, TOGGLEABLE_FIELDS } from '@/lib/field-registry/registry';
+import { FieldKey, LOG_FIELD_REGISTRY, TOGGLEABLE_FIELDS, describeField } from '@/lib/field-registry/registry';
 
 interface Props {
     visibleFields: Record<FieldKey, boolean>;
@@ -45,14 +45,32 @@ export const FieldVisibilityPanel: React.FC<Props> = ({ visibleFields, onToggle,
                             {TOGGLEABLE_FIELDS.map(key => {
                                 const meta = LOG_FIELD_REGISTRY[key];
                                 return (
-                                    <label key={key} className="py-2 -my-2 flex items-center gap-2 cursor-pointer text-[10px] text-slate-400 uppercase tracking-wider">
+                                    <label
+                                        key={key}
+                                        title={describeField(meta)}
+                                        className="py-2 -my-2 flex items-center gap-2 cursor-pointer text-[10px] text-slate-400 tracking-wider"
+                                    >
                                         <input
                                             type="checkbox"
                                             checked={visibleFields[key]}
                                             onChange={() => onToggle(key)}
                                             className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
                                         />
-                                        <span style={{ color: visibleFields[key] ? meta.color : undefined }}>{meta.label}</span>
+                                        {/* Symbols are lowercase DME identifiers, so this list must NOT uppercase
+                                            them the way the rest of the app's labels are uppercased — `la_f_regler1`
+                                            shouted as `LA_F_REGLER1` stops matching the reference tool, the
+                                            Funktionsrahmen and the disassembly, which is the whole point of using
+                                            the symbol. Computed fields carry a `calc` tag instead, so a name that
+                                            looks like a symbol but is not one cannot be mistaken for one. */}
+                                        <span
+                                            className="font-mono"
+                                            style={{ color: visibleFields[key] ? meta.color : undefined }}
+                                        >
+                                            {meta.symbol}
+                                        </span>
+                                        {meta.source === 'derived' && (
+                                            <span className="text-slate-600 text-[9px]" title="Computed by this app">calc</span>
+                                        )}
                                     </label>
                                 );
                             })}

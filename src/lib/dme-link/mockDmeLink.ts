@@ -356,12 +356,19 @@ export class MockDmeLink implements DmeLink {
             coolantTemp,
             rf,
             exhaustTemp,
+            // Idle throttle. The plate is nearly shut, which is what makes the full-load gate a
+            // no-op here — correct for this pattern, and the reason PRACTICE cannot be used to
+            // check that the gate actually rejects anything.
+            wdk1: 4.5 + Math.sin(t * 0.7) * 0.4,
             tankVent,
             // Both idle at 0 on a healthy DME: the functional check is not running and the valve has
             // not faulted. PRACTICE has no failure to simulate here, and inventing one would put a
             // fault code on screen that no car reported.
             tankVentCheckState: 0,
             tankVentDiag: 0,
+            // Zero, and NOT because a car said so — nothing here knows what this byte does. It is
+            // present so the column exists in PRACTICE; its value carries no claim.
+            lambdaFreeze: 0,
         };
     }
 

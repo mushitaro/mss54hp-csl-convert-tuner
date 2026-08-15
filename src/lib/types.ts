@@ -27,6 +27,12 @@ export interface LogDataPoint {
     /** RF — the DME's final relative filling (%), AFTER the EGT correction rf_korr has been applied
      *  to the Alpha-N table's rf_soll. DS2 selection 3, payload bytes 8-9. */
     rf?: number;
+    /** WDK1 — throttle plate 1 position (%). DS2 selection 3, payload bytes 27-28, free.
+     *
+     *  A gate input rather than a gauge: FR 5.01 x.2.3.2 switches the lambda controller off at full
+     *  load, so a sample taken above the WOT threshold carries a trim that is not controlling
+     *  anything. Until this channel existed the log had no way to tell. */
+    wdk1?: number;
 
     // --- tank ventilation -------------------------------------------------------------------
     // Free: DS2 selection 19, the same response stft1/stft2 already come out of.
@@ -47,6 +53,10 @@ export interface LogDataPoint {
     /** TEFC_ED — tank-vent diagnostic handle. Watch it after disabling purge: DTC 24 is exactly
      *  the code a permanently-shut valve would set. */
     tankVentDiag?: number;
+    /** LA_FREEZE_FLAG — DS2 selection 19, payload byte 89. Recorded and never interpreted: the
+     *  symbol appears only in the reference catalog and the Funktionsrahmen's lambda module has no
+     *  "freeze" in it, so nothing may gate on this until a car establishes what it is. */
+    lambdaFreeze?: number;
     /** rf_korr — the EGT density correction the DME applied, measured rather than looked up:
      *  with MAP compensation off (k_rf_cfg = 0x02) the DME computes RF = rf_soll * rf_korr exactly,
      *  so rf_korr = (rf/100) / kf_rf_soll(rpm, correctedLoad). 1.0 = no correction.

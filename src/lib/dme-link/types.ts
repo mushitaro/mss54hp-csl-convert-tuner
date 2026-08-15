@@ -55,6 +55,9 @@ export interface LiveMeasurement {
     rf?: number;
     /** TABG — exhaust gas temperature, 16 °C resolution. Same block as rpm/rawLoad. */
     exhaustTemp?: number;
+    /** WDK1 — throttle plate position, %. Same block as rpm/rawLoad, so free. Exists to answer
+     *  "was the lambda controller even running here", by comparing against the WOT threshold. */
+    wdk1?: number;
     /**
      * TETV — tank-vent valve pulse time, ms. Same block as stft1/stft2, so it is free.
      *
@@ -68,6 +71,9 @@ export interface LiveMeasurement {
     tankVentCheckState?: number;
     /** TEFC_ED — tank-vent diagnostic handle. Non-zero once the DME has faulted the valve. */
     tankVentDiag?: number;
+    /** LA_FREEZE_FLAG — recorded, not interpreted. Its meaning is not in the Funktionsrahmen; see
+     *  the registry entry for the experiment that would establish it. */
+    lambdaFreeze?: number;
 }
 
 /**

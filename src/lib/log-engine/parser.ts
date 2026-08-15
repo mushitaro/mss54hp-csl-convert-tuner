@@ -142,6 +142,10 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         if (tankVentCheckState !== undefined) point.tankVentCheckState = tankVentCheckState;
         const tankVentDiag = pick(row, 'tankVentDiag');
         if (tankVentDiag !== undefined) point.tankVentDiag = tankVentDiag;
+        const wdk1 = pick(row, 'wdk1');
+        if (wdk1 !== undefined) point.wdk1 = wdk1;
+        const lambdaFreeze = pick(row, 'lambdaFreeze');
+        if (lambdaFreeze !== undefined) point.lambdaFreeze = lambdaFreeze;
 
         results.push(point);
     }

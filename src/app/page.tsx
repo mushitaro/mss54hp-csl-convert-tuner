@@ -1497,12 +1497,14 @@ export default function Home() {
           coolantTemp: sample.coolantTemp,
           rf: sample.rf,
           exhaustTemp: sample.exhaustTemp,
+          wdk1: sample.wdk1,
           // Carried into the log rather than only shown live: whether purge was active is a property
           // of the RUN, and it is the thing you want to check when two logs of the same road
           // disagree. It is worth nothing if it only existed while the numbers were on screen.
           tankVent: sample.tankVent,
           tankVentCheckState: sample.tankVentCheckState,
           tankVentDiag: sample.tankVentDiag,
+          lambdaFreeze: sample.lambdaFreeze,
         };
         liveSamplesRef.current.push(point);
         persistQueueRef.current.push(point);

@@ -47,6 +47,18 @@ export const STANDARD_MEASUREMENT_BLOCK = {
          *  so the channel resolves 16 degC and spans the sensor's -55..1250 degC range. `int7` is
          *  this decoder's signed-byte format (see blockDecoder.ts). */
         exhaustTemp: { symbol: 'tabg', offset: 14, format: 'int7', scale: 16, add: 0 } as FieldDef,
+        /**
+         * WDK1 — throttle plate 1, actual position. Free: these two bytes were already arriving and
+         * being discarded.
+         *
+         * Its consumer is a gate, not a gauge. FR 5.01 x.2.3.2 lists full load above `K_LA_N_VL`
+         * among the conditions that switch the lambda controller OFF, and `KF_BZ_WDK_VL` is the
+         * threshold this app already patches to keep the controller alive. Without a throttle
+         * channel there was no way to tell whether a sample was taken above it — recorded in
+         * docs/ecu-logic/60 §9 as "no means of detecting VL in the log", with this exact offset
+         * named as the fix and nobody having taken it.
+         */
+        wdk1: { symbol: 'wdk1', offset: 27, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
     },
 };
 
@@ -97,6 +109,12 @@ export const OPERATING_MEASUREMENTS_BLOCK = {
         /** TEFC_ED — the tank-vent diagnostic handle. Watch this after disabling purge: DTC 24
          *  (tank-venting valve) is exactly the code a permanently-shut valve would set. */
         tankVentDiag: { symbol: 'tefc_ed', offset: 88, format: 'uint8', scale: 1.0, add: 0 } as FieldDef,
+        /** LA_FREEZE_FLAG — logged, never acted on. The symbol exists only in the reference catalog;
+         *  the translated Funktionsrahmen has no "freeze" anywhere in the lambda module, so what
+         *  this byte means is genuinely unknown. See its registry entry for the experiment that
+         *  would settle it. Reading it is free — the master zeroes offsets 84..89 and the slave
+         *  fills them, exactly like tetv and the pair above. */
+        lambdaFreeze: { symbol: 'la_freeze_flag', offset: 89, format: 'uint8', scale: 1.0, add: 0 } as FieldDef,
     },
 };
 
@@ -186,6 +204,7 @@ export function decodeStandardMeasurementBlock(payload: Uint8Array) {
         rawLoad: decodeField(payload, f.rawLoad),
         rf: decodeField(payload, f.rf),
         exhaustTemp: decodeField(payload, f.exhaustTemp),
+        wdk1: decodeField(payload, f.wdk1),
     };
 }
 
@@ -200,6 +219,7 @@ export function decodeOperatingMeasurementsBlock(payload: Uint8Array) {
         tankVent: decodeField(payload, f.tankVent),
         tankVentCheckState: decodeField(payload, f.tankVentCheckState),
         tankVentDiag: decodeField(payload, f.tankVentDiag),
+        lambdaFreeze: decodeField(payload, f.lambdaFreeze),
     };
 }
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { LogDataPoint } from '@/lib/types';
 import { AlertCircle } from 'lucide-react';
-import { FieldKey, LOG_FIELD_REGISTRY, TOGGLEABLE_FIELDS, isFieldPresent, DEFAULT_FIELD_VISIBILITY } from '@/lib/field-registry/registry';
+import { FieldKey, LOG_FIELD_REGISTRY, TOGGLEABLE_FIELDS, isFieldPresent, DEFAULT_FIELD_VISIBILITY, describeField } from '@/lib/field-registry/registry';
 
 interface Props {
     data: LogDataPoint[];
@@ -69,14 +69,24 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
                     <thead className="sticky top-0 bg-slate-950 z-10 text-slate-500 font-bold uppercase tracking-wider">
                         <tr>
                             <th className="py-2 px-3 text-left border-b border-slate-800 sticky left-0 bg-slate-950">Time</th>
-                            <th className="py-2 px-3 border-b border-slate-800">{LOG_FIELD_REGISTRY.rpm.label}</th>
-                            <th className="py-2 px-3 border-b border-slate-800 text-slate-400">{LOG_FIELD_REGISTRY.rawLoad.label}</th>
+                            {/* Headers are DME symbols in a monospace face, hover for the description and
+                                the selection/offset they arrived at. Lowercase is preserved deliberately:
+                                these are identifiers shared with the reference tool, the Funktionsrahmen
+                                and the disassembly, and shouting them breaks the match. */}
+                            <th className="py-2 px-3 border-b border-slate-800 font-mono" title={describeField(LOG_FIELD_REGISTRY.rpm)}>{LOG_FIELD_REGISTRY.rpm.symbol}</th>
+                            <th className="py-2 px-3 border-b border-slate-800 text-slate-400 font-mono" title={describeField(LOG_FIELD_REGISTRY.rawLoad)}>{LOG_FIELD_REGISTRY.rawLoad.symbol}</th>
                             {/* Factor: app-computed (Alpha-N by RPM), always shown between Raw and Corrected */}
-                            <th className="py-2 px-3 border-b border-slate-800" style={{ color: FACTOR_COLOR }}>Factor</th>
-                            <th className="py-2 px-3 border-b border-slate-800" style={{ color: LOG_FIELD_REGISTRY.correctedLoad.color }}>{LOG_FIELD_REGISTRY.correctedLoad.label}</th>
+                            <th className="py-2 px-3 border-b border-slate-800" style={{ color: FACTOR_COLOR }} title="Alpha-N interpolation factor at this RPM
+Computed by this app — the DME never sent this.">Factor</th>
+                            <th className="py-2 px-3 border-b border-slate-800" style={{ color: LOG_FIELD_REGISTRY.correctedLoad.color }} title={describeField(LOG_FIELD_REGISTRY.correctedLoad)}>{LOG_FIELD_REGISTRY.correctedLoad.symbol}</th>
                             {columns.map(key => (
-                                <th key={key} className="py-2 px-3 border-b border-slate-800" style={{ color: LOG_FIELD_REGISTRY[key].color }}>
-                                    {LOG_FIELD_REGISTRY[key].label}
+                                <th
+                                    key={key}
+                                    className={`py-2 px-3 border-b border-slate-800 ${LOG_FIELD_REGISTRY[key].source === 'derived' ? '' : 'font-mono'}`}
+                                    style={{ color: LOG_FIELD_REGISTRY[key].color }}
+                                    title={describeField(LOG_FIELD_REGISTRY[key])}
+                                >
+                                    {LOG_FIELD_REGISTRY[key].symbol}
                                 </th>
                             ))}
                         </tr>

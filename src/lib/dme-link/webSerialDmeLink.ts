@@ -1877,6 +1877,7 @@ export class WebSerialDmeLink implements DmeLink {
         let tankVent: number | undefined;
         let tankVentCheckState: number | undefined;
         let tankVentDiag: number | undefined;
+        let lambdaFreeze: number | undefined;
         try {
             const opFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([OPERATING_MEASUREMENTS_BLOCK.selection]));
             if (isPositiveResponse(opFrame)) {
@@ -1886,6 +1887,7 @@ export class WebSerialDmeLink implements DmeLink {
                 tankVent = op.tankVent ?? undefined;
                 tankVentCheckState = op.tankVentCheckState ?? undefined;
                 tankVentDiag = op.tankVentDiag ?? undefined;
+                lambdaFreeze = op.lambdaFreeze ?? undefined;
             }
         } catch {
             // Leave trim neutral — but resync, because a break latched here would otherwise be
@@ -1907,10 +1909,12 @@ export class WebSerialDmeLink implements DmeLink {
             // must stay distinguishable from a genuine 0 °C / 0 % reading.
             rf: std.rf ?? undefined,
             exhaustTemp: std.exhaustTemp ?? undefined,
+            wdk1: std.wdk1 ?? undefined,
             // Free — same 90-byte response as stft1/stft2 above.
             tankVent,
             tankVentCheckState,
             tankVentDiag,
+            lambdaFreeze,
         };
     }
 
