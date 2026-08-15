@@ -282,7 +282,15 @@ export function useDmeLink() {
      * by the next real operation rather than as an error the user did not ask for.
      */
     useEffect(() => {
-        const id = setInterval(() => { void linkRef.current?.keepAlive(); }, KEEP_ALIVE_INTERVAL_MS);
+        const id = setInterval(() => {
+            // Not while a datalog is running. The gate makes this safe rather than correct: keepAlive
+            // skips when an operation holds it, so a tick that lands mid-exchange is absorbed — but a
+            // tick that lands in the gap BETWEEN two samples wins the gate and spends a full ~150 ms
+            // round trip proving a link that is being exercised twice a second anyway. The whole
+            // point of a tester-present frame is to fill silence, and a log leaves none.
+            if (pollingRef.current) return;
+            void linkRef.current?.keepAlive();
+        }, KEEP_ALIVE_INTERVAL_MS);
         return () => clearInterval(id);
     }, []);
 

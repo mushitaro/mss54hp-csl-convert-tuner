@@ -1834,7 +1834,21 @@ export class WebSerialDmeLink implements DmeLink {
         let stdError: unknown;
         for (let attempt = 1; attempt <= POLL_RETRY_ATTEMPTS; attempt++) {
             try {
-                await this.resyncTransport();
+                // Conditional on the FIRST attempt, unconditional on a retry.
+                //
+                // The resync exists because this used to be the one user-initiated first exchange
+                // with no purge, so it inherited any desync an earlier failed operation left behind.
+                // That reasoning is about recovering from a mess, and it holds on a retry. On the
+                // happy path there is nothing to purge — the previous sample consumed its whole
+                // response — and on WebUSB `purge()` is a USB control transfer, paid on every one of
+                // roughly two-and-a-half samples a second for a buffer that is already empty.
+                //
+                // `bufferedLength() > 0 || hasReadError()` is the same test the read path uses to
+                // decide whether a resync is warranted, so nothing that used to be recovered stops
+                // being recovered: a latched error or a stale tail still triggers it.
+                if (attempt > 1 || this.transport.bufferedLength() > 0 || this.transport.hasReadError()) {
+                    await this.resyncTransport();
+                }
                 stdFrame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([STANDARD_MEASUREMENT_BLOCK.selection]));
                 stdError = undefined;
                 break;

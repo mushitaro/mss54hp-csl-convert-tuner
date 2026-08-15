@@ -1325,6 +1325,48 @@ export default function Home() {
   /** Returns whether this call actually derived anything, so the end-of-run tab move can be armed only
    *  when there is a result to move to. The throttled early return reports null, which matters solely
    *  to force=true callers — and finishLog is the only one. */
+  /**
+   * True while a deferred flush is queued or running, so they cannot pile up.
+   *
+   * Same shape as `persistBusyRef` next door and for the same reason: the work is O(n) in the log
+   * and the log only grows, so on a long run a second flush can be scheduled before the first has
+   * finished. Dropping the extra one is right — the next sample schedules another 500 ms later, and
+   * a flush that is already in flight is about to show the same answer.
+   */
+  const flushBusyRef = useRef(false);
+
+  /**
+   * Runs the UI flush WITHOUT blocking the DS2 poll loop.
+   *
+   * `flushLiveSamples` re-processes the whole log and re-runs the VE calculation. Called straight
+   * from `onSample` it sits between two DS2 exchanges, so the DME is idle for the whole of it —
+   * measured on Session #902, a sample took 411 ms against 244 ms of unavoidable wire and
+   * turnaround, and the missing 167 ms is this.
+   *
+   * Deferring it to a macrotask does not make the work cheaper; it makes it happen at a better
+   * time. The poll loop can issue the next request immediately, and the flush then runs during the
+   * DME's own ~80 ms of thinking, which is dead CPU time either way. It also stops the rate
+   * DEGRADING as the log grows, which is the worse half of the problem: the cost is O(n) and the
+   * old arrangement paid all of it on the critical path.
+   *
+   * requestIdleCallback where it exists, because that is exactly "run when the main thread is
+   * otherwise waiting". Safari and older Android have no such thing, hence the timeout fallback.
+   */
+  const scheduleFlush = () => {
+    if (flushBusyRef.current) return;
+    const now = Date.now();
+    if (now - lastFlushRef.current < 500) return;
+    flushBusyRef.current = true;
+    const run = () => {
+      try { flushLiveSamples(true); } finally { flushBusyRef.current = false; }
+    };
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void })
+      .requestIdleCallback;
+    // A timeout on the idle callback too: idle never arrives on a busy main thread, and a live
+    // readout that stops updating during a hard pull is worse than one that costs a few ms there.
+    if (ric) ric(run, { timeout: 400 }); else setTimeout(run, 0);
+  };
+
   const flushLiveSamples = (force: boolean) => {
     const now = Date.now();
     if (!force && now - lastFlushRef.current < 500) return null;
@@ -1461,7 +1503,7 @@ export default function Home() {
         }
 
         setLiveSample(point); // live raw readout, independent of the VE filters
-        flushLiveSamples(false);
+        scheduleFlush();
         void persistLiveSamples(false); // own throttle, far slower than the 500 ms UI flush
       },
       (failure) => { void finishLogRef.current(failure); },
