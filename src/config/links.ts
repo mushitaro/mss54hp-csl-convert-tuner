@@ -22,6 +22,11 @@ export const PRIVACY_POLICY_URL = 'https://m3.tsunagi.app/privacy-policy';
  * The forum profile URLs carry the member id as well as the name, which is how vBulletin resolves
  * them — a renamed account still lands correctly.
  */
+/** This tool's own source. Declared here with the rest for the same new-tab reason, and because the
+ *  desktop header and the menu sheet now both point at it — inline in two places is one place too
+ *  many for a URL that has to stay the same in both. */
+export const PROJECT_REPO_URL = 'https://github.com/mushitaro/mss54hp-csl-convert-tuner';
+
 export const CREDIT_LINKS = {
     karter16Profile: 'https://nam3forum.com/forums/member/9797-karter16',
     bry5onProfile: 'https://nam3forum.com/forums/member/5503-bry5on',

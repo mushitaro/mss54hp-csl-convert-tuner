@@ -1,9 +1,12 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield, UploadCloud, Plus } from 'lucide-react';
+import {
+    X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield, UploadCloud,
+    Plus, Info, Github, BookOpen,
+} from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
-import { PRIVACY_POLICY_URL } from '@/config/links';
+import { PRIVACY_POLICY_URL, PROJECT_REPO_URL, CREDIT_LINKS } from '@/config/links';
 import type { InstallState } from '@/hooks/useInstallPrompt';
 import { describeSave, describeSync, SaveStatus, SyncStatus } from '@/lib/session-sync/status';
 
@@ -19,25 +22,22 @@ import { describeSave, describeSync, SaveStatus, SyncStatus } from '@/lib/sessio
  * they go behind one control and the header keeps only what has to be glanceable while driving:
  * link state, which car, and which half of the app you are looking at.
  *
- * **Three sections, by subject: VEHICLE, APPLICATION, VIEW.** The car, the app, the screen — every
- * row belongs to exactly one of those, and nothing needs a fourth heading. What used to be five
- * groups (an unlabelled RELOAD/INSTALL block, SESSION, VEHICLE, DOWNLOAD, VIEW) plus a pinned
- * SAVE/SYNC footer was five places to look for one thing; APPLICATION is now the only place any of
- * it can be.
+ * **Three bands, and only one of them scrolls.** VEHICLE is the car, SESSION is the work, VIEW is
+ * the screen. The first two are laid out to fit and stay put; VIEW is the only list long enough to
+ * need a scroller, and it gets the space the other two do not use. They were briefly all in one
+ * scroller with sticky headings, and that is the arrangement this replaces: with one scroller,
+ * whichever band you are not looking at is gone, and SAVE — which the whole sheet exists to make
+ * reachable — was off screen at open by five pixels.
  *
  * **Everything is ordered outward from the thumb.** The sheet opens from a button at the bottom
- * centre, so the sections run bottom-up — VIEW nearest the button, VEHICLE furthest — and the close
- * control sits at that same bottom centre, on the spot the finger is already touching. Press, slide
- * up, release: one gesture, no second aim.
+ * centre, so VIEW is nearest it, VEHICLE furthest, and the close control sits at that same bottom
+ * centre on the spot the finger is already touching. Press, slide up, release: one gesture, no
+ * second aim. VIEW's own list is unrolled upside down and opens scrolled to its end, so STARTUP —
+ * the first tab and the one most often wanted — is the row closest to the button.
  *
- * The section headings are sticky, which is what makes one long scroller legible: whatever you have
- * scrolled to, the band it belongs to is named at the top of the view.
- *
- * SAVE and SYNC used to be pinned above Close, because before that they lived at the top of a
- * scroller that opens at its BOTTOM and were reported three times as "SAVE does not appear on
- * mobile" — it did not appear; it was never visible. They scroll again now, but the other way up:
- * APPLICATION sits directly above VIEW, so the sheet opens with it partly on screen rather than a
- * whole list away. Measured before shipping, and worth re-measuring if the tab list ever grows.
+ * **The icon strip at the top is the desktop header.** Same destinations, same order, drawn as
+ * icons because a phone has no room for "Tuning Source" spelled out. It is the furthest thing from
+ * the thumb, which is where a legal link and an app reload belong.
  *
  * Deliberately NOT in here: anything that writes to the ECU. WRITE, the arming toggles and
  * START/STOP stay on the dashboard where they are one tap apart and visible together — a menu that
@@ -82,27 +82,29 @@ interface Props {
     onDragEnd?: () => void;
     /** Reloads the document. The caller confirms first if there is a live link or unsaved work. */
     onReload: () => void;
+    /** Opens the attribution dialog — the same thing the version string does on a desk. */
+    onOpenCredits: () => void;
     /** Whether this device can take the app, and how. See useInstallPrompt. */
     installState: InstallState;
     onInstall: () => void;
     /** The server is serving a newer build than the one running. */
     updateAvailable?: boolean;
-    /** What the sync row says and whether it can be pressed. Computed by the caller so this row and
+    /** What the sync cell says and whether it can be pressed. Computed by the caller so this and
      *  the desktop header's twin cannot disagree — see lib/session-sync/status.ts.
      *
      *  Null on a build with no store to sync to, which is production: it is served statically from
-     *  GitHub Pages and has no `/api` of any kind. A greyed-out row there would not be a control
+     *  GitHub Pages and has no `/api` of any kind. A greyed-out cell there would not be a control
      *  that is temporarily unavailable, it would be a control for a feature that build does not
      *  contain — which is why this is null rather than a permanent `unavailable` phase. */
     sync: SyncStatus | null;
-    /** Sends every outstanding session. Does not close the sheet: the row is the progress readout. */
+    /** Sends every outstanding session. Does not close the sheet: the caption is the readout. */
     onSync: () => void;
-    /** What the SAVE row says and whether it can be pressed — the step before sync. Same
+    /** What the SAVE cell says and whether it can be pressed — the step before sync. Same
      *  computed-by-the-caller rule as `sync`, and null for the same kind of reason: a layout with no
-     *  session concept at all should render no row rather than a permanently dead one. */
+     *  session concept at all should render no cell rather than a permanently dead one. */
     save: SaveStatus | null;
-    /** Records the tune into this device's database. Does not close the sheet, so the row can
-     *  report the outcome the same way the sync row does. */
+    /** Records the tune into this device's database. Does not close the sheet, so the caption can
+     *  report the outcome. */
     onSave: () => void;
     /** Starts a fresh draft and lands on STARTUP. Closes the sheet — unlike SAVE and SYNC it has
      *  somewhere to take you, so leaving the sheet up would just cover what it did. */
@@ -113,8 +115,9 @@ interface Props {
      * Passed in rather than imported so the build gate stays in one place: production is served
      * statically with no `/api` at all, and the caller is already deciding that for `sync`.
      *
-     * It renders its own trigger, which is why this is a node and not a callback. Its panel is a
-     * fixed sheet that has to come out ABOVE this one — see the z-index note at its openUp branch.
+     * It renders its own trigger, which is why this is a node and not a callback — the caller
+     * dresses it as a cell with MENU_CELL. Its panel is a fixed sheet that has to come out ABOVE
+     * this one; see the z-index note at its openUp branch.
      */
     storePanel?: React.ReactNode;
     /** `<build>.<sha>` plus the service-worker cache name, or undefined on a dev server. */
@@ -124,13 +127,20 @@ interface Props {
 const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadsheet } as const;
 
 /**
- * Every pressable row in APPLICATION, so eight controls read as one control repeated rather than as
- * eight designs. 44px is the tap target; only the tone varies between them.
+ * One cell of the SESSION grid: icon over a short word, 56px tall.
  *
- * Exported because one of those rows is `storePanel`, which the caller builds — the shape has to
- * come from here or that row would be the one that does not match.
+ * Exported because one of the cells is `storePanel`, which the caller builds — the shape has to
+ * come from here or that cell would be the one that does not match its neighbours.
+ *
+ * 56 rather than 44 because these are square-ish targets in a three-across row on a 360px screen,
+ * where the horizontal budget is already about 110px each. The label is `text-[9px]` and truncates:
+ * a cell that grows to fit its word would break the grid it shares.
  */
-export const MENU_ROW = 'w-full flex items-center justify-center gap-3 min-h-[44px] py-3 px-2 -mx-2 rounded transition-colors';
+export const MENU_CELL = 'flex flex-col items-center justify-center gap-1 min-h-[56px] px-1 rounded transition-colors text-[9px] font-bold uppercase tracking-widest';
+
+/** The icon strip's controls — the desktop header, drawn small. 40px is the target; the icons
+ *  themselves are 14px, which is what the header renders them at. */
+const STRIP_ITEM = 'w-10 h-10 flex items-center justify-center rounded transition-colors';
 
 /**
  * One column for every readout in the sheet.
@@ -143,37 +153,35 @@ export const MENU_ROW = 'w-full flex items-center justify-center gap-3 min-h-[44
  */
 const READOUT_COLUMN = 'w-[min(15rem,100%)] mx-auto';
 
-/**
- * One of the three bands, with its heading pinned to the top of the scroll.
- *
- * Sticky is what lets all three live in one scroller. Nothing is pinned outside it any more, so the
- * heading is the only thing that says which band the rows under your thumb belong to — and it has
- * to be opaque, not translucent, because rows scroll underneath it.
- *
- * Vertical padding is halved on a short viewport. Only the readouts are squeezed; the headings and
- * the rows keep their height, so nothing loses a tap target.
- */
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-    <div className="border-b border-slate-900">
-        <h4 className="sticky top-0 z-10 bg-slate-900 px-4 pt-3 pb-2 [@media(max-height:560px)]:pt-1.5 [@media(max-height:560px)]:pb-1 text-[9px] font-bold uppercase tracking-widest text-slate-600 text-center">
-            {title}
-        </h4>
-        <div className="px-4 pb-3 [@media(max-height:560px)]:pb-1.5">{children}</div>
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+    <div className="flex items-baseline gap-3 py-0.5">
+        <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+        <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
     </div>
 );
 
-const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div className="flex items-baseline gap-3 py-1 [@media(max-height:560px)]:py-0.5">
-        <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
-        <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
+/**
+ * A band and its heading.
+ *
+ * The heading is a plain child rather than `sticky`, because nothing scrolls past it any more: each
+ * band holds its own height. VIEW puts its scroller in `children`, so its heading stays put for the
+ * same reason without needing to be told to.
+ */
+const Band: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className = '', children }) => (
+    <div className={`flex flex-col border-b border-slate-800 ${className}`}>
+        <h4 className="shrink-0 px-4 pt-2.5 pb-1 [@media(max-height:560px)]:pt-1 text-[9px] font-bold uppercase tracking-widest text-slate-600 text-center">
+            {title}
+        </h4>
+        {children}
     </div>
 );
 
 export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
-    session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, updateAvailable,
-    installState, onInstall, sync, onSync, save, onSave, onNewSession, storePanel, buildLabel,
+    session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, onOpenCredits,
+    updateAvailable, installState, onInstall, sync, onSync, save, onSave, onNewSession, storePanel,
+    buildLabel,
 }) => {
     const syncLook = sync && describeSync(sync);
     const saveLook = save && describeSave(save);
@@ -224,36 +232,39 @@ export const MobileMenu: React.FC<Props> = ({
 
     const lit = (key: string) => (hot === key ? 'bg-slate-800' : '');
 
+    /**
+     * VIEW opens at the end of its own scroll.
+     *
+     * Its list is unrolled upside down, so the end is STARTUP — the row nearest the button that
+     * opened the sheet. Only this band scrolls, so this is the only scroll position there is to
+     * set; the other two bands cannot move out from under it.
+     */
+    const tabScroller = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const el = tabScroller.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, []);
 
     /**
-     * Opens on APPLICATION, with VEHICLE scrolled off above it.
+     * The SESSION carousel.
      *
-     * It used to open at the very bottom of the scroll, on the argument that the rows nearest the
-     * thumb are the last in the document and `scrollTop 0` would show the readouts instead. Both
-     * halves of that still hold — VEHICLE is readouts and it is still what you land past — but the
-     * bottom is now one row too far: measured at 375x812 with no session, SAVE rendered at y=39
-     * against a scroller starting at y=42, five pixels behind its own sticky heading. Off screen by
-     * five pixels is off screen, and "SAVE does not appear on mobile" is a report this file has
-     * already collected three times.
+     * Two pages, because five controls across one row would be 72px each on a 360px screen and the
+     * three that matter every run — SAVE, SYNC, NEW SESSION — would be the same size as the three
+     * that matter once. Page one is those; page two is the files and the store's settings.
      *
-     * So the target is APPLICATION's top edge, clamped to the end of the scroll. Clamping is what
-     * makes it degrade the right way: when APPLICATION and VIEW both fit, it lands at the bottom
-     * exactly as before and every tab is on screen; when they do not, APPLICATION wins the fold and
-     * the tabs are one flick away under a heading that says so.
+     * Scroll-snap, so a swipe works where the platform allows one, with dots that always do. The
+     * dots are not decoration here: the sheet carries `touch-none` to stop the browser claiming the
+     * opening drag as a scroll, and a horizontal swipe inside it is not guaranteed to survive that.
+     * `touch-pan-x` asks for the exception; the dots do not need it granted.
      */
-    const scroller = useRef<HTMLDivElement>(null);
-    const appBand = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        const el = scroller.current;
-        const band = appBand.current;
-        if (!el) return;
-        if (!band) { el.scrollTop = el.scrollHeight; return; }
-        // Measured from a known scroll position, because getBoundingClientRect is viewport-relative
-        // and offsetTop would be relative to the fixed sheet rather than to the scrolling content.
-        el.scrollTop = 0;
-        const offset = band.getBoundingClientRect().top - el.getBoundingClientRect().top;
-        el.scrollTop = Math.min(offset, el.scrollHeight - el.clientHeight);
-    }, []);
+    const pager = useRef<HTMLDivElement>(null);
+    const [page, setPage] = useState(0);
+    const goTo = (i: number) => {
+        const el = pager.current;
+        if (el) el.scrollTo({ left: i * el.clientWidth, behavior: 'smooth' });
+        setPage(i);
+    };
+    const hasPageTwo = actions.length > 0 || !!storePanel;
 
     /**
      * Ignore the dismissals for a moment after opening.
@@ -274,6 +285,11 @@ export const MobileMenu: React.FC<Props> = ({
     }, []);
     const dismiss = () => { if (dismissable) onClose(); };
 
+    /** Every cross-origin destination in here opens in a new tab, and that is a safety rule rather
+     *  than a courtesy: a same-tab navigation drops the serial link and takes an unsaved run with
+     *  it. See config/links.ts, which is where they are all declared for this reason. */
+    const away = { target: '_blank', rel: 'noopener noreferrer' } as const;
+
     return (
         <>
             <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={dismiss} />
@@ -282,80 +298,104 @@ export const MobileMenu: React.FC<Props> = ({
                 above stays visible — the way out has to be on screen. 95 rather than 90 because on a
                 400px viewport the missing 5% is 20px of list, and Close is the real way out anyway. */}
             <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[95svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
-                {/* One scroller for all three bands, and nothing pinned above it.
-                    ────────────────────────────────────────────────────────────────────────────────
-                    Two scrollers used to share this space with no rule for how they divided it, and
-                    on a 683x400 head unit the readouts simply took what they wanted: that band
-                    measured 314px of a 360px sheet, the tab list got 0px, and Close hung 8px below
-                    the bottom of the screen. The fix then was `min-h-0` so the pinned band would
-                    yield. One scroller cannot have the argument at all.
 
-                    What pinning bought — knowing which band you are in — the sticky headings buy
-                    instead, and they buy it for all three rather than for the two that happened to
-                    be at the top.
+                {/* The desktop header, as icons. Same five destinations in the same order it uses,
+                    plus INSTALL, which has no desktop twin because a desk does not install this.
 
-                    `no-scrollbar`: a 4px bar down the edge of a 360px sheet is noise on an
-                    instrument, and the list already shows it runs past the fold. */}
-                <div ref={scroller} className="no-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                    {/* The furthest thing from the thumb in the sheet, and the only one that belongs
-                        to none of the three bands. The scroller opens at its own bottom, so this
-                        sits off screen until someone deliberately scrolls up for it — which is the
-                        whole placement argument: a legal link has to be reachable, not visible.
+                    Furthest from the thumb of anything in the sheet, and deliberately outside the
+                    sweep: none of these carries a `data-menu-key`, so the hit test returns null over
+                    the whole strip and a finger travelling up can cross it and let go without
+                    opening a legal page, reloading the app, or leaving for GitHub. Do not add one. */}
+                <div className="shrink-0 border-b border-slate-800 px-4 pt-1.5">
+                    <div className="flex items-center justify-center gap-1">
+                        <a href={PRIVACY_POLICY_URL} {...away} title="Privacy policy"
+                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
+                            <Shield className="w-3.5 h-3.5" />
+                        </a>
+                        <button type="button" onClick={onOpenCredits} title="Credits — whose work this is built on"
+                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
+                            <Info className="w-3.5 h-3.5" />
+                        </button>
+                        <a href={PROJECT_REPO_URL} {...away} title="View on GitHub"
+                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
+                            <Github className="w-3.5 h-3.5" />
+                        </a>
+                        <a href={CREDIT_LINKS.tuningThread} {...away} title="Methodology source: NA M3 Forum"
+                            className={`${STRIP_ITEM} text-slate-600 hover:text-amber-400`}>
+                            <BookOpen className="w-3.5 h-3.5" />
+                        </a>
+                        {/* Tinted and pulsing on an update, exactly as the header's twin is — the
+                            one state of this control that has to be seen without being looked for. */}
+                        <button type="button" onClick={onReload}
+                            title={updateAvailable ? 'A newer build is on the server — reload to take it' : 'Reload the app'}
+                            className={`${STRIP_ITEM} ${updateAvailable ? 'text-blue-400 animate-pulse' : 'text-slate-600 hover:text-slate-300'}`}>
+                            <RefreshCw className="w-3.5 h-3.5" />
+                        </button>
+                        {/* The unavailable case is shown, not hidden. "I looked for install and found
+                            nothing" is the report this exists to answer, and a control that
+                            disappears cannot answer it — so it stays, greyed, with the reason on the
+                            title. Gone only once there is genuinely nothing to install to. */}
+                        {installState !== 'installed' && (
+                            <button type="button"
+                                onClick={installState === 'ready' ? onInstall : undefined}
+                                disabled={installState !== 'ready'}
+                                title={installState === 'ready' ? 'Install to device'
+                                    : installState === 'ios' ? 'Share → Add to Home Screen'
+                                        : installState === 'dismissed' ? 'Install declined — reload to be asked again'
+                                            : 'Install — not offered by this browser'}
+                                className={`${STRIP_ITEM} ${installState === 'ready'
+                                    ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-700 cursor-default'}`}>
+                                <Download className="w-3.5 h-3.5" />
+                            </button>
+                        )}
+                    </div>
+                    {/* Which build this phone is actually running. Never acted on, but it is the
+                        first thing asked when a device behaves differently from the desk — and a
+                        service worker serving a stale bundle is a real failure mode here, which is
+                        why the cache name rides along. */}
+                    {buildLabel && (
+                        <p className="pb-1 text-center font-mono text-[9px] leading-none text-slate-700 break-all">{buildLabel}</p>
+                    )}
+                </div>
 
-                        Deliberately NOT wired through `row()`. With no `data-menu-key` the sweep's
-                        hit test returns null over this row, so a finger travelling up the sheet can
-                        pass across it and let go without opening anything. Do not add one.
-
-                        `_blank` is not decoration: a same-tab navigation would drop the serial link
-                        and take an unsaved run with it. */}
-                    <a
-                        href={PRIVACY_POLICY_URL}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center justify-center gap-2 py-4 border-b border-slate-900 text-slate-600 hover:text-slate-400 transition-colors"
-                    >
-                        <Shield className="w-2.5 h-2.5 shrink-0" />
-                        <span className="text-[9px] font-bold uppercase tracking-widest">Privacy Policy</span>
-                    </a>
-
-                    <Section title="Vehicle">
+                {/* Readouts, so this is the band that yields when a landscape phone runs out of
+                    height: `shrink` with `min-h-0` lets it, and its own scroller means what it loses
+                    is below a fold rather than clipped away. SESSION and VIEW hold their size,
+                    because both are controls. */}
+                <Band title="Vehicle" className="min-h-0 shrink">
+                    <div className="no-scrollbar overflow-y-auto overscroll-contain px-4 pb-2">
                         <div className={READOUT_COLUMN}>
                             <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
                             <Field label="AIF">{identity?.aif ?? <span className="text-slate-600">—</span>}</Field>
                             <Field label="SW">{identity?.softwareVersion ?? <span className="text-slate-600">—</span>}</Field>
                         </div>
                         {/* Still a control, and still one step deeper than the number it changes —
-                            so it is centred like the APPLICATION rows rather than aligned like the
-                            readouts above it. It is the one thing in this band you press, and it
-                            should not read as a fourth row of the column. */}
+                            so it is centred rather than aligned to the readouts. It is the one thing
+                            in this band you press, and it should not read as a fourth field. */}
                         <button
                             type="button"
                             {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                            className={`mt-2 ${MENU_ROW} enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                            className={`mt-1 w-full flex items-center justify-center gap-2 min-h-[44px] rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
                         >
                             <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
                             <span className={`font-mono text-[11px] ${flashColor}`}>{flashText}</span>
                         </button>
-                    </Section>
+                    </div>
+                </Band>
 
-                    {/* Everything that is about the app rather than about the car or about which
-                        screen you are on. SAVE, SYNC, RELOAD and NEW SESSION are the four this band
-                        was asked for; the store panel sits with SYNC because it is the other half of
-                        it, and the downloads, INSTALL and the build string are app-level too and had
-                        no other home once SESSION and DOWNLOAD stopped being headings of their own. */}
-                    <div ref={appBand}>
-                    <Section title="Application">
-                        {/* Which session the rows below would act on. A readout, not a control, so it
-                            keeps the readout column and sits above them rather than among them. */}
+                <Band title="Session" className="shrink-0">
+                    <div className="px-4 pb-2">
+                        {/* What the cells below would act on. A readout, so it keeps the readout
+                            column and sits above them rather than among them. */}
                         {session && (
-                            <div className={`${READOUT_COLUMN} mb-3`}>
-                                <div className="flex items-center gap-2 mb-1 min-w-0">
+                            <div className={`${READOUT_COLUMN} mb-2`}>
+                                <div className="flex items-center gap-2 min-w-0">
                                     <Cable className="w-3 h-3 shrink-0 text-slate-600" />
                                     <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
                                     {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
                                 </div>
-                                {baseOrigin && <div className="mb-1 flex items-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
+                                {baseOrigin && <div className="flex items-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
                                 {logName && (
                                     <div className="flex items-center gap-2 min-w-0">
                                         <span className="text-[9px] uppercase tracking-widest text-slate-600 shrink-0">Log</span>
@@ -366,186 +406,157 @@ export const MobileMenu: React.FC<Props> = ({
                             </div>
                         )}
 
-                        {/* SAVE, SYNC, RELOAD, NEW SESSION — in that order, and none of them wired
-                            through `row()`. The sweep's hit test must return null over all four so a
-                            finger travelling up the sheet cannot release onto SAVE and write to the
-                            database, onto SYNC and start an upload, or onto RELOAD and drop the link
-                            and the run with it. Do not add `data-menu-key` to any of them.
-
-                            A full-width row each, which is what lets them carry describeSave's and
-                            describeSync's whole sentence — "Save — nothing to record", "Offline — 3
-                            waiting". Side by side above Close, which is where they used to be, there
-                            was room for one word and the reason lived in a tooltip no phone can
-                            open. */}
-                        {saveLook && (
-                            <button
-                                type="button"
-                                onClick={saveLook.disabled ? undefined : onSave}
-                                disabled={saveLook.disabled}
-                                title={saveLook.title}
-                                className={`${MENU_ROW} ${saveLook.tone === 'ready' ? 'text-amber-400 hover:text-amber-300 cursor-pointer'
-                                    : saveLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
-                                        : 'text-slate-700 cursor-default'}`}
-                            >
-                                <Database className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">{saveLook.label}</span>
-                            </button>
-                        )}
-
                         {/* The failure, in text, on the device that cannot hover.
                             ────────────────────────────────────────────────────────────────────────
-                            Everything else on this sheet keeps its long form in `title`, which is
-                            correct for a label whose short form is already the answer. It is wrong
-                            for an error: the short form is "Sync failed" and the long form is the
-                            only thing that says WHY. A phone has no hover, so on the one platform
-                            this row exists to serve, the app could report that an upload failed and
-                            had no way to report the reason.
-
-                            Wraps rather than truncates, and sits above the button rather than beside
-                            it, because it is read once and then acted on. Rendered only in the error
-                            tone, so nothing moves in the normal case. */}
+                            Everything else here keeps its long form in `title`, which is correct for
+                            a label whose short form is already the answer. It is wrong for an error:
+                            the short form is "Sync failed" and the long form is the only thing that
+                            says WHY. A phone has no hover, so on the one platform this band exists
+                            to serve, the app could report that an upload failed and had no way to
+                            report the reason. Rendered only in the error tone, so nothing moves in
+                            the normal case. */}
                         {syncLook?.tone === 'error' && sync?.error && (
-                            <p className="pt-1 text-[10px] leading-relaxed text-red-400 break-words">
-                                {sync.error}
-                            </p>
-                        )}
-                        {syncLook && (
-                            <button
-                                type="button"
-                                onClick={syncLook.disabled ? undefined : onSync}
-                                disabled={syncLook.disabled}
-                                title={syncLook.title}
-                                className={`${MENU_ROW} ${syncLook.tone === 'ready' ? 'text-blue-400 hover:text-blue-300 cursor-pointer'
-                                    : syncLook.tone === 'error' ? 'text-red-400 hover:text-red-300 cursor-pointer'
-                                        : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
-                                            : 'text-slate-700 cursor-default'}`}
-                            >
-                                <UploadCloud className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
-                            </button>
+                            <p className="pb-1 text-[10px] leading-relaxed text-red-400 break-words">{sync.error}</p>
                         )}
 
-                        {/* Where the token, the list on the server and the link diagnostics live —
-                            directly under the button that uses them. It used to sit in the STARTUP
-                            list's header, which is the one screen SAVE never appears on. */}
-                        {storePanel}
-
-                        <button
-                            type="button"
-                            onClick={onReload}
-                            className={`${MENU_ROW} cursor-pointer ${updateAvailable ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}
+                        <div
+                            ref={pager}
+                            onScroll={e => {
+                                const el = e.currentTarget;
+                                if (el.clientWidth) setPage(Math.round(el.scrollLeft / el.clientWidth));
+                            }}
+                            className="no-scrollbar flex overflow-x-auto overscroll-x-contain snap-x snap-mandatory touch-pan-x"
                         >
-                            <RefreshCw className="w-3.5 h-3.5 shrink-0" />
-                            <span className="text-[10px] font-bold uppercase tracking-widest">
-                                {updateAvailable ? 'Update available — reload' : 'Reload'}
-                            </span>
-                        </button>
+                            {/* Page one: the three pressed every run. None of them is wired through
+                                `row()` — the sweep's hit test must return null over all three so a
+                                finger travelling up the sheet cannot release onto SAVE and write to
+                                the database, onto SYNC and start an upload, or onto NEW SESSION and
+                                discard an empty draft. Do not add `data-menu-key` to any of them. */}
+                            <div className="w-full shrink-0 snap-start grid grid-cols-3 gap-1">
+                                {saveLook && (
+                                    <button
+                                        type="button"
+                                        onClick={saveLook.disabled ? undefined : onSave}
+                                        disabled={saveLook.disabled}
+                                        title={saveLook.title}
+                                        className={`${MENU_CELL} ${saveLook.tone === 'ready' ? 'text-amber-400 hover:bg-slate-800 cursor-pointer'
+                                            : saveLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                                : 'text-slate-700 cursor-default'}`}
+                                    >
+                                        <Database className="w-4 h-4 shrink-0" />
+                                        <span className="max-w-full truncate">Save</span>
+                                    </button>
+                                )}
+                                {syncLook && (
+                                    <button
+                                        type="button"
+                                        onClick={syncLook.disabled ? undefined : onSync}
+                                        disabled={syncLook.disabled}
+                                        title={syncLook.title}
+                                        className={`${MENU_CELL} ${syncLook.tone === 'ready' ? 'text-blue-400 hover:bg-slate-800 cursor-pointer'
+                                            : syncLook.tone === 'error' ? 'text-red-400 hover:bg-slate-800 cursor-pointer'
+                                                : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
+                                                    : 'text-slate-700 cursor-default'}`}
+                                    >
+                                        <UploadCloud className="w-4 h-4 shrink-0" />
+                                        <span className="max-w-full truncate">
+                                            Sync{(sync?.pending ?? 0) > 0 ? ` ${sync?.pending}` : ''}
+                                        </span>
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => { onNewSession(); onClose(); }}
+                                    title="Start a fresh draft and go to STARTUP"
+                                    className={`${MENU_CELL} text-blue-400 hover:bg-slate-800 cursor-pointer`}
+                                >
+                                    <Plus className="w-4 h-4 shrink-0" />
+                                    <span className="max-w-full truncate">New</span>
+                                </button>
+                            </div>
 
-                        {/* The only row here that navigates, so the only one that closes the sheet:
-                            it lands on STARTUP, and leaving the sheet up would cover what it did. */}
-                        <button
-                            type="button"
-                            onClick={() => { onNewSession(); onClose(); }}
-                            className={`${MENU_ROW} text-blue-400 hover:text-blue-300 cursor-pointer`}
-                        >
-                            <Plus className="w-3.5 h-3.5 shrink-0" />
-                            <span className="text-[10px] font-bold uppercase tracking-widest">New Session</span>
-                        </button>
+                            {/* Page two: the files, and the store this session would be sent to.
+                                Absent entirely when there is nothing on it, so the dots below cannot
+                                offer a page that turns out to be empty. */}
+                            {hasPageTwo && (
+                                <div className="w-full shrink-0 snap-start grid grid-cols-4 gap-1">
+                                    {actions.map(a => {
+                                        const Icon = ICONS[a.kind];
+                                        return (
+                                            <button
+                                                key={a.label}
+                                                type="button"
+                                                title={a.hint}
+                                                {...row(`action:${a.label}`, () => { a.onClick(); onClose(); })}
+                                                className={`${MENU_CELL} text-slate-400 hover:text-blue-400 hover:bg-slate-800 cursor-pointer ${lit(`action:${a.label}`)}`}
+                                            >
+                                                <Icon className="w-4 h-4 shrink-0" />
+                                                {/* "Download BASE" does not fit 90px. The verb is the
+                                                    icon's job here; the cell says which bytes. */}
+                                                <span className="max-w-full truncate">{a.label.replace(/^Download /, '')}</span>
+                                            </button>
+                                        );
+                                    })}
+                                    {storePanel}
+                                </div>
+                            )}
+                        </div>
 
-                        {actions.length > 0 && (
-                            <>
-                                <div className="my-2 border-t border-slate-900" />
-                                {actions.map(a => {
-                                    const Icon = ICONS[a.kind];
-                                    return (
-                                        <button
-                                            key={a.label}
-                                            type="button"
-                                            title={a.hint}
-                                            {...row(`action:${a.label}`, () => { a.onClick(); onClose(); })}
-                                            className={`${MENU_ROW} cursor-pointer group ${lit(`action:${a.label}`)}`}
-                                        >
-                                            <Icon className="w-3.5 h-3.5 shrink-0 text-slate-600 group-hover:text-blue-400 transition-colors" />
-                                            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 group-hover:text-blue-400 transition-colors">{a.label}</span>
-                                        </button>
-                                    );
-                                })}
-                            </>
+                        {/* Dots, and a caption that says what SAVE would do.
+                            ────────────────────────────────────────────────────────────────────────
+                            describeSave's labels run to "Save — nothing to record" and "Save — after
+                            the run", and a 90px cell can hold "Save". That sentence is the reason
+                            the cell is the colour it is, so it goes here rather than into a `title`
+                            no phone can open. */}
+                        {(hasPageTwo || saveLook) && (
+                            <div className="mt-1 flex items-center justify-center gap-3">
+                                {hasPageTwo && [0, 1].map(i => (
+                                    <button
+                                        key={i}
+                                        type="button"
+                                        onClick={() => goTo(i)}
+                                        aria-label={i === 0 ? 'Session actions' : 'Files and store'}
+                                        aria-current={page === i}
+                                        className="p-2 -m-2 cursor-pointer"
+                                    >
+                                        <span className={`block w-1.5 h-1.5 rounded-full transition-colors ${page === i ? 'bg-slate-400' : 'bg-slate-700'}`} />
+                                    </button>
+                                ))}
+                                {saveLook && page === 0 && (
+                                    <span className={`truncate text-[9px] uppercase tracking-widest ${saveLook.tone === 'ready' ? 'text-amber-400/80' : 'text-slate-600'}`}>
+                                        {saveLook.label}
+                                    </span>
+                                )}
+                            </div>
                         )}
-
-                        {/* Install is here because installed is the state this tool is meant to be
-                            used in: no browser chrome eating the viewport, the screen kept awake,
-                            and the whole build on disk for a garage with no signal.
-
-                            The unavailable case is shown, not hidden. "I looked for install and
-                            found nothing" is the report this exists to answer, and a control that
-                            disappears cannot answer it. */}
-                        {installState !== 'installed' && (
-                            <button
-                                type="button"
-                                onClick={installState === 'ready' ? onInstall : undefined}
-                                disabled={installState !== 'ready'}
-                                className={`${MENU_ROW} ${installState === 'ready'
-                                    ? 'text-emerald-400 hover:text-emerald-300 cursor-pointer'
-                                    : 'text-slate-700 cursor-default'}`}
-                            >
-                                <Download className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold uppercase tracking-widest">
-                                    {installState === 'ready' ? 'Install to device'
-                                        : installState === 'ios' ? 'Share → Add to Home Screen'
-                                            : installState === 'dismissed' ? 'Install declined — reload to be asked again'
-                                                : 'Install — not offered by this browser'}
-                                </span>
-                            </button>
-                        )}
-
-                        {/* Which build this phone is actually running. Monospace and muted: it is
-                            never acted on, but it is the first thing asked when a device behaves
-                            differently from the desk — and a service worker serving a stale bundle
-                            is a real failure mode here, which is why the cache name rides along. */}
-                        {buildLabel && (
-                            <p className="pt-2 text-center font-mono text-[9px] text-slate-700 break-all">{buildLabel}</p>
-                        )}
-                    </Section>
                     </div>
+                </Band>
 
-                    <Section title="View">
-                        {/* The tab row, unrolled. Horizontally it was 916px of labels in a 360px
-                            window.
-
-                            It used to be unrolled UPSIDE DOWN, so that STARTUP — the first tab and
-                            the most often wanted — ended up last in the document and therefore
-                            nearest the thumb. That followed from the sheet opening at the very
-                            bottom of its scroll, and the sheet no longer does: it opens on
-                            APPLICATION, so the top of this list is what is on screen and the bottom
-                            is what you scroll for. Reversed, that put STARTUP 85px under the fold
-                            and left INERTIA (EXP.) in the first slot. In document order the two
-                            experimental maps are the ones below the fold, which is the right way
-                            round for what they are.
-
+                {/* The only band with a scroller, and the only one that needs one: ten destinations
+                    do not fit under two bands of readouts and controls. It takes whatever height
+                    they leave, with a floor of two rows so it can never be squeezed to nothing. */}
+                <Band title="View" className="flex-1 min-h-[88px]">
+                    <div ref={tabScroller} className="no-scrollbar flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 pb-2">
+                        {/* The tab row, unrolled and turned upside down. Horizontally it was 916px of
+                            labels in a 360px window; here STARTUP — the first tab — sits closest to
+                            the button that opened this, and the list climbs away from the thumb.
                             Disabled entries stay listed rather than hidden: which map does not exist
                             yet is the same information as which one does. */}
                         <div className="flex flex-col">
-                            {tabs.map(t => (
+                            {[...tabs].reverse().map(t => (
                                 <button
                                     key={t.id}
                                     type="button"
                                     {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
-                                    /* 44px, not the 49 these used to be. Ten tabs at five spare
-                                       pixels each is 50px, and 50px is the difference between the
-                                       last tab — STARTUP, the one nearest the thumb and the one
-                                       most often wanted — sitting on screen when the sheet opens or
-                                       23px under the fold. 44 is the tap-target floor, not a
-                                       squeeze: `min-h` holds it whatever the padding computes to. */
-                                    className={`text-center min-h-[44px] py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors flex items-center justify-center ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
+                                    className={`flex items-center justify-center text-center min-h-[44px] py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
                                         : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default'}`}
                                 >
                                     {t.label}
                                 </button>
                             ))}
                         </div>
-                    </Section>
-                </div>
+                    </div>
+                </Band>
 
                 {/* Close, on the spot the opening press landed on. Same height and same centre as the
                     footer's menu button, so releasing without moving lands here and a second tap

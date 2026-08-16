@@ -36,7 +36,7 @@ import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { CreditsDialog } from '@/components/CreditsDialog';
-import { MobileMenu, MENU_ROW } from '@/components/MobileMenu';
+import { MobileMenu, MENU_CELL } from '@/components/MobileMenu';
 import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
@@ -45,7 +45,7 @@ import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud, Gauge } from 'lucide-react';
-import { PRIVACY_POLICY_URL } from '@/config/links';
+import { PRIVACY_POLICY_URL, PROJECT_REPO_URL } from '@/config/links';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
@@ -2627,7 +2627,7 @@ const WOT_CRITERION =
 
           {/* GitHub Link */}
           <a
-            href="https://github.com/mushitaro/mss54hp-csl-convert-tuner"
+            href={PROJECT_REPO_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors"
@@ -4111,14 +4111,15 @@ The TIMING button still has the full record; save it before running another oper
           save={saveStatus}
           onSave={() => { void handleSaveSession(); }}
           onNewSession={() => { void handleNewSession(); setNarrowPane('map'); }}
-          /* Preview only, for the same reason the sync row above it is: production has no `/api`
+          onOpenCredits={() => { setCreditsDialogOpen(true); setMenuOpen(false); }}
+          /* Preview only, for the same reason the sync cell beside it is: production has no `/api`
              for this to talk to, so a store panel there could only ever report failures. Assembled
              here rather than imported inside the sheet so that one gate stays in one place. */
           storePanel={isPreviewBuild ? (
             <SessionStorePanel
               openUp
-              label="Sync settings"
-              triggerClassName={MENU_ROW}
+              label="Store"
+              triggerClassName={MENU_CELL + ' text-slate-400 hover:bg-slate-800 cursor-pointer'}
               onSettingsChange={setUploadSettings}
               onRestored={() => void sessionDb.refresh()}
             />
