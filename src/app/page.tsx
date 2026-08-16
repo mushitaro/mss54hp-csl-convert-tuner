@@ -4107,19 +4107,44 @@ The TIMING button still has the full record; save it before running another oper
           installState={install.state}
           onInstall={() => { void install.promptInstall(); }}
           sync={syncStatus}
-          onSync={() => { void handleSyncAll(); }}
           save={saveStatus}
           onSave={() => { void handleSaveSession(); }}
           onNewSession={() => { void handleNewSession(); setNarrowPane('map'); }}
           onOpenCredits={() => { setCreditsDialogOpen(true); setMenuOpen(false); }}
-          /* Preview only, for the same reason the sync cell beside it is: production has no `/api`
-             for this to talk to, so a store panel there could only ever report failures. Assembled
-             here rather than imported inside the sheet so that one gate stays in one place. */
-          storePanel={isPreviewBuild ? (
+          /* The SYNC cell of the sheet's grid, and the panel behind it — one control, not two.
+             SEND and "where does it send" were a cell each, which is one cell too many on a
+             three-across grid and a distinction nobody was making: the panel is titled SESSION
+             SYNC, explains the two-step flow, and now carries the send itself as `topAction`.
+
+             Preview only, for the same reason `sync` is: production has no `/api` for this to talk
+             to, so it could only ever report failures. Assembled here rather than imported inside
+             the sheet so that one gate stays in one place, and so the trigger's tone comes from the
+             same describeSync the header's twin reads. */
+          storePanel={isPreviewBuild && syncLook ? (
             <SessionStorePanel
               openUp
-              label="Store"
-              triggerClassName={MENU_CELL + ' text-slate-400 hover:bg-slate-800 cursor-pointer'}
+              label={`Sync${(syncStatus?.pending ?? 0) > 0 ? ` ${syncStatus?.pending}` : ''}`}
+              triggerIcon={<UploadCloud className="w-4 h-4 shrink-0" />}
+              triggerClassName={MENU_CELL}
+              triggerToneClassName={syncLook.tone === 'ready' ? 'text-blue-400 hover:bg-slate-800 cursor-pointer'
+                : syncLook.tone === 'error' ? 'text-red-400 hover:bg-slate-800 cursor-pointer'
+                  : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse'
+                    : 'text-slate-600 hover:bg-slate-800 cursor-pointer'}
+              topAction={
+                <button
+                  type="button"
+                  onClick={syncLook.disabled ? undefined : () => { void handleSyncAll(); }}
+                  disabled={syncLook.disabled}
+                  title={syncLook.title}
+                  className={`w-full flex items-center justify-center gap-2 min-h-[44px] rounded border transition-colors ${syncLook.tone === 'ready' ? 'border-blue-500/40 text-blue-400 hover:bg-blue-500/10 cursor-pointer'
+                    : syncLook.tone === 'error' ? 'border-red-500/40 text-red-400 hover:bg-red-500/10 cursor-pointer'
+                      : syncLook.tone === 'busy' ? 'border-slate-800 text-slate-500 animate-pulse cursor-wait'
+                        : 'border-slate-800 text-slate-700 cursor-default'}`}
+                >
+                  <UploadCloud className="w-3.5 h-3.5 shrink-0" />
+                  <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
+                </button>
+              }
               onSettingsChange={setUploadSettings}
               onRestored={() => void sessionDb.refresh()}
             />

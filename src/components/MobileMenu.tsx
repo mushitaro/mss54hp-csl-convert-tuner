@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-    X, Cable, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield, UploadCloud,
+    X, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield,
     Plus, Info, Github, BookOpen,
 } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
@@ -97,8 +97,6 @@ interface Props {
      *  that is temporarily unavailable, it would be a control for a feature that build does not
      *  contain — which is why this is null rather than a permanent `unavailable` phase. */
     sync: SyncStatus | null;
-    /** Sends every outstanding session. Does not close the sheet: the caption is the readout. */
-    onSync: () => void;
     /** What the SAVE cell says and whether it can be pressed — the step before sync. Same
      *  computed-by-the-caller rule as `sync`, and null for the same kind of reason: a layout with no
      *  session concept at all should render no cell rather than a permanently dead one. */
@@ -135,12 +133,41 @@ const ICONS = { bin: Download, save: Database, base: Upload, log: FileSpreadshee
  * 56 rather than 44 because these are square-ish targets in a three-across row on a 360px screen,
  * where the horizontal budget is already about 110px each. The label is `text-[9px]` and truncates:
  * a cell that grows to fit its word would break the grid it shares.
+ *
+ * `w-full h-full` is not belt-and-braces. Two of these three cells are the grid's own children and
+ * stretch on their own; SYNC is a button inside the store panel's wrapper, and without this it sized
+ * to its content — 38px of button sitting at the left edge of a 109px slot, which is exactly the
+ * misalignment that got reported.
  */
-export const MENU_CELL = 'flex flex-col items-center justify-center gap-1 min-h-[56px] px-1 rounded transition-colors text-[9px] font-bold uppercase tracking-widest';
+export const MENU_CELL = 'w-full h-full flex flex-col items-center justify-center gap-1 min-h-[56px] px-1 rounded transition-colors text-[9px] font-bold uppercase tracking-widest';
 
 /** The icon strip's controls — the desktop header, drawn small. 40px is the target; the icons
  *  themselves are 14px, which is what the header renders them at. */
-const STRIP_ITEM = 'w-10 h-10 flex items-center justify-center rounded transition-colors';
+const STRIP_ITEM = 'w-10 h-10 [@media(max-height:560px)]:w-9 [@media(max-height:560px)]:h-9 flex items-center justify-center rounded transition-colors';
+
+/** One page of the SESSION carousel. Three columns on both, so the pages line up rather than
+ *  sliding sideways under the thumb. */
+const PAGE = 'w-full shrink-0 snap-start grid grid-cols-3 gap-2';
+
+/** The breathing room inside a band. Halved on a short viewport, which is the only place the sheet
+ *  is short of height — nothing here is a tap target, so nothing loses one. */
+const BAND_BODY = 'px-4 pb-3 [@media(max-height:560px)]:pb-1.5';
+
+/**
+ * The three download slots, always all three.
+ *
+ * `actions` only carries what exists, and a grid that grew and shrank with it changed this band's
+ * height and moved VIEW under the thumb. The slots are fixed and the lookup is by `kind`, so an
+ * unavailable one is a greyed cell that says why rather than a gap that says nothing.
+ *
+ * `bin` reads "Tuned" when empty even though it can arrive labelled "Patch-On": the empty state is
+ * the absence of a derived tune, and Patch-On only exists in place of one.
+ */
+const DOWNLOAD_SLOTS = [
+    { kind: 'bin', fallback: 'Tuned', absent: 'No tune to download yet — derive one from a log, or arm a patch.' },
+    { kind: 'base', fallback: 'Base', absent: 'This session has no BASE yet. Read one from the DME, or upload a BIN.' },
+    { kind: 'log', fallback: 'Log CSV', absent: 'This session has no log yet.' },
+] as const;
 
 /**
  * One column for every readout in the sheet.
@@ -153,10 +180,22 @@ const STRIP_ITEM = 'w-10 h-10 flex items-center justify-center rounded transitio
  */
 const READOUT_COLUMN = 'w-[min(15rem,100%)] mx-auto';
 
-const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-    <div className="flex items-baseline gap-3 py-0.5">
+/**
+ * One labelled readout, and an em-dash when there is nothing to read.
+ *
+ * The placeholder is the point, not a nicety: both readout bands hold a fixed height, and they can
+ * only do that if a field with no value still occupies a line. It also answers a different question
+ * than a blank does — "this session has no BASE" rather than "this row is missing".
+ *
+ * `truncate` rather than `break-all`: a long VIN used to wrap to a second line and take the band's
+ * height with it, which is exactly what the fixed height is there to prevent.
+ */
+const Field: React.FC<{ label: string; children?: React.ReactNode }> = ({ label, children }) => (
+    <div className="flex items-baseline gap-3 py-1 [@media(max-height:560px)]:py-0.5">
         <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
-        <span className="min-w-0 font-mono text-[11px] text-slate-300 break-all">{children}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">
+            {children ?? <span className="text-slate-700">—</span>}
+        </span>
     </div>
 );
 
@@ -167,9 +206,9 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
  * band holds its own height. VIEW puts its scroller in `children`, so its heading stays put for the
  * same reason without needing to be told to.
  */
-const Band: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className = '', children }) => (
+const Band: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className = 'shrink-0', children }) => (
     <div className={`flex flex-col border-b border-slate-800 ${className}`}>
-        <h4 className="shrink-0 px-4 pt-2.5 pb-1 [@media(max-height:560px)]:pt-1 text-[9px] font-bold uppercase tracking-widest text-slate-600 text-center">
+        <h4 className="shrink-0 px-4 pt-3 pb-2 [@media(max-height:560px)]:pt-1.5 [@media(max-height:560px)]:pb-1 text-[9px] font-bold uppercase tracking-widest text-slate-600 text-center">
             {title}
         </h4>
         {children}
@@ -180,7 +219,7 @@ export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
     session, baseOrigin, logName, logPoints, actions, dragFrom, onDragEnd, onReload, onOpenCredits,
-    updateAvailable, installState, onInstall, sync, onSync, save, onSave, onNewSession, storePanel,
+    updateAvailable, installState, onInstall, sync, save, onSave, onNewSession, storePanel,
     buildLabel,
 }) => {
     const syncLook = sync && describeSync(sync);
@@ -264,7 +303,6 @@ export const MobileMenu: React.FC<Props> = ({
         if (el) el.scrollTo({ left: i * el.clientWidth, behavior: 'smooth' });
         setPage(i);
     };
-    const hasPageTwo = actions.length > 0 || !!storePanel;
 
     /**
      * Ignore the dismissals for a moment after opening.
@@ -298,6 +336,21 @@ export const MobileMenu: React.FC<Props> = ({
                 above stays visible — the way out has to be on screen. 95 rather than 90 because on a
                 400px viewport the missing 5% is 20px of list, and Close is the real way out anyway. */}
             <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[95svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
+
+                {/* The backstop, and only that.
+                    ────────────────────────────────────────────────────────────────────────────────
+                    VEHICLE and SESSION hold their height and VIEW absorbs the squeeze — which works
+                    until VIEW has none left to give. Measured at 812x375, a landscape phone: VIEW
+                    reached 1px, the two bands above still wanted 350px of a 304px space, and Close
+                    was pushed 48px below the bottom of the screen. The way out of a sheet cannot be
+                    a function of how tall the phone is.
+
+                    So the four things above Close can scroll as a group, and Close never can. On any
+                    portrait phone this never engages: the bands fit, VIEW takes the remainder, and
+                    the only scroller in the sheet is VIEW's own. It is here for the case where the
+                    arithmetic does not work at all, and in that case a band you have to scroll to is
+                    still better than a control that is not on the screen. */}
+                <div className="no-scrollbar flex-1 min-h-0 flex flex-col overflow-y-auto overscroll-contain">
 
                 {/* The desktop header, as icons. Same five destinations in the same order it uses,
                     plus INSTALL, which has no desktop twin because a desk does not install this.
@@ -358,16 +411,15 @@ export const MobileMenu: React.FC<Props> = ({
                     )}
                 </div>
 
-                {/* Readouts, so this is the band that yields when a landscape phone runs out of
-                    height: `shrink` with `min-h-0` lets it, and its own scroller means what it loses
-                    is below a fold rather than clipped away. SESSION and VIEW hold their size,
-                    because both are controls. */}
-                <Band title="Vehicle" className="min-h-0 shrink">
-                    <div className="no-scrollbar overflow-y-auto overscroll-contain px-4 pb-2">
+                {/* Laid out to fit, and never scrolled: the flash count is the one control in here
+                    and a band that scrolls can hide it. `shrink-0`, so a short viewport takes its
+                    height out of VIEW instead — VIEW is the only band that absorbs a squeeze. */}
+                <Band title="Vehicle">
+                    <div className={BAND_BODY}>
                         <div className={READOUT_COLUMN}>
                             <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
-                            <Field label="AIF">{identity?.aif ?? <span className="text-slate-600">—</span>}</Field>
-                            <Field label="SW">{identity?.softwareVersion ?? <span className="text-slate-600">—</span>}</Field>
+                            <Field label="AIF">{identity?.aif}</Field>
+                            <Field label="SW">{identity?.softwareVersion}</Field>
                         </div>
                         {/* Still a control, and still one step deeper than the number it changes —
                             so it is centred rather than aligned to the readouts. It is the one thing
@@ -375,7 +427,7 @@ export const MobileMenu: React.FC<Props> = ({
                         <button
                             type="button"
                             {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                            className={`mt-1 w-full flex items-center justify-center gap-2 min-h-[44px] rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                            className={`mt-2 [@media(max-height:560px)]:mt-1 w-full flex items-center justify-center gap-2 min-h-[44px] [@media(max-height:560px)]:min-h-[36px] rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
                         >
                             <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
@@ -384,27 +436,32 @@ export const MobileMenu: React.FC<Props> = ({
                     </div>
                 </Band>
 
-                <Band title="Session" className="shrink-0">
-                    <div className="px-4 pb-2">
-                        {/* What the cells below would act on. A readout, so it keeps the readout
-                            column and sits above them rather than among them. */}
-                        {session && (
-                            <div className={`${READOUT_COLUMN} mb-2`}>
-                                <div className="flex items-center gap-2 min-w-0">
-                                    <Cable className="w-3 h-3 shrink-0 text-slate-600" />
-                                    <span className="min-w-0 truncate text-[11px] font-bold tracking-widest uppercase text-slate-300">{session.label}</span>
-                                    {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
-                                </div>
-                                {baseOrigin && <div className="flex items-center gap-2"><span className="text-[9px] uppercase tracking-widest text-slate-600">Base</span>{baseOrigin}</div>}
-                                {logName && (
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        <span className="text-[9px] uppercase tracking-widest text-slate-600 shrink-0">Log</span>
-                                        <span className="min-w-0 truncate font-mono text-[10px] text-slate-400">{logName}</span>
-                                        {logPoints !== undefined && <span className="shrink-0 font-mono text-[10px] text-slate-600">{logPoints}pts</span>}
-                                    </div>
+                {/* Fixed height too, and that is why every field and every cell is always drawn.
+                    Nothing here appears or disappears with what is loaded: an empty session shows
+                    the three labels against em-dashes and the downloads greyed out. A band that
+                    changed height would move VIEW under the thumb between one glance and the next,
+                    and a control that vanishes cannot say why it is not available. */}
+                <Band title="Session">
+                    <div className={BAND_BODY}>
+                        <div className={`${READOUT_COLUMN} mb-2 [@media(max-height:560px)]:mb-1`}>
+                            <Field label="Name">
+                                {session && (
+                                    <span className="inline-flex items-baseline gap-2 min-w-0">
+                                        <span className="min-w-0 truncate">{session.label}</span>
+                                        {session.archived && <span className="shrink-0 text-[8px] uppercase tracking-widest text-slate-500">read-only</span>}
+                                    </span>
                                 )}
-                            </div>
-                        )}
+                            </Field>
+                            <Field label="Base">{baseOrigin}</Field>
+                            <Field label="Log">
+                                {logName && (
+                                    <span className="inline-flex items-baseline gap-2 min-w-0">
+                                        <span className="min-w-0 truncate text-[10px]">{logName}</span>
+                                        {logPoints !== undefined && <span className="shrink-0 text-[10px] text-slate-600">{logPoints}pts</span>}
+                                    </span>
+                                )}
+                            </Field>
+                        </div>
 
                         {/* The failure, in text, on the device that cannot hover.
                             ────────────────────────────────────────────────────────────────────────
@@ -413,10 +470,11 @@ export const MobileMenu: React.FC<Props> = ({
                             the short form is "Sync failed" and the long form is the only thing that
                             says WHY. A phone has no hover, so on the one platform this band exists
                             to serve, the app could report that an upload failed and had no way to
-                            report the reason. Rendered only in the error tone, so nothing moves in
-                            the normal case. */}
+                            report the reason. Rendered only in the error tone — and it is allowed to
+                            change this band's height, unlike everything else in it, because an
+                            upload that failed is worth a reflow. */}
                         {syncLook?.tone === 'error' && sync?.error && (
-                            <p className="pb-1 text-[10px] leading-relaxed text-red-400 break-words">{sync.error}</p>
+                            <p className="pb-2 text-[10px] leading-relaxed text-red-400 break-words">{sync.error}</p>
                         )}
 
                         <div
@@ -430,9 +488,9 @@ export const MobileMenu: React.FC<Props> = ({
                             {/* Page one: the three pressed every run. None of them is wired through
                                 `row()` — the sweep's hit test must return null over all three so a
                                 finger travelling up the sheet cannot release onto SAVE and write to
-                                the database, onto SYNC and start an upload, or onto NEW SESSION and
+                                the database, onto SYNC and open an upload, or onto NEW SESSION and
                                 discard an empty draft. Do not add `data-menu-key` to any of them. */}
-                            <div className="w-full shrink-0 snap-start grid grid-cols-3 gap-1">
+                            <div className={PAGE}>
                                 {saveLook && (
                                     <button
                                         type="button"
@@ -447,23 +505,13 @@ export const MobileMenu: React.FC<Props> = ({
                                         <span className="max-w-full truncate">Save</span>
                                     </button>
                                 )}
-                                {syncLook && (
-                                    <button
-                                        type="button"
-                                        onClick={syncLook.disabled ? undefined : onSync}
-                                        disabled={syncLook.disabled}
-                                        title={syncLook.title}
-                                        className={`${MENU_CELL} ${syncLook.tone === 'ready' ? 'text-blue-400 hover:bg-slate-800 cursor-pointer'
-                                            : syncLook.tone === 'error' ? 'text-red-400 hover:bg-slate-800 cursor-pointer'
-                                                : syncLook.tone === 'busy' ? 'text-slate-500 animate-pulse cursor-wait'
-                                                    : 'text-slate-700 cursor-default'}`}
-                                    >
-                                        <UploadCloud className="w-4 h-4 shrink-0" />
-                                        <span className="max-w-full truncate">
-                                            Sync{(sync?.pending ?? 0) > 0 ? ` ${sync?.pending}` : ''}
-                                        </span>
-                                    </button>
-                                )}
+                                {/* SYNC is the store panel's door, not a second control beside it.
+                                    Sending and configuring where it sends were two cells that had to
+                                    be told apart, and the panel behind this one is already titled
+                                    SESSION SYNC and already carries the send — see `topAction`
+                                    there. The tone is still describeSync's, so the cell reports the
+                                    same state it always did. */}
+                                {storePanel}
                                 <button
                                     type="button"
                                     onClick={() => { onNewSession(); onClose(); }}
@@ -475,66 +523,65 @@ export const MobileMenu: React.FC<Props> = ({
                                 </button>
                             </div>
 
-                            {/* Page two: the files, and the store this session would be sent to.
-                                Absent entirely when there is nothing on it, so the dots below cannot
-                                offer a page that turns out to be empty. */}
-                            {hasPageTwo && (
-                                <div className="w-full shrink-0 snap-start grid grid-cols-4 gap-1">
-                                    {actions.map(a => {
-                                        const Icon = ICONS[a.kind];
-                                        return (
-                                            <button
-                                                key={a.label}
-                                                type="button"
-                                                title={a.hint}
-                                                {...row(`action:${a.label}`, () => { a.onClick(); onClose(); })}
-                                                className={`${MENU_CELL} text-slate-400 hover:text-blue-400 hover:bg-slate-800 cursor-pointer ${lit(`action:${a.label}`)}`}
-                                            >
-                                                <Icon className="w-4 h-4 shrink-0" />
-                                                {/* "Download BASE" does not fit 90px. The verb is the
-                                                    icon's job here; the cell says which bytes. */}
-                                                <span className="max-w-full truncate">{a.label.replace(/^Download /, '')}</span>
-                                            </button>
-                                        );
-                                    })}
-                                    {storePanel}
-                                </div>
-                            )}
+                            {/* Page two: the files. Three slots, always all three, greyed when the
+                                bytes do not exist — an absent cell would change the grid under the
+                                thumb and could not say why it had gone. Same three columns as page
+                                one, so the two pages line up rather than sliding sideways. */}
+                            <div className={PAGE}>
+                                {DOWNLOAD_SLOTS.map(slot => {
+                                    const a = actions.find(x => x.kind === slot.kind);
+                                    const Icon = ICONS[slot.kind];
+                                    return a ? (
+                                        <button
+                                            key={slot.kind}
+                                            type="button"
+                                            title={a.hint}
+                                            {...row(`action:${slot.kind}`, () => { a.onClick(); onClose(); })}
+                                            className={`${MENU_CELL} text-slate-400 hover:text-blue-400 hover:bg-slate-800 cursor-pointer ${lit(`action:${slot.kind}`)}`}
+                                        >
+                                            <Icon className="w-4 h-4 shrink-0" />
+                                            {/* "Download BASE" does not fit 90px. The verb is the
+                                                icon's job here; the cell says which bytes. */}
+                                            <span className="max-w-full truncate">{a.label.replace(/^Download /, '')}</span>
+                                        </button>
+                                    ) : (
+                                        <button
+                                            key={slot.kind}
+                                            type="button"
+                                            disabled
+                                            title={slot.absent}
+                                            className={`${MENU_CELL} text-slate-700 cursor-default`}
+                                        >
+                                            <Icon className="w-4 h-4 shrink-0" />
+                                            <span className="max-w-full truncate">{slot.fallback}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </div>
 
-                        {/* Dots, and a caption that says what SAVE would do.
-                            ────────────────────────────────────────────────────────────────────────
-                            describeSave's labels run to "Save — nothing to record" and "Save — after
-                            the run", and a 90px cell can hold "Save". That sentence is the reason
-                            the cell is the colour it is, so it goes here rather than into a `title`
-                            no phone can open. */}
-                        {(hasPageTwo || saveLook) && (
-                            <div className="mt-1 flex items-center justify-center gap-3">
-                                {hasPageTwo && [0, 1].map(i => (
-                                    <button
-                                        key={i}
-                                        type="button"
-                                        onClick={() => goTo(i)}
-                                        aria-label={i === 0 ? 'Session actions' : 'Files and store'}
-                                        aria-current={page === i}
-                                        className="p-2 -m-2 cursor-pointer"
-                                    >
-                                        <span className={`block w-1.5 h-1.5 rounded-full transition-colors ${page === i ? 'bg-slate-400' : 'bg-slate-700'}`} />
-                                    </button>
-                                ))}
-                                {saveLook && page === 0 && (
-                                    <span className={`truncate text-[9px] uppercase tracking-widest ${saveLook.tone === 'ready' ? 'text-amber-400/80' : 'text-slate-600'}`}>
-                                        {saveLook.label}
-                                    </span>
-                                )}
-                            </div>
-                        )}
+                        <div className="mt-2 [@media(max-height:560px)]:mt-1 flex items-center justify-center gap-3">
+                            {[0, 1].map(i => (
+                                <button
+                                    key={i}
+                                    type="button"
+                                    onClick={() => goTo(i)}
+                                    aria-label={i === 0 ? 'Session actions' : 'Downloads'}
+                                    aria-current={page === i}
+                                    className="p-2 -m-2 cursor-pointer"
+                                >
+                                    <span className={`block w-1.5 h-1.5 rounded-full transition-colors ${page === i ? 'bg-slate-400' : 'bg-slate-700'}`} />
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </Band>
 
-                {/* The only band with a scroller, and the only one that needs one: ten destinations
-                    do not fit under two bands of readouts and controls. It takes whatever height
-                    they leave, with a floor of two rows so it can never be squeezed to nothing. */}
+                {/* The only band that scrolls, and the only one that gives ground. Ten destinations
+                    do not fit under two bands of readouts and controls, and on a landscape phone
+                    neither does much else — so this is where the squeeze goes, by being the only
+                    `flex-1` in the column. It reaches one row on a 375px-tall viewport and scrolls
+                    from there; the two bands above keep every control they have. */}
                 <Band title="View" className="flex-1 min-h-[88px]">
                     <div ref={tabScroller} className="no-scrollbar flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 pb-2">
                         {/* The tab row, unrolled and turned upside down. Horizontally it was 916px of
@@ -557,6 +604,8 @@ export const MobileMenu: React.FC<Props> = ({
                         </div>
                     </div>
                 </Band>
+
+                </div>
 
                 {/* Close, on the spot the opening press landed on. Same height and same centre as the
                     footer's menu button, so releasing without moving lands here and a second tap

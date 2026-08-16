@@ -86,10 +86,31 @@ export const SessionStorePanel: React.FC<{
      *  In the menu sheet it sits directly under a SYNC button that actually sends, and two rows
      *  reading "Sync" would be two rows that look like the same control. */
     label?: string;
-    /** Replaces the trigger's shape, not its tone. The menu sheet gives it the same full-width 44px
-     *  row every other control in that band uses; a 16px inline button is not a thumb target. */
+    /** Replaces the trigger's shape, not its tone. The menu sheet gives it the same cell shape the
+     *  controls beside it use; a 16px inline button is not a thumb target. */
     triggerClassName?: string;
-}> = ({ openUp, onSettingsChange, onRestored, label = 'Sync', triggerClassName }) => {
+    /** Overrides the trigger's tone as well as its shape. `canSync` decides it otherwise, which is
+     *  right for a settings door — but once this control IS sync, the tone has to be sync's. */
+    triggerToneClassName?: string;
+    /** The icon on the trigger, when the default cloud is not what this door is called. */
+    triggerIcon?: React.ReactNode;
+    /**
+     * The send itself, at the top of the panel.
+     *
+     * This panel and the SYNC button used to be two controls side by side, and they should not have
+     * been: one configures where sessions go and lists what arrived, the other puts them there. The
+     * panel is already titled SESSION SYNC and already explains the two-step flow, so it is the
+     * place the send belongs — and merging them frees the cell the second control was taking.
+     *
+     * A node rather than a handler, because the button's whole state — label, tone, whether it can
+     * be pressed — comes from the same `describeSync` the header's twin reads. Building it here
+     * would be a second copy of that.
+     */
+    topAction?: React.ReactNode;
+}> = ({
+    openUp, onSettingsChange, onRestored, label = 'Sync', triggerClassName, triggerToneClassName,
+    triggerIcon, topAction,
+}) => {
     const [isOpen, setIsOpen] = useState(false);
     const [settings, setSettings] = useState<SyncSettings>(EMPTY_SETTINGS);
     const [savedFlash, setSavedFlash] = useState(false);
@@ -183,11 +204,11 @@ export const SessionStorePanel: React.FC<{
             <button
                 onClick={() => setIsOpen(v => !v)}
                 title={t.title}
-                className={`${triggerClassName ?? 'inline-flex items-center gap-1.5'} text-[10px] font-bold uppercase tracking-widest transition-colors ${canSync(settings)
+                className={`${triggerClassName ?? 'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest'} transition-colors ${triggerToneClassName ?? (canSync(settings)
                     ? 'text-slate-500 hover:text-blue-400'
-                    : 'text-slate-700 hover:text-slate-500'}`}
+                    : 'text-slate-700 hover:text-slate-500')}`}
             >
-                <CloudUpload className="w-3 h-3 shrink-0" /> {label}
+                {triggerIcon ?? <CloudUpload className="w-3 h-3 shrink-0" />} {label}
             </button>
 
             {/* The same two shapes FilterConfigPanel and FieldVisibilityPanel use, rather than a
@@ -221,6 +242,9 @@ export const SessionStorePanel: React.FC<{
                     </div>
 
                     <div className="p-3 space-y-3 overflow-y-auto overscroll-contain">
+                        {/* First, above the explanation of it. Everything below this line is setup
+                            done once per device; this is the thing done after every run. */}
+                        {topAction}
                         <p className="text-[9px] text-slate-600">{t.intro}</p>
 
                         <label className="block space-y-1">
