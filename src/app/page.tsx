@@ -36,7 +36,7 @@ import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
 import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { CreditsDialog } from '@/components/CreditsDialog';
-import { MobileMenu } from '@/components/MobileMenu';
+import { MobileMenu, MENU_ROW } from '@/components/MobileMenu';
 import { MessageDialog, Message } from '@/components/MessageDialog';
 import { MarkIcon } from '@/components/MarkIcon';
 import { useAppUpdate, reloadForUpdate } from '@/hooks/useAppUpdate';
@@ -2818,6 +2818,18 @@ const WOT_CRITERION =
                 </div>
               )}
               <div className="flex items-center gap-2">
+                {/* The wide layout's only door to the store — the token, the list on the server and
+                    the link diagnostics. Below 900px that door is the APPLICATION band of the menu
+                    sheet, and the sheet is `min-[900px]:hidden`, so without this instance the pull
+                    half of "record on the phone, finish at the desk" would have no way in on the
+                    machine that does the finishing. Same component, one instance per width, exactly
+                    like the three panels beside it. */}
+                {isPreviewBuild && (
+                  <SessionStorePanel
+                    onSettingsChange={setUploadSettings}
+                    onRestored={() => void sessionDb.refresh()}
+                  />
+                )}
                 <InterpolationTableEditor
                   config={interpolationTable}
                   onSave={handleTableChange}
@@ -3176,15 +3188,6 @@ const WOT_CRITERION =
                     onUploadLog={canSync(uploadSettings) ? handleUploadSessionLog : undefined}
                     uploadState={uploadState}
                     onFinalize={handleFinalizeSession}
-                    /* Preview only, for the same reason the sync controls are — production has no
-                       `/api` for this to talk to, so a store panel there could only ever report
-                       failures. */
-                    headerExtra={isPreviewBuild ? (
-                      <SessionStorePanel
-                        onSettingsChange={setUploadSettings}
-                        onRestored={() => void sessionDb.refresh()}
-                      />
-                    ) : undefined}
                   />
                 </div>
               )}
@@ -4107,6 +4110,19 @@ The TIMING button still has the full record; save it before running another oper
           onSync={() => { void handleSyncAll(); }}
           save={saveStatus}
           onSave={() => { void handleSaveSession(); }}
+          onNewSession={() => { void handleNewSession(); setNarrowPane('map'); }}
+          /* Preview only, for the same reason the sync row above it is: production has no `/api`
+             for this to talk to, so a store panel there could only ever report failures. Assembled
+             here rather than imported inside the sheet so that one gate stays in one place. */
+          storePanel={isPreviewBuild ? (
+            <SessionStorePanel
+              openUp
+              label="Sync settings"
+              triggerClassName={MENU_ROW}
+              onSettingsChange={setUploadSettings}
+              onRestored={() => void sessionDb.refresh()}
+            />
+          ) : undefined}
           buildLabel={buildLabel}
           tabs={TABS}
           activeTab={activeTab}

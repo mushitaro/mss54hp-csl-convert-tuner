@@ -33,13 +33,6 @@ interface Props {
     uploadState?: Record<string, UploadState>;
     /** Arms this session's stored TUNED for a patch-off flash. Does not write — the hub does. */
     onFinalize: (session: TuningSession) => void;
-    /** Sits beside NEW SESSION in this list's own header — the session store lives here.
-     *
-     *  It used to be an unlabelled cloud icon in the footer's cluster of graph controls, next to the
-     *  interpolation table and the field-visibility toggles. Nothing about that row said what it
-     *  was, because nothing in that row was about sessions: it configures where sessions go and
-     *  pulls them back, which is this list's subject and nobody else's. */
-    headerExtra?: React.ReactNode;
 }
 
 export type UploadState = 'busy' | 'done' | { error: string };
@@ -195,7 +188,7 @@ export const OriginBadge: React.FC<{ session: TuningSession; parent?: TuningSess
 
 export const SessionList: React.FC<Props> = ({
     sessions, loading, error, onOpen, onNewSession, onNewFrom, onRename, onDelete, onUploadBase,
-    onDownloadBase, onDownloadTuned, onDownloadLog, onUploadLog, uploadState, onFinalize, headerExtra,
+    onDownloadBase, onDownloadTuned, onDownloadLog, onUploadLog, uploadState, onFinalize,
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftLabel, setDraftLabel] = useState('');
@@ -252,14 +245,13 @@ export const SessionList: React.FC<Props> = ({
         // absence of rows did not already say, and at opacity-50 they read as a disabled control
         // rather than as decoration — a ghost of something you might be able to press.
         //
-        // The store belongs in the empty state above all others: a desk that has never opened this
-        // app has exactly zero sessions, and pulling one back off the phone is the first thing it
-        // wants to do. Hiding the way in until a local session exists would put the recovery route
-        // behind the thing it recovers.
+        // SYNC used to stand beside it here, on the argument that a desk which has never opened
+        // this app wants to pull one back before anything else. It lives in the menu's APPLICATION
+        // band now, and on a desk in the panel row beside the tabs — both of which are on screen
+        // whether or not a session exists, which the argument actually wanted.
         return (
             <div className="h-full flex items-center justify-center gap-2">
                 {NewButton}
-                {headerExtra}
             </div>
         );
     }
@@ -268,10 +260,7 @@ export const SessionList: React.FC<Props> = ({
         <div className="h-full w-full flex flex-col min-h-0">
             <div className="flex-none flex items-center justify-between pb-2 px-1">
                 <span className="text-[9px] text-slate-600 uppercase tracking-widest font-bold">Sessions</span>
-                <span className="flex items-center gap-2">
-                    {NewButton}
-                    {headerExtra}
-                </span>
+                {NewButton}
             </div>
 
             {/* Five columns need about 730px, and this list sits in a pane that is roughly 0.6 of

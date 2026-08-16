@@ -82,7 +82,14 @@ export const SessionStorePanel: React.FC<{
     onSettingsChange: (settings: SyncSettings) => void;
     /** Refreshes the local session list after a pull. */
     onRestored?: () => void;
-}> = ({ openUp, onSettingsChange, onRestored }) => {
+    /** What the trigger says. Defaults to "Sync", which is right in the panel row beside the tabs.
+     *  In the menu sheet it sits directly under a SYNC button that actually sends, and two rows
+     *  reading "Sync" would be two rows that look like the same control. */
+    label?: string;
+    /** Replaces the trigger's shape, not its tone. The menu sheet gives it the same full-width 44px
+     *  row every other control in that band uses; a 16px inline button is not a thumb target. */
+    triggerClassName?: string;
+}> = ({ openUp, onSettingsChange, onRestored, label = 'Sync', triggerClassName }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [settings, setSettings] = useState<SyncSettings>(EMPTY_SETTINGS);
     const [savedFlash, setSavedFlash] = useState(false);
@@ -176,11 +183,11 @@ export const SessionStorePanel: React.FC<{
             <button
                 onClick={() => setIsOpen(v => !v)}
                 title={t.title}
-                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest transition-colors ${canSync(settings)
+                className={`${triggerClassName ?? 'inline-flex items-center gap-1.5'} text-[10px] font-bold uppercase tracking-widest transition-colors ${canSync(settings)
                     ? 'text-slate-500 hover:text-blue-400'
                     : 'text-slate-700 hover:text-slate-500'}`}
             >
-                <CloudUpload className="w-3 h-3" /> Sync
+                <CloudUpload className="w-3 h-3 shrink-0" /> {label}
             </button>
 
             {/* The same two shapes FilterConfigPanel and FieldVisibilityPanel use, rather than a
@@ -192,12 +199,20 @@ export const SessionStorePanel: React.FC<{
                 851x393, a landscape phone, the SAVE row landed 3px below the fold, and capping the
                 height moved it to 10px below. Only detaching from the anchor fixes it.
                 svh, never vh: vh grows when the address bar retracts, so a panel sized to it loses
-                its own bottom the moment the bar comes back. */}
+                its own bottom the moment the bar comes back.
+
+                `openUp` now means one thing only: this is rendered inside the menu sheet's
+                APPLICATION band. Two consequences, and both are about that parent rather than about
+                the panel. `z-[100]` because the sheet is `z-[95]` and its scrim `z-[90]`, so the
+                default 50 would put this behind the thing that opened it. `touch-auto` because the
+                sheet carries `touch-none` to stop the browser claiming the opening drag as a
+                scroll — and touch-action is resolved up the DOM chain even for a fixed element, so
+                without this the panel's own list could not be scrolled by finger. */}
             {isOpen && (
                 <div className={`${openUp
-                    ? 'fixed inset-x-3 bottom-[60px] max-h-[min(calc(100svh-72px),460px)]'
-                    : 'absolute right-0 top-10 w-80 max-w-[calc(100vw-2rem)] max-h-[min(70dvh,460px)]'
-                    } flex flex-col overscroll-contain bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50`}>
+                    ? 'fixed inset-x-3 bottom-[60px] max-h-[min(calc(100svh-72px),460px)] z-[100] touch-auto'
+                    : 'absolute right-0 top-10 w-80 max-w-[calc(100vw-2rem)] max-h-[min(70dvh,460px)] z-50'
+                    } flex flex-col overscroll-contain bg-slate-900 border border-slate-700 rounded-lg shadow-xl`}>
                     <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800 shrink-0">
                         <span className="text-[10px] font-bold tracking-wider text-slate-400">{t.title}</span>
                         <button onClick={() => setIsOpen(false)} className="p-1 text-slate-600 hover:text-slate-300">
