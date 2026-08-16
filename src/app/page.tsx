@@ -387,12 +387,18 @@ export default function Home() {
    */
   const [verifyMode, setVerifyMode] = useState<WriteVerifyMode>('full');
   /**
-   * What the next run is for. Chosen before START TUNE, because it decides which DS2 blocks a
-   * sample is made of and therefore what the log can answer afterwards.
+   * What the run in progress is for — which DS2 blocks a sample is made of, and therefore what the
+   * log can answer afterwards.
    *
-   * Not derived, unlike almost everything else on this screen — it is a statement of intent that
-   * nothing in the data can imply, and the whole point is to make it before the drive rather than
-   * discover it after. Defaults to VE, which is what every run was until profiles existed.
+   * It used to be a RUN selector in the connection cluster, chosen before START TUNE. That selector
+   * is gone, and there is nothing left for it to ask: EGT is retired, so VE is the only thing this
+   * button can start, and INERTIA has never run from here — it is driven from its own panel, which
+   * owns the arming, the gear check and the estimate.
+   *
+   * So it is set by whoever actually starts a run rather than chosen in advance:
+   * `startInertiaRunWithDiagnostics` flips it to INERTIA for the duration and back after. Every
+   * branch that reads it still reads a true statement about the run that is happening — including
+   * the hub's STOP, which must not run the VE teardown over an inertia run.
    */
   const [logProcess, setLogProcess] = useState<ProcessId>('VE');
   const connectedVin = dmeLink.identity?.vin ?? null;
@@ -1701,9 +1707,28 @@ export default function Home() {
   /** The inertia run, with the same diagnostic publish the datalog now does. Wrapped here rather
    *  than inside InertiaWorkflow because uploading a record is the page's job — the workflow owns an
    *  EGAS run, not a session. */
+  /**
+   * The only way an inertia run starts, which is why it is also the only place `logProcess` says so.
+   *
+   * With the RUN selector gone, nothing declares the process in advance any more — so it is
+   * declared by the thing that actually begins the run, and withdrawn when it ends. The branches
+   * that depend on it are not cosmetic: the hub's STOP reads it to avoid running the VE teardown
+   * over an inertia run, which would flush an empty sample buffer, report a datalog that does not
+   * exist and drop the link.
+   *
+   * Reset in the same callback that publishes the diagnostics, so it happens on a failed run as
+   * well as a finished one. Leaving it stuck on INERTIA would make the next START TUNE route to the
+   * inertia panel instead of starting a VE log.
+   */
   const startInertiaRunWithDiagnostics = useCallback(
-    (onSample: Parameters<typeof dmeLink.startInertiaRun>[0], onEnd?: (failure: string | null) => void) =>
-      dmeLink.startInertiaRun(onSample, failure => { publishDiagnostics('log'); onEnd?.(failure); }),
+    (onSample: Parameters<typeof dmeLink.startInertiaRun>[0], onEnd?: (failure: string | null) => void) => {
+      setLogProcess('INERTIA');
+      return dmeLink.startInertiaRun(onSample, failure => {
+        setLogProcess('VE');
+        publishDiagnostics('log');
+        onEnd?.(failure);
+      });
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dmeLink.startInertiaRun],
   );
@@ -3470,68 +3495,32 @@ The TIMING button still has the full record; save it before running another oper
                             while the warning is on screen is the wrong shape for a destructive gate.
                             Opens on FULL for a DME that has never had the two checks agree; see
                             verifyPolicy.ts. */}
+                        {/* A checkbox, not a two-option list. FULL is the state of not having asked
+                            for QUICK — which is the shape of the decision, and the same shape as
+                            PRACTICE two elements away, so the row reads as one kind of control
+                            rather than three.
+
+                            Amber for the same reason PRACTICE is amber: ticking it opts out of the
+                            conservative default. Unticked means every one of the 65536 bytes is read
+                            back and compared, and that is what a blank box should mean. */}
                         <label
-                          className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
-                          title={'How the flash proves it landed. Every chunk\'s verify byte is checked in BOTH modes — this chooses what happens after the last one.\n\n'
-                            + 'QUICK — ask the DME for its own encoding checksum (DS2 0x0A). One exchange, ~50ms. Its authority is the CRC-16/ARC values the ECU stores in its own flash, covering 65528 of the pair\'s 65536 bytes. It cannot say WHERE a mismatch is, and it cannot catch a corruption that preserves CRC-16.\n\n'
-                            + 'FULL — everything QUICK does, and read all 65536 bytes back and compare them byte for byte. Adds ~123s. The only check that can name an offset.\n\n'
-                            + 'This opens on FULL until QUICK and FULL have agreed once on this VIN.'}
+                          className="py-3 -my-3 flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
+                          title={'How the flash proves it landed. Every chunk\'s verify byte is checked either way — this chooses what happens after the last one.\n\n'
+                            + 'TICKED (QUICK) — ask the DME for its own encoding checksum (DS2 0x0A). One exchange, ~50ms. Its authority is the CRC-16/ARC values the ECU stores in its own flash, covering 65528 of the pair\'s 65536 bytes. It cannot say WHERE a mismatch is, and it cannot catch a corruption that preserves CRC-16.\n\n'
+                            + 'CLEAR (FULL) — everything QUICK does, and read all 65536 bytes back and compare them byte for byte. Adds ~123s. The only check that can name an offset.\n\n'
+                            + 'This opens CLEAR until QUICK and FULL have agreed once on this VIN.'}
                         >
-                          VERIFY
-                          <select
-                            value={verifyMode}
+                          <input
+                            type="checkbox"
+                            checked={verifyMode === 'quick'}
                             disabled={dmeLink.state !== 'connected'}
-                            onChange={(e) => setVerifyMode(e.target.value as WriteVerifyMode)}
-                            className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            <option value="quick">QUICK</option>
-                            <option value="full">FULL</option>
-                          </select>
+                            onChange={(e) => setVerifyMode(e.target.checked ? 'quick' : 'full')}
+                            className="w-3 h-3 accent-amber-500 rounded bg-slate-700 border-none disabled:opacity-50 disabled:cursor-not-allowed"
+                          />
+                          {/* "QUICK" alone would sit two controls from FAST READ and mean something
+                              different; the second word is what keeps them apart. */}
+                          QUICK VERIFY
                         </label>
-                        {/* What the next run is FOR.
-                            Beside VERIFY rather than on the ring, because the ring's label says what
-                            the button does and this says what the run is about — and because the
-                            choice has to be made before the drive, which is where this cluster is
-                            read. The rate is part of the option rather than a separate readout: it
-                            is the consequence of the choice, and the whole reason EGT exists as a
-                            process is that not reading block 19 roughly doubles it.
-                            Selecting INERTIA moves to its tab, which owns its own start — see
-                            InertiaWorkflow for why that run is driven from there. */}
-                        {dmeLink.state === 'connected' && (
-                          <label
-                            className="flex items-center gap-1 text-[9px] text-slate-600 font-mono cursor-pointer"
-                            title={'What this run measures, which decides which DS2 blocks a sample is made of.\n\n'
-                              + `VE — blocks 3+19. The lambda trim is the input. ${LOG_PROFILES.VE.produces}.\n`
-                              + `INERTIA — block 83 alone. ${LOG_PROFILES.INERTIA.produces}.\n\n`
-                              + 'EGT (block 3 only) is retired. It was more than twice as fast, but deriving the correction '
-                              + 'table needs the lambda trim from block 19 — k_applied says what the DME did, only STFT says '
-                              + 'whether it was right — so that profile could only ever produce a drive you had to repeat.'}
-                          >
-                            RUN
-                            <select
-                              value={logProcess}
-                              onChange={(e) => {
-                                const next = e.target.value as ProcessId;
-                                setLogProcess(next);
-                                if (next === 'INERTIA') goToTab('inertia');
-                              }}
-                              className="bg-slate-800 text-[9px] font-mono text-slate-300 rounded px-1 py-0.5 outline-none cursor-pointer border border-slate-700"
-                            >
-                              {/* Runnable profiles only, plus whatever this session already is —
-                                  a retired option left in the menu is a trap with a label on it,
-                                  but silently rewriting a reopened session's process would be
-                                  worse. */}
-                              {(Object.keys(LOG_PROFILES) as ProcessId[])
-                                .filter(id => LOG_PROFILES[id].runnable || id === logProcess)
-                                .map(id => (
-                                  <option key={id} value={id}>
-                                    {LOG_PROFILES[id].label} ~{expectedHz(LOG_PROFILES[id].blocks).toFixed(1)}Hz
-                                    {LOG_PROFILES[id].runnable ? '' : ' (retired)'}
-                                  </option>
-                                ))}
-                            </select>
-                          </label>
-                        )}
                         {/* FAST READ. A readout, not a control — it is armed by whether a service-block
                             backup exists for this VIN, which is a fact about the DME rather than a
                             preference. Shown even when off, because "why was my read still 2 minutes"
