@@ -2753,6 +2753,31 @@ const WOT_CRITERION =
             <div className="h-full hidden min-[900px]:flex items-center ml-auto border-l border-slate-800 pl-4 ml-4 gap-4">
               {processedLog && (
                 <div className="flex flex-col items-end justify-center h-full">
+                  {/* RATE, ahead of the counts it governs.
+                      It already existed as a DASH tile, which is the wrong place for it: the DASH is
+                      live channels and disappears with them, while sample rate is the property that
+                      decides what every one of these counts is worth. A 561-sample drive means one
+                      thing at 6.6 Hz and another at 2.9 — so it is read first, and the counts are
+                      read against it.
+
+                      Live value during a run, the log's own average otherwise, so a reopened session
+                      still reports the rate it was recorded at instead of a dash.
+
+                      The expected figure is in the title, not on the row. logProfile's own comment
+                      asks for the gap between measured and expected to be visible, and it is — but
+                      "2.94 / 3.0 Hz" is two numbers where the reader wanted one, and on a phone the
+                      second one is what pushed this line out of the row it shares. The gap is the
+                      transport: the model states the DME's turnaround and the wire, and what is left
+                      over is the cable. */}
+                  {logRate && (
+                    <div
+                      className="flex items-center gap-2 text-[9px] font-mono leading-none mb-1"
+                      title={logRate.title}
+                    >
+                      <span className="text-slate-600">RATE</span>
+                      <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
+                    </div>
+                  )}
                   <div className="flex items-center gap-2 text-[9px] font-mono leading-none mb-1">
                     <span className="text-slate-500">VALID</span>
                     <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
@@ -2761,30 +2786,6 @@ const WOT_CRITERION =
                     <span className="text-slate-600">TOTAL</span>
                     <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
                   </div>
-                  {/* RATE, beside the counts it governs.
-                      It already existed as a DASH tile, which is the wrong place for it: the DASH is
-                      live channels and disappears with them, while sample rate is the property that
-                      decides what every one of these counts is worth. A 561-sample drive means one
-                      thing at 6.6 Hz and another at 2.9.
-
-                      Live value during a run, the log's own average otherwise, so a reopened session
-                      still reports the rate it was recorded at instead of a dash.
-
-                      The expected figure sits beside it deliberately — logProfile's own comment
-                      promises this ("Shown next to the measured rate during a run precisely so that
-                      gap is visible"), and until now nothing showed it. The gap is the transport:
-                      the model states the DME's turnaround and the wire, and what is left over is
-                      the cable. */}
-                  {logRate && (
-                    <div
-                      className="flex items-center gap-2 text-[9px] font-mono leading-none mt-1"
-                      title={logRate.title}
-                    >
-                      <span className="text-slate-600">RATE</span>
-                      <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
-                      <span className="text-slate-700">{`/ ${logRate.want.toFixed(1)} Hz`}</span>
-                    </div>
-                  )}
                   {/* The difference between the two numbers above, itemised. Without this the pair
                       says "half your drive is gone" and stops there. */}
                   <DropCensusLine census={processedLog.dropCensus} className="justify-end mt-1" />
@@ -3188,6 +3189,7 @@ const WOT_CRITERION =
                     onUploadLog={canSync(uploadSettings) ? handleUploadSessionLog : undefined}
                     uploadState={uploadState}
                     onFinalize={handleFinalizeSession}
+                    activeSessionId={currentSession?.id}
                   />
                 </div>
               )}
@@ -3998,27 +4000,38 @@ The TIMING button still has the full record; save it before running another oper
             {/* Ahead of the counts, not after them, because it is the part with an action in it and
                 this row is read at arm's length on a phone. */}
             <DropCensusLine census={processedLog.dropCensus} className="mr-auto" />
-            <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
-              <span className="text-slate-500">VALID</span>
-              <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
-            </span>
-            <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
-              <span className="text-slate-600">TOTAL</span>
-              <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
-            </span>
-            {/* The narrow-screen twin of the RATE row in the wide stats block. This is the one that
-                is actually read in the car — the block above is `min-[900px]` and a phone in
-                landscape does not always clear that. */}
-            {logRate && (
-              <span
-                className="flex items-center gap-1.5 text-[9px] font-mono leading-none"
-                title={logRate.title}
-              >
-                <span className="text-slate-600">RATE</span>
-                <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
-                <span className="text-slate-700">{`/ ${logRate.want.toFixed(1)} Hz`}</span>
+            {/* One flex item, not three.
+                ────────────────────────────────────────────────────────────────────────────────
+                RATE / VALID / TOTAL are read against each other — a 1,260-sample drive means one
+                thing at 6.6 Hz and another at 2.9 — so they have to break as a unit. Loose in the
+                wrapping row they did not: the census beside them itemises up to seven reasons, and
+                with a full one RATE stayed on the census's line while VALID and TOTAL dropped to
+                the next. Grouped and `shrink-0`, the row breaks between the census and the trio or
+                not at all.
+
+                RATE leads, because it is what the other two are worth. It carries one number now:
+                logProfile asks for the gap between measured and expected to be visible and it is,
+                on the title — but "2.94 / 3.0 Hz" is two numbers where the reader wanted one, and
+                the second was the width that stopped these fitting a phone. */}
+            <span className="flex items-center gap-4 shrink-0">
+              {logRate && (
+                <span
+                  className="flex items-center gap-1.5 text-[9px] font-mono leading-none"
+                  title={logRate.title}
+                >
+                  <span className="text-slate-600">RATE</span>
+                  <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
+                </span>
+              )}
+              <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
+                <span className="text-slate-500">VALID</span>
+                <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
               </span>
-            )}
+              <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
+                <span className="text-slate-600">TOTAL</span>
+                <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
+              </span>
+            </span>
           </div>
         )}
         {/* One row again.

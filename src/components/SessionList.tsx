@@ -33,6 +33,15 @@ interface Props {
     uploadState?: Record<string, UploadState>;
     /** Arms this session's stored TUNED for a patch-off flash. Does not write — the hub does. */
     onFinalize: (session: TuningSession) => void;
+    /**
+     * Which session the rest of the app is currently showing.
+     *
+     * The list had no way to say it, and it is the one fact a list of sessions most needs to carry:
+     * the maps, the log, the toggles and WRITE all act on ONE of these rows, and every other tab
+     * shows the consequences without ever naming which. Opening a second session from here changes
+     * what WRITE would send — so which one is loaded is not decoration.
+     */
+    activeSessionId?: string | null;
 }
 
 export type UploadState = 'busy' | 'done' | { error: string };
@@ -189,6 +198,7 @@ export const OriginBadge: React.FC<{ session: TuningSession; parent?: TuningSess
 export const SessionList: React.FC<Props> = ({
     sessions, loading, error, onOpen, onNewSession, onNewFrom, onRename, onDelete, onUploadBase,
     onDownloadBase, onDownloadTuned, onDownloadLog, onUploadLog, uploadState, onFinalize,
+    activeSessionId,
 }) => {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftLabel, setDraftLabel] = useState('');
@@ -302,11 +312,21 @@ export const SessionList: React.FC<Props> = ({
                             // if that tune is already in the ECU with the patches off.
                             const canFinalize = canFromTuned && !isFinal;
                             const infoOpen = infoFor.has(session.id);
+                            const isOpen = session.id === activeSessionId;
                             return (
                                 // `order` is what puts the actions under the name on a card: the
                                 // cells stay in the order the table header promises, and only the
                                 // narrow layout re-sequences them to name → actions → facts.
-                                <tr key={session.id} className="text-xs group align-top transition-colors hover:bg-slate-900/40 flex flex-wrap items-center gap-x-3 px-3 py-1.5 border-b border-slate-800 min-[1280px]:table-row min-[1280px]:border-slate-900">
+                                // The open one is tinted rather than badged alone, because the thing
+                                // being answered is "which row is the rest of the app about" — a
+                                // question the eye asks of the whole list at once, and a badge has
+                                // to be found before it can be read. The OPEN chip beside it says
+                                // in words what the colour says at a glance; neither is enough by
+                                // itself, and blue is already this palette's "you are here" (the
+                                // active tab, the current pane).
+                                <tr key={session.id} className={`text-xs group align-top transition-colors flex flex-wrap items-center gap-x-3 px-3 py-1.5 border-b min-[1280px]:table-row ${isOpen
+                                    ? 'bg-blue-500/10 hover:bg-blue-500/15 border-blue-500/20 min-[1280px]:border-blue-500/20'
+                                    : 'hover:bg-slate-900/40 border-slate-800 min-[1280px]:border-slate-900'}`}>
                                     <td className="block w-full order-1 py-1 min-[1280px]:table-cell min-[1280px]:w-auto min-[1280px]:px-3 min-[1280px]:py-2">
                                         <div className="flex flex-col gap-0.5 min-w-0">
                                             <div className="flex items-center gap-1.5 min-w-0">
@@ -318,9 +338,21 @@ export const SessionList: React.FC<Props> = ({
                                                         {isLast ? '└─▸' : '├─▸'}
                                                     </span>
                                                 )}
-                                                <span className="text-[9px] font-mono font-bold text-slate-600 shrink-0" title="Session number">
+                                                <span className={`text-[9px] font-mono font-bold shrink-0 ${isOpen ? 'text-blue-400' : 'text-slate-600'}`} title="Session number">
                                                     #{session.seq ?? '?'}
                                                 </span>
+                                                {/* Shares the badge slot with DRAFT and FINAL, and
+                                                    can legitimately sit beside either: those say
+                                                    what the session IS, this says where the app is
+                                                    pointed. */}
+                                                {isOpen && (
+                                                    <span
+                                                        className="text-[8px] font-bold text-blue-300 bg-blue-500/15 border border-blue-500/40 rounded px-1 py-px shrink-0"
+                                                        title="This is the session the maps, the log and WRITE are currently acting on."
+                                                    >
+                                                        OPEN
+                                                    </span>
+                                                )}
                                                 {isDraft && (
                                                     <span className="text-[8px] font-bold text-blue-400 bg-blue-500/10 border border-blue-500/30 rounded px-1 py-px shrink-0">
                                                         DRAFT

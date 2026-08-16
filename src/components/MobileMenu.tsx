@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
     X, Gauge, Database, Download, Upload, FileSpreadsheet, RefreshCw, Shield,
-    Plus, Info, Github, BookOpen,
+    Plus, Medal, Github, BookOpen,
 } from 'lucide-react';
 import { DmeIdentity } from '@/lib/dme-link/types';
 import { PRIVACY_POLICY_URL, PROJECT_REPO_URL, CREDIT_LINKS } from '@/config/links';
@@ -162,10 +162,14 @@ const BAND_BODY = 'px-4 pb-3 [@media(max-height:560px)]:pb-1.5';
  *
  * `bin` reads "Tuned" when empty even though it can arrive labelled "Patch-On": the empty state is
  * the absence of a derived tune, and Patch-On only exists in place of one.
+ *
+ * BASE, TUNED, LOG — the tune in the middle, on the same centre line SAVE holds on page one, so
+ * flicking between the pages keeps the eye on one column. It also reads in order: what the session
+ * started from, what it became, what proved it.
  */
 const DOWNLOAD_SLOTS = [
-    { kind: 'bin', fallback: 'Tuned', absent: 'No tune to download yet — derive one from a log, or arm a patch.' },
     { kind: 'base', fallback: 'Base', absent: 'This session has no BASE yet. Read one from the DME, or upload a BIN.' },
+    { kind: 'bin', fallback: 'Tuned', absent: 'No tune to download yet — derive one from a log, or arm a patch.' },
     { kind: 'log', fallback: 'Log CSV', absent: 'This session has no log yet.' },
 ] as const;
 
@@ -360,47 +364,60 @@ export const MobileMenu: React.FC<Props> = ({
                     the whole strip and a finger travelling up can cross it and let go without
                     opening a legal page, reloading the app, or leaving for GitHub. Do not add one. */}
                 <div className="shrink-0 border-b border-slate-800 px-4 pt-1.5">
-                    <div className="flex items-center justify-center gap-1">
-                        <a href={PRIVACY_POLICY_URL} {...away} title="Privacy policy"
-                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
-                            <Shield className="w-3.5 h-3.5" />
-                        </a>
+                    {/* Three columns, not one centred row. CREDITS holds the middle of the strip on
+                        its own, and `1fr auto 1fr` keeps it on the sheet's centre line whatever the
+                        groups either side happen to weigh — INSTALL comes and goes, and a flex row
+                        would slide the medal sideways with it. Same reason MENU is absolutely
+                        centred in the footer this sheet opens from. */}
+                    <div className="grid grid-cols-[1fr_auto_1fr] items-center">
+                        <div className="flex items-center justify-end gap-1">
+                            <a href={PRIVACY_POLICY_URL} {...away} title="Privacy policy"
+                                className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
+                                <Shield className="w-3.5 h-3.5" />
+                            </a>
+                            <a href={PROJECT_REPO_URL} {...away} title="View on GitHub"
+                                className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
+                                <Github className="w-3.5 h-3.5" />
+                            </a>
+                        </div>
+                        {/* A medal, and centred: this is the one control in the strip that is not a
+                            tool but an acknowledgement — whose disassembly, whose XDF, whose DS2
+                            tool this is built on. It was an ⓘ among five other icons, which read as
+                            "about this app" rather than "about whose work this is". */}
                         <button type="button" onClick={onOpenCredits} title="Credits — whose work this is built on"
-                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
-                            <Info className="w-3.5 h-3.5" />
+                            className={`${STRIP_ITEM} text-slate-500 hover:text-amber-400`}>
+                            <Medal className="w-4 h-4" />
                         </button>
-                        <a href={PROJECT_REPO_URL} {...away} title="View on GitHub"
-                            className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
-                            <Github className="w-3.5 h-3.5" />
-                        </a>
-                        <a href={CREDIT_LINKS.tuningThread} {...away} title="Methodology source: NA M3 Forum"
-                            className={`${STRIP_ITEM} text-slate-600 hover:text-amber-400`}>
-                            <BookOpen className="w-3.5 h-3.5" />
-                        </a>
-                        {/* Tinted and pulsing on an update, exactly as the header's twin is — the
-                            one state of this control that has to be seen without being looked for. */}
-                        <button type="button" onClick={onReload}
-                            title={updateAvailable ? 'A newer build is on the server — reload to take it' : 'Reload the app'}
-                            className={`${STRIP_ITEM} ${updateAvailable ? 'text-blue-400 animate-pulse' : 'text-slate-600 hover:text-slate-300'}`}>
-                            <RefreshCw className="w-3.5 h-3.5" />
-                        </button>
-                        {/* The unavailable case is shown, not hidden. "I looked for install and found
-                            nothing" is the report this exists to answer, and a control that
-                            disappears cannot answer it — so it stays, greyed, with the reason on the
-                            title. Gone only once there is genuinely nothing to install to. */}
-                        {installState !== 'installed' && (
-                            <button type="button"
-                                onClick={installState === 'ready' ? onInstall : undefined}
-                                disabled={installState !== 'ready'}
-                                title={installState === 'ready' ? 'Install to device'
-                                    : installState === 'ios' ? 'Share → Add to Home Screen'
-                                        : installState === 'dismissed' ? 'Install declined — reload to be asked again'
-                                            : 'Install — not offered by this browser'}
-                                className={`${STRIP_ITEM} ${installState === 'ready'
-                                    ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-700 cursor-default'}`}>
-                                <Download className="w-3.5 h-3.5" />
+                        <div className="flex items-center justify-start gap-1">
+                            <a href={CREDIT_LINKS.tuningThread} {...away} title="Methodology source: NA M3 Forum"
+                                className={`${STRIP_ITEM} text-slate-600 hover:text-amber-400`}>
+                                <BookOpen className="w-3.5 h-3.5" />
+                            </a>
+                            {/* Tinted and pulsing on an update, exactly as the header's twin is — the
+                                one state of this control that has to be seen without being looked for. */}
+                            <button type="button" onClick={onReload}
+                                title={updateAvailable ? 'A newer build is on the server — reload to take it' : 'Reload the app'}
+                                className={`${STRIP_ITEM} ${updateAvailable ? 'text-blue-400 animate-pulse' : 'text-slate-600 hover:text-slate-300'}`}>
+                                <RefreshCw className="w-3.5 h-3.5" />
                             </button>
-                        )}
+                            {/* The unavailable case is shown, not hidden. "I looked for install and
+                                found nothing" is the report this exists to answer, and a control that
+                                disappears cannot answer it — so it stays, greyed, with the reason on
+                                the title. Gone only once there is genuinely nothing to install to. */}
+                            {installState !== 'installed' && (
+                                <button type="button"
+                                    onClick={installState === 'ready' ? onInstall : undefined}
+                                    disabled={installState !== 'ready'}
+                                    title={installState === 'ready' ? 'Install to device'
+                                        : installState === 'ios' ? 'Share → Add to Home Screen'
+                                            : installState === 'dismissed' ? 'Install declined — reload to be asked again'
+                                                : 'Install — not offered by this browser'}
+                                    className={`${STRIP_ITEM} ${installState === 'ready'
+                                        ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-700 cursor-default'}`}>
+                                    <Download className="w-3.5 h-3.5" />
+                                </button>
+                            )}
+                        </div>
                     </div>
                     {/* Which build this phone is actually running. Never acted on, but it is the
                         first thing asked when a device behaves differently from the desk — and a
@@ -490,7 +507,20 @@ export const MobileMenu: React.FC<Props> = ({
                                 finger travelling up the sheet cannot release onto SAVE and write to
                                 the database, onto SYNC and open an upload, or onto NEW SESSION and
                                 discard an empty draft. Do not add `data-menu-key` to any of them. */}
+                            {/* NEW, SAVE, SYNC — a session's life left to right, and SAVE on the
+                                centre line because it is the one pressed after every run. Page two
+                                puts TUNED on that same line, so a flick between the pages does not
+                                move the eye off the column it was reading. */}
                             <div className={PAGE}>
+                                <button
+                                    type="button"
+                                    onClick={() => { onNewSession(); onClose(); }}
+                                    title="Start a fresh draft and go to STARTUP"
+                                    className={`${MENU_CELL} text-blue-400 hover:bg-slate-800 cursor-pointer`}
+                                >
+                                    <Plus className="w-4 h-4 shrink-0" />
+                                    <span className="max-w-full truncate">New</span>
+                                </button>
                                 {saveLook && (
                                     <button
                                         type="button"
@@ -512,15 +542,6 @@ export const MobileMenu: React.FC<Props> = ({
                                     there. The tone is still describeSync's, so the cell reports the
                                     same state it always did. */}
                                 {storePanel}
-                                <button
-                                    type="button"
-                                    onClick={() => { onNewSession(); onClose(); }}
-                                    title="Start a fresh draft and go to STARTUP"
-                                    className={`${MENU_CELL} text-blue-400 hover:bg-slate-800 cursor-pointer`}
-                                >
-                                    <Plus className="w-4 h-4 shrink-0" />
-                                    <span className="max-w-full truncate">New</span>
-                                </button>
                             </div>
 
                             {/* Page two: the files. Three slots, always all three, greyed when the
