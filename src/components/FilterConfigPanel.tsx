@@ -5,7 +5,7 @@ import {
     TRANSIENT_SETTLE_SEC_DEFAULT,
 } from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
-import { COVERAGE_THIN_DEFAULT, COVERAGE_OK_DEFAULT } from './MapEditor';
+import { COVERAGE_OK_DEFAULT } from './MapEditor';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 /**
@@ -98,17 +98,18 @@ const TEXT = {
         covRfHint:
             'この設定は、補正テーブルのセルに同じ条件を課します。\n'
             + '補正テーブルは 72 セル、VE マップは 480 セルです。1 セルが結果に与える影響が大きいため、VE マップとは別の値を持たせています。',
-        covBands: 'Heatmap Bands',
+        covBands: 'Covered At',
         covBandsHint:
             'この設定は、ヒートマップの色分けだけを決めます。計算には影響しません。\n'
-            + '上のゲートより高い値を既定にしています。ゲートは「このセルを書き換えてよいか」を判定し、この設定は「この領域をこれ以上走らなくてよいか」を示します。後者のほうが高い基準です。',
+            + 'ヒートマップは 3 段階です。薄い色は「通ったが、ゲートを通らなかった」セル。中間色は「ゲートを通り、書き換えられた」セル。濃い色は、この値に達して「もうこの領域を走らなくてよい」セルです。\n'
+            + '薄い色と中間色の境目は VE Cell Gate のサンプル数そのものです。ゲートが採用したセルが薄いままだと、色と計算が食い違うためです。したがってここで決めるのは、濃い色に変わる点だけです。\n'
+            + 'ゲートは「このセルを書き換えてよいか」、この値は「この領域をこれ以上走らなくてよいか」を答えます。後者のほうが高い基準なので、既定はゲートよりかなり上に置いています。',
+        bandsLegend: (gate: number, ok: number) =>
+            `薄い = 1〜${gate - 1} · 中間 = ${gate}〜${ok - 1}（書き換え済み）· 濃い = ${ok} 以上`,
+        subSamples: 'Samples',
+        subWeight: 'Weight',
         gateOff:
             'ゲートを無効にしました。1 サンプルしか記録されていないセルもマップに書き込まれます。下に表示される採用セル数が、この設定による変化を示します。',
-
-        unitSamples: 'samples',
-        unitWeight: 'weight',
-        unitThin: 'thin',
-        unitCovered: 'covered',
     },
     en: {
         settings: 'Filter Settings',
@@ -172,17 +173,18 @@ const TEXT = {
         covRfHint:
             'These values apply the same condition to the cells of the correction table.\n'
             + 'The correction table has 72 cells; the VE map has 480. One cell of the correction table therefore carries far more of the result, which is why it has its own values.',
-        covBands: 'Heatmap Bands',
+        covBands: 'Covered At',
         covBandsHint:
-            'These values set the colouring of the heatmap only. They do not affect the calculation.\n'
-            + 'They are set above the gate by default. The gate decides whether a cell may be rewritten; these bands indicate whether an area has been driven enough to move on from. The second is the higher bar.',
+            'This value sets the colouring of the heatmap only. It does not affect the calculation.\n'
+            + 'The heatmap has three levels. The faintest means the cell was visited but did not clear the gate. The middle one means it cleared the gate and was rewritten. The strongest means it reached this value, and the area needs no more driving.\n'
+            + 'The boundary between the first two is the VE Cell Gate\'s own sample count, because a cell the gate accepted must not still be painted as thin — the colour and the calculation would be saying different things. So the only thing left to set here is where the strongest level begins.\n'
+            + 'The gate answers whether a cell may be rewritten; this value answers whether an area has been driven enough to move on from. The second is the higher bar, which is why the default sits well above the gate.',
+        bandsLegend: (gate: number, ok: number) =>
+            `faint = 1-${gate - 1} · mid = ${gate}-${ok - 1} (rewritten) · full = ${ok}+`,
+        subSamples: 'Samples',
+        subWeight: 'Weight',
         gateOff:
             'The gate is off. A cell holding a single sample will be written into the map. The accepted-cell count shown below is what this setting changed.',
-
-        unitSamples: 'samples',
-        unitWeight: 'weight',
-        unitThin: 'thin',
-        unitCovered: 'covered',
     },
 };
 
@@ -290,7 +292,26 @@ const Row: React.FC<{
     );
 };
 
-/** The sliders all look the same; only the tone and the disabled state vary. */
+/** The rendered width of the thumb, from globals.css. Needed here to know where it is. */
+const THUMB_PX = 18;
+
+/**
+ * A slider that only moves when you grab the thumb.
+ *
+ * A native range input jumps to wherever the track is pressed. That is fine for a volume control and
+ * wrong for these: the panel is read at arm's length in a car, the sliders sit four to a screen, and
+ * a press that lands 20px off the thumb does not miss — it silently sets a new evidence threshold
+ * and re-derives the map. There is no undo, and nothing announces it.
+ *
+ * So a press outside the thumb is cancelled. `preventDefault` on pointerdown suppresses both the
+ * jump and the drag that would follow it, which leaves the press doing exactly nothing. Keyboard
+ * adjustment is untouched — arrow keys never went through this path — so the control stays operable
+ * without a pointer.
+ *
+ * The tolerance is one thumb width either side, not half: fingers are wider than cursors, and the
+ * failure this prevents is expensive while the failure it introduces — having to press again, a
+ * little closer — is not.
+ */
 const Slider: React.FC<{
     min: number; max: number; step?: number; value: number; disabled?: boolean;
     accent?: string; onChange: (v: number) => void;
@@ -300,9 +321,35 @@ const Slider: React.FC<{
         min={min} max={max} step={step}
         disabled={disabled}
         value={value}
+        onPointerDown={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            // The thumb's centre travels between half a thumb in from each end, never to the edges.
+            const frac = max > min ? (value - min) / (max - min) : 0;
+            const centre = r.left + THUMB_PX / 2 + frac * (r.width - THUMB_PX);
+            if (Math.abs(e.clientX - centre) > THUMB_PX) e.preventDefault();
+        }}
         onChange={(e) => onChange(Number(e.target.value))}
-        className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${disabled ? 'bg-slate-800 accent-slate-600' : `bg-slate-700 ${accent}`}`}
+        className={`w-full h-1 rounded-lg appearance-none touch-none ${disabled ? 'bg-slate-800 accent-slate-600' : `bg-slate-700 ${accent}`}`}
     />
+);
+
+/**
+ * One number inside a group that shares a switch.
+ *
+ * The VE and RF KORR gates are two numbers each, and stacking their sliders with one shared label
+ * put two 18px thumbs four pixels apart with nothing saying which was which. Each gets its own name,
+ * its own readout and its own line.
+ */
+const SubField: React.FC<{ label: string; value: string; dim?: boolean; children: React.ReactNode }> = (
+    { label, value, dim, children },
+) => (
+    <div className="space-y-1.5">
+        <div className="flex justify-between items-baseline text-[9px] uppercase tracking-wider">
+            <span className={dim ? 'text-slate-700' : 'text-slate-500'}>{label}</span>
+            <span className={dim ? 'text-slate-700' : 'text-slate-400 font-mono'}>{value}</span>
+        </div>
+        {children}
+    </div>
 );
 
 const NO_CHANNELS = { tabg: false, tankVent: false, rf: false, stft: false } as const;
@@ -367,6 +414,11 @@ export const FilterConfigPanel: React.FC<Props> = ({
     const settleSamples = resolveTransientWindow({ ...localConfig, transientSettleSec: settleSec }, measuredHz);
     const veGateOn = localConfig.enableVeCellGate ?? true;
     const rfGateOn = localConfig.enableRfKorrCellGate ?? true;
+    const veSamples = localConfig.minVeCellSamples ?? 10;
+    const veWeight = localConfig.minVeCellWeight ?? 5;
+    const rfSamples = localConfig.rfKorrMinCellSamples ?? 10;
+    const rfWeight = localConfig.rfKorrMinCellWeight ?? 5;
+    const coveredAt = localConfig.coverageOk ?? COVERAGE_OK_DEFAULT;
 
     return (
         <div className="relative">
@@ -476,46 +528,59 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 <Row
                                     {...row('veGate')}
                                     label={t.covVe}
-                                    value={`${localConfig.minVeCellSamples ?? 10} ${t.unitSamples} / ${(localConfig.minVeCellWeight ?? 5).toFixed(1)} ${t.unitWeight}`}
                                     toggle={{ checked: veGateOn, onChange: v => handleChange('enableVeCellGate', v) }}
                                     hint={t.covVeHint}
                                 >
-                                    {/* Ceilings from the measurement in MapEditor: session #902 put
-                                        130 samples in its busiest cell of 480, so a threshold of 200
-                                        could not be met by any drive and only 4 cells cleared 100. */}
-                                    <Slider min={1} max={100} value={localConfig.minVeCellSamples ?? 10}
-                                        disabled={!veGateOn} onChange={v => handleChange('minVeCellSamples', v)} />
-                                    <Slider min={0.5} max={30} step={0.5} value={localConfig.minVeCellWeight ?? 5}
-                                        disabled={!veGateOn} onChange={v => handleChange('minVeCellWeight', v)} />
+                                    <div className="space-y-3 pt-1">
+                                        {/* Ceiling from the measurement in MapEditor: session #902
+                                            put 130 samples in its busiest cell of 480, so a
+                                            threshold of 200 could not be met by any drive at all. */}
+                                        <SubField label={t.subSamples} dim={!veGateOn} value={`${veSamples}`}>
+                                            <Slider min={1} max={100} value={veSamples}
+                                                disabled={!veGateOn} onChange={v => handleChange('minVeCellSamples', v)} />
+                                        </SubField>
+                                        <SubField label={t.subWeight} dim={!veGateOn} value={veWeight.toFixed(1)}>
+                                            <Slider min={0.5} max={30} step={0.5} value={veWeight}
+                                                disabled={!veGateOn} onChange={v => handleChange('minVeCellWeight', v)} />
+                                        </SubField>
+                                    </div>
                                     {!veGateOn && <p className="text-[9px] text-red-400 leading-snug">{t.gateOff}</p>}
                                 </Row>
 
                                 <Row
                                     {...row('rfGate')}
                                     label={t.covRf}
-                                    value={`${localConfig.rfKorrMinCellSamples ?? 10} ${t.unitSamples} / ${(localConfig.rfKorrMinCellWeight ?? 5).toFixed(1)} ${t.unitWeight}`}
                                     toggle={{ checked: rfGateOn, onChange: v => handleChange('enableRfKorrCellGate', v) }}
                                     hint={t.covRfHint}
                                 >
-                                    <Slider min={1} max={100} value={localConfig.rfKorrMinCellSamples ?? 10}
-                                        disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellSamples', v)} />
-                                    <Slider min={0.5} max={30} step={0.5} value={localConfig.rfKorrMinCellWeight ?? 5}
-                                        disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellWeight', v)} />
+                                    <div className="space-y-3 pt-1">
+                                        <SubField label={t.subSamples} dim={!rfGateOn} value={`${rfSamples}`}>
+                                            <Slider min={1} max={100} value={rfSamples}
+                                                disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellSamples', v)} />
+                                        </SubField>
+                                        <SubField label={t.subWeight} dim={!rfGateOn} value={rfWeight.toFixed(1)}>
+                                            <Slider min={0.5} max={30} step={0.5} value={rfWeight}
+                                                disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellWeight', v)} />
+                                        </SubField>
+                                    </div>
                                     {!rfGateOn && <p className="text-[9px] text-red-400 leading-snug">{t.gateOff}</p>}
                                 </Row>
 
-                                {/* No on/off: these colour the heatmap and gate nothing, so there is
-                                    no behaviour to switch off. */}
+                                {/* One number, not two. The lower band is the VE gate — see
+                                    coverageThin — so there is nothing left to set but the point at
+                                    which a cell is done. No on/off either: this colours the heatmap
+                                    and gates nothing, so there is no behaviour to switch off. */}
                                 <Row
                                     {...row('bands')}
                                     label={t.covBands}
-                                    value={`${localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT} ${t.unitThin} / ${localConfig.coverageOk ?? COVERAGE_OK_DEFAULT} ${t.unitCovered}`}
+                                    value={`${coveredAt}`}
                                     hint={t.covBandsHint}
                                 >
-                                    <Slider min={1} max={500} step={5} value={localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT}
-                                        onChange={v => handleChange('coverageThin', v)} />
-                                    <Slider min={1} max={1000} step={10} value={localConfig.coverageOk ?? COVERAGE_OK_DEFAULT}
+                                    <Slider min={10} max={1000} step={10} value={coveredAt}
                                         onChange={v => handleChange('coverageOk', v)} />
+                                    <p className="text-[9px] text-slate-600 leading-snug pt-0.5">
+                                        {t.bandsLegend(veGateOn ? veSamples : 1, coveredAt)}
+                                    </p>
                                 </Row>
                             </div>
 

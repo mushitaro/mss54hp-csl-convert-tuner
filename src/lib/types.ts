@@ -253,10 +253,16 @@ export interface LogFilterConfig {
     /** Bilinear weight that must accumulate in a VE cell before it may move. Default 5.0.
      *  Both are required: 10 samples spread across four corners can carry very little weight. */
     minVeCellWeight?: number;
-    /** Heatmap band edges — display only, and deliberately higher than the gate. The gate says
-     *  "enough to act on"; these say "enough to stop driving this area". Defaults 50 / 200 —
-     *  see COVERAGE_THIN_DEFAULT, which is where the numbers and their measurement live. */
+    /**
+     * @deprecated The lower heatmap band is the VE gate's own sample count now, not a separate
+     * number. Independent, the two could contradict each other — a cell above the gate and below
+     * this was rewritten and still painted as barely visited. Kept on the type because sessions
+     * stored one; ignored, which costs nothing, since this was only ever a colour.
+     */
     coverageThin?: number;
+    /** Where the heatmap's strongest band begins — display only. The gate says "enough to act on";
+     *  this says "enough to stop driving this area", which is the higher bar. Default 200; see
+     *  COVERAGE_OK_DEFAULT, where the number and its measurement live. */
     coverageOk?: number;
 
     /** The rf_korr tuner's own grid thresholds. Separate numbers because that table has 72 cells

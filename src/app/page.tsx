@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'; // Added dynamic import
 import { ChartLoading } from '@/components/ChartLoading';
 import { DropZone } from '@/components/DropZone';
-import { MapEditor, COVERAGE_THIN_DEFAULT, COVERAGE_OK_DEFAULT } from '@/components/MapEditor';
+import { MapEditor, COVERAGE_OK_DEFAULT } from '@/components/MapEditor';
 import { RfKorrTable } from '@/components/RfKorrTable';
 
 // Dynamic imports for heavy components
@@ -546,8 +546,23 @@ export default function Home() {
     };
   })();
 
+  /**
+   * The heatmap's two band edges. The lower one is the gate itself, not a setting of its own.
+   *
+   * They used to be independent, and that let them contradict each other: with the gate at 10 and
+   * the thin band at 50, a cell holding 20 samples had been REWRITTEN and was still painted as
+   * barely visited. The colour and the calculation were answering the same question differently,
+   * and the colour is what gets looked at.
+   *
+   * Tied together, the three levels each say one thing: faint means the cell was driven and the gate
+   * refused it, mid means the gate accepted it and the map moved, full means there is no more to
+   * gain by driving there. The only number left to choose is the last boundary.
+   *
+   * `coverageThin` stays on the type for sessions that stored one, and is deliberately ignored —
+   * it is display-only, so nothing about a stored tune depends on it.
+   */
   const coverageBands = {
-    coverageThin: filterConfig.coverageThin ?? COVERAGE_THIN_DEFAULT,
+    coverageThin: filterConfig.enableVeCellGate === false ? 1 : (filterConfig.minVeCellSamples ?? 10),
     coverageOk: filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT,
   };
   const { diffSubject, setDiffSubject, diffReference, setDiffReference, diffMapForVisualization } = comparison;

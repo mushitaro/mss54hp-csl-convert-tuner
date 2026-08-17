@@ -175,6 +175,51 @@ body {
   height: 6px;
 }
 
+/* A thumb you can actually catch.
+   ────────────────────────────────────────────────────────────────────────────
+   Chrome draws about 12px for a range thumb, on a 4px track, in a panel read at
+   arm's length in a car. Every one of these sliders decides what goes into a VE
+   map, so the cost of missing is not a wasted tap — it is a value that moved.
+
+   18px with a ring, and the ring is what makes it findable rather than merely
+   bigger. The track stays 4px: the thumb is the control, the track is the scale.
+
+   `currentColor` so the accent still comes from the Tailwind `accent-*` class on
+   each slider — the transient group is violet, everything else blue, and that
+   distinction is worth keeping.
+
+   This is one half of the fix. The other is the pointer-down guard in
+   FilterConfigPanel: a bigger thumb is easier to hit, and the guard is what
+   makes missing it cost nothing. */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgb(15 15 19 / 0.9);
+  cursor: grab;
+}
+
+input[type="range"]:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+
+input[type="range"]:disabled::-webkit-slider-thumb {
+  cursor: default;
+  opacity: 0.5;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgb(15 15 19 / 0.9);
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
