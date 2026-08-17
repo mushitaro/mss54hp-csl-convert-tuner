@@ -91,6 +91,29 @@ console.log('\n[both conditions, not either]');
     check('count alone does not open it when weight is short',
         r.coverage.withEvidence === 0 && r.newMap === null,
         'weight ' + at(r.weightMap, 2700, 1.0).toFixed(1) + ', cleared ' + r.coverage.withEvidence);
+    // And this is the cell the heatmap used to paint as rewritten: 20 hits against a gate of 10
+    // samples reads as "cleared" to anything testing the count alone, and it did not clear.
+    check('...and the accepted map agrees it was refused',
+        at(r.acceptedMap, 2700, 1.0) === false && at(r.hitMap, 2700, 1.0) === 20,
+        'accepted ' + at(r.acceptedMap, 2700, 1.0) + ' on ' + at(r.hitMap, 2700, 1.0) + ' hits');
+}
+
+/**
+ * The heatmap's middle band is this map, and nothing else.
+ *
+ * It means "this cell was rewritten", which is a decision the gate has already made — so it is
+ * reported rather than reconstructed. Two earlier versions reconstructed it from a threshold and
+ * both were wrong; a count cannot express a gate that also tests weight.
+ */
+console.log('\n[the accepted map IS the gate]');
+{
+    const r = run([...samples(10, 2700, 1.0, 1.10), ...samples(3, 3100, 1.0, 1.10)]);
+    const trues = r.acceptedMap.flat().filter(Boolean).length;
+    check('one true per cell that cleared', trues === r.coverage.withEvidence, `${trues} vs ${r.coverage.withEvidence}`);
+    check('accepted where it cleared', at(r.acceptedMap, 2700, 1.0) === true);
+    check('refused where it did not', at(r.acceptedMap, 3100, 1.0) === false);
+    check('same shape as the map', r.acceptedMap.length === LOAD.length
+        && r.acceptedMap.every(row => row.length === RPM.length));
 }
 
 console.log('\n[the census is the cost of the threshold]');

@@ -20,6 +20,10 @@ export function useVeCalculation() {
   const [hitMap, setHitMap] = useState<number[][] | null>(null);
   const [correctionMap, setCorrectionMap] = useState<number[][] | null>(null);
   const [weightMap, setWeightMap] = useState<number[][] | null>(null);
+  /** Which cells the evidence gate accepted — i.e. which ones the map was actually rewritten in.
+   *  The heatmap paints from this rather than re-testing a threshold of its own, so the colour
+   *  cannot say something different from the calculation. */
+  const [acceptedMap, setAcceptedMap] = useState<boolean[][] | null>(null);
 
   // Measured EGT correction. `rfKorrMap` is the weighted-mean rf_korr each cell's samples were
   // taken under; `rfKorrSpreadMap` is max-min within the cell, which is the number that says
@@ -122,6 +126,7 @@ export function useVeCalculation() {
     setHitMap(result.hitMap);
     setCorrectionMap(result.correctionMap);
     setWeightMap(result.weightMap);
+    setAcceptedMap(result.acceptedMap);
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
     setCoverage(result.coverage);
@@ -183,6 +188,7 @@ export function useVeCalculation() {
     setHitMap(result.hitMap);
     setCorrectionMap(result.correctionMap);
     setWeightMap(result.weightMap);
+    setAcceptedMap(result.acceptedMap);
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
     setCoverage(result.coverage);
@@ -205,6 +211,7 @@ export function useVeCalculation() {
     liveRef.current = null;
     setNewMap(null);
     setWeightMap(null);
+    setAcceptedMap(null);
     setWarmupMap(null);
     setHitMap(null);
     setCorrectionMap(null);
@@ -223,6 +230,7 @@ export function useVeCalculation() {
     hitMap,
     correctionMap,
     weightMap,
+    acceptedMap,
     rfKorrMap,
     rfKorrSpreadMap,
     coverage,

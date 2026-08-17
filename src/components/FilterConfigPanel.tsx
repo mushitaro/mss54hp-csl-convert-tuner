@@ -102,10 +102,10 @@ const TEXT = {
         covBandsHint:
             'この設定は、ヒートマップの色分けだけを決めます。計算には影響しません。\n'
             + 'ヒートマップは 3 段階です。薄い色は「通ったが、ゲートを通らなかった」セル。中間色は「ゲートを通り、書き換えられた」セル。濃い色は、この値に達して「もうこの領域を走らなくてよい」セルです。\n'
-            + '薄い色と中間色の境目は VE Cell Gate のサンプル数そのものです。ゲートが採用したセルが薄いままだと、色と計算が食い違うためです。したがってここで決めるのは、濃い色に変わる点だけです。\n'
+            + '薄い色と中間色の境目は、ゲートが実際に下した判定そのものです。サンプル数と重みの両方を見た結果を使うため、色と計算が食い違いません。したがってここで決めるのは、濃い色に変わる点だけです。\n'
             + 'ゲートは「このセルを書き換えてよいか」、この値は「この領域をこれ以上走らなくてよいか」を答えます。後者のほうが高い基準なので、既定はゲートよりかなり上に置いています。',
-        bandsLegend: (gate: number, ok: number) =>
-            `薄い = 1〜${gate - 1} · 中間 = ${gate}〜${ok - 1}（書き換え済み）· 濃い = ${ok} 以上`,
+        bandsLegend: (ok: number) =>
+            `薄い = ゲート未通過 · 中間 = 書き換え済み · 濃い = ${ok} サンプル以上`,
         subSamples: 'Samples',
         subWeight: 'Weight',
         gateOff:
@@ -177,10 +177,10 @@ const TEXT = {
         covBandsHint:
             'This value sets the colouring of the heatmap only. It does not affect the calculation.\n'
             + 'The heatmap has three levels. The faintest means the cell was visited but did not clear the gate. The middle one means it cleared the gate and was rewritten. The strongest means it reached this value, and the area needs no more driving.\n'
-            + 'The boundary between the first two is the VE Cell Gate\'s own sample count, because a cell the gate accepted must not still be painted as thin — the colour and the calculation would be saying different things. So the only thing left to set here is where the strongest level begins.\n'
+            + 'The boundary between the first two is the gate\'s own verdict, taken from the calculation itself. It accounts for both the sample count and the weight, so the colour and the calculation cannot say different things. The only thing left to set here is where the strongest level begins.\n'
             + 'The gate answers whether a cell may be rewritten; this value answers whether an area has been driven enough to move on from. The second is the higher bar, which is why the default sits well above the gate.',
-        bandsLegend: (gate: number, ok: number) =>
-            `faint = 1-${gate - 1} · mid = ${gate}-${ok - 1} (rewritten) · full = ${ok}+`,
+        bandsLegend: (ok: number) =>
+            `faint = below the gate · mid = rewritten · full = ${ok}+ samples`,
         subSamples: 'Samples',
         subWeight: 'Weight',
         gateOff:
@@ -292,46 +292,113 @@ const Row: React.FC<{
     );
 };
 
-/** The rendered width of the thumb, from globals.css. Needed here to know where it is. */
-const THUMB_PX = 18;
+/** Chrome's own thumb, which is what draws here. Only ever used to work out roughly WHERE the thumb
+ *  is, never to set a value, so being a pixel or two out costs nothing. */
+const THUMB_PX = 16;
+/** How far from the thumb a press still counts as grabbing it. Generous on purpose — see below. */
+const GRAB_PX = 24;
+/** Movement below this is a press, not a drag. */
+const SLOP_PX = 3;
 
 /**
- * A slider that only moves when you grab the thumb.
+ * A slider that changes only while its thumb is being dragged.
  *
- * A native range input jumps to wherever the track is pressed. That is fine for a volume control and
- * wrong for these: the panel is read at arm's length in a car, the sliders sit four to a screen, and
- * a press that lands 20px off the thumb does not miss — it silently sets a new evidence threshold
- * and re-derives the map. There is no undo, and nothing announces it.
+ * A native range input jumps to wherever the track is pressed. That is right for a volume control
+ * and wrong for these: every one of them sets an evidence threshold, and moving one re-derives the
+ * map with no undo and nothing announced.
  *
- * So a press outside the thumb is cancelled. `preventDefault` on pointerdown suppresses both the
- * jump and the drag that would follow it, which leaves the press doing exactly nothing. Keyboard
- * adjustment is untouched — arrow keys never went through this path — so the control stays operable
- * without a pointer.
+ * The first attempt cancelled the stray press with `preventDefault` on pointerdown. It did not work
+ * on the phone, and the measurement that said it did was worthless — the events were dispatched
+ * from JavaScript, and an untrusted event never triggers a default action in the first place, so
+ * there was never anything there to prevent.
  *
- * The tolerance is one thumb width either side, not half: fingers are wider than cursors, and the
- * failure this prevents is expensive while the failure it introduces — having to press again, a
- * little closer — is not.
+ * So the native control is taken out of the pointer path instead of being argued with:
+ * `pointer-events: none` on the input, and a transparent band over it that handles the pointer
+ * itself. Nothing is cancelled, so nothing depends on what a browser does with a cancelled event.
+ *
+ *   • A press further than GRAB_PX from the thumb is ignored — not prevented, never acted on.
+ *   • A press on the thumb starts a drag, and the value follows the pointer's movement FROM WHERE
+ *     IT WAS GRABBED. A press that does not move therefore cannot change the value at all, which
+ *     is what makes a generous grab radius free: the worst a sloppy hit can do is nothing.
+ *   • The keyboard is untouched. The input still takes focus by Tab and still fires `change` on the
+ *     arrow keys — the one path that never involved a pointer.
+ *
+ * The band is 16px tall against the track's 4px, positioned rather than padded so it adds nothing to
+ * the layout, and `touch-action: pan-y` leaves a vertical swipe scrolling the panel: seven of these
+ * claiming a 16px band each would otherwise make the panel hard to scroll.
  */
 const Slider: React.FC<{
     min: number; max: number; step?: number; value: number; disabled?: boolean;
     accent?: string; onChange: (v: number) => void;
-}> = ({ min, max, step, value, disabled, accent = 'accent-blue-500', onChange }) => (
-    <input
-        type="range"
-        min={min} max={max} step={step}
-        disabled={disabled}
-        value={value}
-        onPointerDown={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            // The thumb's centre travels between half a thumb in from each end, never to the edges.
-            const frac = max > min ? (value - min) / (max - min) : 0;
-            const centre = r.left + THUMB_PX / 2 + frac * (r.width - THUMB_PX);
-            if (Math.abs(e.clientX - centre) > THUMB_PX) e.preventDefault();
-        }}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className={`w-full h-1 rounded-lg appearance-none touch-none ${disabled ? 'bg-slate-800 accent-slate-600' : `bg-slate-700 ${accent}`}`}
-    />
-);
+}> = ({ min, max, step = 1, value, disabled, accent = 'accent-blue-500', onChange }) => {
+    const drag = React.useRef<{ id: number; from: number; x: number; moved: boolean } | null>(null);
+
+    /** How far this press landed from the thumb's centre, in px. */
+    const offThumb = (band: HTMLElement, clientX: number) => {
+        const r = band.getBoundingClientRect();
+        // The thumb's centre travels between half a thumb in from each end, never to the edges.
+        const frac = max > min ? (value - min) / (max - min) : 0;
+        return Math.abs(clientX - (r.left + THUMB_PX / 2 + frac * (r.width - THUMB_PX)));
+    };
+
+    const grab = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (disabled || offThumb(e.currentTarget, e.clientX) > GRAB_PX) return;
+        drag.current = { id: e.pointerId, from: value, x: e.clientX, moved: false };
+        e.currentTarget.style.cursor = 'grabbing';
+        // Throws for a pointer the browser has no record of, which is every synthetic one.
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not a live pointer */ }
+    };
+
+    const move = (e: React.PointerEvent<HTMLDivElement>) => {
+        const d = drag.current;
+        if (!d || d.id !== e.pointerId) return;
+        const dx = e.clientX - d.x;
+        // Landing on the thumb and letting go is a no-op rather than a one-step nudge.
+        if (!d.moved && Math.abs(dx) < SLOP_PX) return;
+        d.moved = true;
+        const travel = Math.max(1, e.currentTarget.getBoundingClientRect().width - THUMB_PX);
+        const raw = d.from + (dx / travel) * (max - min);
+        // Snapped from `min`, which is where a range input's own step grid starts.
+        const next = Math.min(max, Math.max(min,
+            Number((min + Math.round((raw - min) / step) * step).toFixed(4))));
+        if (next !== value) onChange(next);
+    };
+
+    const drop = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (drag.current?.id !== e.pointerId) return;
+        drag.current = null;
+        e.currentTarget.style.cursor = '';
+        try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* never captured */ }
+    };
+
+    /** Desktop only: say which part of this band is the control. Written straight to the node — a
+     *  cursor is not state, and putting it in React state would re-render on every mouse move. */
+    const hint = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (drag.current || e.pointerType !== 'mouse') return;
+        e.currentTarget.style.cursor = !disabled && offThumb(e.currentTarget, e.clientX) <= GRAB_PX
+            ? 'grab' : '';
+    };
+
+    return (
+        <div className="relative">
+            <input
+                type="range"
+                min={min} max={max} step={step}
+                disabled={disabled}
+                value={value}
+                onChange={(e) => onChange(Number(e.target.value))}
+                className={`block w-full h-1 rounded-lg appearance-none pointer-events-none ${disabled ? 'bg-slate-800 accent-slate-600' : `bg-slate-700 ${accent}`}`}
+            />
+            <div
+                className="absolute inset-x-0 -inset-y-1.5 touch-pan-y"
+                onPointerDown={grab}
+                onPointerMove={(e) => { move(e); hint(e); }}
+                onPointerUp={drop}
+                onPointerCancel={drop}
+            />
+        </div>
+    );
+};
 
 /**
  * One number inside a group that shares a switch.
@@ -410,8 +477,27 @@ export const FilterConfigPanel: React.FC<Props> = ({
         onToggleInfo: () => toggleInfo(id),
     });
 
-    const settleSec = localConfig.transientSettleSec ?? TRANSIENT_SETTLE_SEC_DEFAULT;
-    const settleSamples = resolveTransientWindow({ ...localConfig, transientSettleSec: settleSec }, measuredHz);
+    /**
+     * The settle wait, said in the unit it is actually kept in.
+     *
+     * A config from before this control carries no seconds — only the sample count it was built
+     * with, and the filter is still using that count. Forcing a seconds value in here showed 2.0 s
+     * for a session whose filter was waiting 4 samples, which at 2.95 Hz is 1.4 s: the panel was
+     * describing what this control WOULD apply if it were touched, not what was happening. Every
+     * session made so far is in that state — `transientSettleSec` is not in DEFAULT_FILTER_CONFIG,
+     * so it appears only once this slider has been dragged.
+     */
+    const storedSec = localConfig.transientSettleSec;
+    const settleSamples = resolveTransientWindow(localConfig, measuredHz);
+    const settleSec = storedSec
+        ?? (measuredHz && measuredHz > 0 ? localConfig.transientWindow / measuredHz : TRANSIENT_SETTLE_SEC_DEFAULT);
+    // With no seconds AND no rate there is nothing to convert between, so it says the one number
+    // that is true rather than relating two that cannot be related.
+    const settleLabel = storedSec === undefined && !(measuredHz && measuredHz > 0)
+        ? `${localConfig.transientWindow} samples`
+        : settleSamples === undefined
+            ? `${settleSec.toFixed(1)} s`
+            : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`;
     const veGateOn = localConfig.enableVeCellGate ?? true;
     const rfGateOn = localConfig.enableRfKorrCellGate ?? true;
     const veSamples = localConfig.minVeCellSamples ?? 10;
@@ -579,7 +665,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                     <Slider min={10} max={1000} step={10} value={coveredAt}
                                         onChange={v => handleChange('coverageOk', v)} />
                                     <p className="text-[9px] text-slate-600 leading-snug pt-0.5">
-                                        {t.bandsLegend(veGateOn ? veSamples : 1, coveredAt)}
+                                        {t.bandsLegend(coveredAt)}
                                     </p>
                                 </Row>
                             </div>
@@ -609,9 +695,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                     <Row
                                         {...row('settle')}
                                         label="Settle Time"
-                                        value={settleSamples === undefined
-                                            ? `${settleSec.toFixed(1)} s`
-                                            : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`}
+                                        value={settleLabel}
                                         hint={t.settleHint}
                                     >
                                         <Slider min={0.5} max={5} step={0.5} value={settleSec}

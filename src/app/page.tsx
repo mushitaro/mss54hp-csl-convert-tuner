@@ -506,7 +506,7 @@ export default function Home() {
     [logWindowStart, setSelectedLogIndex],
   );
 
-  const { newMap, mapData, hitMap, correctionMap, weightMap, warmupMap, wotMap, tunedRfKorr } = veCalc;
+  const { newMap, mapData, hitMap, correctionMap, weightMap, acceptedMap, warmupMap, wotMap, tunedRfKorr } = veCalc;
   /** The coverage bands every grid in this page tints with, resolved once from the session's filter
    *  config. Passed explicitly rather than let each MapEditor fall back to its own default, so a
    *  changed setting reaches all four grids or none. */
@@ -547,22 +547,21 @@ export default function Home() {
   })();
 
   /**
-   * The heatmap's two band edges. The lower one is the gate itself, not a setting of its own.
+   * The heatmap's three levels: refused, rewritten, and driven enough to move on from.
    *
-   * They used to be independent, and that let them contradict each other: with the gate at 10 and
-   * the thin band at 50, a cell holding 20 samples had been REWRITTEN and was still painted as
-   * barely visited. The colour and the calculation were answering the same question differently,
-   * and the colour is what gets looked at.
+   * The first boundary is not a number at all — it is the gate's own verdict, cell by cell, as the
+   * calculation recorded it. Two earlier versions of this tried to reconstruct that verdict from a
+   * threshold instead, and both got it wrong: an independent `coverageThin` of 50 painted a cell
+   * the gate had ACCEPTED at 20 samples as barely visited, and tying that number to the gate's
+   * sample count still ignored the weight half of the gate, so a cell with 10 samples and a weight
+   * of 2.5 — refused — was painted as rewritten. The colour is what gets looked at, so it has to be
+   * the decision itself rather than a re-derivation of it.
    *
-   * Tied together, the three levels each say one thing: faint means the cell was driven and the gate
-   * refused it, mid means the gate accepted it and the map moved, full means there is no more to
-   * gain by driving there. The only number left to choose is the last boundary.
-   *
-   * `coverageThin` stays on the type for sessions that stored one, and is deliberately ignored —
-   * it is display-only, so nothing about a stored tune depends on it.
+   * `coverageThin` stays on the type for sessions that stored one, and is deliberately ignored: it
+   * is display-only, so nothing about a stored tune depends on it.
    */
   const coverageBands = {
-    coverageThin: filterConfig.enableVeCellGate === false ? 1 : (filterConfig.minVeCellSamples ?? 10),
+    acceptedData: acceptedMap ?? undefined,
     coverageOk: filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT,
   };
   const { diffSubject, setDiffSubject, diffReference, setDiffReference, diffMapForVisualization } = comparison;

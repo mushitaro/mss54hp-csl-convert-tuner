@@ -153,7 +153,7 @@ export class VECalculator {
     ): {
         newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
-        tunedUsedMap: boolean[][];
+        tunedUsedMap: boolean[][]; acceptedMap: boolean[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
         // Defaults to RF ÷ rf_soll — the route that needs no sensor. A caller that forgets to pass
@@ -274,7 +274,7 @@ export class VECalculator {
     ): {
         newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
-        tunedUsedMap: boolean[][];
+        tunedUsedMap: boolean[][]; acceptedMap: boolean[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
         const rows = this.loadAxis.length;
@@ -295,6 +295,17 @@ export class VECalculator {
         const rfKorrMap: number[][] = [];
         const rfKorrSpreadMap: number[][] = [];
         const tunedUsedMap: boolean[][] = [];
+        /**
+         * Which cells this gate accepted — the decision itself, not a number to re-test it from.
+         *
+         * The heatmap's middle band means "this cell was rewritten", and it used to paint that from
+         * `hitMap >= minCellSamples`, which is only half the gate. A cell reaching 10 samples
+         * typically carries a weight near 2.5 (one sample is split across four cells), so it fails
+         * `minCellWeight` and is NOT rewritten — and was painted as though it had been. Colour and
+         * calculation disagreeing is exactly what tying the band to the gate was meant to end, and
+         * the colour is what gets looked at.
+         */
+        const acceptedMap: boolean[][] = [];
 
         for (let r = 0; r < rows; r++) {
             const newRow: number[] = [];
@@ -305,6 +316,7 @@ export class VECalculator {
             const rfKorrRow: number[] = [];
             const rfKorrSpreadRow: number[] = [];
             const tunedUsedRow: boolean[] = [];
+            const acceptedRow: boolean[] = [];
 
             for (let c = 0; c < cols; c++) {
                 const cell = grid[r][c];
@@ -324,7 +336,9 @@ export class VECalculator {
                 // The evidence gate. Both conditions — see VeCalcOptions.minCellSamples for why,
                 // and for what this replaced.
                 if (cell.rawCount > 0) cellsWithSomeData++;
-                if (cell.rawCount >= minSamples && cell.weightSum >= minWeight) {
+                const accepted = cell.rawCount >= minSamples && cell.weightSum >= minWeight;
+                acceptedRow.push(accepted);
+                if (accepted) {
                     cellsWithEvidence++;
                     // Calculation uses Weighted Average
                     // Avg = Sum(Value * Weight) / Sum(Weight)
@@ -384,6 +398,7 @@ export class VECalculator {
             rfKorrMap.push(rfKorrRow);
             rfKorrSpreadMap.push(rfKorrSpreadRow);
             tunedUsedMap.push(tunedUsedRow);
+            acceptedMap.push(acceptedRow);
         }
 
         return {
@@ -410,6 +425,7 @@ export class VECalculator {
             correctionMap,
             weightMap, // Returns Weight Sum
             tunedUsedMap, // Which cells actually took the 'tuned' correction
+            acceptedMap,  // Which cells cleared the gate, i.e. which ones were rewritten
             rfKorrMap, // Weighted-mean rf_korr the cell's samples were taken under
             rfKorrSpreadMap, // max-min rf_korr across those samples
             /** How many cells cleared the evidence gate, out of how many the log touched at all and

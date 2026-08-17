@@ -29,9 +29,20 @@ interface Props {
     cellNote?: (row: number, col: number) => string | undefined;
     /** Cells to render as inert — present, readable, and not part of the result. */
     mutedCells?: boolean[][];
-    /** Coverage band edges. Defaults to COVERAGE_THIN/OK_DEFAULT; the session's filter config
-     *  overrides them, so the map and the panel that sets them cannot disagree. */
+    /**
+     * Which cells the evidence gate accepted, straight from the calculation that made this map.
+     *
+     * When given it — and not a sample count — decides the faint/mid boundary, because that
+     * boundary means "was this cell rewritten" and this is the answer to that question. A count
+     * cannot be: the gate tests samples AND weight, and a cell reaching 10 samples usually carries
+     * a weight near 2.5, so it is refused while a count-only test would paint it as written.
+     */
+    acceptedData?: boolean[][];
+    /** The faint/mid edge for grids finalised somewhere else, with no accepted map to show — the
+     *  correction table and the inertia pane. Ignored when `acceptedData` is given. */
     coverageThin?: number;
+    /** Where the top band starts: enough samples that there is nothing left to gain by driving
+     *  this cell again. A display threshold only; no calculation reads it. */
     coverageOk?: number;
 }
 
@@ -102,7 +113,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
     rowLabel = 'RO %', colLabel = 'RPM', valueLabel = 'RF %',
     rowFormat = (v: number) => v.toFixed(2),
     valueFormat = (v: number) => v.toFixed(3),
-    cellNote, mutedCells,
+    cellNote, mutedCells, acceptedData,
     coverageThin = COVERAGE_THIN_DEFAULT, coverageOk = COVERAGE_OK_DEFAULT,
 }) {
     // Render a scrollable grid
@@ -169,10 +180,19 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
                                     // OK/present role emerald-* now carries. Safe to share the blue family
                                     // with the lean-diff fill below: the guard above means a cell can never
                                     // paint both, and diffData is all-or-nothing for the whole table.
+                                    //
+                                    // Three levels, one meaning each: the cell was driven and REFUSED,
+                                    // it was driven and REWRITTEN, or it holds enough that there is no
+                                    // more to gain by driving it. The first boundary is the gate's own
+                                    // verdict where there is one, so the colour cannot disagree with
+                                    // what was written; the second is a count, because "enough" is.
+                                    const rewritten = acceptedData
+                                        ? !!acceptedData[rowIdx]?.[colIdx]
+                                        : hits >= coverageThin;
                                     const alpha =
-                                        hits >= coverageOk ? COVERAGE_ALPHA_FULL
-                                            : hits >= coverageThin ? COVERAGE_ALPHA_OK
-                                                : COVERAGE_ALPHA_THIN;
+                                        !rewritten ? COVERAGE_ALPHA_THIN
+                                            : hits >= coverageOk ? COVERAGE_ALPHA_FULL
+                                                : COVERAGE_ALPHA_OK;
                                     style = { backgroundColor: `rgba(143, 216, 242, ${alpha})` };
                                     // Every band stays dark enough for the light text the rest of the
                                     // table uses, so the numbers do not change colour as coverage builds.

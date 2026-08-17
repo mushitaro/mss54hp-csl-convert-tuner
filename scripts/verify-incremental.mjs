@@ -191,6 +191,9 @@ for (const [label, log] of [['session #902', realLog()], ['synthetic', synthetic
     check('VE map identical', sameNums(wantMap.newMap.data, gotMap.newMap.data), 'cell values differ');
     check('hit map identical', sameNums(wantMap.hitMap, gotMap.hitMap));
     check('weight map identical', sameNums(wantMap.weightMap, gotMap.weightMap));
+    // The heatmap paints from this one, and a live run paints it while the car is still moving.
+    check('accepted map identical',
+        JSON.stringify(wantMap.acceptedMap) === JSON.stringify(gotMap.acceptedMap), 'cells differ');
     check('coverage identical', JSON.stringify(wantMap.coverage) === JSON.stringify(gotMap.coverage),
         `${JSON.stringify(gotMap.coverage)} vs ${JSON.stringify(wantMap.coverage)}`);
     // Finalising is called on every flush, so it had better be a read.
