@@ -148,9 +148,33 @@ export interface LogFilterConfig {
     idleRpm: number;         // Default: 1000 (Exclude < 1000 RPM & RawLoad=0)
 
     enableTransient: boolean;
-    transientWindow: number; // Default: 4 (Frames to look back)
+    /**
+     * @deprecated Superseded by `transientSettleSec`. Kept because every session ever saved carries
+     * it, and re-deriving one of those has to reproduce the map it stored. See resolveTransientWindow.
+     */
+    transientWindow: number; // Frames to look back
     rpmStableThreshold: number; // Default: 10 (% Change)
     tpsStableThreshold: number; // Default: 5 (Absolute Change in RO)
+
+    /**
+     * How long the lambda trim is given to arrive before a sample counts, in SECONDS.
+     *
+     * The thing being waited for is the DME's, not the app's. `la_f_regler` is an integrator whose
+     * gain the calibration states in 1/sec (KF_LA_KI_POS: 0.0305-0.0488, i.e. roughly 3-5 % per
+     * second), so a 5 % error takes about a second to absorb and a 10 % error about two. That
+     * duration is a property of the car and does not change.
+     *
+     * `transientWindow` expressed the same wait as a COUNT OF SAMPLES, which does change: four
+     * frames is 1.36 s at the VE profile's measured 2.95 Hz and 0.61 s at the 6.6 Hz of the retired
+     * EGT profile. Same setting, same car, less than half the wait — and because the test is a raw
+     * difference with no division by dt, the faster log also tolerated roughly 2.2x the rpm slope
+     * before calling a sample transient. Nothing about the DME had changed.
+     *
+     * So the wait is stored in seconds and converted per log at its own measured rate. That keeps
+     * reproduction exact — a log's rate is a property of that log, so re-opening it converts to the
+     * same number of samples — while keeping the wait matched to what it is waiting for.
+     */
+    transientSettleSec?: number;
 
     // --- Open-loop exclusion ---------------------------------------------------------------
     // The VE correction consumes `stft` = la_f_regler, the DME's own lambda INTEGRATOR. That
@@ -212,13 +236,26 @@ export interface LogFilterConfig {
     // promise worth keeping. What IS kept is that the numbers travel with the session, so a
     // re-opened tune says which thresholds produced it.
 
+    /**
+     * Whether the VE cell gate runs at all. Default true.
+     *
+     * Off means off: a cell holding one sample is written. That is the behaviour this gate was
+     * added to end, so the panel says so in red the moment it is unticked and the accepted-cell
+     * count beside it moves to show the cost. A control whose label and behaviour disagree would be
+     * worse than the setting it guards.
+     */
+    enableVeCellGate?: boolean;
+    /** Whether the correction table's cell gate runs at all. Default true. Same reasoning. */
+    enableRfKorrCellGate?: boolean;
+
     /** Samples that must land in a VE cell before it may move. Default 10. */
     minVeCellSamples?: number;
     /** Bilinear weight that must accumulate in a VE cell before it may move. Default 5.0.
      *  Both are required: 10 samples spread across four corners can carry very little weight. */
     minVeCellWeight?: number;
     /** Heatmap band edges — display only, and deliberately higher than the gate. The gate says
-     *  "enough to act on"; these say "enough to stop driving this area". Defaults 30 / 100. */
+     *  "enough to act on"; these say "enough to stop driving this area". Defaults 50 / 200 —
+     *  see COVERAGE_THIN_DEFAULT, which is where the numbers and their measurement live. */
     coverageThin?: number;
     coverageOk?: number;
 
@@ -318,6 +355,35 @@ export function resolveRfKorr(
         apply: legacy !== 'as-logged',
         legacyWrite: legacy === 'tuned',
     };
+}
+
+/** The wait the panel now offers, in seconds. Two seconds is what the lambda integrator's own gain
+ *  asks for: at 3-5 % per second it needs about that long to absorb a 10 % error. */
+export const TRANSIENT_SETTLE_SEC_DEFAULT = 2.0;
+
+/**
+ * Roughly how many samples the transient wait works out to on a log at this rate.
+ *
+ * **For display only.** The filter does not convert seconds to a count — it walks back over the
+ * timestamps, so the wait is a duration and no rate enters the arithmetic. This exists because
+ * "2.0 s" alone does not tell a reader whether that is three samples or thirty, and the count is
+ * what makes the setting feel concrete next to a log of a known length.
+ *
+ * Converting for real was tried and reverted: a live flush has seen less of the log than a batch
+ * pass, measures a different rate, and rounds to a different count. On a rate ramping 0.20 s to
+ * 0.40 s that came out as 37 valid samples live against 41 batch — and the live number is the one
+ * that gets saved, because nothing reprocesses after STOP.
+ *
+ * Returns the stored `transientWindow` for a config from before the setting existed, which is what
+ * that session was actually built with, and undefined when there is no rate to convert at.
+ */
+export function resolveTransientWindow(
+    config: Pick<LogFilterConfig, 'transientWindow' | 'transientSettleSec'>,
+    hz: number | undefined,
+): number | undefined {
+    if (config.transientSettleSec === undefined) return config.transientWindow;
+    if (hz === undefined || !(hz > 0)) return undefined;
+    return Math.max(1, Math.round(config.transientSettleSec * hz));
 }
 
 export interface InterpolationPoint {

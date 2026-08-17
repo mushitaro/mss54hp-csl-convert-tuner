@@ -46,6 +46,7 @@ import { useWideLayout, useSplitGraph } from '@/hooks/useWideLayout';
 import { useMapZoom } from '@/hooks/useMapZoom';
 import { AlertCircle, CheckCircle, Download, FileCode, FileSpreadsheet, Settings, Power, Zap, Play, Thermometer, Cpu, Trash2, Github, BookOpen, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud, Gauge } from 'lucide-react';
 import { PRIVACY_POLICY_URL, PROJECT_REPO_URL } from '@/config/links';
+import { isFieldPresent } from '@/lib/field-registry/registry';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, RfKorrSource, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
@@ -592,12 +593,16 @@ export default function Home() {
     writeRfKorr: write,
     // The evidence gate, and the rf_korr tuner's own. Both travel in the filter config so a session
     // replays under the thresholds it was built with rather than under today's defaults.
-    minCellSamples: config.minVeCellSamples,
-    minCellWeight: config.minVeCellWeight,
-    rfKorrThresholds: {
-      minCellSamples: config.rfKorrMinCellSamples,
-      minCellWeight: config.rfKorrMinCellWeight,
-    },
+    //
+    // Switched off, the gate becomes 1 sample / 0 weight rather than 0 / 0: a cell nothing landed
+    // in still has nothing to say, and writing it would be worse than the no-gate behaviour the
+    // switch is offering. Everything else about "off" means off, and the panel says so in red.
+    ...(config.enableVeCellGate === false
+      ? { minCellSamples: 1, minCellWeight: 0 }
+      : { minCellSamples: config.minVeCellSamples, minCellWeight: config.minVeCellWeight }),
+    rfKorrThresholds: config.enableRfKorrCellGate === false
+      ? { minCellSamples: 1, minCellWeight: 0 }
+      : { minCellSamples: config.rfKorrMinCellSamples, minCellWeight: config.rfKorrMinCellWeight },
     egt,
   });
 
@@ -637,6 +642,7 @@ export default function Home() {
     // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
+      filterConfig.enableVeCellGate, filterConfig.enableRfKorrCellGate,
       filterConfig.minVeCellSamples, filterConfig.minVeCellWeight,
       filterConfig.rfKorrMinCellSamples, filterConfig.rfKorrMinCellWeight,
       egtTables, writeRfKorr]);
@@ -723,12 +729,27 @@ export default function Home() {
     }
   };
 
-  /** Does this log carry an exhaust temperature at all? The DME-table route needs a Δ, and Δ has
-   *  exactly one non-circular source: kf_rf_tabg_modell(rpm, RF) − TABG. Without TABG there is no
-   *  row to read the table at, so the route is not a choice. */
-  const logHasTabg = useMemo(
-    () => !!processedLog?.data.some(p => p.exhaustTemp !== undefined),
-    [processedLog]);
+  /**
+   * Which channels this log actually carries — the one thing the filter panel cannot see for itself.
+   *
+   * Read from the RAW log, never from `processedLog`. That is not tidiness, it is the difference
+   * between a control that can be turned back off and one that cannot: with the tank-vent exclusion
+   * ON, every purging row is dropped, and a stock car purges 94-99.6 % of the time above 2500 rpm.
+   * Judging presence on the filtered log would then find no TETV, grey the control out, and leave
+   * the user unable to undo the setting that caused it. Nothing here may depend on its own output.
+   *
+   * `isFieldPresent` rather than four hand-rolled `.some()` calls: it already knows that the derived
+   * channels probe their logged precondition instead of themselves, and it already caps the scan.
+   */
+  const logChannels = useMemo(() => {
+    const raw = logFileState.rawLogData ?? [];
+    return {
+      tabg: isFieldPresent('exhaustTemp', raw),
+      tankVent: isFieldPresent('tankVent', raw),
+      rf: isFieldPresent('rf', raw),
+      stft: isFieldPresent('stft1', raw) || isFieldPresent('stft2', raw),
+    };
+  }, [logFileState.rawLogData]);
 
   /** How far apart the two routes land on this log — the check on DS2 offset 8, which is still
    *  unconfirmed against a real DME. Undefined when they cannot be compared at all, which now
@@ -768,20 +789,32 @@ export default function Home() {
   const rfKorrArmed = writeRfKorr && canTuneRfKorr;
   const rfKorrWrite = rfKorrArmed ? tunedRfKorr!.tuned : null;
 
-  /** Which of the four conditions is missing, in the order they are usually missing.
+  /**
+   * Which of the conditions is missing, in the order they are usually missing.
    *
-   *  One sentence naming the actual blocker, not a list of everything it could be. A disabled
-   *  switch that cannot say why is the one that gets reported as broken — the same reasoning as
-   *  derivedTablesLockReason beside it, which this deliberately reads like. */
+   * One sentence naming the actual blocker, not a list of everything it could be. A disabled switch
+   * that cannot say why is the one that gets reported as broken — the same reasoning as
+   * derivedTablesLockReason beside it, which this deliberately reads like.
+   *
+   * The missing-channel cases are read from the LIVE CENSUS, not from `tunedRfKorr`, and that is the
+   * whole point of this rewrite. `tuneRfKorrTable` returns null when either the exhaust temperature
+   * or the lambda trim is absent, so `tunedRfKorr` is null in both cases — which meant the branch
+   * naming the exhaust temperature could never be reached, and both causes fell through to "record a
+   * log". A log had been recorded. What was missing was a channel in it, and the retired EGT profile
+   * produces exactly that log.
+   */
+  const rfKorrCensus = veCalc.rfKorrLive;
   const rfKorrLockReason = !egtTables
     ? 'Needs the binary\'s EGT tables — they did not decode from these bytes, so there is nothing to derive against.'
     : !(applyPatch || patchStatus?.mapOff)
       ? 'Needs a log recorded with the PATCH on (k_rf_cfg = 0x02). With MAP compensation live, RF carries the integrator on top and rf_korr cannot be pinned to a few percent.'
-      : !tunedRfKorr
+      : !processedLog?.data.length
         ? 'Needs a log first — the table is back-calculated from one. Record a run (START TUNE) or load one.'
-        : tunedRfKorr.report.sensorMissing
-          ? 'Needs an exhaust temperature (TABG) in the log. Δ has no other non-circular source, and Δ is what picks the row of the table.'
-          : 'Too few cells cleared their evidence thresholds to be worth writing — see the RF KORR tab for the per-cell reasons.';
+        : rfKorrCensus?.sensorMissing
+          ? 'This log carries no exhaust temperature (TABG). Δ picks the row of the table and has no other non-circular source.'
+          : rfKorrCensus?.trimMissing
+            ? 'This log carries no lambda trim (la_f_regler). The record shows how much the DME corrected, but only the trim shows whether that correction was right.'
+            : 'Too few cells cleared their evidence thresholds to be worth writing — see the RF KORR tab for the per-cell reasons.';
 
   const handleDownloadBin = () => {
     binaryFileState.downloadBin(newMap, { tunedRfKorr: rfKorrWrite });
@@ -2420,9 +2453,12 @@ const WOT_CRITERION =
   const wotEvidenceCells = useMemo(() => {
     if (!hitMap?.length) return 0;
     const top = hitMap[hitMap.length - 1];          // maxLoad row: what interpolateMap reads at 100 %
-    const min = filterConfig.minVeCellSamples ?? 10;
+    // Follows the VE gate, including being switched off — the WOT map is built by scaling the top
+    // row of the VE map, so "enough evidence to write a WOT cell" cannot be a stricter question
+    // than "enough evidence to have written the row it is scaled from".
+    const min = filterConfig.enableVeCellGate === false ? 1 : (filterConfig.minVeCellSamples ?? 10);
     return top.reduce((n, hits) => n + (hits >= min ? 1 : 0), 0);
-  }, [hitMap, filterConfig.minVeCellSamples]);
+  }, [hitMap, filterConfig.minVeCellSamples, filterConfig.enableVeCellGate]);
 
   /**
    * And the log has to have been recorded with VL suppressed.
@@ -2863,7 +2899,7 @@ const WOT_CRITERION =
                   onToggle={(enabled) => handleConfigChange({ ...filterConfig, enableCorrection: enabled })}
                   readOnly={isArchived}
                 />
-                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} routeSamples={routeSamples} />
+                <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} channels={logChannels} measuredHz={logRate?.hz} routeGap={routeGap} routeSamples={routeSamples} />
                 <FieldVisibilityPanel
                   visibleFields={fieldVisibility.visibleFields}
                   onToggle={fieldVisibility.toggleField}
@@ -3034,7 +3070,9 @@ const WOT_CRITERION =
                       {` of ${veCalc.coverage.total} cells met the evidence gate`}
                       <span className="text-slate-600">
                         {`  ·  ${veCalc.coverage.withAnyData} touched by this log`}
-                        {`  ·  gate ${filterConfig.minVeCellSamples ?? 10} samples / weight ${filterConfig.minVeCellWeight ?? 5}`}
+                        {filterConfig.enableVeCellGate === false
+                          ? '  ·  gate off'
+                          : `  ·  gate ${filterConfig.minVeCellSamples ?? 10} samples / weight ${filterConfig.minVeCellWeight ?? 5}`}
                       </span>
                     </div>
                   )}
@@ -4068,7 +4106,7 @@ The TIMING button still has the full record; save it before running another oper
               readOnly={isArchived}
               openUp
             />
-            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} hasTabg={logHasTabg} routeGap={routeGap} routeSamples={routeSamples} openUp />
+            <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived} channels={logChannels} measuredHz={logRate?.hz} routeGap={routeGap} routeSamples={routeSamples} openUp />
             <FieldVisibilityPanel
               visibleFields={fieldVisibility.visibleFields}
               onToggle={fieldVisibility.toggleField}

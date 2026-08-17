@@ -43,12 +43,13 @@ interface Route {
     id: RfKorrSource;
     label: string;
     formula: string;
-    /** The channel this route cannot work without, beyond RF which both require. */
-    needs?: 'tabg';
+    /** The channel this route cannot work without. Both need `rf`; only the table route also
+     *  needs an exhaust temperature to index Δ with. */
+    needs: 'rf' | 'tabg';
 }
 
 const ROUTES: Route[] = [
-    { id: 'rf-ratio', label: 'RF ÷ rf_soll', formula: 'rf_korr = RF ÷ rf_soll' },
+    { id: 'rf-ratio', label: 'RF ÷ rf_soll', formula: 'rf_korr = RF ÷ rf_soll', needs: 'rf' },
     { id: 'table-delta', label: 'DME TABLE', formula: 'rf_korr = KF_RF_KORR_DRREL(rpm, Δ)', needs: 'tabg' },
 ];
 
@@ -63,6 +64,7 @@ const TEXT = {
             + '**20 km/h ゲートは見えません** — ゲートが閉じていた区間でも表の値を返すので、'
             + 'そこは DME が実際に掛けた 1.000 とずれます。',
         noTabg: '排気温(TABG)がログに無いため選べません。初回のデータログで TABG が取れているか確認してください。',
+        noRf: 'このログには相対充填量が記録されていないため、どちらの経路も使えません。',
         agree: '2 経路の一致',
         agreeGood: '一致。DS2 offset 8 / 14 とカタログのアドレス解釈が同時に裏付けられます。',
         agreeBad: '不一致。offset 8 が補正前の rf_soll を指している疑いがあります — '
@@ -81,6 +83,7 @@ const TEXT = {
             + 'Δ = kf_rf_tabg_modell(rpm, RF) − TABG. **It cannot see the 20 km/h gate** — where the '
             + 'gate was shut it still returns the table value, while the DME applied 1.000.',
         noTabg: 'No exhaust temperature (TABG) in this log. Check the first datalog for a TABG channel.',
+        noRf: 'This log contains no relative filling value, so neither route can be used.',
         agree: 'the two routes',
         agreeGood: 'agree — which confirms DS2 offsets 8 and 14 and the catalog addresses at once.',
         agreeBad: 'disagree. Offset 8 may be pointing at pre-correction rf_soll, in which case '
@@ -95,6 +98,8 @@ export const RfKorrSourceControl: React.FC<{
     onChange: (source: RfKorrSource) => void;
     /** The log carries an exhaust temperature, so the table route can index a Δ. */
     hasTabg: boolean;
+    /** Both routes divide by or read RF; without it neither can be computed. */
+    hasRf: boolean;
     readOnly?: boolean;
     /**
      * Mean |RF÷rf_soll − table(rpm,Δ)| over the samples where both exist, or undefined when they
@@ -104,7 +109,7 @@ export const RfKorrSourceControl: React.FC<{
     routeGap?: number;
     /** How many samples the gap was measured over. See the note beside where it renders. */
     routeSamples?: number;
-}> = ({ source, onChange, hasTabg, readOnly = false, routeGap, routeSamples }) => {
+}> = ({ source, onChange, hasTabg, hasRf, readOnly = false, routeGap, routeSamples }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
     const selected = ROUTES.find(r => r.id === source) ?? ROUTES[0];
@@ -124,7 +129,7 @@ export const RfKorrSourceControl: React.FC<{
 
             <div className="flex gap-1">
                 {ROUTES.map(route => {
-                    const locked = route.needs === 'tabg' && !hasTabg;
+                    const locked = route.needs === 'tabg' ? !hasTabg : !hasRf;
                     return (
                         <button
                             key={route.id}
@@ -158,6 +163,7 @@ export const RfKorrSourceControl: React.FC<{
             </p>
 
             {!hasTabg && <p className="text-[9px] text-amber-500/80 leading-snug">{t.noTabg}</p>}
+            {!hasRf && <p className="text-[9px] text-amber-500/80 leading-snug">{t.noRf}</p>}
 
             {/* The cross-check. Stated as a number rather than a verdict badge: the threshold is a
                 judgement and the reader should see what it was applied to. */}

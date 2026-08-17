@@ -23,6 +23,32 @@ export interface FilterResume {
     lastKatsHotTime: number;
 }
 
+/**
+ * The sample at least `settleSec` before `i`, or null if the log does not reach back that far.
+ *
+ * Walking backwards, the span grows, so the first sample that satisfies it is the nearest one that
+ * is far enough — the least overshoot available. Never less than asked: undershooting would compare
+ * against a sample the lambda trim had not finished moving away from, which is the whole thing being
+ * avoided.
+ *
+ * Null at the start of a log is the same exemption the index-based path has: with nothing far enough
+ * back there is no comparison to make, so the sample is kept. Those are the first couple of seconds
+ * of a drive, which the temperature and idle gates have usually taken already.
+ *
+ * Linear, and deliberately not a two-pointer: `i` restarts at `resume.consumed` on every flush, so a
+ * pointer carried across calls would have to be part of FilterResume to stay correct. The scan is
+ * bounded by the window — about six samples at 3 Hz — and stops the moment the span is met.
+ */
+function findSettleReference(
+    raw: LogDataPoint[], i: number, settleSec: number, secondsPerTimeUnit: number,
+): LogDataPoint | null {
+    const now = raw[i].time;
+    for (let j = i - 1; j >= 0; j--) {
+        if ((now - raw[j].time) * secondsPerTimeUnit >= settleSec) return raw[j];
+    }
+    return null;
+}
+
 export const processLogData = (
     rawData: LogDataPoint[],
     fileName: string,
@@ -88,6 +114,26 @@ export const processLogData = (
 
     // Helper: Get data point at index safely
     const getAt = (idx: number) => (idx >= 0 && idx < rawData.length) ? rawData[idx] : null;
+
+    /**
+     * The transient look-back as a DURATION, when the config states one.
+     *
+     * Converting seconds to a sample count was tried first and is wrong, because the count would
+     * have to come from the log's measured rate — and a live flush has seen less of the log than a
+     * batch pass, so it measures a different rate and converts to a different count. On a rate that
+     * ramps 0.20 s to 0.40 s across a drive, `verify:incremental` caught it immediately: 37 valid
+     * samples live against 41 batch. The live path has no full reprocess afterwards, so the map on
+     * screen at STOP is the one that gets saved — a divergence there is not cosmetic.
+     *
+     * Walking back over TIME removes the rate from the question entirely. Timestamps are the same in
+     * a prefix as in the whole log, so both paths look back to the same sample by construction, and
+     * the wait is the duration the DME actually needs rather than a count that happens to mean that
+     * duration at one link speed.
+     *
+     * Absent means an older session: it keeps the exact sample count it was built with. See
+     * resolveTransientWindow, which is the same rule stated for the UI.
+     */
+    const settleSec = cfg.transientSettleSec;
 
     // --- Cat-protection (open-loop) exclusion setup ---------------------------------------------
     // `time` is NOT one unit across sources: the live DS2 logger emits seconds
@@ -249,9 +295,19 @@ export const processLogData = (
         rfKorrData.push(point);
 
         // 4. Transient Filter
-        // Check back N frames
-        if (cfg.enableTransient && i >= cfg.transientWindow) {
-            const prev = getAt(i - cfg.transientWindow);
+        //
+        // One sample against one sample — not an average, and only ever backwards. Nothing looks
+        // forward, so the sample at the instant a change begins passes (its own past is still
+        // quiet) and the ones after it are the ones dropped.
+        //
+        // The comparison sample is found by TIME when the config states a settle duration, and by
+        // index when it does not. Both walk the RAW array, which is why a resume must be handed the
+        // whole log rather than the new tail: earlier filters have already dropped samples out of
+        // `validData`, and the look-back has to be able to see them.
+        if (cfg.enableTransient) {
+            const prev = settleSec === undefined
+                ? (i >= cfg.transientWindow ? getAt(i - cfg.transientWindow) : null)
+                : findSettleReference(rawData, i, settleSec, secondsPerTimeUnit);
             if (prev) {
                 // RPM Stability Check (Relative %)
                 const rpmDiffPct = Math.abs((current.rpm - prev.rpm) / prev.rpm) * 100;
@@ -271,6 +327,7 @@ export const processLogData = (
 
         validData.push(point);
     }
+
 
     return {
         fileName,

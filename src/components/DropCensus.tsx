@@ -28,14 +28,19 @@ const LABEL: Record<DropReason, string> = {
 
 /** The one sentence that says what to DO about each. Hover on desktop; the label alone has to carry
  *  it on a phone, which is why the labels are the words used everywhere else. */
+/**
+ * Same rules as the filter panel's explanations: what was excluded, why that sample cannot be used,
+ * and what to do about it next time. One vocabulary across both — a reader who has read the panel
+ * should recognise every word here.
+ */
 const WHY: Record<DropReason, string> = {
-    coldEngine: 'Below the minimum coolant temperature — drive the first minutes before starting the log.',
-    idle: 'Closed throttle below the idle threshold. Not a fault; idle carries no VE information.',
-    transient: 'RPM or throttle still moving, so the lambda loop had not settled. Hold steadier, longer pulls.',
-    catProtect: 'Cat protection enrichment opened the lambda loop, plus the unwind after it.',
-    tankVent: 'The purge valve was passing vapour. Write TANK VENT: SHUT and run again — this is the one that a patch removes entirely.',
-    fullLoad: 'Past the DME\'s full-load threshold, where FR 5.01 switches the lambda controller off. The WOT TH patch keeps it alive.',
-    controllerStop: 'The lambda factor was pinned at K_LA_FMAX/K_LA_FMIN, so it reports "at least this much" rather than a measurement.',
+    coldEngine: 'The DME does not close the lambda loop below 60 °C, so the lambda trim was not being updated. Let the coolant reach temperature before starting the log.',
+    idle: 'At the lowest filling the DME adds 12-30 % more fuel from a table this tool does not write, and the lambda trim falls to cancel it. Not a fault, and not information about air flow.',
+    transient: 'Engine speed or throttle was still changing, so the lambda trim had not finished moving to its new value. Hold a steady pedal for longer.',
+    catProtect: 'The DME was enriching to protect the catalyst, which suspends lambda control — the trim held its last value. Includes the 20 s the enrichment takes to clear.',
+    tankVent: 'The purge valve was letting tank vapour into the engine, so the lambda trim was cancelling fuel the DME did not inject. Write TANK VENT: SHUT and run again — this is the one a patch removes entirely.',
+    fullLoad: 'Past the DME\'s full-load threshold, where lambda control is switched off. The WOT TH patch keeps it running.',
+    controllerStop: 'The lambda trim was pinned at its own limit, so it reports "at least this much" rather than a measurement.',
 };
 
 export const DropCensusLine: React.FC<{ census: Census; className?: string }> = ({ census, className }) => {

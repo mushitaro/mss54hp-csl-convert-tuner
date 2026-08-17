@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Filter } from 'lucide-react';
-import { LogFilterConfig, RfKorrSource, resolveRfKorr } from '@/lib/types';
+import { X, Filter, Info } from 'lucide-react';
+import {
+    LogFilterConfig, RfKorrSource, resolveRfKorr, resolveTransientWindow,
+    TRANSIENT_SETTLE_SEC_DEFAULT,
+} from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
 import { COVERAGE_THIN_DEFAULT, COVERAGE_OK_DEFAULT } from './MapEditor';
 import { useDialogLang } from '@/hooks/useDialogLang';
@@ -10,43 +13,176 @@ import { useDialogLang } from '@/hooks/useDialogLang';
  * Filter, Max RO Delta — stay as they are: they are the instrument's vocabulary, the same words the
  * stored TuneSettings and the log columns use, and translating them would break that chain rather
  * than help. What gets translated is the text that explains something.
+ *
+ * ## How these are written
+ *
+ * Every explanation answers one question and only that one: **move this control, and what happens to
+ * the accuracy of the VE correction?** Four parts, in this order —
+ *
+ *   1. what this control excludes (fact)
+ *   2. why that sample cannot be used (mechanism)
+ *   3. what raising and lowering it does (both directions)
+ *   4. what to do about it on the next run, where there is something to do
+ *
+ * Subject and verb in every sentence. No metaphor — the actor is the DME, lambda control, the engine
+ * or the filter, and it gets named. No implementation history, no internal variable names, no session
+ * numbers; those belong in code comments, and they were what made the previous copy unreadable.
+ *
+ * One vocabulary, fixed: サンプル (not 点), 除外する (not 捨てる/外す), λ トリム (not トリム/補正),
+ * VE 補正値, セルを書き換える, 純正値, 充填量.
+ *
+ * Mechanisms are only stated where they have been checked against the disassembly, the XDF or the
+ * Funktionsrahmen. Min Temp and Cat Protect are two conditions of one mechanism — the lambda loop
+ * not closing — and are written so that understanding either one explains the other.
  */
 const TEXT = {
     ja: {
         settings: 'フィルター設定',
         locked: '固定 — このセッションは ECU に書き込み済みで、その ECU に入っているバイト列はこの設定から作られました。ここを動かすと記録が実物と食い違います。別のフィルターで調整するには「Use as base」で新しいセッションを開始してください。（保存しただけなら固定されません。）',
-        idleHint: 'RPMが下限未満 かつ RO≤1.0 の点を除外',
-        tpsHint: 'スロットル開度の変化量(絶対値)',
         immediate: '変更は即時反映されます',
-        katsHint: '排気温が上限を超えると触媒保護増量が入り、DMEはλ制御を停止します。凍結したトリム値をVE計算に取り込まないよう、その区間と復帰後20秒を除外します。EGTを含まないログでは何も起きません。',
-        tankVentLabel: 'Tank Vent',
-        tankVentHint: 'タンク換気（パージ）中は、DMEが噴いていない燃料がエンジンに入るため、λトリムがその分だけ動きます。λ制御は正常に閉じたままなので、値は「意味がない」のではなく「別の理由で正しい」— そのままVEに取り込むと、次回は存在しない蒸発ガスの分だけマップが動きます。純正は2500rpm以上・中負荷で94〜99.6%作動するので、除外すると大半のサンプルが消えることがあります。本来は K_TE_TVTE_GA=0 で走行中だけ止めるのが正解で、これはそれをしなかったログの救済です。TETVを含まないログでは何も起きません。',
-        covTitle: 'COVERAGE — 何セルを書くか',
-        covIntro: 'ここから下は「どのサンプルを捨てるか」ではなく「どのセルを書き換えてよいか」を決めます。証拠が足りないセルは純正値のままバイト不変で残ります。',
-        covVe: 'VE セル採用',
-        covVeHint: '1 セルを動かすのに必要なサンプル数と重み。両方必要です — 4 隅に散った 10 点は重みが乗らず、中央に落ちた数点は重みだけ大きくなるため。2026-08 まで VE マップにはサンプル数の門番が無く、`weightSum > 0.1`（＝セル中央に落ちた 1 点で 1.0）だけでした。',
-        covRf: 'RF KORR セル採用',
-        covRfHint: '補正テーブル側の同じ門番。VE マップ 480 セルに対しこちらは 72 セルなので、1 セルが結果に効く度合いが桁で違います。だから別の数字。',
-        covBands: '表示バンド（薄い / 十分）',
-        covBandsHint: 'ヒートマップの色分けだけを決めます。計算のゲートより高く置いてあります — ゲートは「動かしてよいか」、バンドは「もう走らなくてよいか」で、後者のほうが高い基準だからです。既定 50 / 200 は実測から: セッション #902（657 秒・有効 751 点・2.44 Hz）で 480 セル中 155 セルに点が入り、最も濃いセルで 130 点、100 点以上はわずか 4 セルでした。「十分」は 1 回の走行では届かず、数回のキャンペーンで届く水準に置いてあります。',
+        info: '説明を表示',
+
+        minTempHint:
+            'このフィルターは、冷却水温がこの値に達していないサンプルを除外します。\n'
+            + 'DME は水温が 60 °C を超えるまで λ 制御を閉じません。それまでのあいだ λ トリムは更新されず、直前の値のまま保持されます。保持された値は、その時点の空気量とは対応していません。既定の 65 °C は、この 60 °C に対して余裕を取った値です。\n'
+            + '値を上げると除外されるサンプルが増え、λ 制御が閉じていない区間の混入を確実に防げますが、使えるサンプル数は減ります。値を下げると、λ トリムが動き始めた直後のサンプルが混ざります。\n'
+            + '水温が安定してから記録を開始すれば、このフィルターが除外するサンプルはほとんど無くなります。',
+
+        idleHint:
+            'このフィルターは、回転数がこの値より低く、かつスロットル開度がほぼ 0 のサンプルを除外します。\n'
+            + 'DME は充填量が最も低い領域でだけ、噴射時間を 12〜30 % 増やしています。この増量は VE マップとは別のテーブルで決まっており、このツールはそのテーブルを書き換えません。λ 制御は閉じているため、λ トリムはこの増量を打ち消す方向に下がります。つまりこの領域の λ トリムは、空気量の誤差ではなく、意図的な増量を打ち消した結果です。\n'
+            + 'VE マップにはこの領域のセルも存在します。しかしそのセルを λ トリムに合わせて動かすと、噴射側の増量を吸気側で相殺することになり、増量の意図そのものを失います。\n'
+            + '値を上げると除外される範囲が広がり、低回転側のセルに残るサンプルが減ります。値を下げると、増量の影響を受けたサンプルが混ざります。停車時間の長いログで除外の割合が大きくなるのは、正常な結果です。',
+
+        katsHint:
+            'このフィルターは、排気温がこの値を超えた区間と、その後 20 秒間のサンプルを除外します。\n'
+            + '排気温がこの値を超えると、DME は触媒を保護するために燃料を増量し、λ 制御を停止します。Min Temp と同じ機構です。λ 制御が停止しているあいだ λ トリムは更新されず、停止直前の値のまま保持されます。保持された値は、その時点の空気量とは対応していません。増量が抜けきるまでに時間がかかるため、排気温が下がってからの 20 秒も除外します。\n'
+            + '値を下げると除外される区間が広がり、保持された λ トリムの混入を確実に防げますが、高負荷側のサンプルが減ります。値を上げると逆になります。',
+        katsLocked: 'このログには排気温が記録されていないため、この設定は何も除外しません。',
+
+        tankVentHint:
+            'このフィルターは、タンク換気バルブが開いていたサンプルを除外します。\n'
+            + 'バルブが開いているあいだ、燃料タンク内で発生した蒸発ガスがエンジンに入ります。DME はこのガスを噴射量として数えていないため、λ 制御は蒸発ガスの分だけ λ トリムを下げます。この λ トリムは λ 制御が正常に働いた結果ですが、次回の走行で同じ量の蒸発ガスが発生する保証はありません。\n'
+            + '純正設定では 2500 rpm 以上・中負荷でバルブがほぼ連続して開くため、この設定を有効にするとログの大半が除外されることがあります。\n'
+            + '走行前に PATCH でバルブを閉じておけば、この問題そのものが発生しません。この設定は、閉じずに記録したログを利用するためのものです。',
+        tankVentLocked: 'このログにはタンク換気バルブの状態が記録されていないため、この設定は何も除外しません。',
+
+        transientHint:
+            'このフィルターは、回転数またはスロットル開度が変化している最中のサンプルを除外します。\n'
+            + 'λ トリムは積分器です。空気量が変わっても即座には移動せず、新しい値に到達するまで時間がかかります。変化の最中に記録されたサンプルでは、λ トリムはまだ移動の途中にあり、変化後の空気量に対応した値になっていません。',
+
+        settleHint:
+            'この値は、回転数やアクセル開度が変化してから何秒後のサンプルを使うかを決めます。\n'
+            + 'DME は燃料の調整に 1〜2 秒かかります。その間のサンプルでは、λ トリムはまだ目標の値に届いていません。\n'
+            + '判定は時刻で行うため、通信の速さが変わっても待つ時間は変わりません。\n'
+            + '値を上げると除外されるサンプルが増え、残ったサンプルでは DME の調整が終わっています。値を下げると、調整の途中のサンプルが混ざります。',
+
+        rpmDeltaHint:
+            'この値は、Settle Time で指定した時間のあいだに回転数が何 % 変化したら「変化した」と判定するかを決めます。\n'
+            + '判定は平均ではなく、その時間だけ前にある 1 サンプルとの比較です。比較するのは過去だけなので、変化が始まった瞬間のサンプルは通過し、そのあとが除外されます。\n'
+            + '値を下げると除外されるサンプルが増え、残ったサンプルは定常状態に近くなりますが、使えるサンプル数は減ります。値を上げると逆になります。',
+
+        roDeltaHint:
+            'この値は、Max RPM Delta と同じ判定をアクセル開度に対して行います。\n'
+            + '回転数側が変化率（%）で指定するのに対し、こちらは開度の絶対差（% ポイント）で指定します。',
+
+        covIntro:
+            'ここから下の設定は、除外するサンプルではなく、書き換えてよいセルを決めます。条件を満たさなかったセルは、純正値のまま 1 バイトも変更されません。',
+        covVe: 'VE Cell Gate',
+        covVeHint:
+            'この設定は、1 つのセルを書き換えるために必要なサンプル数と重みを決めます。\n'
+            + 'サンプルは走行中のどの時点のものでもよく、連続している必要はありません。合計がこの値に達すれば条件を満たします。\n'
+            + '重みを別に指定するのは、1 つのサンプルが周囲 4 つのセルに分配されるためです。セルの中心付近で記録されたサンプルはそのセルに大きな重みを与え、境界付近で記録されたサンプルは 4 つに分散します。したがってサンプル数だけでは、そのセルにどれだけの情報が入ったかを表せません。\n'
+            + '値を上げると書き換えられるセルが減り、書き換えられたセルは平均に使うサンプルが増えるぶん値が安定します。値を下げると逆になります。',
+        covRf: 'RF KORR Cell Gate',
+        covRfHint:
+            'この設定は、補正テーブルのセルに同じ条件を課します。\n'
+            + '補正テーブルは 72 セル、VE マップは 480 セルです。1 セルが結果に与える影響が大きいため、VE マップとは別の値を持たせています。',
+        covBands: 'Heatmap Bands',
+        covBandsHint:
+            'この設定は、ヒートマップの色分けだけを決めます。計算には影響しません。\n'
+            + '上のゲートより高い値を既定にしています。ゲートは「このセルを書き換えてよいか」を判定し、この設定は「この領域をこれ以上走らなくてよいか」を示します。後者のほうが高い基準です。',
+        gateOff:
+            'ゲートを無効にしました。1 サンプルしか記録されていないセルもマップに書き込まれます。下に表示される採用セル数が、この設定による変化を示します。',
+
+        unitSamples: 'samples',
+        unitWeight: 'weight',
+        unitThin: 'thin',
+        unitCovered: 'covered',
     },
     en: {
         settings: 'Filter Settings',
         locked: 'Locked — this session has been written to the ECU, and the bytes in it were built from these settings. Changing them here would make the record disagree with the car. Use as base to start a new session and tune with different filters. (Saving alone does not lock anything.)',
-        idleHint: 'Exclude if RPM < Limit & RO≤1.0',
-        tpsHint: 'Absolute Change in Opening %',
         immediate: 'Adjustments apply immediately',
-        katsHint: 'Above this EGT the DME adds cat-protection fuel and switches lambda control off, freezing the trim. Those samples and the 20 s it takes the enrichment to unwind are dropped so a frozen trim never reaches the VE map. Does nothing on a log without EGT.',
-        tankVentLabel: 'Tank Vent',
-        tankVentHint: 'While the purge valve is open the engine receives fuel the DME did not inject, so the lambda trim moves to cancel it. The loop is still closed, so the trim is not meaningless — it is correct for a reason the VE map cannot reproduce, and folding it in moves cells to chase vapour that will not be there next time. Stock duty is 94-99.6% above 2500 rpm at mid load, so this can discard most of a log. Disabling the valve for the run (K_TE_TVTE_GA = 0) is the real fix; this salvages a log taken without it. Does nothing on a log without TETV.',
-        covTitle: 'COVERAGE — which cells get written',
-        covIntro: 'Everything above decides which samples to discard. These decide which cells may be rewritten. A cell short of evidence keeps its stock value, byte for byte.',
-        covVe: 'VE cell',
-        covVeHint: 'Samples and bilinear weight a cell needs before it may move. Both, not either: ten samples spread over four corners carry very little weight, and a large weight can come from a few samples sitting dead centre. Until 2026-08 the VE map had no count threshold at all — only `weightSum > 0.1`, which one sample landing squarely on a cell already clears.',
-        covRf: 'RF KORR cell',
-        covRfHint: 'The same gate on the correction table. It has 72 cells against the 480 of the VE map, so one of its cells carries far more of the result — which is why it gets its own numbers.',
-        covBands: 'Heatmap bands (thin / covered)',
-        covBandsHint: 'Display only. Deliberately above the gate: the gate answers "may this cell move", the bands answer "can I stop driving this area", and the second is a higher bar. The 50/200 defaults are measured, not chosen: session #902 (657 s, 751 valid samples at 2.44 Hz) put samples in 155 of 480 cells, peaked at 130 in the busiest, and cleared 100 in only four. "Covered" is therefore a multi-run target rather than something one drive reaches.',
+        info: 'Show explanation',
+
+        minTempHint:
+            'This filter excludes samples recorded before the coolant reached this temperature.\n'
+            + 'The DME does not close the lambda loop until the coolant is above 60 °C. Until then the lambda trim is not updated: it holds the value it had before. That held value does not correspond to the air flow at the time it was recorded. The default of 65 °C leaves a margin above that 60 °C threshold.\n'
+            + 'Raising this value excludes more samples and reliably keeps the open-loop stretch out of the result, but leaves fewer samples to work with. Lowering it admits samples taken just after the lambda trim started moving again.\n'
+            + 'Starting the log after the coolant temperature has stabilised leaves almost nothing for this filter to exclude.',
+
+        idleHint:
+            'This filter excludes samples taken below this engine speed with the throttle essentially closed.\n'
+            + 'In the lowest filling region the DME deliberately increases injection time by 12 to 30 %. That increase comes from a table separate from the VE map, and this tool does not write it. Lambda control is closed, so the lambda trim falls to cancel the increase. The lambda trim in this region is therefore the result of cancelling a deliberate enrichment, not of an air-flow error.\n'
+            + 'The VE map does contain cells for this region. Moving those cells to satisfy the lambda trim would cancel an injection-side enrichment on the air side, which removes the effect the enrichment was there to produce.\n'
+            + 'Raising this value widens the excluded range and leaves fewer samples in the low-speed cells. Lowering it admits samples affected by the enrichment. A log with long stops losing a large share of its samples here is the expected result.',
+
+        katsHint:
+            'This filter excludes samples taken above this exhaust temperature, and those taken in the 20 s that follow.\n'
+            + 'Above this temperature the DME adds fuel to protect the catalyst and suspends lambda control — the same mechanism as Min Temp. While lambda control is suspended the lambda trim is not updated: it holds the value it had when control stopped. That held value does not correspond to the air flow at the time it was recorded. The enrichment takes time to clear, which is why the 20 s after the temperature falls are excluded as well.\n'
+            + 'Lowering this value widens the excluded stretch and reliably keeps a held lambda trim out of the result, but leaves fewer high-load samples. Raising it does the opposite.',
+        katsLocked: 'This log contains no exhaust temperature, so this setting excludes nothing.',
+
+        tankVentHint:
+            'This filter excludes samples recorded while the tank ventilation valve was open.\n'
+            + 'While the valve is open, vapour formed in the fuel tank enters the engine. The DME does not count that vapour as injected fuel, so lambda control lowers the lambda trim by the corresponding amount. The lambda trim is the correct output of a working control loop, but there is no guarantee that the same quantity of vapour will be present on the next drive.\n'
+            + 'With stock settings the valve is open almost continuously above 2500 rpm at mid load, so enabling this setting can exclude most of a log.\n'
+            + 'Shutting the valve for the run with PATCH prevents the problem altogether. This setting exists to make use of a log recorded without it.',
+        tankVentLocked: 'This log contains no tank ventilation channel, so this setting excludes nothing.',
+
+        transientHint:
+            'This filter excludes samples recorded while engine speed or throttle opening was still changing.\n'
+            + 'The lambda trim is an integrator. It does not step to a new value when the air flow changes; it takes time to arrive. In a sample recorded during that movement the lambda trim is still part-way there, and does not correspond to the air flow after the change.',
+
+        settleHint:
+            'This value sets how long after a change in engine speed or throttle opening a sample may be used.\n'
+            + 'The DME takes one to two seconds to complete a fuel adjustment. In a sample taken during that time, the lambda trim has not yet reached its target.\n'
+            + 'The test is made on timestamps, so the waiting time stays the same whatever the link speed.\n'
+            + 'Raising this value excludes more samples and leaves only those where the DME had finished adjusting. Lowering it admits samples taken mid-adjustment.',
+
+        rpmDeltaHint:
+            'This value sets how much engine speed may change, as a percentage, over the Settle Time before the sample counts as having changed.\n'
+            + 'The test is not an average: it compares against the single sample taken that long earlier. It also looks only backwards, so the sample at the instant a change begins passes and the ones after it are excluded.\n'
+            + 'Lowering this value excludes more samples and leaves the remainder closer to steady state, but reduces how many samples are available. Raising it does the opposite.',
+
+        roDeltaHint:
+            'This value applies the same test as Max RPM Delta to throttle opening.\n'
+            + 'Engine speed is tested as a percentage change; throttle opening is tested as an absolute difference in opening percent.',
+
+        covIntro:
+            'The settings below do not decide which samples to exclude. They decide which cells may be rewritten. A cell that does not meet the condition keeps its stock value, byte for byte.',
+        covVe: 'VE Cell Gate',
+        covVeHint:
+            'These values set how many samples, and how much weight, a cell needs before it may be rewritten.\n'
+            + 'The samples may come from any point in the drive and do not have to be consecutive. The condition is met once the totals reach these values.\n'
+            + 'Weight is specified separately because each sample is distributed across the four cells surrounding it. A sample recorded near the centre of a cell gives that cell most of its weight; a sample recorded near a boundary is split across four. A sample count alone therefore does not describe how much information a cell received.\n'
+            + 'Raising these values rewrites fewer cells, and each rewritten cell is averaged over more samples, so its value is more stable. Lowering them does the opposite.',
+        covRf: 'RF KORR Cell Gate',
+        covRfHint:
+            'These values apply the same condition to the cells of the correction table.\n'
+            + 'The correction table has 72 cells; the VE map has 480. One cell of the correction table therefore carries far more of the result, which is why it has its own values.',
+        covBands: 'Heatmap Bands',
+        covBandsHint:
+            'These values set the colouring of the heatmap only. They do not affect the calculation.\n'
+            + 'They are set above the gate by default. The gate decides whether a cell may be rewritten; these bands indicate whether an area has been driven enough to move on from. The second is the higher bar.',
+        gateOff:
+            'The gate is off. A cell holding a single sample will be written into the map. The accepted-cell count shown below is what this setting changed.',
+
+        unitSamples: 'samples',
+        unitWeight: 'weight',
+        unitThin: 'thin',
+        unitCovered: 'covered',
     },
 };
 
@@ -63,9 +199,17 @@ interface Props {
     /** Open above the trigger instead of below it. The mobile footer sits at the bottom edge, so a
      *  popover hanging `top-10` off a control down there opens off-screen. */
     openUp?: boolean;
-    /** The log carries an exhaust temperature, so the DME-table route can index a Δ. Decided by the
-     *  page, which is the only place that can see the processed log. */
-    hasTabg?: boolean;
+    /**
+     * Which channels the loaded log actually carries.
+     *
+     * Decided by the page, which is the only place that can see the log at all. Every control whose
+     * effect depends on a channel is disabled when that channel is absent — a filter that silently
+     * does nothing is worse than one that says it cannot.
+     */
+    channels?: { tabg: boolean; tankVent: boolean; rf: boolean; stft: boolean };
+    /** This log's measured sample rate, for the "≈ n samples" beside the settle time. Display only:
+     *  the filter itself works on timestamps and never converts. */
+    measuredHz?: number;
     /** Mean gap between the two rf_korr routes over this log, or undefined when they cannot be
      *  compared. The one check the app has on a DS2 offset nobody has confirmed on a car. */
     routeGap?: number;
@@ -73,49 +217,113 @@ interface Props {
 }
 
 /**
- * Two numbers that belong to one decision, side by side.
+ * One control, one shape.
  *
- * A slider would be wrong for these. The row filters above are all "somewhere in a range feels
- * right", which is what a slider is for; a sample threshold is a number you mean exactly, you
- * compare against the count in a tooltip, and 10 versus 11 is a real difference you cannot hit by
- * dragging. Number inputs also let the value be typed on a phone without a precise drag.
+ * Everything in this panel is the same object: a name, a value, an optional on/off, sliders, and an
+ * explanation that is out of the way until asked for. Before this there were three shapes — sliders
+ * with a permanent paragraph under them, a bare checkbox, and a pair of number inputs — and the
+ * paragraphs alone ran the panel to twice the height of a phone.
+ *
+ * The explanation lives behind the ⓘ and never in a `title`. Chrome for Android surfaces `title` on
+ * neither tap nor long-press, so an explanation put there does not exist on the device this panel is
+ * read on. The disabled reason is the exception and is always visible: a control that cannot be
+ * pressed has to say why without being asked.
  */
-const NumberPair: React.FC<{
-    label: string; hint: string;
-    a: { value: number; min: number; max: number; step: number; unit: string; onChange: (v: number) => void };
-    b: { value: number; min: number; max: number; step: number; unit: string; onChange: (v: number) => void };
-}> = ({ label, hint, a, b }) => {
-    const box = (f: typeof a) => (
-        <label className="flex-1 min-w-0 flex items-center gap-1">
-            <input
-                type="number"
-                value={f.value}
-                min={f.min} max={f.max} step={f.step}
-                // Clamped here rather than trusted from the input: `min`/`max` are advisory on a
-                // number input, and a typed 0 would silently reopen the no-gate behaviour this
-                // section exists to close.
-                onChange={e => {
-                    const n = Number(e.target.value);
-                    if (Number.isFinite(n)) f.onChange(Math.min(f.max, Math.max(f.min, n)));
-                }}
-                className="w-full min-w-0 bg-slate-800 text-[10px] font-mono text-slate-300 rounded px-1.5 py-1 outline-none border border-slate-700 focus:border-blue-500"
-            />
-            <span className="text-[9px] text-slate-600 shrink-0">{f.unit}</span>
-        </label>
-    );
+const Row: React.FC<{
+    id: string;
+    label: string;
+    value?: React.ReactNode;
+    /** Omitted for a row with no on/off of its own. */
+    toggle?: { checked: boolean; onChange: (v: boolean) => void; accent?: string };
+    /** Non-empty means the control is inert on this log, and says so. */
+    lockedReason?: string;
+    hint: string;
+    infoLabel: string;
+    open: boolean;
+    onToggleInfo: () => void;
+    children?: React.ReactNode;
+}> = ({ id, label, value, toggle, lockedReason, hint, infoLabel, open, onToggleInfo, children }) => {
+    const on = toggle ? toggle.checked : true;
+    const live = on && !lockedReason;
     return (
-        <div className="space-y-1">
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider">{label}</div>
-            <div className="flex items-center gap-2">{box(a)}{box(b)}</div>
-            <p className="text-[9px] text-slate-600">{hint}</p>
+        <div className="space-y-1" data-filter-row={id}>
+            <div className="flex justify-between items-center gap-2 text-[10px] text-slate-500 uppercase tracking-wider">
+                {toggle ? (
+                    <label className={`py-3 -my-3 flex items-center gap-2 min-w-0 ${lockedReason ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                        <input
+                            type="checkbox"
+                            checked={toggle.checked}
+                            disabled={!!lockedReason}
+                            onChange={(e) => toggle.onChange(e.target.checked)}
+                            className={`w-3 h-3 rounded bg-slate-700 border-none shrink-0 ${toggle.accent ?? 'accent-blue-500'} disabled:opacity-40`}
+                        />
+                        <span className={`truncate ${lockedReason ? 'text-slate-700' : ''}`}>{label}</span>
+                    </label>
+                ) : (
+                    <span className="truncate">{label}</span>
+                )}
+                <span className="flex items-center gap-1 shrink-0">
+                    {value !== undefined && (
+                        <span className={live ? 'text-slate-300' : 'text-slate-600'}>{value}</span>
+                    )}
+                    <button
+                        type="button"
+                        onClick={onToggleInfo}
+                        aria-expanded={open}
+                        aria-label={infoLabel}
+                        className={`p-1.5 -mr-1.5 rounded transition-colors ${open ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}
+                    >
+                        <Info className="w-3 h-3" />
+                    </button>
+                </span>
+            </div>
+            {children}
+            {/* Above the explanation, not inside it: the reason a control cannot be used is not
+                background reading. */}
+            {lockedReason && (
+                <p className="text-[9px] text-amber-500/80 leading-snug">{lockedReason}</p>
+            )}
+            {open && (
+                <p className="text-[9px] text-slate-500 leading-relaxed whitespace-pre-line pt-0.5">{hint}</p>
+            )}
         </div>
     );
 };
 
-export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, readOnly = false, openUp, hasTabg = false, routeGap, routeSamples }) => {
+/** The sliders all look the same; only the tone and the disabled state vary. */
+const Slider: React.FC<{
+    min: number; max: number; step?: number; value: number; disabled?: boolean;
+    accent?: string; onChange: (v: number) => void;
+}> = ({ min, max, step, value, disabled, accent = 'accent-blue-500', onChange }) => (
+    <input
+        type="range"
+        min={min} max={max} step={step}
+        disabled={disabled}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${disabled ? 'bg-slate-800 accent-slate-600' : `bg-slate-700 ${accent}`}`}
+    />
+);
+
+const NO_CHANNELS = { tabg: false, tankVent: false, rf: false, stft: false } as const;
+
+export const FilterConfigPanel: React.FC<Props> = ({
+    config, onConfigChange, readOnly = false, openUp, channels = NO_CHANNELS, measuredHz,
+    routeGap, routeSamples,
+}) => {
     const [isOpen, setIsOpen] = useState(false);
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
     const t = TEXT[useDialogLang()];
+
+    /** Which explanations are open. A Set rather than one at a time: these are read against each
+     *  other — Min Temp and Cat Protect are the same mechanism — and a panel that shuts the last one
+     *  every time you open the next cannot be read that way. */
+    const [infoFor, setInfoFor] = useState<ReadonlySet<string>>(() => new Set());
+    const toggleInfo = (id: string) => setInfoFor(prev => {
+        const next = new Set(prev);
+        if (!next.delete(id)) next.add(id);
+        return next;
+    });
 
     // Sync local config if prop changes (reset)
     useEffect(() => {
@@ -147,6 +355,18 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
         setLocalConfig(newCfg);
         onConfigChange(newCfg);
     };
+
+    const row = (id: string) => ({
+        id,
+        infoLabel: t.info,
+        open: infoFor.has(id),
+        onToggleInfo: () => toggleInfo(id),
+    });
+
+    const settleSec = localConfig.transientSettleSec ?? TRANSIENT_SETTLE_SEC_DEFAULT;
+    const settleSamples = resolveTransientWindow({ ...localConfig, transientSettleSec: settleSec }, measuredHz);
+    const veGateOn = localConfig.enableVeCellGate ?? true;
+    const rfGateOn = localConfig.enableRfKorrCellGate ?? true;
 
     return (
         <div className="relative">
@@ -184,229 +404,178 @@ export const FilterConfigPanel: React.FC<Props> = ({ config, onConfigChange, rea
                             </p>
                         )}
 
-                        <div className={`space-y-5 ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
-                            {/* Alpha-N Correction Moved to Table Editor */}
-
-                            {/* Min Temp */}
-                            <div className="space-y-1">
-                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={localConfig.enableMinTemp}
-                                            onChange={(e) => handleChange('enableMinTemp', e.target.checked)}
-                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
-                                        />
-                                        <span>Min Temp</span>
-                                    </label>
-                                    <span className={`${localConfig.enableMinTemp ? 'text-slate-300' : 'text-slate-600'}`}>{localConfig.minTemp}°C</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="0" max="100"
+                        <div className={`space-y-4 ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
+                            <Row
+                                {...row('minTemp')}
+                                label="Min Temp"
+                                value={`${localConfig.minTemp}°C`}
+                                toggle={{ checked: localConfig.enableMinTemp, onChange: v => handleChange('enableMinTemp', v) }}
+                                hint={t.minTempHint}
+                            >
+                                <Slider min={0} max={100} value={localConfig.minTemp}
                                     disabled={!localConfig.enableMinTemp}
-                                    value={localConfig.minTemp}
-                                    onChange={(e) => handleChange('minTemp', Number(e.target.value))}
-                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${localConfig.enableMinTemp ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
-                                />
-                            </div>
+                                    onChange={v => handleChange('minTemp', v)} />
+                            </Row>
 
-                            {/* Idle RPM */}
-                            <div className="space-y-1">
-                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={localConfig.enableIdle}
-                                            onChange={(e) => handleChange('enableIdle', e.target.checked)}
-                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
-                                        />
-                                        <span>Idle RPM Threshold</span>
-                                    </label>
-                                    <span className={`${localConfig.enableIdle ? 'text-slate-300' : 'text-slate-600'}`}>{localConfig.idleRpm} RPM</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="500" max="2000" step="50"
+                            <Row
+                                {...row('idle')}
+                                label="Idle RPM Threshold"
+                                value={`${localConfig.idleRpm} RPM`}
+                                toggle={{ checked: localConfig.enableIdle, onChange: v => handleChange('enableIdle', v) }}
+                                hint={t.idleHint}
+                            >
+                                <Slider min={500} max={2000} step={50} value={localConfig.idleRpm}
                                     disabled={!localConfig.enableIdle}
-                                    value={localConfig.idleRpm}
-                                    onChange={(e) => handleChange('idleRpm', Number(e.target.value))}
-                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${localConfig.enableIdle ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
-                                />
-                                <p className="text-[9px] text-slate-600">{t.idleHint}</p>
-                            </div>
+                                    onChange={v => handleChange('idleRpm', v)} />
+                            </Row>
 
-                            {/* Cat Protect — open-loop exclusion. Defaults ON (`?? true` in the
-                                filter), so a session saved before this field existed behaves the
-                                same as a new one rather than silently keeping frozen-trim rows. */}
-                            <div className="space-y-1">
-                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={localConfig.enableOpenLoopExclusion ?? true}
-                                            onChange={(e) => handleChange('enableOpenLoopExclusion', e.target.checked)}
-                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
-                                        />
-                                        <span>Cat Protect EGT</span>
-                                    </label>
-                                    <span className={`${(localConfig.enableOpenLoopExclusion ?? true) ? 'text-slate-300' : 'text-slate-600'}`}>
-                                        {localConfig.katsTabgOn ?? 850} °C
-                                    </span>
-                                </div>
-                                <input
-                                    type="range"
-                                    // 700 °C is well below anything that arms the enrichment;
-                                    // 950 is above the sensor's useful working range here. The
-                                    // stock K_TI_KATS_TABG_EIN sits at 850, mid-scale.
-                                    min="700" max="950" step="10"
-                                    disabled={!(localConfig.enableOpenLoopExclusion ?? true)}
-                                    value={localConfig.katsTabgOn ?? 850}
-                                    onChange={(e) => handleChange('katsTabgOn', Number(e.target.value))}
-                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${(localConfig.enableOpenLoopExclusion ?? true) ? 'bg-slate-700 accent-blue-500' : 'bg-slate-800 accent-slate-600'}`}
-                                />
-                                <p className="text-[9px] text-slate-600">{t.katsHint}</p>
-                            </div>
+                            {/* Defaults ON (`?? true` in the filter), so a session saved before this
+                                field existed behaves the same as a new one rather than silently
+                                keeping frozen-trim rows. */}
+                            <Row
+                                {...row('kats')}
+                                label="Cat Protect EGT"
+                                value={`${localConfig.katsTabgOn ?? 850} °C`}
+                                toggle={{ checked: localConfig.enableOpenLoopExclusion ?? true, onChange: v => handleChange('enableOpenLoopExclusion', v) }}
+                                lockedReason={channels.tabg ? undefined : t.katsLocked}
+                                hint={t.katsHint}
+                            >
+                                {/* 700 °C is well below anything that arms the enrichment; 950 is
+                                    above the sensor's useful working range here. The stock
+                                    K_TI_KATS_TABG_EIN sits at 850, mid-scale. */}
+                                <Slider min={700} max={950} step={10} value={localConfig.katsTabgOn ?? 850}
+                                    disabled={!(localConfig.enableOpenLoopExclusion ?? true) || !channels.tabg}
+                                    onChange={v => handleChange('katsTabgOn', v)} />
+                            </Row>
 
-                            {/* Tank Vent. Defaults OFF, unlike Cat Protect above — see
-                                LogFilterConfig. No slider: the threshold exists in the config for a
-                                car whose valve reads a small non-zero at rest, but the useful
-                                setting is "anything the DME calls open", and a control offering a
-                                number here would imply there is a good one to pick. */}
-                            <div className="space-y-1">
-                                <div className="flex justify-between items-center text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={localConfig.enableTankVentExclusion ?? false}
-                                            onChange={(e) => handleChange('enableTankVentExclusion', e.target.checked)}
-                                            className="w-3 h-3 accent-blue-500 rounded bg-slate-700 border-none"
-                                        />
-                                        <span>{t.tankVentLabel}</span>
-                                    </label>
-                                    <span className={`${(localConfig.enableTankVentExclusion ?? false) ? 'text-slate-300' : 'text-slate-600'}`}>
-                                        &gt; {localConfig.tankVentMaxMs ?? 0} ms
-                                    </span>
-                                </div>
-                                <p className="text-[9px] text-slate-600">{t.tankVentHint}</p>
-                            </div>
+                            {/* Defaults OFF, unlike Cat Protect above — see LogFilterConfig. No
+                                slider: the threshold exists in the config for a car whose valve reads
+                                a small non-zero at rest, but the useful setting is "anything the DME
+                                calls open", and a control offering a number here would imply there
+                                is a good one to pick. */}
+                            <Row
+                                {...row('tankVent')}
+                                label="Tank Vent"
+                                value={`> ${localConfig.tankVentMaxMs ?? 0} ms`}
+                                toggle={{ checked: localConfig.enableTankVentExclusion ?? false, onChange: v => handleChange('enableTankVentExclusion', v) }}
+                                lockedReason={channels.tankVent ? undefined : t.tankVentLocked}
+                                hint={t.tankVentHint}
+                            />
 
                             {/* COVERAGE — a section, not another row, because these answer a
                                 different question from everything above them. The row filters decide
                                 which samples survive; these decide which CELLS may be rewritten from
                                 the samples that did. Mixing them into one list is how the map ended
                                 up with no evidence gate at all while looking like it had one. */}
-                            <div className="pt-2 mt-1 border-t border-slate-800/60 space-y-3">
+                            <div className="pt-3 mt-1 border-t border-slate-800/60 space-y-4">
                                 <div>
-                                    <div className="text-[10px] text-slate-400 uppercase tracking-wider">{t.covTitle}</div>
-                                    <p className="text-[9px] text-slate-600 mt-0.5">{t.covIntro}</p>
+                                    <div className="text-[10px] text-slate-400 uppercase tracking-wider">COVERAGE</div>
+                                    <p className="text-[9px] text-slate-600 mt-0.5 leading-relaxed">{t.covIntro}</p>
                                 </div>
 
-                                <NumberPair
-                                    label={t.covVe} hint={t.covVeHint}
-                                    a={{ value: localConfig.minVeCellSamples ?? 10, min: 1, max: 200, step: 1, unit: 'samples',
-                                        onChange: v => handleChange('minVeCellSamples', v) }}
-                                    b={{ value: localConfig.minVeCellWeight ?? 5.0, min: 0.5, max: 100, step: 0.5, unit: 'weight',
-                                        onChange: v => handleChange('minVeCellWeight', v) }}
-                                />
-                                <NumberPair
-                                    label={t.covRf} hint={t.covRfHint}
-                                    a={{ value: localConfig.rfKorrMinCellSamples ?? 10, min: 1, max: 200, step: 1, unit: 'samples',
-                                        onChange: v => handleChange('rfKorrMinCellSamples', v) }}
-                                    b={{ value: localConfig.rfKorrMinCellWeight ?? 5.0, min: 0.5, max: 100, step: 0.5, unit: 'weight',
-                                        onChange: v => handleChange('rfKorrMinCellWeight', v) }}
-                                />
-                                <NumberPair
-                                    label={t.covBands} hint={t.covBandsHint}
-                                    a={{ value: localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT, min: 1, max: 1000, step: 5, unit: 'thin',
-                                        onChange: v => handleChange('coverageThin', v) }}
-                                    b={{ value: localConfig.coverageOk ?? COVERAGE_OK_DEFAULT, min: 1, max: 2000, step: 10, unit: 'covered',
-                                        onChange: v => handleChange('coverageOk', v) }}
-                                />
+                                <Row
+                                    {...row('veGate')}
+                                    label={t.covVe}
+                                    value={`${localConfig.minVeCellSamples ?? 10} ${t.unitSamples} / ${(localConfig.minVeCellWeight ?? 5).toFixed(1)} ${t.unitWeight}`}
+                                    toggle={{ checked: veGateOn, onChange: v => handleChange('enableVeCellGate', v) }}
+                                    hint={t.covVeHint}
+                                >
+                                    {/* Ceilings from the measurement in MapEditor: session #902 put
+                                        130 samples in its busiest cell of 480, so a threshold of 200
+                                        could not be met by any drive and only 4 cells cleared 100. */}
+                                    <Slider min={1} max={100} value={localConfig.minVeCellSamples ?? 10}
+                                        disabled={!veGateOn} onChange={v => handleChange('minVeCellSamples', v)} />
+                                    <Slider min={0.5} max={30} step={0.5} value={localConfig.minVeCellWeight ?? 5}
+                                        disabled={!veGateOn} onChange={v => handleChange('minVeCellWeight', v)} />
+                                    {!veGateOn && <p className="text-[9px] text-red-400 leading-snug">{t.gateOff}</p>}
+                                </Row>
+
+                                <Row
+                                    {...row('rfGate')}
+                                    label={t.covRf}
+                                    value={`${localConfig.rfKorrMinCellSamples ?? 10} ${t.unitSamples} / ${(localConfig.rfKorrMinCellWeight ?? 5).toFixed(1)} ${t.unitWeight}`}
+                                    toggle={{ checked: rfGateOn, onChange: v => handleChange('enableRfKorrCellGate', v) }}
+                                    hint={t.covRfHint}
+                                >
+                                    <Slider min={1} max={100} value={localConfig.rfKorrMinCellSamples ?? 10}
+                                        disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellSamples', v)} />
+                                    <Slider min={0.5} max={30} step={0.5} value={localConfig.rfKorrMinCellWeight ?? 5}
+                                        disabled={!rfGateOn} onChange={v => handleChange('rfKorrMinCellWeight', v)} />
+                                    {!rfGateOn && <p className="text-[9px] text-red-400 leading-snug">{t.gateOff}</p>}
+                                </Row>
+
+                                {/* No on/off: these colour the heatmap and gate nothing, so there is
+                                    no behaviour to switch off. */}
+                                <Row
+                                    {...row('bands')}
+                                    label={t.covBands}
+                                    value={`${localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT} ${t.unitThin} / ${localConfig.coverageOk ?? COVERAGE_OK_DEFAULT} ${t.unitCovered}`}
+                                    hint={t.covBandsHint}
+                                >
+                                    <Slider min={1} max={500} step={5} value={localConfig.coverageThin ?? COVERAGE_THIN_DEFAULT}
+                                        onChange={v => handleChange('coverageThin', v)} />
+                                    <Slider min={1} max={1000} step={10} value={localConfig.coverageOk ?? COVERAGE_OK_DEFAULT}
+                                        onChange={v => handleChange('coverageOk', v)} />
+                                </Row>
                             </div>
 
                             {/* RF KORR — not a filter, but it belongs to "how this log becomes a
                                 map" and has to travel with the session for the tune to be
-                                reproducible, which is why it is in this panel at all.
-
-                                The control itself is RfKorrModeControl, shared with the RF KORR
-                                tab. It is the same setting in two places rather than two settings:
-                                a reader looking for anything RF KORR goes to that tab, and this
-                                copy is what keeps NOMINAL vs LOGGED reachable on a log that has an
-                                RF channel but no exhaust probe — exactly when that tab does not
-                                exist.
-
-                                ONE control, not two. MEASURED also writes the back-calculated
-                                table into the binary, and the two halves are only correct together:
-                                a VE map built for the new table while the DME still applies the old
-                                one is off by their ratio, which reaches -27 % on the lean side. Two
-                                checkboxes could express that; a three-way cannot. */}
+                                reproducible, which is why it is in this panel at all. */}
                             <RfKorrSourceControl
                                 source={rfKorrSource}
                                 onChange={setRfKorrSource}
-                                hasTabg={hasTabg}
+                                hasTabg={channels.tabg}
+                                hasRf={channels.rf}
                                 readOnly={readOnly}
                                 routeGap={routeGap}
                                 routeSamples={routeSamples}
                             />
 
-                            {/* Transient Header */}
-                            <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
-                                <label className="py-3 -my-3 flex items-center gap-2 cursor-pointer text-[10px] text-slate-500 uppercase tracking-wider font-bold">
-                                    <input
-                                        type="checkbox"
-                                        checked={localConfig.enableTransient}
-                                        onChange={(e) => handleChange('enableTransient', e.target.checked)}
-                                        className="w-3 h-3 accent-orange-500 rounded bg-slate-700 border-none"
-                                    />
-                                    <span>Transient Filter</span>
-                                </label>
-                            </div>
-
-                            {/* Transient Window */}
-                            <div className={`space-y-1 ${!localConfig.enableTransient ? 'opacity-50 pointer-events-none' : ''}`}>
-                                <div className="flex justify-between text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <span>Window Size</span>
-                                    <span className="text-slate-300">{localConfig.transientWindow} Frames</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1" max="10"
-                                    value={localConfig.transientWindow}
-                                    onChange={(e) => handleChange('transientWindow', Number(e.target.value))}
-                                    className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                            <div className="pt-3 border-t border-slate-800 space-y-4">
+                                <Row
+                                    {...row('transient')}
+                                    label="Transient Filter"
+                                    toggle={{ checked: localConfig.enableTransient, onChange: v => handleChange('enableTransient', v), accent: 'accent-orange-500' }}
+                                    hint={t.transientHint}
                                 />
-                            </div>
 
-                            {/* RPM Stable Threshold */}
-                            <div className={`space-y-1 ${!localConfig.enableTransient ? 'opacity-50 pointer-events-none' : ''}`}>
-                                <div className="flex justify-between text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <span>Max RPM Delta</span>
-                                    <span className="text-slate-300">{localConfig.rpmStableThreshold}%</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1" max="50"
-                                    value={localConfig.rpmStableThreshold}
-                                    onChange={(e) => handleChange('rpmStableThreshold', Number(e.target.value))}
-                                    className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
-                                />
-                            </div>
+                                <div className={`space-y-4 ${!localConfig.enableTransient ? 'opacity-50 pointer-events-none' : ''}`}>
+                                    <Row
+                                        {...row('settle')}
+                                        label="Settle Time"
+                                        value={settleSamples === undefined
+                                            ? `${settleSec.toFixed(1)} s`
+                                            : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`}
+                                        hint={t.settleHint}
+                                    >
+                                        <Slider min={0.5} max={5} step={0.5} value={settleSec}
+                                            accent="accent-orange-500"
+                                            onChange={v => handleChange('transientSettleSec', v)} />
+                                    </Row>
 
-                            {/* TPS Stable Threshold (RO) */}
-                            <div className={`space-y-1 ${!localConfig.enableTransient ? 'opacity-50 pointer-events-none' : ''}`}>
-                                <div className="flex justify-between text-[10px] text-slate-500 uppercase tracking-wider">
-                                    <span>Max RO Delta</span>
-                                    <span className="text-slate-300">{localConfig.tpsStableThreshold}%</span>
+                                    <Row
+                                        {...row('rpmDelta')}
+                                        label="Max RPM Delta"
+                                        value={`${localConfig.rpmStableThreshold}%`}
+                                        hint={t.rpmDeltaHint}
+                                    >
+                                        <Slider min={1} max={50} value={localConfig.rpmStableThreshold}
+                                            accent="accent-orange-500"
+                                            onChange={v => handleChange('rpmStableThreshold', v)} />
+                                    </Row>
+
+                                    <Row
+                                        {...row('roDelta')}
+                                        label="Max RO Delta"
+                                        value={`${localConfig.tpsStableThreshold}%`}
+                                        hint={t.roDeltaHint}
+                                    >
+                                        <Slider min={1} max={50} value={localConfig.tpsStableThreshold}
+                                            accent="accent-orange-500"
+                                            onChange={v => handleChange('tpsStableThreshold', v)} />
+                                    </Row>
                                 </div>
-                                <input
-                                    type="range"
-                                    min="1" max="50"
-                                    value={localConfig.tpsStableThreshold}
-                                    onChange={(e) => handleChange('tpsStableThreshold', Number(e.target.value))}
-                                    className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
-                                />
-                                <p className="text-[9px] text-slate-600">{t.tpsHint}</p>
                             </div>
                         </div>
 
