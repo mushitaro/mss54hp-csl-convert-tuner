@@ -12,6 +12,7 @@
  */
 import { VECalculator } from '../src/lib/ve-calculator/calculator.ts';
 import { APP_CONFIG } from '../src/config/constants.ts';
+import { RF_KORR_TUNE_DEFAULTS, withDefaults } from '../src/lib/ve-calculator/rfKorrTuner.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + d)); if (!c) fails++; };
@@ -99,6 +100,30 @@ console.log('\n[the census is the cost of the threshold]');
     check('withEvidence counts only cells that cleared', r.coverage.withEvidence === 1, r.coverage.withEvidence);
     check('withAnyData counts every cell touched', r.coverage.withAnyData >= 2, r.coverage.withAnyData);
     check('total is the whole map', r.coverage.total === RPM.length * LOAD.length, r.coverage.total);
+}
+
+/**
+ * An absent setting must not read as "no gate".
+ *
+ * The page assembles its options object unconditionally, so an untouched session hands the rf_korr
+ * tuner `{ minCellSamples: undefined, minCellWeight: undefined }`. Object spread copies those keys
+ * WITH their undefined values, and `count < undefined` is false — so a plain `{...DEFAULTS,...opts}`
+ * left both gates on a flashable 72-cell table wide open, on every fresh session, silently.
+ *
+ * Asserted against the exported defaults rather than against 10 and 5.0, so the test keeps meaning
+ * the same thing after the measured defaults land.
+ */
+console.log('\n[an absent option is not an option set to nothing]');
+{
+    const merged = withDefaults({ minCellSamples: undefined, minCellWeight: undefined });
+    check('undefined does not overwrite minCellSamples',
+        merged.minCellSamples === RF_KORR_TUNE_DEFAULTS.minCellSamples, String(merged.minCellSamples));
+    check('undefined does not overwrite minCellWeight',
+        merged.minCellWeight === RF_KORR_TUNE_DEFAULTS.minCellWeight, String(merged.minCellWeight));
+    check('a real value still wins',
+        withDefaults({ minCellSamples: 42 }).minCellSamples === 42, 'not applied');
+    check('untouched fields keep their defaults',
+        withDefaults({ minCellSamples: 42 }).settleSec === RF_KORR_TUNE_DEFAULTS.settleSec, 'settleSec moved');
 }
 
 console.log(fails === 0 ? '\nALL PASS' : '\n' + fails + ' FAILURE(S)');

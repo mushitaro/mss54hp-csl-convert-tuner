@@ -166,6 +166,32 @@ export const RF_KORR_TUNE_DEFAULTS: RfKorrTuneOptions = {
     writeIdentityRow: false,
 };
 
+/**
+ * The defaults, with only the options the caller actually supplied laid over them.
+ *
+ * A plain `{ ...DEFAULTS, ...opts }` is what this replaces, and it was silently disabling both
+ * evidence gates on every fresh session. Object spread copies own enumerable properties INCLUDING
+ * the ones whose value is `undefined`, and the page assembles its options object unconditionally:
+ *
+ *     rfKorrThresholds: { minCellSamples: config.rfKorrMinCellSamples, ... }
+ *
+ * Those config fields are optional and absent from DEFAULT_FILTER_CONFIG, so on a session nobody
+ * has touched they arrive as `{ minCellSamples: undefined, minCellWeight: undefined }` — and the
+ * spread writes the undefined over the 10 and the 5.0. The comparisons downstream then read
+ * `count < undefined`, which is `false`, so every cell passes. `tsconfig` has `strict` but not
+ * `exactOptionalPropertyTypes`, so nothing complains.
+ *
+ * Fixed here rather than at the one call site on purpose: the next caller would open the same hole,
+ * and this is the gate on a 72-cell table that gets flashed into an ECU.
+ */
+export function withDefaults(opts: Partial<RfKorrTuneOptions>): RfKorrTuneOptions {
+    const out = { ...RF_KORR_TUNE_DEFAULTS } as unknown as Record<string, unknown>;
+    for (const [k, v] of Object.entries(opts)) {
+        if (v !== undefined) out[k] = v;
+    }
+    return out as unknown as RfKorrTuneOptions;
+}
+
 export type RejectReason =
     | 'no-evidence'
     | 'thin-weight'
@@ -373,7 +399,7 @@ export function rfKorrCensus(
     veAxes: { rpm: number[]; load: number[] },
     opts: Partial<RfKorrTuneOptions> = {},
 ): { report: RfKorrTuneReport; prepared: RfKorrPrepared[] } {
-    const o: RfKorrTuneOptions = { ...RF_KORR_TUNE_DEFAULTS, ...opts };
+    const o: RfKorrTuneOptions = withDefaults(opts);
     const veCols = veAxes.rpm.length;
 
     const report: RfKorrTuneReport = {
@@ -513,7 +539,7 @@ export function tuneRfKorrTable(
     veAxes: { rpm: number[]; load: number[] },
     opts: Partial<RfKorrTuneOptions> = {},
 ): RfKorrTuneResult | null {
-    const o: RfKorrTuneOptions = { ...RF_KORR_TUNE_DEFAULTS, ...opts };
+    const o: RfKorrTuneOptions = withDefaults(opts);
 
     const rpmAxis = egt.rfKorr.rpm;
     const deltaAxis = egt.rfKorr.delta;
