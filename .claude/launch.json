@@ -1,12 +1,23 @@
 {
-  "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 5054,
-      "autoPort": false
-    }
-  ]
+    "version": "0.0.1",
+    "configurations": [
+        {
+            "//": "`scripts/dev-alt.mjs` rather than `npm run dev`, because a port is not enough: Next 16 locks `<distDir>/dev/lock`, so a second dev server on this checkout is refused on ANY port. The launcher gives this one its own distDir as well as its own port. package.json's `dev` script and dev.cmd stay on 5054 and `.next` — that window prints 127.0.0.1:5054 and is where the browser testing happens; a harness-side conflict is not a reason to move it.",
+            "//port": "Stated twice — the argument is what Next binds, `port` is where the harness connects — so `autoPort` stays false and a collision is fixed by changing both numbers here.",
+            "name": "dev",
+            "runtimeExecutable": "node",
+            "runtimeArgs": ["scripts/dev-alt.mjs", "5057"],
+            "port": 5057,
+            "autoPort": false
+        },
+        {
+            "//": "The static export served by the Cloudflare Pages emulator, WITH the /api functions and a local D1. `npm run dev` above has no /api at all, so the upload path can only be exercised here. Run `npm run build` first — this serves out/, it does not create it.",
+            "//port": "Stated TWICE and the two must stay in step: `runtimeArgs` is what wrangler binds, `port` is where the harness connects. That is also why `autoPort` stays false — letting the harness pick a free port would only change the second one, and it would then wait on a port wrangler never bound. Moved off 8788 because another chat's preview was already holding it; on a collision, change both numbers here rather than the flag.",
+            "name": "preview",
+            "runtimeExecutable": "npx",
+            "runtimeArgs": ["wrangler", "pages", "dev", "--port", "8793"],
+            "port": 8793,
+            "autoPort": false
+        }
+    ]
 }

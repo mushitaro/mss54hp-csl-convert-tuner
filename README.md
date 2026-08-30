@@ -4,6 +4,52 @@
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## Credits
+
+This tool is built on work that others published first. Each entry below names that work, and what
+in this application rests on it.
+
+**[karter16](https://nam3forum.com/forums/member/9797-karter16)** — the source this tool owes the
+most to. Three distinct bodies of work, all of them published freely:
+
+- **[MSS54 DS2 Tool](https://github.com/karter16/MSS54-DS2-Tool-Public)** — the reference
+  implementation of the DS2 protocol against this DME. The following files in this repository are
+  ports of it, and say so at the top of each file: `src/lib/dme-link/ds2.ts` (frame format, control
+  bytes, programming segments, baud-switch payloads, adaptation masks),
+  `src/lib/dme-link/flashCounter.ts` (the boot-field layout, the `K16.` prep marker, the 30-per-
+  processor limit), `src/lib/dme-link/webSerialDmeLink.ts` (the erase → write → verify sequence, the
+  seed/key login, the service-block restore), `src/lib/dme-link/serviceBlockReport.ts`, and
+  `src/lib/dme-link/liveValueBlocks.ts`. Where this app diverges, the reason is written in a comment
+  next to the divergence rather than left silent.
+- **`CSL_0401_Karter16_v3_6_publish.xdf`** — the TunerPro definition. Every calibration address and
+  scaling in `src/lib/ecu-items/` and `src/config/constants.ts` traces back to it.
+- **The 0401 disassembly** ([notes thread](https://nam3forum.com/forums/forum/special-interests/coding-tuning/287069-csl-0401-program-binary-disassembly-notes),
+  [repo](https://github.com/karter16/CSL_0401_Binary_Disassembly_Notes)) — the Ghidra output and the
+  named RAM symbols behind everything in `docs/ecu-logic/` — the exhaust-temperature correction
+  path, the filling regulator, the idle controller and the FRA adaptation defect — as is the rule
+  that λ = 1 must not be chased in the region that correction covers.
+
+**[Bry5on](https://nam3forum.com/forums/member/5503-bry5on)** — validation on their own car, and the
+publication of what it taught, warning included: flattening `KF_RF_KORR_DRREL` and driving it, the
+control group for the FRA adaptation defect, the CAN logging work and the knock-frame decoding. It
+is evidence a disassembly cannot give, and the safe-side defaults in this application rest on
+reports of that kind.
+
+**[terra](https://nam3forum.com/forums/member/1465-terra)** — the original CSL-conversion partial,
+and the early fixes the community built upon it. The BASE this application reads and writes descends
+from them.
+
+**The NA M3 Forums CSL-conversion thread** —
+[the street-tuning methodology](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability).
+This application is an automation of it.
+
+**BMW / Bosch Funktionsrahmen** — the 39 function-specification documents that make the disassembly
+readable. Quoted by section number in `docs/ecu-logic/90-sources.md`.
+
+A per-claim map of which statement rests on which source is kept in
+[`docs/ecu-logic/90-sources.md`](docs/ecu-logic/90-sources.md), which distinguishes what was
+*reported by the community* from what was *derived here and remains unverified*.
+
 ## Overview
 
 This application integrates the various tuning processes for the E46 M3 CSL Conversion currently shared in the community into a single, streamlined workflow.
@@ -25,7 +71,7 @@ The tool automates and combines the following steps:
 7. **Re-enabling MAP & LTFT compensation** (replacing TunerPro steps)
 8. **Checksum correction** (replacing external checksum tools)
 9. **Direct DME communication** — read, live logging, and flashing over a K+DCAN cable (replacing separate reader/flasher tools)
-10. **DME adaptation reset** — clears the learned lambda, knock, and VANOS trims before a re-tune, so the next log is captured from a known baseline instead of one still shaped by the previous map
+10. **DME adaptation reset** — clears the learned lambda and knock trims before a re-tune, so the next log is captured from a known baseline instead of one still shaped by the previous map. VANOS adaptation is read and shown but deliberately **not** cleared: clearing it makes the DME re-learn cam phase, and cam phase moves filling — the quantity the log exists to measure
 11. **Flash counter** — reads how many programming cycles the DME has left and can reset the counter, so a tool built around repeated flashes stops running into an invisible ceiling; includes a read-only inspection of the DME's identity records (VIN / AIF)
 
 (The tool is completely free.)
@@ -60,7 +106,7 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
   measured rather than assumed and shown live as **HZ** next to the sample count, and the run's mean
   rate is stored with the session and listed beside its point count.
 - **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
-- **WRITE** — flashes the tuned BIN (checksum corrected, then read-back verified)
+- **WRITE** — flashes the tuned BIN (checksum corrected, then verified — QUICK or FULL, see Safety)
 
 ### If a log is interrupted
 
@@ -237,9 +283,21 @@ This tool can **erase and write your DME**. Flashing an ECU always carries risk.
   browser's and cannot be changed, and it does not appear at all for a killed process, an OS
   shutdown or a power cut. It also releases itself if an operation ever hangs, so a stuck state
   cannot trap the tab.
-- A write takes **about 4 minutes** at 9600 baud (write ~2.5 min + read-back verify ~70 s). The
-  progress display shows the current stage (Erasing / Writing / Verifying). **This is normal — do not
-  interrupt it.**
+- A write takes **about 2½ minutes** at 9600 baud with the default QUICK verification, or **about
+  4½ minutes** with FULL, which adds a byte-for-byte read-back of all 65536 bytes (measured at
+  122.9 s). The progress display shows the current stage (Erasing / Writing / Verifying). **This is
+  normal — do not interrupt it.**
+- **VERIFY: QUICK or FULL.** Every chunk's programming verify byte is checked either way; the mode
+  chooses what happens after the last chunk.
+  - **QUICK** asks the DME for its own encoding checksum (DS2 `0x0A`) — one exchange, ~50 ms. Its
+    authority is the CRC-16/ARC values the ECU stores in its own flash, which cover 65528 of the
+    pair's 65536 bytes. It cannot tell you *where* a mismatch is.
+  - **FULL** does that *and* reads all 65536 bytes back and compares them. It is the only check that
+    can name an offset.
+  - The selector **opens on FULL for any DME it has not seen the two agree on**, so the first write
+    to a given car takes the stronger proof. After that it opens on QUICK.
+  - Which mode ran is recorded in the session's flash history and stated in the completion message —
+    it never just says "verified".
 - After a successful write, **turn the ignition OFF, wait 10 seconds, then back ON** so the DME
   reinitialises with the new data. The app prompts you for this.
 - Use **Download Tuned** before writing if you want to inspect the exact bytes in TunerPro first — the
@@ -280,8 +338,8 @@ than from assumption, whether the identity records are present and which process
 - **Accuracy**: Calculations have been verified against manual tools at the cell level and confirmed to match perfectly.
 - **Checksums**: **Now implemented.** CRC-16/ARC is recalculated automatically before every BIN download and every DME write — you do **not** need to correct checksums with external tools. The algorithm was verified byte-for-byte against a known-good stock partial BIN.
 - **Every read is checked against the DME's own checksums.** The ECU stores checksums for its data blocks, and between them they cover the whole 64 KB. Each read is verified against those before the bytes are used, so a partial or corrupted read is caught at the point it happens rather than discovered later in a tune built on top of it. This is what makes a read *byte-exact* rather than merely complete.
-- **Flashing**: **Now implemented**, using the BMW DS2 protocol over a K+DCAN (FTDI) cable, and verified on a real vehicle. Each written chunk is validated against the DME's programming verify byte, and the whole region is read back and compared byte-for-byte before the write is reported successful.
-- **Adaptation reset**: Clears the DME's learned lambda trim (2 factors + 2 offsets), knock adaptation (6 cylinders), and VANOS adaptation (intake/exhaust) — 12 values, decoded and displayed before and after the clear. This is a **scoped** clear (DS2 service 0x43, mask 0x47), not a diagnostic tool's full "Clear All": throttle/pedal/EGAS, SMG clutch, detected-equipment and crank-wheel adaptations are left untouched, since the CSL's SMG-II clutch adaptation would otherwise need a full re-adaptation procedure to recover. Both the DS2 frame bytes and the field layout were verified against a decompiled reference tool. A snapshot of the values immediately before and after the clear is saved with the session. Not yet cross-checked against a real DME's actual post-clear values (only that the clear command and read-back path are correct) — verify the results look sane before relying on them.
+- **Flashing**: **Now implemented**, using the BMW DS2 protocol over a K+DCAN (FTDI) cable, and verified on a real vehicle. Each written chunk is validated against the DME's programming verify byte, and the result is then confirmed either by the DME's own encoding checksum (QUICK) or by that plus a byte-for-byte read-back of the whole region (FULL) before the write is reported successful.
+- **Adaptation reset**: Clears the DME's learned lambda trim (2 factors + 2 offsets) and knock adaptation (6 cylinders) — 10 values, decoded and displayed before and after the clear. VANOS adaptation (intake/exhaust) is decoded and shown alongside them but is **not** cleared, on karter16's advice ([thread 242281 #161](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability?p=363888#post363888)): nothing in this tuning process affects it, and forcing a re-learn moves cam phase, which moves filling. A separate VANOS-only clear exists for the max-power cam sweep, which does need it. This is a **scoped** clear (DS2 service 0x43, mask 0x07), not a diagnostic tool's full "Clear All": VANOS, throttle/pedal/EGAS, SMG clutch, detected-equipment and crank-wheel adaptations are left untouched, since the CSL's SMG-II clutch adaptation would otherwise need a full re-adaptation procedure to recover. Both the DS2 frame bytes and the field layout were verified against a decompiled reference tool. A snapshot of the values immediately before and after the clear is saved with the session. Not yet cross-checked against a real DME's actual post-clear values (only that the clear command and read-back path are correct) — verify the results look sane before relying on them.
 - **Flash counter**: Read at connect from the DME's boot field — a run of 2-byte markers, 30 slots per processor, decoded with the same scan the reference tool uses. Resetting it erases and rewrites the 8 KB service block on **both** processors (the block also carrying the AIF, ZIF and VIN records), then reads all 16 KB back and compares byte-for-byte. The pre-erase block is stored in a separate browser database first, and the reset aborts if that fails. Three guards refuse to start: engine not stopped, a boot field still mid-programming, or a block found already erased by an earlier interrupted attempt — that last one matters because an erased block reads as a healthy `0/30 available` on the counter alone, so a naive retry would write the hole back and verify it. An interrupted reset is recovered by writing the saved block back (**Recover**, offered in place of a retry). A cleared counter reads `1/30`, not `0/30`: `0x0000` is the "consumed, keep looking" sentinel the scan walks over. **Confirmed on a real vehicle** (2026-07-28): the counter reads and the reset completes. A read-only inspection of both service blocks is also available and is the right first step on any DME with an unclear history.
 - **When the link fails**: an echo mismatch is classified by **bit direction** rather than reported as
   a wall of hex. A K-line is open-collector, so a device physically cannot turn a 0 into a 1 — if

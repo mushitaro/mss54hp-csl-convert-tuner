@@ -271,18 +271,48 @@ export const Ds2AdaptationMask2 = {
 } as const;
 
 /**
- * The only clear this app performs: the adaptations a re-tune needs zeroed so the next log is
- * captured from a known base — lambda trim, knock, VANOS, and the idle/fuel demand values.
+ * What a re-tune needs zeroed so the next log is captured from a known base: lambda trim, knock, and
+ * the idle/fuel demand values.
  *
  * Deliberately NOT the reference's "Clear All" (0xF7 / 0x32), which also wipes throttle/pedal/EGAS,
  * SMG, detected-equipment and crank-wheel adaptations. Those are irrelevant to a tune and expensive
  * to lose: the CSL is SMG-II only, so clearing SMG adaptation forces a clutch re-adaptation
- * procedure. This mask is exactly the twelve values the reset dialog shows, so nothing is cleared
- * that the user wasn't shown first.
+ * procedure.
+ *
+ * **VANOS left this mask on 2026-08-15** (was 0x47). karter16, thread 242281 #161: "There's nothing
+ * in this tuning process that impacts them, and it's probably just a distraction to reset them and
+ * force the DME to re-learn them. I'd suggest dropping this and removing one more potential variable
+ * in the process." The stronger form of that argument is the reason it went: the re-learn moves cam
+ * phase, cam phase moves filling, and filling is the quantity the log exists to measure — so
+ * clearing VANOS does not merely fail to help, it perturbs the measurement. The two VANOS rows are
+ * still *read* and still shown; see adaptationBlocks.ts.
+ *
+ * Everything this clears is shown in the reset dialog first, with one exception that predates this
+ * change: IDLE_FUEL (bit 0) has no display row in either block, so four values are cleared that the
+ * dialog never lists. That is a real gap, recorded here rather than papered over — the old comment
+ * claimed this mask was "exactly the twelve values the reset dialog shows", which was never true.
  */
 export const TUNE_ADAPTATION_CLEAR = {
     mask1: Ds2AdaptationMask1.IDLE_FUEL | Ds2AdaptationMask1.KNOCK
-        | Ds2AdaptationMask1.LAMBDA | Ds2AdaptationMask1.VANOS,   // 0x47
+        | Ds2AdaptationMask1.LAMBDA,   // 0x07
+    mask2: 0,
+} as const;
+
+/**
+ * VANOS adaptation, on its own, for the one workflow that genuinely needs it gone.
+ *
+ * The max-power cam sweep drives VANOS targets over DS2 control 0x0C and requires a clean adaptation
+ * state — a learned offset shifts the actual cam position away from the commanded one, which
+ * corrupts the whole sweep (docs/ecu-logic/70-max-power-methodology.md). Until now the tune reset
+ * supplied that as a side effect; removing VANOS from it would have quietly removed a documented
+ * prerequisite.
+ *
+ * A second constant rather than a mask parameter, for the same reason clearTuneAdaptations() takes
+ * none (see DmeLink): which adaptations a tuning tool may clear is a product decision, and there are
+ * now two such decisions — not an open door.
+ */
+export const VANOS_ADAPTATION_CLEAR = {
+    mask1: Ds2AdaptationMask1.VANOS,   // 0x40
     mask2: 0,
 } as const;
 
@@ -390,18 +420,65 @@ export const Ds2BaudRate = {
  *
  * Asking for an unsupported rate is safe: the DME answers 0xB0 and trySwitchBaud leaves the port
  * alone — but the read then runs at 9600, so check `switchOutcome` before believing a rate ran.
+ *
+ * **The UI selector for the READ rate has been removed, for the same reason as the block-size one
+ * below: the question it existed to answer has been answered.** Three rates, and the two that were
+ * not the default are closed — 38400 negative over eleven attempts, 125000 unreachable from a read
+ * at all. What was left was a control whose every setting but one was known to lose the read, sitting
+ * on the connect row where it read as a tuning knob. Nothing else was choosing: READ, the datalog,
+ * the full write and the fast write each set their own rate from the operation, and FAST READ reaches
+ * 125000 through a programming session without anyone selecting anything. The type stays — the switch
+ * table is real, `writeBaud` is still armed deliberately, and `ds2BaudSpecFor` still maps all three.
+ *
+ * Ten values were offered at various points (10400/14400/19200/28800 and 57600/76800/115200 as well),
+ * on the reasoning that the payload encodes an arbitrary 24-bit rate. The ECU disagreed. Encoding a
+ * rate and implementing it are different things, which is the whole lesson of this file.
  */
 export type Ds2SupportedBaud = 9600 | 38400 | 125000;
 
 /**
- * Every selectable rate, slowest first — the single source the UI's selector renders from, so a
- * rate can never exist in the switch table but be unreachable (or vice versa).
+ * Bytes per read telegram, as an option on the link. **The UI selector for this has been removed —
+ * the question it existed to answer has been answered, and the answer is no.**
  *
- * Deliberately exactly the reference's three. Seven others were offered here at various points —
- * 10400/14400/19200/28800 below 38400, and 57600/76800/115200 above it — on the reasoning that the
- * payload encodes an arbitrary 24-bit rate. Removed once the ECU was actually asked: see Ds2BaudRate.
+ * karter16's journal reported 38400 working outside programming mode *"provided the block size
+ * wasn't too big"*, and every attempt here had been at 122, so this was built to move that variable.
+ * It was then swept on the car across all four of the reference's sizes.
+ *
+ * **38400 failed at every size.** Eleven attempts across two transports and four block sizes, dying
+ * at exchange 0, 0, 0, 1, 3, 5, 6, 15, 22, 23 and 116 of 538, every one of them
+ * `Timed out waiting for 2 byte(s) (received 0)` after five retries — the DME sends nothing, never a
+ * corrupted frame, and the death position does not track the block size. The Android/WebUSB runs
+ * also rule out the port close/reopen that Web Serial is forced into, since that transport sets the
+ * FTDI divisor on the open handle and dies identically. This matches karter16's own conclusion that
+ * 38400 "wasn't stable enough to make an actual feature".
+ *
+ * The constructor option stays because it is real and free, and because it is the reference's own
+ * reliability escape hatch (`AllowedDs2MemoryBlockSizes`) if a different cable or a different car
+ * ever makes the question live again. What is gone is the control that invited another sweep: a
+ * knob proven to change nothing is not neutral, it costs a trip to the vehicle every time someone
+ * wonders.
+ *
+ * For the record, the arithmetic that made the trade unattractive anyway — the ~55 ms turnaround is
+ * paid per exchange whatever the size, so at 38400: 122 → 538 exchanges ≈ 51 s, 96 → 683 ≈ 59 s,
+ * 64 → 1024 ≈ 79 s, and 32 → 2048 ≈ 139 s, which is slower than 9600's measured 126 s.
  */
-export const DS2_SELECTABLE_BAUDS: readonly Ds2SupportedBaud[] = [9600, 38400, 125000];
+export const DS2_READ_BLOCK_SIZES = [122, 96, 64, 32] as const;
+export type Ds2ReadBlockSize = typeof DS2_READ_BLOCK_SIZES[number];
+
+/**
+ * How long to allow a flash write telegram at a given rate, mirroring the reference's
+ * `ProgrammingWriteSupport.GetProgrammingWriteTimeout`.
+ *
+ * It scales because most of the allowance is the telegram itself, not the DME: at 9600 a 131-byte
+ * request takes 150 ms on the wire and the ECU programs the cells in ~32 ms (measured), so a 15 s
+ * budget is ~90x the expected time. Keeping 15 s at 125000 would leave a dead link taking 15 s per
+ * chunk to notice — 330 chunks of that is over an hour of not failing.
+ */
+export function programmingWriteTimeoutFor(baud: number): number {
+    if (baud >= 125000) return 3000;
+    if (baud >= 38400) return 10000;
+    return 15000;
+}
 
 export function ds2BaudSpecFor(baud: Ds2SupportedBaud): Ds2BaudRateSpec {
     switch (baud) {
@@ -475,6 +552,79 @@ export function describeVerifyByte(verifyByte: number): string {
         case 15: return 'data incomplete';
         default: return `unknown verify byte 0x${verifyByte.toString(16)}`;
     }
+}
+
+// --- Encoding checksum (control 0x0A) -----------------------------------------------------------
+//
+// The DME's own verdict on its own flash. Ported from the reference Ds2EncodingChecksumResult.cs,
+// where it is the substance of `ProgrammingVerificationMode.QuickVerify` — that tool's DEFAULT
+// post-write check, and the reason it does not read 64 KB back after every flash.
+//
+// One exchange: request `12 04 0A 1C` (4 bytes), response `12 05 A0 xx ck` (5 bytes). ~50 ms at
+// 9600 against ~123 s for a full read-back of the same region.
+//
+// What it actually proves is worth being precise about, because it is NOT the same guarantee as a
+// read-back. The MSS54HP stores CRC-16/ARC values for each area inside the flash itself (see
+// checksum/dmeDataChecksum.ts — two slots covering 65528 of the data pair's 65536 bytes). This asks
+// the DME whether its own stored CRCs match its own contents. So it is an external authority on the
+// bytes rather than a second copy of our read path — a systematic transport fault corrupts a
+// read-back and a re-read identically, and cannot forge a CRC the ECU computed for itself. What it
+// cannot do is say WHERE a mismatch is, or catch a corruption that happens to preserve CRC-16.
+
+export interface Ds2EncodingChecksumArea {
+    bit: number;
+    name: string;
+    /** **A SET BIT MEANS FAULTED.** The polarity is the easy thing to get backwards, and getting it
+     *  backwards turns this check into one that passes on a broken flash and fails on a good one. */
+    faulted: boolean;
+}
+
+export interface Ds2EncodingChecksum {
+    /** The raw status byte, kept so a report can carry what the DME actually said. */
+    lowByte: number;
+    /** Some DMEs answer with a second byte. The reference accepts 1 or 2 and decodes only the first;
+     *  it is retained rather than dropped so an unexpected value is visible in a saved report. */
+    extraByte: number | null;
+    areas: Ds2EncodingChecksumArea[];
+}
+
+/** Bit → area, exactly the reference's table. Bits 3 and 7 are not assigned by it. */
+const ENCODING_CHECKSUM_AREAS: readonly { bit: number; name: string }[] = [
+    { bit: 0, name: 'Boot sector master' },
+    { bit: 1, name: 'Program master' },
+    { bit: 2, name: 'Data master' },
+    { bit: 4, name: 'Boot sector slave' },
+    { bit: 5, name: 'Program slave' },
+    { bit: 6, name: 'Data slave' },
+];
+
+/**
+ * The two areas a DataTune write touches, and therefore the only two a tune's QuickVerify may judge.
+ *
+ * Matches the reference's `DataChecksumBits = { 2, 6 }`. Deliberately not "all areas must be clean":
+ * a program-area fault is a real fact about the ECU but it is not something this write caused or
+ * could fix, and failing a good tune write on it would be wrong. It is reported, not thrown on.
+ */
+export const DATA_TUNE_CHECKSUM_BITS: readonly number[] = [2, 6];
+
+export function parseEncodingChecksum(frame: Ds2Frame): Ds2EncodingChecksum {
+    if (!isPositiveResponse(frame)) {
+        throw new Error(`Encoding checksum query answered DS2 status 0x${frame.controlOrStatus.toString(16)}`);
+    }
+    if (frame.payload.length < 1 || frame.payload.length > 2) {
+        throw new Error(`Encoding checksum payload must be 1 or 2 bytes, got ${frame.payload.length}`);
+    }
+    const lowByte = frame.payload[0];
+    return {
+        lowByte,
+        extraByte: frame.payload.length === 2 ? frame.payload[1] : null,
+        areas: ENCODING_CHECKSUM_AREAS.map(a => ({ ...a, faulted: (lowByte & (1 << a.bit)) !== 0 })),
+    };
+}
+
+/** The faulted areas among `bits`. Empty means those areas are clean by the DME's own reckoning. */
+export function faultedAreas(result: Ds2EncodingChecksum, bits: readonly number[]): Ds2EncodingChecksumArea[] {
+    return result.areas.filter(a => bits.includes(a.bit) && a.faulted);
 }
 
 /**

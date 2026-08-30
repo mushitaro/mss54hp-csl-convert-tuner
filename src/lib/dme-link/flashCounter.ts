@@ -47,6 +47,20 @@ export const SERVICE_BLOCK_PAIR_LENGTH = ServiceBlockLayout.master.length + Serv
  */
 export const CLEAR_PREP_MARKER = new Uint8Array([0x4B, 0x31, 0x36, 0x2E]);
 
+/**
+ * `50 60 70 33` — the OTHER marker at the same `prepMarkerOffset`, used by FAST READ entry and by
+ * the Service Info restore.
+ *
+ * The comment above has described this byte string since the flash-counter work landed, as the
+ * thing not to confuse `K16.` with. It finally has a caller. Same address, different payload,
+ * different operation: `K16.` prepares a counter CLEAR, this prepares an erase whose contents are
+ * going straight back.
+ *
+ * Written only when the four bytes there are still erased — a DME that has had fast entry run
+ * before already carries it, and rewriting a programmed cell is what the verify byte rejects.
+ */
+export const FAST_ENTRY_PREP_MARKER = new Uint8Array([0x50, 0x60, 0x70, 0x33]);
+
 /** What the first non-consumed marker says the boot field is doing (DmeFlashCounter.DecodeState). */
 export type FlashCounterState =
     | 'available'                 // 0xFFFF — closed and ready to accept another programming session
@@ -218,11 +232,22 @@ export function shouldWriteClearPrepMarker(image: Uint8Array): boolean {
     return true;
 }
 
-/** True when either processor is out of headroom or not in a closed/available state. */
-export function hasFlashCounterWarning(info: FlashCounterInfo): boolean {
-    for (const region of [info.master, info.slave]) {
-        if (region.state !== 'available') return true;
-        if (region.remaining < LOW_SLOT_WARNING_THRESHOLD) return true;
-    }
-    return false;
+/**
+ * How bad the flash-counter situation is, in the two levels that mean different things.
+ *
+ * It was a single boolean called `hasFlashCounterWarning`, and nothing used it — because neither
+ * caller can act on one bit. `blocked` and `low` are not degrees of the same problem: `blocked`
+ * means a boot field is not closed, which is a programming session still open and stops a reset
+ * outright; `low` is headroom, which only asks the operator to think. The header paints them red and
+ * amber for exactly that reason, and had to work it out itself.
+ *
+ * Worst-of, over both processors, because a limit reached on either half is reached.
+ */
+export type FlashCounterLevel = 'blocked' | 'low' | 'ok';
+
+export function classifyFlashCounter(regions: FlashCounterInfo | readonly FlashCounterRegion[]): FlashCounterLevel {
+    const list = Array.isArray(regions) ? regions : [(regions as FlashCounterInfo).master, (regions as FlashCounterInfo).slave];
+    if (list.some(r => r.state !== 'available')) return 'blocked';
+    if (list.some(r => r.remaining < LOW_SLOT_WARNING_THRESHOLD)) return 'low';
+    return 'ok';
 }

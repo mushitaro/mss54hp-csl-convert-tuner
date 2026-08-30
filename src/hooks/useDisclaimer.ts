@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 // 免責同意の記録先。localStorage はこのアプリで唯一の同期・軽量な永続化で、セッション用の
 // IndexedDB(useSessionDb)より免責フラグ 1 個の保存に適する。キーは他アプリと衝突しない接頭辞つき。
@@ -8,26 +8,50 @@ const STORAGE_KEY = 'e46m3csl:disclaimer-ack';
 const DISCLAIMER_VERSION = '1';
 
 /**
- * アクセス時の免責ダイアログの表示可否と、その「今後表示しない」永続化を司るフック。
+ * Whether the disclaimer has to be shown, and the "don't show again" that stops it.
  *
- * 静的エクスポート(output: 'export')でサーバープリレンダーされるため、localStorage は
- * レンダー中ではなくマウント後の useEffect でのみ読む。初期値を false にしておくことで、
- * 同意済みユーザーにダイアログが一瞬ちらつくのを防ぐ(ハイドレーション不一致も回避)。
+ * ## Why a store rather than `useState` + an effect
+ *
+ * The answer lives in `localStorage`, which does not exist during the static prerender — so it was
+ * read in a mount effect that called `setOpen(true)`. That is a setState synchronously inside an
+ * effect: it renders once with the wrong answer, commits, then renders again. For this particular
+ * flag the wrong answer is "no disclaimer", which is the one that must not be shown even for a
+ * frame, and the second render is what the user sees flicker.
+ *
+ * `useSyncExternalStore` states the two halves separately. `getServerSnapshot` answers `false`, so
+ * the export contains no dialog and the hydrating render agrees with it; `getSnapshot` reads the
+ * real answer, which arrives on the first client render rather than after a commit. Same pattern,
+ * and the same argument, as `useIsPreviewBuild` and `useDialogLang`.
+ *
+ * ストレージが使えない場合(プライベートモード等)は必ず提示する。
  */
-export function useDisclaimer() {
-    const [open, setOpen] = useState(false);
+let acknowledged: boolean | null = null;
+const listeners = new Set<() => void>();
 
-    useEffect(() => {
-        try {
-            if (localStorage.getItem(STORAGE_KEY) !== DISCLAIMER_VERSION) setOpen(true);
-        } catch {
-            // プライベートモード等でストレージが使えなくても、免責は必ず提示する。
-            setOpen(true);
-        }
-    }, []);
+function readStored(): boolean {
+    try {
+        return localStorage.getItem(STORAGE_KEY) === DISCLAIMER_VERSION;
+    } catch {
+        return false;
+    }
+}
+
+/** Cached, because `getSnapshot` must return a stable value or React re-renders forever. */
+const isOpen = (): boolean => !(acknowledged ??= readStored());
+/** The prerender has no storage and must not put a dialog in the export. */
+const isOpenOnServer = (): boolean => false;
+
+function subscribe(fn: () => void) {
+    listeners.add(fn);
+    return () => { listeners.delete(fn); };
+}
+
+export function useDisclaimer() {
+    const open = useSyncExternalStore(subscribe, isOpen, isOpenOnServer);
 
     // ダイアログを閉じる唯一の経路。dontShowAgain が真のときだけ現行版を保存し、以後は非表示に
-    // なる。チェックせず同意した場合は保存しないため、次回アクセスで再び表示される。
+    // なる。チェックせず同意した場合は保存しないため、次回アクセスで再び表示される — so the
+    // in-memory flag is set either way and only the WRITE is conditional.
     const accept = useCallback((dontShowAgain: boolean) => {
         if (dontShowAgain) {
             try {
@@ -36,7 +60,8 @@ export function useDisclaimer() {
                 // 保存に失敗しても同意操作自体は成立させる(次回また出るだけ)。
             }
         }
-        setOpen(false);
+        acknowledged = true;
+        listeners.forEach(fn => fn());
     }, []);
 
     return { open, accept };

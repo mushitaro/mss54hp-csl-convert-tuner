@@ -19,6 +19,21 @@ export interface ByteTransport {
     open(): Promise<void>;
     close(): Promise<void>;
     reopen(baudRate: number): Promise<void>;
+    /**
+     * Whether `reopen` changes the rate on the OPEN handle, without closing the port.
+     *
+     * A capability question, not a platform check — which is what lets the DS2 layer stay ignorant
+     * of its backend while still refusing to do something only one backend can survive. Web Serial
+     * has no in-place baud change at all (`close()` + `open()` is mandatory, WICG/serial has no
+     * `setOptions`), so a boost there begins with a port transition no other DS2 tool produces, and
+     * moves DTR/RTS across it. The FTDI vendor path assigns the divisor on the open handle and never
+     * disturbs the line, exactly as the reference tool's `FT_SetBaudRate` does.
+     *
+     * It matters most for the WRITE path: there the switch can only be sent after the erase, so the
+     * one moment a transition could desync the link is the moment the ECU is least able to survive
+     * it. See writePartialBinInner.
+     */
+    reopenIsInPlace(): boolean;
     write(bytes: Uint8Array): Promise<void>;
     /**
      * Synchronous by contract, and it must stay that way. `resyncTransport` calls it without
@@ -32,6 +47,17 @@ export interface ByteTransport {
     peekReadError(): Error | null;
     recoverRead(): Promise<void>;
     readExact(length: number, timeoutMs: number): Promise<Uint8Array>;
+    /**
+     * Trades idle wakeups for response latency, for the duration of a datalog.
+     *
+     * Optional because only the FTDI backend has the knob: Web Serial exposes no equivalent at all,
+     * so a run there gets whatever the driver does and this is a silent no-op — worth stating,
+     * because it means the two backends' measured sample rates are not directly comparable.
+     *
+     * Best-effort on the backend that does have it. A chip that refuses logs slower, which is what
+     * it was doing before; it must never be able to fail a run.
+     */
+    setLatencyTimer?(mode: 'log' | 'idle'): Promise<void>;
 }
 
 /**

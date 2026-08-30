@@ -143,9 +143,13 @@ export abstract class BufferedByteTransport {
             // not here yet and no host-side change helps.
             this.timing?.parkStart(performance.now());
             await new Promise<void>(resolve => {
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
-                timer = setTimeout(() => {
+                // `wake` is written before `timer` and closes over it. That is safe rather than
+                // clever: the only way `wake` can be called is through `this.waiter`, which is
+                // assigned on the last line — by which point `timer` holds the handle. Writing it in
+                // this order is what lets `timer` be a const, and a const is what says out loud that
+                // there is exactly one timer per park.
+                const wake = () => { clearTimeout(timer); resolve(); };
+                const timer = setTimeout(() => {
                     if (this.waiter?.wake === wake) this.waiter = null;
                     resolve();
                 }, remaining);

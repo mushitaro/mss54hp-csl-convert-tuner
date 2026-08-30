@@ -102,6 +102,27 @@ const FTDI_MODEM_DTR_LOW_RTS_LOW = 0x0300;
  */
 const FTDI_LATENCY_MS = 16;
 
+/**
+ * Latency timer while a datalog is running. **4 ms, and only then.**
+ *
+ * The sweep above was run on the BULK READ, and its conclusion is right for that path and wrong for
+ * this one. A bulk read moves 122-byte chunks: the timer's tail is a small share of a long response,
+ * and lowering it only buys more idle wakeups. A datalog's exchanges are 13 to 94 bytes and there
+ * are two or three of them per sample, so the tail is paid several times a second on responses short
+ * enough that it dominates them. The #904 per-exchange traces show the packetisation directly —
+ * 16 ms steps in the ECHO delivery as well as the response tail, on frames that take 6 ms to
+ * transmit.
+ *
+ * The cost the constant above names is real and is what bounds this: 4 ms is 250 idle wakeups a
+ * second against 62.5, each a `transferIn` resolution on the main thread. That is why this is armed
+ * for the duration of a run and restored afterwards rather than becoming the default — during a run
+ * almost every expiry carries data, and outside one the link is idle.
+ *
+ * Never 1: it equals the USB frame length, which is the case FTDI's own AN_107 advises against and
+ * the Linux kernel reverted.
+ */
+const FTDI_LOG_LATENCY_MS = 4;
+
 /** Line-status (16550 LSR) bits in byte 1 of every packet header. */
 const LSR_OVERRUN = 0x02;
 const LSR_PARITY = 0x04;
@@ -125,8 +146,8 @@ const SUPPORTED_CHIP_VERSIONS = new Set([2, 4, 6]);
  *     encoded  = (d8 >> 3) | (fracCode << 14)
  *     value    = encoded & 0xFFFF,  index = encoded >>> 16
  *
- * A three-entry table rather than the general converter, because `DS2_SELECTABLE_BAUDS` is exactly
- * these three and ds2.ts documents at length why it will not grow. Three audited constants cannot
+ * A three-entry table rather than the general converter, because `Ds2SupportedBaud` is exactly these
+ * three and ds2.ts documents at length why it will not grow. Three audited constants cannot
  * be subtly wrong; a general converter can. 0x4138 and 0xC04E match FTDI's published AN232B-05
  * table, which is the independent check that the derivation above is right. All three rates are
  * exact — zero baud error, including 125000.
@@ -182,6 +203,9 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
     /** Set by the navigator.usb 'disconnect' listener. The WebUSB analogue of Chromium leaving
      *  port.readable null, and more reliable than probing device.opened. */
     private deviceGone = false;
+    /** What the chip's latency timer is currently set to, so a repeated request is not a USB round
+     *  trip and a failed one does not leave this lying. */
+    private latencyMs = FTDI_LATENCY_MS;
     /** Resolves when the read loop has actually exited, so recoverRead does not race it. */
     private pumpExited: Promise<void> = Promise.resolve();
     /**
@@ -204,6 +228,22 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
 
     /** One vendor OUT request. bmRequestType 0x40 is what `requestType: 'vendor'` + device recipient
      *  encodes, which is what the FTDI firmware expects for all of these. */
+    /**
+     * Arms the low latency timer for a datalog, or puts the idle one back.
+     *
+     * Best-effort by contract: a chip that refuses the request logs slower, which is what it was
+     * doing before. It must never be able to fail a run — this is a throughput adjustment, and the
+     * run is the thing that matters.
+     */
+    async setLatencyTimer(mode: 'log' | 'idle'): Promise<void> {
+        const want = mode === 'log' ? FTDI_LOG_LATENCY_MS : FTDI_LATENCY_MS;
+        if (this.latencyMs === want || !this.device) return;
+        try {
+            await this.sio(SIO_SET_LATENCY_TIMER, want);
+            this.latencyMs = want;
+        } catch { /* the run carries on at whatever the chip is already doing */ }
+    }
+
     private async sio(request: number, value: number, index = FTDI_PORT_INDEX): Promise<void> {
         const device = this.device;
         if (!device) throw new DmeLinkError('USB device is not open');
@@ -257,6 +297,9 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
 
         // Order matters: SIO_RESET clears modem-control state, so the DTR/RTS request must follow it.
         await this.sio(SIO_RESET, SIO_RESET_SIO);
+        // Back to the idle value on every open, so a run that ended by the cable being pulled cannot
+        // leave the chip waking 250 times a second for the next session.
+        this.latencyMs = FTDI_LATENCY_MS;
         await this.sio(SIO_SET_LATENCY_TIMER, FTDI_LATENCY_MS);
         await this.sio(SIO_SET_FLOW_CTRL, 0, 0x0000 | FTDI_PORT_INDEX); // mode 0 = none, in the high byte
         await this.setBaudRate(9600);
@@ -400,6 +443,12 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
      * Serial backend re-de-asserts DTR/RTS after every reopen because its close/open cycle moves
      * them; nothing moves them here, so they are set once at open() and never touched again.
      */
+    /** SET_BAUD_RATE on the open handle. No close, no reopen, no control-line movement — the read
+     *  loop never even stops. This is what the reference does over D2XX. */
+    reopenIsInPlace(): boolean {
+        return true;
+    }
+
     async reopen(baudRate: number): Promise<void> {
         if (!this.device) throw new DmeLinkError('USB device is not open');
         await this.setBaudRate(baudRate);

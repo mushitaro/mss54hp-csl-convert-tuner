@@ -79,11 +79,6 @@ function isBlankEntry(entry: Uint8Array): boolean {
     return allFF || allZero;
 }
 
-function decodeUInt24Decimal(bytes3: Uint8Array): string {
-    const v = (bytes3[0] << 16) | (bytes3[1] << 8) | bytes3[2];
-    return String(v).padStart(6, '0');
-}
-
 function decodeSixBitLetter(value: number): string {
     if (value < 1 || value > 26) return '?';
     return String.fromCharCode(65 + value - 1);

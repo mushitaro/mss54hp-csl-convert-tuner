@@ -22,7 +22,7 @@ Two tools settle this in minutes, and guessing does not:
 
 Then **A/B it in the live page** before changing source: stub the suspect (`window.Plotly.react = () => {}`), re-measure, and you have the saving before you have written anything.
 
-## The four that actually mattered
+## The six that actually mattered
 
 ### 1. Work happening in an invisible pane
 
@@ -77,6 +77,22 @@ State the width. `table-fixed` with `w-full` divides the container between the c
 ```
 
 Scale the line-height with the font or tall glyphs clip: `text-xs` is 12/16, and overriding only `font-size` leaves the 16 behind.
+
+### 5. A `backdrop-filter` over nothing
+
+A full-viewport pane carried `backdrop-blur-sm`. Nothing sat behind it — the pane is opaque and the app is one pane at a time — so the blur was compositing the whole viewport every frame to produce a picture identical to the one without it. **1098/1300 ms → 287/245 ms at 4x throttle**, for deleting one class.
+
+`backdrop-filter` is worth it on a scrim that genuinely blurs the app behind a dialog. It is worth nothing on a surface that covers what it would have blurred, and the cost scales with the area, so the mistake is largest exactly where it looks most harmless — a full-screen pane.
+
+Audit every `backdrop-*` by asking **what is visible through this**. If the answer is "nothing", it is pure compositing cost.
+
+### 6. Layout read at input rate
+
+**A move handler must not read layout.** `getBoundingClientRect()` inside `onPointerMove` runs at the pointer's rate — 60–120 Hz on touch — and each read forces a synchronous layout whenever a recent commit dirtied it, which during a drag is most of them.
+
+Read the geometry once at pointerdown and keep it in the drag ref: **a drag cannot outlive a resize**, so the width measured at grab time *is* the travel. `Slider` in `FilterPanelControls.tsx` (commit 27f8b38), which also throttles what it emits by pointer type — 160 ms on a finger against 90 on a mouse — landed at **65 → 38 commits to the readout, 0.15 ms per move**.
+
+It was reported as "sticky slider on the phone only", and that is the shape of the whole class: a desk absorbs a forced layout the phone cannot, so per-event measurement fails only where nobody is profiling.
 
 ## What to do with what is left
 

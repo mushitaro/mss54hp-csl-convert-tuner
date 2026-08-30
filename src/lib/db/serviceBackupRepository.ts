@@ -21,6 +21,9 @@
  * existing. Nothing here can touch saved sessions.
  */
 
+import { computeNonErasedSpans, type SeedMap } from '@/lib/dme-link/fastEntry';
+import { ServiceBlockLayout, SERVICE_BLOCK_PAIR_LENGTH } from '@/lib/dme-link/flashCounter';
+
 export const BACKUP_DB_NAME = 'mss54hp-tuner-backups';
 export const BACKUP_DB_VERSION = 1;
 export const SERVICE_BLOCKS_STORE = 'serviceBlocks';
@@ -69,17 +72,31 @@ function openBackupDb(): Promise<IDBDatabase> {
                 db.createObjectStore(SERVICE_BLOCKS_STORE, { keyPath: 'at' });
             }
         };
+        // `blocked` is not terminal: the same request still fires `onsuccess` once the other tab
+        // lets go, and resolving an already-rejected promise silently leaks that open connection —
+        // which then blocks the next upgrade for good. See the fuller note in schema.ts.
+        let settled = false;
         request.onsuccess = () => {
             const db = request.result;
             db.onversionchange = () => db.close();
+            if (settled) { db.close(); return; }
+            settled = true;
             resolve(db);
         };
-        request.onerror = () => reject(request.error);
+        request.onerror = () => {
+            if (settled) return;
+            settled = true;
+            reject(request.error);
+        };
         // Neither success nor error, so without this the promise never settles — and the caller
         // waiting on it is the step that decides whether the ECU may be erased.
-        request.onblocked = () => reject(new Error(
-            'Backup database upgrade is blocked by another open tab. Close the app\'s other tabs and retry.',
-        ));
+        request.onblocked = () => {
+            if (settled) return;
+            settled = true;
+            reject(new Error(
+                'Backup database upgrade is blocked by another open tab. Close the app\'s other tabs and retry.',
+            ));
+        };
     });
 }
 
@@ -152,4 +169,37 @@ export async function loadServiceBackup(at: number): Promise<ServiceBackupRecord
     } finally {
         db.close();
     }
+}
+
+/**
+ * The FAST READ seed, derived from a stored service-block backup rather than kept as its own record.
+ *
+ * No new store and no schema change, because the thing a seed needs to be is exactly what that
+ * backup already holds: the 16384 bytes of both Free Identifiers sectors, keyed by VIN, with the
+ * real-vs-PRACTICE guard already enforced (see listRestorableBackups). The span map is a pure
+ * function of those bytes, so storing it separately would create a second copy that could disagree
+ * with the first.
+ *
+ * That reuse also means a seed doubles as the recovery artefact: the same bytes that let fast entry
+ * know what to preserve are the ones the Service Info restore would write back if it went wrong.
+ */
+export async function loadFastEntrySeed(
+    vin: string | undefined,
+    mock: boolean,
+): Promise<SeedMap | null> {
+    const backups = await listRestorableBackups(vin, mock);
+    if (!backups.length) return null;
+    const record = await loadServiceBackup(backups[0].at);      // newest first
+    if (!record || record.buffer.byteLength !== SERVICE_BLOCK_PAIR_LENGTH) return null;
+    const pair = new Uint8Array(record.buffer);
+    const half = ServiceBlockLayout.master.length;
+    return {
+        // Master first, then slave — the order programServiceBlocks and readServiceBlocks both use.
+        spans: [
+            ...computeNonErasedSpans(pair.subarray(0, half), 'master'),
+            ...computeNonErasedSpans(pair.subarray(half), 'slave'),
+        ],
+        hasMaster: true,
+        hasSlave: true,
+    };
 }

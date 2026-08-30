@@ -175,6 +175,33 @@ body {
   height: 6px;
 }
 
+/* No `::-webkit-slider-thumb` rule here, and that is a measured decision rather than an omission.
+   ────────────────────────────────────────────────────────────────────────────
+   `appearance: none` on a range input does NOT stop Blink drawing a thumb. It
+   stops it drawing the default TRACK, which is what lets these be 4px and
+   `bg-slate-700` — and Chrome still paints a thumb over that track, tinted by
+   `accent-color`. So the `accent-*` class on each slider is doing real work: the
+   filter panel is blue and the transient group is violet because of it.
+
+   Supplying an author thumb here is what breaks that. `accent-color` only ever
+   tints the UA's own thumb, so replacing it with a custom one throws the accent
+   away — and a custom thumb has to be painted from something, which in practice
+   means `currentColor`, i.e. the INHERITED text colour. That is how every thumb
+   in this app came to render #C6C6CF: one near-white, blue and violet alike.
+
+   Measured in Chrome 151, headless, reading the pixels — six sliders, identical
+   but for these properties:
+     appearance:none + accent-color blue,   no thumb rule   -> blue thumb
+     appearance:none + accent-color violet, no thumb rule   -> violet thumb
+     appearance:none + accent-color + currentColor thumb    -> grey thumb (both)
+     appearance:none + color blue + currentColor thumb      -> blue thumb
+   The first two are this file's state and the ones that matter. A rule was added
+   twice on the belief that the first two render nothing; they do not.
+
+   If a bigger thumb is ever wanted for the head unit, it costs the accent — the
+   colour would have to move to a `text-*` class on every slider, and this note
+   is the reason that trade has to be made deliberately. */
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }

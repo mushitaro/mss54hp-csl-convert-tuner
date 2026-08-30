@@ -164,7 +164,9 @@ location.reload();
 
 What the no-`skipWaiting` policy objects to is the swap being **automatic**. A button the user pressed is the consent it was missing, so ask for it there and nowhere else — the worker still waits for everybody who did not ask.
 
-**Every step falls through to a plain reload, on one shared deadline.** No network, no worker, an update that turned out not to exist, a `controllerchange` that never arrives — the user asked for a reload and must get one. Verified: no update 1.6s, offline 2.6s, cold start with the network cut still renders.
+**Every step falls through to a plain reload — but give each step its own deadline.** One shared budget is what makes the button need pressing twice: 4s is generous for a probe and nowhere near enough to install a 6MB precache, so the press starts the download, times out, reloads, and the *second* press collects what the first one paid for. Split it: **probe 4s / install 60s / swap 5s**, and prime `reg.update()` at detection so the install is already running when the button is pressed. No network, no worker, an update that turned out not to exist, a `controllerchange` that never arrives — the user asked for a reload and must get one. Verified: no update 1.6s, offline 2.6s, cold start with the network cut still renders.
+
+**An install that takes a minute needs a progress UI, and it can be a real one.** The worker knows the asset list, so it can total the bytes and post them as it caches: `cacheOne` reading the response body through a stream, `PRECACHE_PROGRESS` to `clients.matchAll({includeUncontrolled: true, type: 'window'})` every 100ms. Rewrapping the response to post progress also means stripping `content-encoding`/`content-length`/`transfer-encoding` from the copy you cache — keeping them describes a body that is no longer encoded that way.
 
 **Resolve navigations to the shell, not to the request.** `caches.match(request)` looks obviously right and breaks the first time anything launches the app with a query string — `?resume=1` from a launcher, a tracking parameter, a deep link — because that exact URL was never cached, so the navigation goes to the network and offline it simply fails. Match the fixed entry document instead:
 
@@ -176,5 +178,7 @@ if (request.mode === 'navigate') {
 ```
 
 That is also what lets the query survive: it reaches the app on `location.search` without ever having to exist in the cache. Pair it with the rule above — do **not** add `/` to the precache, because update detection depends on that path missing and reaching the network.
+
+**Check which build you are looking at before you believe anything about it.** Cache-first means a client can sit on an old build indefinitely; measured during a review, the origin had build 233 and the browser was running 226 — eight commits of "fixes" that were not in the page being examined. Read `meta[name=build-id]` (or the chunk hashes) first, every time, and say which build a screenshot came from.
 
 **Test it against a server that behaves like your host.** `serve` has cleanUrls on, so `/index.html` 301s to `/index`; `cache.add()` follows that and stores a response with `redirected: true`, and a redirected response may not satisfy a navigation. Every reload under the worker then fails with `net::ERR_FAILED` — in the harness only, and it looks exactly like a bug in the worker. Thirty lines of `node:http` that serve the file at its own path with a 200 is the fix. The test that is worth having is the whole loop: serve build A, let the worker claim the page, swap the directory to build B, press the row, and assert on which chunk hash the page ends up running.

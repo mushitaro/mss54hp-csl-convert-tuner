@@ -1,5 +1,19 @@
-// CSL Stock Map Data (20x24) - Provided by user
-// Axis are implied same as main map (TPS vs RPM)
+/**
+ * `kf_rf_soll` as the CSL 0401 community partial ships it — the Alpha-N reference table.
+ *
+ * 24 rows (opening) x 20 columns (rpm), the app's own `AXIS_LOAD` / `AXIS_RPM`, values as the
+ * binary stores them once decoded (uint16 / 1000). Z lives at `0xD356`.
+ *
+ * **It is a reference, and this was checked rather than assumed**: all 480 cells are bit-identical
+ * to `0xD356` in `public/mock/csl-0401-community-patch-v1.partial.bin`. The RETIRED note further
+ * down used to claim the opposite — "not any particular car's stock map once a campaign has run,
+ * the tuner in question had already moved 364 of its 480 cells" — and that was reading the wrong
+ * side of a comparison. 363 cells differ between this table and `scripts/fixtures/session-920-base.bin`,
+ * which is the difference between the REFERENCE and that CAR. The car moved; the reference did not.
+ *
+ * That is what makes RESTORE VE possible: a table to go back TO has to come from bytes, and this
+ * does. See `BinaryPatcher.restoreVeTable`.
+ */
 export const CSL_STOCK_MAP_DATA: number[][] = [
     [0.210, 0.152, 0.113, 0.095, 0.092, 0.088, 0.075, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050],
     [0.242, 0.163, 0.132, 0.126, 0.105, 0.084, 0.085, 0.074, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050, 0.050],
@@ -34,6 +48,13 @@ export const APP_CONFIG = {
         // Using placeholders or likely defaults based on user input.
         ADDRESS_MAP_CONFIG: 0xE5E4, // k_rf_cfg
         ADDRESS_TEMP_LIMIT: 0x4824, // K_LAA_TMOT_MIN
+        // The other end of the same window. `laa_st_calc` (slave 0x019B90) needs
+        // MIN < TMOT < MAX to enable EITHER long-term learner, so the PATCH's MIN = 100 degC
+        // against this 100 degC leaves no temperature at which anything can learn. Reading both
+        // is what lets `trimNeutrality` say "frozen" from the bytes instead of from a toggle.
+        ADDRESS_TEMP_LIMIT_MAX: 0x4825, // K_LAA_TMOT_MAX
+        /** Both are stored as `x - 48` degC. */
+        TEMP_LIMIT_OFFSET_C: 48,
 
         VE_TABLE: {
             ADDRESS_X_AXIS: 0xD2FE, // RPM Axis
@@ -83,7 +104,139 @@ export const APP_CONFIG = {
         LAMBDA_2: 'Lambda 2', // [NEW]
         COOLANT_TEMP: 'Kuehlmitteltemperatur', // Guessing/Safety, or fallback
         // User only provided Lambdaintegrator 1, so we handle missing 2 in code.
+        // Header names the WRITER uses live above; the READER accepts any of CSV_ALIASES below.
+        EXHAUST_TEMP: 'Abgastemperatur',
+        RF: 'relative Fuellung',
+        // Tank ventilation. German, matching the rest of this table — the DME's own vocabulary is
+        // Tankentlueftung, and a log exported here should re-import through the same names.
+        TANK_VENT: 'Tankentlueftung Ventil',
+        TANK_VENT_CHECK: 'Tankentlueftung Funktionspruefung',
+        TANK_VENT_DIAG: 'Tankentlueftung Diagnose',
+        // Throttle position, and the lambda freeze byte. Same rule as the three above: a channel the
+        // live link produces has to survive the CSV round trip or downloading a run silently loses it.
+        WDK1: 'Drosselklappe Istwert',
+        LAMBDA_FREEZE: 'Lambda Freeze Flag',
+        INTAKE_TEMP: 'Intake Air Temp',
+        CHARGE_TEMP: 'Charge Temp Modelled',
+        AMBIENT_PRESSURE: 'Ambient Pressure',
+        ALTITUDE: 'Altitude',
+        AMBIENT_PRESSURE_SUBSTITUTED: 'Ambient Pressure Substituted',
+        AMBIENT_TEMP: 'Outside Air Temp',
+        AMBIENT_TEMP_SUBSTITUTED: 'Outside Air Temp Substituted',
+        VEHICLE_SPEED: 'Road Speed',
+        LTFT_1: 'Lambda LT 1',
+        LTFT_2: 'Lambda LT 2',
+        LLS_ST: 'Idle Valve Status',
+        MD_DYN_ST: 'Slew Limiter State',
+        MD_FW: 'Torque Request',
+        MD_FW_FILTER: 'Torque Request Filtered',
+        MD_LS_DELTA: 'Tip-in Allowance',
+        MD_DP_DELTA: 'Dashpot Allowance',
+        PRESSURE_DECODE_GAP: 'Pressure Decode Gap',
     },
+
+    /**
+     * Header names the log READER will accept, lowercased, first match wins.
+     *
+     * ### ADD A NEWLY-DISCOVERED CSV HEADER NAME HERE — nowhere else.
+     *
+     * The parser used to carry one header per field plus an ad-hoc `temp1/temp2/temp3` chain for
+     * coolant, which is why coolant was the only field that tolerated a second spelling. Those
+     * three spellings are reproduced verbatim below, so behaviour is unchanged for every log that
+     * parsed before this table existed.
+     *
+     * `rf` and `exhaustTemp` are the two channels the EGT correction work depends on, and they are
+     * NOT equally optional:
+     *
+     *   rf           REQUIRED. parseLogFile throws without it — see the comment there. Over DS2 it
+     *                arrives in the same 35-byte response as rpm and load, so a live run always
+     *                has it; a CSV that lacks it needs the column added, not a second derivation.
+     *   exhaustTemp  Optional. Without it the DME-table route for rf_korr cannot index a Δ, which
+     *                the app states and works around by using RF ÷ rf_soll.
+     *
+     * Both are seeded with the names this app's own serializer writes, so an exported log
+     * re-imports. Real Testo header names still have to be read off the car — add them here.
+     */
+    CSV_ALIASES: {
+        // The TODO below is discharged. These are no longer guesses: they are Testo's own MSS54
+        // channel list, `ecudata/MSS54DS0_DATATABLE_results.txt`, which gives every channel as
+        // `display name, SYMBOL, unit, telegram` — and the display name is what a Testo CSV heads
+        // its column with. The telegram field settles provenance too: `12050B03` is DS2 selection 3
+        // and `12050B13` is selection 19, the same two blocks this app reads.
+        //
+        // The list is a German/English mix, which is why guessing did not work. `Abgastemperatur`,
+        // `Tankentlueftung Ventil` and `Drosselklappe Istwert` were all reasonable and all wrong;
+        // Testo says `Exhaust temp.`, `Tank ventilation valve duty cycle`, `Throttle pos. actual`.
+        // The invented spellings stay, LAST, because this app's own serializer writes them and an
+        // exported log has to re-import.
+        time: ['time', 'zeit'],
+        rpm: ['rpm', 'drehzahl'],
+        rawLoad: ['relativer oeffnungsquerschnitt'],
+        stft1: ['lambdaintegrator 1'],
+        stft2: ['lambdaintegrator 2'],
+        /**
+         * ORDER MATTERS HERE, and it is not cosmetic — first match wins.
+         *
+         * Testo exports TWO temperatures from block 3 and only one of them is the engine:
+         *   Motor temp.   MOTORTEMPERATUR          = tmot, the DME's engine temperature
+         *   Coolant temp. KUEHLW_AUSL_TEMPERATUR   = tka, the RADIATOR OUTLET
+         *
+         * `tmot` is what the minimum-temperature filter tests and what the DME's own warm-up logic
+         * uses; the radiator outlet is a different sensor that reads lower and lags. A CSV carrying
+         * both would have matched `coolant temp` first under the old ordering and quietly filtered
+         * the log against the wrong one, so the correct spellings are now ahead of it.
+         */
+        coolantTemp: ['motor temp.', 'motortemperatur', 'kuehlmitteltemperatur', 'coolant temp.', 'coolant temp'],
+        // Testo's name first, this app's serializer second — see the note at the top of the table.
+        rf: ['relative fuellung'] as string[],
+        exhaustTemp: ['exhaust temp.', 'abgastemperatur'] as string[],
+        tankVent: ['tank ventilation valve duty cycle', 'tankentlueftung ventil'] as string[],
+        wdk1: ['throttle pos. actual', 'drosselklappe istwert'] as string[],
+        // No Testo equivalent: these three are not in its MSS54 list at all, so the serializer's own
+        // header is the only name they have. `tefc_ll_st` and `tefc_ed` are decoded here from bytes
+        // Testo never surfaced, and `la_freeze_flag` is not even named outside karter16's catalog.
+        tankVentCheckState: ['tankentlueftung funktionspruefung'] as string[],
+        tankVentDiag: ['tankentlueftung diagnose'] as string[],
+        lambdaFreeze: ['lambda freeze flag'] as string[],
+        // Testo has no column for this — it is a RAM read on the slow lane, not a block field — so
+        // the app's own spelling is the only one that exists. See the intakeTemp field entry.
+        intakeTemp: ['intake air temp', 'ansauglufttemperatur'] as string[],
+        // Same situation as intakeTemp: RAM reads on the slow lane, so the app's own spelling
+        // is the only one they have. The German forms are the DME's own symbols, accepted so a
+        // log exported by another MSS54 tool still reads.
+        chargeTemp: ['charge temp modelled', 'tan_m'] as string[],
+        ambientPressure: ['ambient pressure', 'umgebungsdruck', 'p_umg'] as string[],
+        altitude: ['altitude', 'hoehe', 'p_umg_hoehe'] as string[],
+        ambientPressureSubstituted: ['ambient pressure substituted'] as string[],
+        ambientTemp: ['outside air temp', 'aussentemperatur', 't_umg'] as string[],
+        ambientTempSubstituted: ['outside air temp substituted'] as string[],
+        vehicleSpeed: ['road speed', 'geschwindigkeit', 'v'] as string[],
+        ltft1: ['lambda lt 1', 'laa_f1', 'ltft1'] as string[],
+        ltft2: ['lambda lt 2', 'laa_f2', 'ltft2'] as string[],
+        llsSt: ['idle valve status', 'lls_st', 'lls st'] as string[],
+        mdDynSt: ['slew limiter state', 'md_dyn_st', 'md dyn st'] as string[],
+        mdFw: ['torque request', 'md_fw'] as string[],
+        mdFwFilter: ['torque request filtered', 'md_fw_filter'] as string[],
+        mdLsDelta: ['tip-in allowance', 'md_ls_delta'] as string[],
+        mdDpDelta: ['dashpot allowance', 'md_dp_delta'] as string[],
+        pressureDecodeGap: ['pressure decode gap'] as string[],
+    },
+
+    /**
+     * Below this median, a log's RF column is read as a FRACTION and multiplied by 100.
+     *
+     * The DS2 channel is a percentage (80.0 means 80 % filling) and `annotateRfKorr` divides by
+     * 100 to compare it against the dimensionless Alpha-N table. A CSV exporter may equally well
+     * write 0.80. Both conventions are plausible and the difference is a factor of 100, which is
+     * not a subtle wrongness — it makes every measured rf_korr absurd. 3 sits far from both
+     * populations: a real percentage under load is 55–110, a real fraction is 0.55–1.10.
+     *
+     * Same shape of decision as `medianStep` in log-engine/filter.ts, which tells a seconds log
+     * from a milliseconds one; median rather than mean for the same reason, and the threshold sits
+     * in the wide empty gap between the two populations rather than near either.
+     */
+    CSV_RF_FRACTION_THRESHOLD: 3,
+
     CSV_DELIMITER: ';', // Explicitly set for this format
 
     CONSTANTS: {
@@ -101,8 +254,19 @@ export const MAP_DIMENSIONS = {
 export const RPM_AXIS = APP_CONFIG.MSS54HP.AXIS_RPM;
 export const TPS_AXIS = APP_CONFIG.MSS54HP.AXIS_LOAD;
 
-// [EXPERIMENTAL] Stock Data Placeholders - USER MUST FILL THESE
-// Cold Start Map Axes (Derived from Screenshots)
+/**
+ * `kf_rf_soll_kath` as the CSL 0401 community partial ships it — the CATALYST-WARMUP Alpha-N table.
+ *
+ * A different table from `kf_rf_soll` with different axes, which is the whole reason it needs its
+ * own reference: X runs 600-4600 rpm (`0xD718`) against the main table's 600-7900, and Y (`0xD740`)
+ * has no 0.146 % row. Never match the two up by row number — `kf_rf_soll` row 3 is y 0.391 and
+ * kath row 3 is y 0.610.
+ *
+ * These were transcribed from screenshots and are no longer placeholders: the stock table decoded
+ * from the XDF matches this one in all 480 cells, and so does `0xD770` in the shipped community
+ * partial. Address and uint16 x/1000 scaling are confirmed with it. See
+ * `BinaryPatcher.restoreWarmupTable`.
+ */
 export const CSL_STOCK_WARMUP_RPM = [
     600, 900, 1000, 1100, 1300, 1400, 1600, 1800, 2000, 2200,
     2400, 2700, 2900, 3000, 3100, 3400, 3600, 3900, 4200, 4600
@@ -143,24 +307,49 @@ export const CSL_STOCK_WARMUP_MAP: number[][] = [
 ];
 
 // WOT Map Axes (Derived from Screenshots)
-export const CSL_STOCK_WOT_RPM = [
-    700, 900, 1000, 1200, 1300, 1400, 1700, 1900, 2100, 2300,
-    2600, 3000, 3300, 3500, 4400, 5800, 6400, 8000
+/**
+ * RETIRED — `KF_TI_N_RF_VL`'s axes and Z, transcribed from a screenshot.
+ *
+ * They fed `generateWOTMap`, which is gone (see COMMUNITY_WOT_FUEL_RAW). The reason not to bring
+ * them back as they were: the Z row disagreed with the shipped community partial in one count
+ * (1.062 against 1.063 at 1200 rpm). A reference table has to come from bytes, which is what
+ * COMMUNITY_WOT_FUEL_RAW is.
+ *
+ * This note used to carry a second reason — that `CSL_STOCK_MAP_DATA` was itself not stock. It is
+ * stock, and the check is written out above it. Retired with the rest.
+ */
+
+/**
+ * `KF_TI_N_RF_VL` as the community patch ships it — the full-load injection-time multiplier.
+ *
+ * Raw bytes, `x/128`, 18 rpm points (700 900 1000 1200 1300 1400 1700 1900 2100 2300 2600 3000
+ * 3300 3500 4400 5800 6400 8000). All three RF rows (0.8 / 0.9 / 1.0) hold this same row, so the
+ * table is effectively one-dimensional in rpm.
+ *
+ * ## What it does, and why a reference copy is worth shipping
+ *
+ * At full load `ti_load_factor` (slave `0x01c6ca`) selects this table instead of `KF_TI_N_RF`, and
+ * the result multiplies the injection time. `KF_TI_N_RF` is 1.000 across its whole part-load range,
+ * which is the proof that these are MULTIPLIERS and not fuel tables: a table of ones cannot be an
+ * amount. So the mixture at full load is `lambda = 1 / (rf_korr x this)` — the numbers below imply
+ * lambda 0.77 to 1.05, which is BMW's full-load enrichment.
+ *
+ * **The VE table must not be compensated into this one.** Fuel is already proportional to
+ * `rf_soll x rf_korr`, so correcting the VE table corrects the fuel; multiplying this table by the
+ * same ratio applies the correction twice and the mixture goes lean by c^2. That is not
+ * hypothetical — it is what `generateWOTMap` did, and a car came back with this table scaled by its
+ * VE ratio and a full-load lambda of 1.23 at 2100 rpm. Nothing had gone wrong yet only because the
+ * WOT-threshold patch was in, so the table was never reached.
+ *
+ * Shipped as a constant rather than read from `public/mock/…partial.bin` so the restore works with
+ * no network and no mock asset, and so `verify:wot-reference` can assert the two agree.
+ */
+export const COMMUNITY_WOT_FUEL_RAW: readonly number[] = [
+    122, 145, 138, 136, 156, 151, 148, 134, 140, 146, 164, 166, 152, 159, 155, 155, 156, 156,
 ];
 
-export const CSL_STOCK_WOT_LOAD = [0.80, 0.90, 1.00];
-
-// WOT Map - 3x18 - Transcribed from Screenshot (Rows are identical)
-// Scaling: x/128, uint8
-const WOT_ROW_DATA = [
-    0.953, 1.133, 1.078, 1.062, 1.219, 1.180, 1.156, 1.047, 1.094, 1.141,
-    1.281, 1.297, 1.188, 1.242, 1.211, 1.211, 1.219, 1.219
-];
-export const CSL_STOCK_WOT_MAP: number[][] = [
-    [...WOT_ROW_DATA],
-    [...WOT_ROW_DATA],
-    [...WOT_ROW_DATA]
-];
+/** Rows in `KF_TI_N_RF_VL`'s Z block. All identical — see COMMUNITY_WOT_FUEL_RAW. */
+export const WOT_FUEL_ROWS = 3;
 
 // [EXPERIMENTAL] Binary Addresses
 export const EXPERIMENTAL_CONFIG = {
@@ -168,6 +357,51 @@ export const EXPERIMENTAL_CONFIG = {
     ADDRESS_WOT_MAP: 0xB5A,
     ADDRESS_WOT_THRESHOLD_MAP: 0xAC54 // KF_BZ_WDK_VL (4x4)
 };
+
+/**
+ * The calibration that decides whether the lambda controller was running — Funktionsrahmen 5.01.
+ *
+ * Addresses from `CSL_0401_Karter16_v3_6_publish.xdf`, which orients a 64 KB partial as
+ * [slave 0x0000-0x7FFF | master 0x8000-0xFFFF], so an XDF address is an offset. `KF_BZ_WDK_VL` is
+ * master and the three lambda constants are slave, which is why they look like different worlds.
+ *
+ * `ADDRESS_WOT_THRESHOLD_MAP` above is the same table's Z data. It has been in the app since the WOT
+ * patch shipped, but only ever as "is the first cell over 1000", because the axes were not known and
+ * a patch check does not need them. Reading a threshold at an operating point does.
+ */
+export const LAMBDA_SHUTDOWN = {
+    /** KF_BZ_WDK_VL — throttle % at which the DME calls it full load. Z is x/10. */
+    WOT_THRESHOLD_X: 0xAC44,   // 4 x u16, rpm
+    WOT_THRESHOLD_Y: 0xAC4C,   // 4 x u16, degC
+    WOT_THRESHOLD_Z: 0xAC54,   // 4 rows x 4 cols u16, x/10 -> %
+    /** KL_LA_N — relative filling above which the controller is switched off, over rpm. Y is
+     *  x/1000. Measured 1.500 flat across all seven points on a real binary, i.e. unreachable
+     *  (filling runs 0.3-1.1), so this gate is expected to report zero. Implemented anyway: it is
+     *  a calibration and another car's may differ, and a gate that silently is not there is worse
+     *  than one that honestly reports nothing. */
+    LOAD_THRESHOLD_X: 0x489A,  // 7 x u16, rpm
+    LOAD_THRESHOLD_Y: 0x48A8,  // 7 x u16, x/1000
+    /** K_LA_FMAX / K_LA_FMIN — the controller's clamps, x/32768. Measured 1.30 / 0.70. */
+    F_MAX: 0x481A,
+    F_MIN: 0x481C,
+} as const;
+
+/**
+ * `K_TE_TVTE_GA` — the tank-vent duty gain, slave `0xBF1`, one byte.
+ *
+ * Not in EXPERIMENTAL_CONFIG, because it is not experimental in the way those three are. Their
+ * scaling is unverified (see docs/ecu-logic/60-tuning-logic.md §7); this one is confirmed twice
+ * over — at instruction level in tetv_calc (slave 0x26ED6), and by karter16 logging the valve on a
+ * real car. What it shares with them is being TUNING ONLY, which is a different property and is
+ * enforced by the toggle rather than by where the constant lives.
+ *
+ * Stock is 0x80 = 1.0 with the XDF's x/128 conversion. Zero holds the valve shut.
+ */
+export const TANK_VENT_GAIN = {
+    ADDRESS: 0xBF1,
+    STOCK_RAW: 0x80,
+    DISABLED_RAW: 0x00,
+} as const;
 
 // Stock WOT Threshold Map (4x4) - Transcribed
 // Scaling: x/10 (Raw = Val * 10)

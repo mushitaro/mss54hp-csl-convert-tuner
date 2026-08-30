@@ -23,6 +23,8 @@
  * instrument's vocabulary — translating those would break the label-is-a-promise chain, not serve it.
  */
 
+import type { RouteId } from '@/lib/log-engine/logProfile';
+
 export type DialogLang = 'ja' | 'en';
 
 // ブラウザの言語設定から表示言語を判定する。日本語(ja / ja-JP 等)なら日本語、それ以外はすべて英語。
@@ -49,6 +51,39 @@ const KEY_CYCLE_EN =
     '3. Turn the key back ON\n\n' +
     'The DME reinitializes with the new data.';
 
+/**
+ * Which campaign shape a write belongs to, in one line at the top of the confirm.
+ *
+ * Only route B gets a warning, and it is the one worth having: B divides the VE map by k_new, which
+ * docs/ecu-logic/60 §9 records as never checked on a car. A costs one more flash slot and depends
+ * on nothing of the kind, so the dialog says which of those is about to happen while there is still
+ * a Cancel button. `verify:route` asserts that B is the only route carrying that dependency, so the
+ * warning cannot drift away from the arithmetic it describes.
+ */
+const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
+    ja: {
+        NONE: '',
+        CONSERVATIVE: 'ROUTE 0 — BMW の EGT 補正表はそのままです。VE マップだけを書きます。\n\n',
+        A1: 'ROUTE A · 第1段 — EGT 補正表 (KF_RF_KORR_DRREL) だけを書きます。VE マップは含まれません。\n'
+            + '  この後は「Use as base → TUNED」で新しいセッションを作り、そこで VE を測ってください。\n\n',
+        A2: 'ROUTE A · 第2段 — VE マップを書きます。補正表はこのキャンペーンで既に書き換え済みです。\n\n',
+        B: 'ROUTE B — VE マップと EGT 補正表を同時に書きます。\n'
+            + '  ⚠ VE マップは k_new で割ってあります。この割り算は実車で未検証です。\n'
+            + '    ROUTE A（表と VE を別々に書く）なら、フラッシュ1回分多く使う代わりに\n'
+            + '    この未検証の式に依存しません。\n\n',
+    },
+    en: {
+        NONE: '',
+        CONSERVATIVE: "ROUTE 0 — BMW's EGT correction table is left alone. Only the VE map is written.\n\n",
+        A1: 'ROUTE A step 1 — the EGT correction table (KF_RF_KORR_DRREL) alone. No VE map.\n'
+            + '  Continue with "Use as base → TUNED" and measure VE in that new session.\n\n',
+        A2: 'ROUTE A step 2 — the VE map. The correction table was already replaced by this campaign.\n\n',
+        B: 'ROUTE B — the VE map and the EGT correction table, together.\n'
+            + '  ⚠ The VE map has been divided by k_new. That division has never been checked on a car.\n'
+            + '    ROUTE A writes them separately: one more flash slot, and no dependency on it.\n\n',
+    },
+};
+
 const JA = {
     // --- workspace / session housekeeping ---
     clearLog: 'このデータログ(CSV)を破棄しますか？',
@@ -60,6 +95,18 @@ const JA = {
     noStoredTune: 'このセッションにはまだTUNEDが保存されていません。',
     noStoredLog: 'このセッションにはデータログが保存されていません。',
     noTuneToFinalize: 'このセッションにはファイナライズできるTUNEDがありません。',
+
+    titleRunPreflight: '走行前の確認',
+    runPreflight: (profile: string, missing: string[]) =>
+        `${profile} のランに必要なパッチが、いま ECU に入っていません。` + '\n\n'
+        + missing.map(m => m === 'PATCH'
+            ? '・PATCH — MAP補正とLTFT学習が生きたままです。トリムはVE誤差ではなく、'
+            + 'DMEが自分で補正した結果を映します。'
+            : '・TANK VENT — パージバルブが開きます。EGTランは block 19 を読まないので、'
+            + '起きていても検出できません。').join('\n')
+        + '\n\n先に WRITE PATCH-ON を当ててから走るのが本来の順序です。'
+        + '\nこのまま走ることもできますが、そのログが何を測っているかは保証されません。',
+    btnRunAnyway: 'このまま走る',
     noBinaryOfKind: (which: string) => `このセッションには ${which.toUpperCase()} のBINがありません。`,
     notReconstructed: '保存されたデータログからこのセッションを再構築できませんでした。書き込みは無効です。',
     setBaseFirst: '先にBASEを設定してください(BINを読み込むか、DMEから読み出してください)。',
@@ -67,7 +114,8 @@ const JA = {
     noValidCsvData: 'CSVから有効なデータを読み取れませんでした。',
 
     saved:
-        'セッションを保存しました。\n\n' +
+        'セッションを保存しました。DRAFT のままです — フィルターを変えて再計算し、保存し直せます。\n' +
+        '読み取り専用になるのは ECU に WRITE したときだけです。\n\n' +
         'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
         'キャンセル = ワークスペースを閉じてセッション一覧に戻る',
 
@@ -99,15 +147,40 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
         'DMEへ書き込みます。\n\n' +
+        ROUTE_TEXT.ja[a.route] +
         `書き込む内容: ${a.tuned
             ? 'チューニング済みマップ'
             : `⚠ マップは変更しません(パッチのみ) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
+        // 検証方式は「何を証明したことになるか」を変える。ダイアログが「検証OK」と言う意味が
+        // モードによって違う以上、消去の前にどちらで走るかを明示しないと約束が曖昧になる。
+        `検証方式: ${a.verifyMode === 'full'
+            ? 'FULL — DME自身のチェックサム照合に加えて、全65536バイトを読み戻してバイト単位で比較します。'
+            : 'QUICK — DME自身のチェックサム照合(DS2 0x0A)。ECUが自分のフラッシュに保持するCRCとの一致を1往復で確認します。'}\n` +
+        (a.verifyMode === 'quick'
+            ? '  ※ QUICKはカバー範囲65536バイト中65528バイト。ただし不一致の「位置」は分かりません。\n'
+            : '') +
+        (a.boostBaud
+            ? `\n⚠ BOOST ${a.boostBaud} が有効です（実験）。\n`
+            + '  消去の直後にボーレートを上げます。DME は programming session の中でしかこのレートを受け付けません。\n'
+            + '  切替が拒否されたら 9600 のまま書き込みます。受理されたのに応答が止まった場合は、\n'
+            + '  書き込み電文を 1 バイトも送らずに 9600 へ戻します。\n'
+            + '  ⚠ どちらのレートでも応答しなくなった場合、データ領域が消去されたまま中断します。\n'
+            + '    復旧は「イグニッション OFF → 10 秒 → ON → 再接続 → WRITE をやり直し」です。\n'
+            + '    WRITE は必ず消去からやり直すので、再実行は安全です。\n'
+            : '') +
+        (a.tankVentOff
+            ? `\n⚠ TANK VENT: SHUT — タンク換気を無効にしたまま書き込みます。\n`
+            + '  目的はチューニング走行中の再現性です。この BIN はそのまま走り続けるためのものではありません。\n'
+            + '  キャニスタがパージされなくなり、飽和すれば燃料臭や DTC 24（タンク換気バルブ）の原因になります。\n'
+            + '  ログを取り終えたら TANK VENT を OEM に戻してもう一度書き込んでください。\n'
+            + '  ファイル名に _TEVOFF が付き、セッションにも記録されます。\n'
+            : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
         '  エンジンが回っているとDMEが書き込みを拒否します。\n' +
-        '⚠ 電源(バッテリー)を安定させてください。書き込みには約4分かかります。\n' +
+        `⚠ 電源(バッテリー)を安定させてください。書き込みには約${a.verifyMode === 'full' ? '4分半' : '2分半'}かかります。\n` +
         '  書き込み中は絶対に電源を切ったり、ケーブルを抜いたりしないでください。\n' +
         // ブラウザ側のダイアログは文言を指定できないため、理由を説明できるのはここだけである。
         '  ブラウザのタブを閉じたり、リロードしたりしないでください。\n' +
@@ -120,7 +193,7 @@ const JA = {
             '  他のアプリに切り替えないでください。\n' +
             '  OTGケーブルとコネクタが動かないよう固定してください。\n'
             : '') +
-        '\nチェックサムは自動補正されます。書き込み後にリードバック検証を行います。\n\n' +
+        '\nチェックサムは自動補正されます。全テレグラムのverifyバイトは両モードとも必ず検査します。\n\n' +
         '続行しますか？',
 
     /**
@@ -150,12 +223,27 @@ const JA = {
             'チューンに使う前にREADをやり直してください。';
     },
 
-    patchWriteDone:
-        '✅ パッチの書き込みが完了しました(リードバック検証OK)。\n\n' +
+    /**
+     * 何をもって「完了」と言っているのかを、実際に走った検証で名乗る。
+     *
+     * ここは以前「リードバック検証OK」と固定文で書いていた。QUICKを選べるようになった以上、
+     * その一文は場合によって嘘になる — そして「検証OK」としか読めない完了画面は、
+     * ラベルが約束であるという原則を最も直接に破る場所である。
+     */
+    writeVerifiedBy: (v: { mode: 'quick' | 'full'; readBack: boolean }): string =>
+        v.readBack
+            ? '全バイトのリードバック照合＋DMEのチェックサム照合OK'
+            : v.mode === 'quick'
+                ? 'DMEのチェックサム照合OK(リードバックは実施していません)'
+                : '検証は完了しましたが、実施内容を特定できませんでした',
+
+    patchWriteDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ パッチの書き込みが完了しました(${JA.writeVerifiedBy(v)})。\n\n` +
         KEY_CYCLE_JA + '\n\n' +
         'その後 CONNECTION で接続し直すと、START TUNE でデータログを開始できます。',
 
-    writeDone: '✅ 書き込みが完了しました(リードバック検証OK)。\n\n' + KEY_CYCLE_JA,
+    writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ 書き込みが完了しました(${JA.writeVerifiedBy(v)})。\n\n` + KEY_CYCLE_JA,
 
     retuneConfirm:
         'このチューンの続きから、次のセッションを始めますか？\n\n' +
@@ -201,6 +289,31 @@ const JA = {
     // 上の長文のうち4本は、ネイティブの alert/confirm ではなくアプリ内ダイアログ(MessageDialog)で
     // 出す。683x400 のヘッドユニットではネイティブ側が本文の長さぶんだけ縦に伸び、選択肢が
     // 折り返しの下に隠れるため。ネイティブはボタン文言を自前で用意するので、ここに無かった。
+    /**
+     * 系譜チェック。書き込みは常に 65536 バイト全体を消して書き直すので、
+     * ECU に今入っている較正がこのチューンの BASE でない場合、
+     * **アドレスが 1 バイトも重なっていなくても**相手の変更が丸ごと消える。
+     * 「少ししか変えていない」という表示は両方のセッションに出るので、これは目視では気づけない。
+     */
+    lineageBlocked: (summary: string, verdict: 'diverged' | 'unknown' | 'match') =>
+        `${summary}\n\n` +
+        (verdict === 'diverged'
+            ? '書き込みは 65536 バイト全体の消去＋再書き込みです。\n' +
+            'いま車両に入っている変更は、**アドレスが重なっていなくても**すべて失われます。\n' +
+            '例: VE セッションと慣性セッションを同じ BASE から分岐させると、\n' +
+            '  互いに別の領域しか触っていなくても、後から書いた方が先の方を打ち消します。\n\n' +
+            '正しい手順: ECU を READ し直し、その READ を BASE に新しいセッションを作る。\n\n'
+            : '確認できないことは「問題なし」ではありません。\n' +
+            '半分書き込まれた ECU の復旧など、承知のうえで進める理由がある場合のみ続行してください。\n\n') +
+        'それでも書き込みますか？',
+    titleLineage: '系譜の確認',
+    btnFlashAnyway: '承知のうえで書き込む',
+
+    // Shown live, only while the run has gate-open samples it is throwing away for want of a settle.
+    // Names the remedy rather than the symptom: the gate is open, so the load is high enough — what
+    // is missing is holding it still, and holding it long enough for the exhaust to catch up.
+    rfKorrNoAnchorHint: 'アンカー未取得。加速し続けず、アクセル開度を固定して RF を一定に保ってください（上り坂・3〜4速）。'
+        + '整定に 3 秒、排気がモデルに追いつくまで 10 秒以上。同じ回転域で繰り返すこと。',
     titleLogFinished: 'データログ終了',
     titleWriteConfirm: 'DMEへ書き込みます',
     titleWriteFailed: '書き込みに失敗しました',
@@ -224,6 +337,18 @@ const EN: NativeDialogText = {
     noStoredTune: 'This session has no saved tune yet.',
     noStoredLog: 'This session has no stored log.',
     noTuneToFinalize: 'This session has no saved tune to finalize.',
+
+    titleRunPreflight: 'Before this run',
+    runPreflight: (profile: string, missing: string[]) =>
+        `The ${profile} run needs patches that are not in the ECU right now.` + '\n\n'
+        + missing.map(m => m === 'PATCH'
+            ? '- PATCH - MAP compensation and LTFT learning are still live, so the trim reports the '
+            + 'DME correcting itself rather than the VE error you are trying to measure.'
+            : '- TANK VENT - the purge valve will open. An EGT run does not read block 19, so it '
+            + 'cannot even see it happening.').join('\n')
+        + '\n\nThe intended order is WRITE PATCH-ON first, then drive.'
+        + '\nRunning anyway is allowed; what the log measures is then not guaranteed.',
+    btnRunAnyway: 'Run anyway',
     noBinaryOfKind: (which: string) => `This session has no ${which.toUpperCase()} binary.`,
     notReconstructed: 'This session could not be reconstructed from its stored log — flashing is disabled.',
     setBaseFirst: 'Set a BASE first (upload a BIN or read it from the DME).',
@@ -231,7 +356,8 @@ const EN: NativeDialogText = {
     noValidCsvData: 'No valid data found in CSV.',
 
     saved:
-        'Session saved.\n\n' +
+        'Session saved. It stays a DRAFT — change the filters, re-derive and save again.\n' +
+        'Only writing to the ECU makes a session read-only.\n\n' +
         'OK     = keep it loaded (you can WRITE it now)\n' +
         'Cancel = close the workspace and return to the session list',
 
@@ -260,15 +386,40 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +
+        ROUTE_TEXT.en[a.route] +
         `What will be written: ${a.tuned
             ? 'the tuned map'
             : `⚠ the map is NOT changed (patches only) — ${a.patchOn ? 'PATCH ON' : 'PATCH OFF'}`}\n` +
+        `Verification: ${a.verifyMode === 'full'
+            ? "FULL — the DME's own checksum, plus all 65536 bytes read back and compared byte for byte."
+            : "QUICK — the DME's own encoding checksum (DS2 0x0A), one exchange against the CRCs the ECU stores in its own flash."}\n` +
+        (a.verifyMode === 'quick'
+            ? '  Note: QUICK covers 65528 of the 65536 bytes, but cannot say WHERE a mismatch is.\n'
+            : '') +
+        (a.boostBaud
+            ? `\n⚠ BOOST ${a.boostBaud} is armed (experimental).\n`
+            + '  The baud is raised immediately after the erase — the DME accepts this rate only from\n'
+            + '  inside a programming session, and the erase is what creates one.\n'
+            + '  A refused switch simply writes at 9600. If it is accepted and the DME then goes silent,\n'
+            + '  the link drops back to 9600 before a single write telegram is sent.\n'
+            + '  ⚠ If the ECU answers at neither rate, the write stops with the data area erased.\n'
+            + '    Recovery: ignition OFF, wait 10 s, back ON, reconnect, and run WRITE again.\n'
+            + '    WRITE always restarts from the erase, so re-running it is safe.\n'
+            : '') +
+        (a.tankVentOff
+            ? `\n⚠ TANK VENT: SHUT — writing with tank ventilation disabled.\n`
+            + '  This is for reproducibility during a tuning run. It is not a BIN to keep driving.\n'
+            + '  The charcoal canister stops being purged; once saturated it can cause a fuel smell,\n'
+            + '  and DTC 24 (tank-venting valve) is the code for a valve that will not open.\n'
+            + '  When the logging is done, set TANK VENT back to OEM and write once more.\n'
+            + '  The filename carries _TEVOFF, and the session records it.\n'
+            : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +
         '  The DME refuses the write while the engine is running.\n' +
-        '⚠ Keep the power (battery) stable. The write takes about 4 minutes.\n' +
+        `⚠ Keep the power (battery) stable. The write takes about ${a.verifyMode === 'full' ? 'four and a half' : 'two and a half'} minutes.\n` +
         '  Never cut the power or unplug the cable while it is writing.\n' +
         '  Do not close or reload this browser tab.\n' +
         '  (Trying to close it asks for confirmation, but confirming still leaves.)\n' +
@@ -279,7 +430,7 @@ const EN: NativeDialogText = {
             '  Do not switch to another app.\n' +
             '  Secure the OTG cable and connector so they cannot move.\n'
             : '') +
-        '\nThe checksum is corrected automatically. The write is verified by reading it back.\n\n' +
+        "\nThe checksum is corrected automatically. Every telegram's verify byte is checked in both modes.\n\n" +
         'Continue?',
 
     noTransport: (a: { android: boolean }) => a.android
@@ -292,12 +443,20 @@ const EN: NativeDialogText = {
             'Run READ again before tuning from it.';
     },
 
-    patchWriteDone:
-        '✅ The patch write is complete (read-back verified).\n\n' +
+    writeVerifiedBy: (v: { mode: 'quick' | 'full'; readBack: boolean }): string =>
+        v.readBack
+            ? "every byte read back and compared, plus the DME's own checksum"
+            : v.mode === 'quick'
+                ? "the DME's own checksum — no read-back was performed"
+                : 'verified, but the checks that ran could not be identified',
+
+    patchWriteDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ The patch write is complete (${EN.writeVerifiedBy(v)}).\n\n` +
         KEY_CYCLE_EN + '\n\n' +
         'Reconnect with CONNECTION afterwards, then START TUNE begins the data log.',
 
-    writeDone: '✅ The write is complete (read-back verified).\n\n' + KEY_CYCLE_EN,
+    writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
+        `✅ The write is complete (${EN.writeVerifiedBy(v)}).\n\n` + KEY_CYCLE_EN,
 
     retuneConfirm:
         'Start the next session from this tune?\n\n' +
@@ -338,6 +497,25 @@ const EN: NativeDialogText = {
         'Note: the connection was released here.',
 
     // --- titles and buttons ---
+    lineageBlocked: (summary: string, verdict: 'diverged' | 'unknown' | 'match') =>
+        `${summary}\n\n` +
+        (verdict === 'diverged'
+            ? 'A write erases and rewrites all 65536 bytes.\n' +
+            'Whatever is in the car now would be lost — INCLUDING changes at addresses this tune\n' +
+            'does not touch at all.\n' +
+            'Example: branch a VE session and an inertia session off the same BASE, and even though\n' +
+            '  they edit completely separate regions, the second one flashed undoes the first.\n\n' +
+            'The correct step: re-READ the ECU and build this tune on that read.\n\n'
+            : 'Not being able to tell is not the same as it being fine.\n' +
+            'Continue only if you have a reason to write over an unknown state — recovering a\n' +
+            'half-flashed ECU, for instance.\n\n') +
+        'Write anyway?',
+    titleLineage: 'Lineage check',
+    btnFlashAnyway: 'Write anyway',
+
+    rfKorrNoAnchorHint: 'No anchor yet. Stop accelerating through the load — hold the pedal still and keep RF '
+        + 'steady (uphill, 3rd or 4th). Three seconds to settle, ten or more for the exhaust to catch up. '
+        + 'Repeat in the same rpm band.',
     titleLogFinished: 'Data log finished',
     titleWriteConfirm: 'Write to the DME',
     titleWriteFailed: 'The write failed',

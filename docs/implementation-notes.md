@@ -1,9 +1,39 @@
-# Implementation Notes — DME Link, Checksum & Tuning Pipeline
+# Implementation Notes — DME Link, Checksum & Flashing
 
-Working memo for the live-DME features. Captures the protocol facts and design decisions that are
-expensive to re-derive, and records exactly what has and has not been proven on real hardware.
+Working memo for the **transport and flashing** layers: how this app talks to the DME, how the
+checksum works, and what has and has not been proven on real hardware. Protocol facts and design
+decisions that are expensive to re-derive.
 
 Last updated: 2026-07 (after the first successful real-vehicle write).
+
+> **This file used to be titled "…& Tuning Pipeline" and never contained one.** The tuning logic —
+> what the log channels mean, why PATCH writes the bytes it writes, how the VE correction is
+> derived, and how the EGT correction is handled — lives in
+> **`docs/ecu-logic/60-tuning-logic.md`**. Start there for anything above the byte layer.
+>
+> The rest of `docs/ecu-logic/` covers the other side of the wire: what the 0401 DME itself does
+> (load path, EGT correction, idle control, the FRA bug, binary lineage), starting at
+> `docs/ecu-logic/00-glossary.md`.
+
+**Where things are in this file.** §9 is 560 lines — 40 % of the document — and is a closed
+investigation kept for its dead-hypothesis log. Its conclusion is in the box at the top of §9;
+you do not need to read the rest unless you are re-opening the baud-rate question.
+
+| § | Topic |
+|---|---|
+| 1 | What is verified on real hardware |
+| 2 | Module map |
+| 3 | DS2 protocol essentials (framing, login, timeouts) |
+| 4 | Partial BIN layout |
+| 5 | **Checksum — CRC-16/ARC**, and the ordering rule every writer must obey |
+| 6 | Write / flashing flow and its safety gates |
+| 7 | Identity (VIN / AIF / software number) |
+| 8 | **Live measurement block layouts** (the log channels) |
+| 9 | Baud rate — *closed*, see the box at its head |
+| 10–11 | UX state machine, known limitations |
+| 12 | K-line instability on the car |
+| 13 | Flash counter read + reset |
+| 14 | Android — WebUSB / FTDI |
 
 ---
 
@@ -34,7 +64,7 @@ shares every layer above the bytes, so what needs separate verification is only 
 | Partial BIN read (65536 B) | ✅ Verified — **65528/65536 bytes checked against the ECU's own stored checksums**, 126.5 s / 518 B/s |
 | Live polling + datalog | ✅ Verified on real DME (544 samples) |
 | Reconnect after key cycle | ✅ Verified on real DME |
-| Partial BIN write (flash) | ❌ **Never run over WebUSB** |
+| Partial BIN write (flash) | ✅ **Verified on the car (2026-08-09)** — full erase → write → verify over WebUSB |
 | Break recovery (BI bit) | ❌ Untested |
 | `SIO_RESET` receive-flush polarity (2 vs 1) | ❌ Untested — 2 is the libftdi 1.5 value, assumed |
 | Backgrounding / screen-off endurance | ❌ Untested |
@@ -44,25 +74,58 @@ shares every layer above the bytes, so what needs separate verification is only 
 
 ## 2. Module map
 
+Regenerated 2026-08-18 from the tree. Ten modules were missing from the previous version.
+
 ```
 src/lib/dme-link/
   types.ts              DmeLink interface, TransferPhase/TransferProgress, DmeLinkError
   ds2.ts                DS2 framing, XOR checksum, seed/key, memory payloads,
                         write-response parsing, baud specs, MSS54HP address layout
-  identity.ts           System address table, AIF entries, VIN (packed 6-bit), ZIF program number
-  liveValueBlocks.ts    Live measurement block field layouts + decoding
+  identity.ts           System address table, AIF entries, VIN (packed 6-bit), ZIF program number,
+                        MSS54/MSS54HP variant detection
+  blockDecoder.ts       Field formats shared by the live-value and adaptation block tables
+  liveValueBlocks.ts    Live measurement block field layouts + decoding (selections 3 / 19 / 83)
+  adaptationBlocks.ts   Adaptation block layouts, cleared-value expectations, clear masks
+  ramMap.ts             Control-0x06 RAM windows and signals — the torque cluster and the
+                        lambda trim the fast VE profile reads instead of block 19
+  flashCounter.ts       Service-block layout, counter analysis, reset image, warning levels
+  fastEntry.ts          FAST READ preservation plan (what must survive the sector erase)
+  serviceBlockReport.ts Service-block dump analysis, for inspection rather than repair
+  verifyPolicy.ts       Which write-verify mode this ECU has earned
+  transferTiming.ts     Per-exchange instrument: medians, per-exchange-kind breakdown, samples
+  linkEventLog.ts       Phase-level narrative of the operation in flight
   byteTransport.ts      ByteTransport contract + platform detection + transport factory
   bufferedByteTransport.ts  Shared receive buffer, parked waiter, readExact (both backends)
   webSerialTransport.ts navigator.serial wrapper — desktop backend
   webUsbFtdiTransport.ts    FTDI vendor protocol over WebUSB — Android backend (§14)
-  webSerialDmeLink.ts   Real DME implementation (login, read, write, live polling)
+  webSerialDmeLink.ts   Real DME implementation (login, read, write, live polling, fast entry)
   mockDmeLink.ts        Offline simulator — mirrors the real flow incl. phases, no cable needed
+  mockDrive.ts          The simulated drive the mock's telemetry comes from
+src/lib/log-engine/
+  logProfile.ts         What a run is FOR: its exchange list, its cost, its fallback, the truth
+                        gate on the RAM lambda trim
+  filter.ts             The sample filters and the drop census; the resumable pass a live run uses
+  axisBracket.ts        Where a value sits on a calibration axis — one rule, five former copies
+  lambdaGates.ts        FR 5.01 conditions under which la_f_regler means nothing
+  parser.ts / serializer.ts   Log CSV in and out
+  rate.ts               Measured sample rate, in seconds whatever the column's unit
+src/lib/ve-calculator/
+  calculator.ts         Binning, the VE derivation, the warmup/WOT tables
+  egtTables.ts          KF_RF_KORR_DRREL and friends, read from the binary rather than assumed
+  rfKorrTuner.ts        Back-calculates the correction table; owns the census the panel reads
+  rfKorrRoutes.ts       Agreement between the two ways of reaching rf_korr
+src/lib/binary-engine/
+  parser.ts             Reads the maps and the patch state out of a BIN
+  patcher.ts            Every writer, and what "restore" restores
 src/lib/checksum/
   crc16.ts              CRC-16/ARC
   dmeDataChecksum.ts    MSS54HP data-pair checksum analyse/correct
-src/lib/db/             IndexedDB session store (tuned BIN + paired log)
+src/lib/db/             IndexedDB session store (tuned BIN + paired log + live-run recovery)
+src/lib/session-sync/   The deployment's store: sessions, diagnostics, wording
 src/lib/field-registry/ Log data-channel metadata (labels/units/format/visibility)
-src/hooks/useDmeLink.ts Connection state machine + progress throttling
+src/hooks/useDmeLink.ts Connection state machine, progress throttling, the link snapshot async
+                        handlers read instead of a frozen prop
+src/hooks/useLiveRun.ts A datalog in progress: samples, durability, flush pacing, the readout store
 ```
 
 Protocol details below were derived by analysing an existing native reference tool for this ECU
@@ -214,8 +277,64 @@ flashed.
      then the erase is retried once — sending pre-clean unconditionally wastes a flash-counter slot.
 3. **Write slave**, then **write master** — `0x07` seg `2`, 122-byte chunks.
 4. **Finalize** — `0x07` seg `15` @ `0`.
-5. **Read-back verify** — read both blocks (segment 0) and compare byte-for-byte. Any mismatch
-   throws; the write is only reported successful if every byte matches.
+5. **Verify** — see the next section. QUICK (default once earned) or FULL.
+
+### Verification — two modes, and what each one actually proves (2026-08-11)
+
+There are **three independent layers**, and the mode chooses only whether the third one runs.
+
+| Layer | What it proves | QUICK | FULL |
+|---|---|---|---|
+| ① per-telegram verify byte | the DME programmed that chunk's cells and passed its own internal check (`1` = OK; `2` = verify failed, `3` = cells not erased, …) | always | always |
+| ② `0x0A` encoding checksum | the DME's **own** stored CRC-16/ARC values match its own flash. The two data slots cover **65528 of 65536 bytes**; the remaining 8 *are* the slots, which a match verifies | ✅ | ✅ |
+| ③ 64 KB read-back | the bytes we sent equal the bytes it returns, and **where** any mismatch is | ✖ | ✅ |
+
+`0x0A` was defined in `ds2.ts` from the start and **never called**, exactly like the
+`maxTelegramLength` decoder and `Ds2BaudRate.Baud38400`. It is the substance of the reference tool's
+`ProgrammingVerificationMode.QuickVerify`, which is **that tool's default** — the reason it does not
+read 64 KB back after every flash.
+
+- Request `12 04 0A 1C` (4 bytes) → response `12 05 A0 xx ck` (5 bytes). **One exchange, ~50 ms**,
+  against **122.9 s** for the read-back of the same region. That is ~45% of a flash.
+- **A set bit means FAULTED.** bit0 boot master · bit1 program master · **bit2 data master** ·
+  bit4 boot slave · bit5 program slave · **bit6 data slave**. A tune write judges bits 2 and 6 only
+  (`DATA_TUNE_CHECKSUM_BITS`), matching the reference's `DataChecksumBits`. A program-area fault is
+  a real fact about the ECU but not one this write caused, so it is reported, never thrown on.
+
+**What QUICK cannot do**, stated plainly because the UI states it too: it cannot say *where* a
+mismatch is, and it cannot catch a corruption that happens to preserve CRC-16 (1 in 65536, and only
+reachable at all if ① passed on every chunk first).
+
+**The assumption QUICK rests on, and how it is discharged.** Nothing in the reference or the 0401
+disassembly says whether the DME recomputes its checksum on demand or answers from a value cached at
+boot. If it cached, a post-write "clean" would be the same answer it gives for a botched write. So:
+
+- `0x0A` is **also read at connect**, into `DmeIdentity.encodingChecksum` — the before half of a
+  before/after pair. It is read-only, four bytes, and cannot fail a connection.
+- `verifyPolicy.ts` keeps, per VIN, whether a **FULL** write has completed on that ECU *and* its
+  checksum came back clean. Until that has happened the VERIFY selector **opens on FULL**. The user
+  can still choose QUICK; the point is that the first write to an unfamiliar DME does not silently
+  take the cheaper proof.
+- Under QUICK a missing or refused `0x0A` is a **failure**, not a warning: "the data was written and
+  every telegram reported programming OK, but nothing has confirmed the result." Under FULL it is
+  recorded and the write stands on the byte comparison, which is the stronger check and already ran.
+
+> **These assertions do not exist in this repository.** The paragraphs below describe a
+> scripted-DME harness that was written during development and never committed; `scripts/`
+> holds no such file, and `npm run verify:*` does not run one. What each paragraph says about
+> the CODE is still accurate and worth reading — what is NOT true is that anything checks it
+> automatically. `verify:ds2` covers the framing, the seed/key, the echo classification and
+> the verify byte; everything that needs a DME to answer is unchecked.
+
+The claim these paragraphs were written to support is about the telegram *trace and count*
+rather than the outcome — which is what would prove QUICK skipped the read-back rather than merely
+reporting that it had: QUICK sends **0** read telegrams and FULL sends **538**; the
+checksum is asked exactly once in both; bit 2 set throws and names "Data master" without naming the
+clean slave area; `0xB0` throws under QUICK with the re-run-with-FULL advice and passes under FULL
+with the reason recorded; a double erase failure chains both messages and emits no write telegram.
+
+The mode is carried into `FlashRecord.verifyMode`, the completion dialog and the uploaded diagnostic
+record, all using the same words. A write verified two different ways must not be describable by one.
 
 ### Write-response validation (safety-critical)
 
@@ -258,8 +377,11 @@ already read `0xFF`, so re-writing them is a wasted program cycle.
 ### Safety gates (deliberately lighter than the reference tool)
 
 1. **Checksum auto-correction** — always, no opt-out.
-2. **One confirmation dialog** before flashing (engine off / stable power).
-3. **Read-back verification** — byte-for-byte.
+2. **One confirmation dialog** before flashing (engine off / stable power). It names the verify mode
+   and the resulting duration, because the mode changes what "verified" will mean afterwards and the
+   moment to say so is before the erase.
+3. **Verification** — per-telegram verify byte and the DME's `0x0A` checksum always; the
+   byte-for-byte read-back under FULL. See the verification section above.
 4. **Post-write dialog** — key OFF → wait 10 s → key ON, then auto-disconnect (the power cycle ends
    the DME session anyway).
 5. Write is **not cancellable** (cancelling after erase would leave the ECU half-programmed).
@@ -321,27 +443,93 @@ payload**. Physical value = `add + raw * scale`.
 | Offset | Symbol | Field | Format | Scale | Add |
 |---|---|---|---|---|---|
 | 0 | `n` | **RPM** | u16 BE | 1.0 | 0 |
-| 8 | `rf` | relative filling (%) | u16 BE | 0.1 | 0 |
+| 2 | `LLR_N_SOLL` | idle speed target (rpm) | u16 BE | 1.0 | 0 |
+| 4 / 6 | `ML` / `TL` | air mass / load signal | u16 BE | — | — |
+| 8 | `rf` | **relative filling (%)** — AFTER the EGT correction | u16 BE | 0.1 | 0 |
+| 10 | `tan` | intake air temp (°C) | u8 | 1.0 | −48 |
 | 11 | `tmot` | **coolant temp (°C)** | u8 | 1.0 | **−48** |
+| 12 | `toel` | oil temp (°C) | u8 | 1.0 | −48 |
+| 14 | `tabg` | **exhaust gas temp (°C)** | **i8** | **16.0** | 0 |
+| 15 | `t_umg` | ambient temp (°C) | u8 | 1.0 | −48 |
 | 16 | `ub` | battery voltage (V) | u8 | 0.1 | 0 |
-| 20 | `aq_rel` | **relative opening (%)** | u16 BE | 0.46511627906976744 | 0 |
+| 20 | `aq_rel` | **relative opening (%)** | u16 BE | **200/65536** (`0.0030517578125`) | 0 |
 | 27 / 29 | `wdk1` / `wdk2` | throttle position (%) | i16 BE | 0.1 | 0 |
+
+`rf` and `tabg` are decoded by `liveValueBlocks.ts`; the rest of the added rows are listed because
+they are in the same response and cost nothing to add later. Their offsets come from the 0401
+disassembly (`ds2_handler` `case 0x1c`, payload offset = array index − 3) — see
+`docs/ecu-logic/20-egt-correction.md` §7.1, including the one unresolved inconsistency in that
+derivation and the on-car check that settles it.
+
+`tabg` is the DME's `TABG >> 4` as a **signed** byte, i.e. 16 °C per count over a −55…1250 °C
+sensor range. It is a gating and monitoring channel, not a precision measurement.
 
 `aq_rel` is the **same physical quantity** as the Testo CSV's *"relativer Oeffnungsquerschnitt"* —
 i.e. our `rawLoad`. That mapping is what makes live tuning feed the existing VE pipeline unchanged.
+
+Its scale is **200/65536**, not the reference catalogue's `0.46511627906976744`. The offset is right
+— RPM and tmot decode correctly beside it — but that tool scales `aq_rel` to its own % convention,
+about 150x larger, which puts idle at 38 % and cruise over 200 %. Checked against a real Testo log:
+every *relativer Oeffnungsquerschnitt* value there is exactly `raw * 200/65536`, so idle reads ~0.25
+and cruise ~1, which is what the load axis is in.
 
 ### Selection 19 — "Operating Measurements" (90 bytes)
 
 | Offset | Symbol | Field | Format | Scale |
 |---|---|---|---|---|
+| 38 | `tetv` | tank-vent valve pulse time (ms) | u16 BE | 0.002 |
 | 40 | `la_f_regler1` | lambda controller factor, bank 1 | u16 BE | 1/32768 (`3.0517578125e-05`) |
 | 42 | `la_f_regler2` | lambda controller factor, bank 2 | u16 BE | 1/32768 |
+| 62 | `tefc_ll_st` | tank-vent idle functional-check state | u8 | 1 |
+| 88 | `tefc_ed` | tank-vent diagnostic handle | u8 | 1 |
+| 89 | `la_freeze_flag` | recorded, not interpreted | u8 | 1 |
 
-These stand in for the CSV's *Lambdaintegrator 1/2* (`stft1`/`stft2`); neutral trim ≈ 1.0.
-**Block 3 contains no lambda/STFT data** — selection 19 is required for it.
+`la_f_regler1/2` stand in for the CSV's *Lambdaintegrator 1/2* (`stft1`/`stft2`); neutral trim ≈ 1.0.
+**Block 3 contains no lambda/STFT data.**
 
-Live polling = 2 round trips per sample (≈ 6–7 samples/s at 9600). Selection 19 is **best-effort**:
-if it fails, trim falls back to 1.0 and RPM/RO/temp logging continues rather than killing the loop.
+### Selection 83 — EGAS freeze-frame (52 bytes)
+
+**Not telemetry.** The buffer at `0xFFDA48` is filled on the first EGAS event and latched; every
+later event only increments byte 0. On a healthy car it reads 52 zero bytes for as long as you care
+to poll it. Read by `readEgasFreezeFrame` as a diagnostic, and by nothing else — the inertia run
+reads block 3 plus a RAM chunk instead. See `EgasMeasurement` in types.ts.
+
+### RAM reads (control 0x06) as a live channel
+
+The eight predefined blocks are the whole of what `0x0B` can give, and two things a run needs are
+either absent from them or expensive:
+
+| What | Where | Why |
+|---|---|---|
+| `MD_DYN_ST`…`MD_IND_NE` | segment 0x01, `0xFF8180` +40 B | Indicated torque for the inertia run; block 83 turned out to be a fault frame |
+| `LA_F_REGLER1/2` | segment 0x01, `0xFF80CA` +4 B | The one channel a VE log needs from block 19, at 4 bytes instead of 90 |
+
+The lambda-trim read is the fast VE profile. Its address comes from the 0401 master disassembly,
+which is evidence and not proof, so a run opens by checking it against block 19 itself — RAM, block,
+RAM, three times, 5 % agreement plus a plausibility band, two of three — and falls back to reading
+both blocks if the car disagrees. Block 19 stays on a 1/8 lane for the four channels that exist
+nowhere else, which re-checks the claim for free for the whole drive. See `ramMap.ts` and
+`LAMBDA_TRUTH_GATE` in `logProfile.ts`.
+
+### What a sample costs
+
+`expectedHz(profile.exchanges)` is the one place this is stated; the numbers below come from it.
+
+| Profile | Exchanges | Modelled | Measured |
+|---|---|---|---|
+| VE (fast) | block 3 + RAM 4 B + block 19 at 1/8 | **4.7 Hz** | — (WP6) |
+| VE (fallback) | block 3 + block 19 | 3.0 Hz | 2.95 Hz (#904) |
+| EGT (retired) | block 3 | 7.5 Hz | 6.60 Hz (#903) |
+| INERTIA | block 3 + RAM 40 B | 4.4 Hz | — |
+
+Wire at 9600 8E1, plus the DME's own turnaround: 83 ms for a block read, 35 ms for a RAM read. The
+model omits transport latency deliberately, so it sits above a measured rate and the gap is the
+transport's — see `DME_TURNAROUND_MS`. The FTDI latency timer drops from 16 ms to 4 ms for the
+duration of a run and back afterwards.
+
+Every exchange other than block 3 is best-effort: a failure leaves its channels **undefined**, never
+1.0. `1.0` is a real measurement meaning "the controller wanted no correction", and handing it back
+for an exchange that did not happen is the same lie as calling `la_f_regler` "Lambda".
 
 > ⚠️ The STFT mapping is decoded correctly per the block definition, but whether `la_f_regler`
 > numerically matches the Testo logger's *Lambdaintegrator* has **not** been cross-checked against a
@@ -351,6 +539,19 @@ if it fails, trim falls back to 1.0 and RPM/RO/temp logging continues rather tha
 ---
 
 ## 9. Web Serial constraints & the baud-rate finding
+
+> **CLOSED. The conclusion, in full:**
+> **9600 is the only rate this DME implements.** 38400 opens and negotiates but the DME does not
+> answer at it; 125000 fails on real hardware. Raising the baud produced no speed-up because the
+> residual time is the DME's own per-block turnaround, not the line rate. A full read is **~124 s**
+> at 9600 and that is at the DME's floor — the remaining lever is not software.
+>
+> Everything below is the investigation that established this, including the hypotheses that turned
+> out to be wrong. It is kept because re-opening this question without it would mean repeating the
+> same dead ends on a car. **You do not need to read it to work on this app.**
+>
+> Sub-sections headed `ANSWERED` / `CLOSED` / `FINAL` / `Current state` are successive restatements
+> of the same conclusion as evidence accumulated; they are not separate findings.
 
 Confirmed against the [WICG Web Serial spec](https://wicg.github.io/serial/):
 
@@ -684,10 +885,10 @@ a verify byte of "verify failed" or "cells not erased" means the DME tried and c
 re-asking would hide failing flash behind a success. The reference catches only `TimeoutException` for
 exactly this reason. `sendProgrammingControl` (erase/finalize) is still not retried, also matching.
 
-Verified against the real class with a scripted fake transport (12 assertions): a clean write sends one
-telegram; two lost telegrams then success now completes instead of failing; it gives up after exactly
-5; and verify-failure, DME rejection, and a next-address mismatch each send exactly one telegram and
-are reported rather than masked.
+The behaviour, stated rather than checked (see the note in §6): a clean write sends one telegram;
+two lost telegrams then success completes instead of failing; it gives up after exactly 5; and
+verify-failure, DME rejection, and a next-address mismatch each send exactly one telegram and are
+reported rather than masked.
 
 **Correction: the reference does not use 38400.** `Ds2BaudRate.Baud38400` is defined and has **zero
 call sites** in the entire tree; every `TrySwitchToProgrammingBaudAsync` goes to 125000, and always
@@ -860,6 +1061,45 @@ the answer, and none of it is code.
 - `Timed out waiting for N byte(s) (received M)` with no latched error → the DME stopped answering;
   transport is exonerated, look at the 0x91 switch and the session state instead
 
+### CLOSED AGAIN (2026-08-13, Android/WebUSB + block-size sweep): 38400 is finished
+
+The two loose ends §9 left open have both been run on the car, and both are negative.
+
+**The port transition was not the cause.** §9's "two things only this app has to do" argued that Web
+Serial's forced `close()`/`open()` on a baud change is a disturbance no other DS2 tool produces, and
+that it could not be removed. On the Android/WebUSB backend it *is* removed — `SET_BAUD_RATE` goes to
+the open handle, the read loop never stops, DTR/RTS are never re-driven. **38400 dies there
+identically.** That retires the last host-side suspect.
+
+**Block size does not rescue it either.** karter16's build journal reports 38400 working outside
+programming mode *"provided the block size wasn't too big"*, and every attempt to that point had been
+at 122. Swept across the reference's own `{122, 96, 64, 32}`:
+
+| attempts | died at exchange (of 538) |
+|---|---|
+| desktop Web Serial, 122 | 0, 1, 4, 7, 9, 17 |
+| Android WebUSB, 122–32 | 0, 0, 0, 1, 3, 5, 6, 15, 22, 23, 116 |
+
+Every one of them `Timed out waiting for 2 byte(s) (received 0)` after all five retries — the DME
+stops answering, never a corrupted frame — and **the death position does not track the block size**.
+The best run (116 exchanges, 21.6%) was at 122, the largest. Per-exchange median at 38400 was 159 ms
+against 9600's 209 ms, so the wire really was faster; it simply never survived.
+
+karter16's own verdict on the same experiment: it "wasn't stable enough to make an actual feature".
+Agreed, measured, and closed. The BLK selector has been removed — a knob proven to change nothing
+costs a trip to the vehicle every time someone wonders. The constructor option and the finding stay
+in `DS2_READ_BLOCK_SIZES`.
+
+**And 125000 was never reachable from a read.** From the same journal: the DME only accepts it
+*"when the DME is in programming mode"*, and *"the bootloader lacks mechanisms for entering
+programming mode via DS2 except through valid flash wipe commands"*. Every `TrySwitchToProgrammingBaudAsync`
+in the reference is inside a programming session for exactly that reason. Asking for it from the READ
+selector was structurally wrong, not badly timed — no settle would ever have helped.
+
+**So the read is finished at 9600/122, ~126 s on Android and ~123 s on desktop, and the remaining
+speed work is entirely on the write path** — where the erase puts the DME in programming mode as a
+side effect of what the operation already does.
+
 ### Instrumentation (2026-07-29)
 
 Rather than keep guessing at the 75 ms, `transferTiming.ts` decomposes it per chunk, behind a **DIAG**
@@ -936,11 +1176,33 @@ CONNECTION → READ → START TUNE → STOP → WRITE ─→ (key off dialog) �
 
 ## 11. Known limitations / TODO
 
-- **Speed**: everything at 9600. Read ~124 s measured, write ~4 min. ~40 s of that read is overhead
-  no one has explained yet, and 38400 now fails part-way through. Both open — see §9.
+- **Speed**: everything at 9600. Read ~124 s measured; write ~2½ min with QUICK verification, ~4½
+  with FULL (the read-back is 122.9 s of it). The read side is at the DME's floor and closed — see
+  §9. The write side's own floor is **not yet measured**: the instrument now covers it (§15) but no
+  vehicle run has produced a write report, so the per-chunk flash programming time — the part a baud
+  boost could never recover — is still the ~110 ms/chunk back-derived from a README sentence.
 - **STFT cross-check**: `la_f_regler` vs Testo *Lambdaintegrator* not validated (§8).
-- **Write baud**: write is always 9600 (the reference boosts to 125000 after erase). Deferred until
-  baud switching is proven.
+- **Write baud**: write is always 9600. The reference boosts to 125000 **inside the programming
+  session, immediately after the erase** (`TuneWriteExecutor.cs:67`, best-effort — it continues at
+  9600 if the switch is refused). **This is now the only remaining speed lever anywhere in the app**,
+  the read having been closed at 9600 (see §9's 2026-08-13 entry). karter16's journal confirms both
+  halves of why: the DME accepts 125000 only *"when the DME is in programming mode"*, and the
+  bootloader offers no way in *"except through valid flash wipe commands"* — which the tune write
+  performs anyway. Still not attempted here, and the reason to be careful is unchanged: the switch
+  can only be sent at the moment failure is most expensive, i.e. on an already-erased ECU.
+  **The payoff is now measured rather than guessed. The DME programs a chunk in 32 ms and the
+  request takes 150 ms on the wire, so a write telegram is 78% wire and a boost is worth roughly
+  4× — not the 2.2× estimated while the programming time was assumed to be ~110 ms** (§15).
+  One arithmetic caveat to carry into it: `SIM_SYNCR = 0xD700` puts the DME's SCI at
+  `f_sys/(32×SCBR)`, where 125000 is not exactly representable, so host and ECU may sit ~4.9% apart
+  even when the switch is accepted. `requestWire` against `theoreticalRequestWire` is the check that
+  says whether the request really moved.
+- **The datalog's per-exchange constants are one drive from being settled.** `kind: 'log'` is armed
+  by both run kinds now and the report carries a per-exchange-kind breakdown (`byExchange`), so one
+  drive says what block 3, block 19 and a RAM read each really cost instead of one median over all
+  three. `DME_TURNAROUND_MS` states two constants — 83 ms for a block read, 35 ms for a RAM read —
+  and the second is from traces rather than from a summary. Until that drive, the model is expected
+  to sit above the measured rate and the gap is the transport's; see §8.
 - **Chromium only**: Chrome/Edge/Opera on desktop (Web Serial), Chrome on Android (WebUSB, §14). The
   file-upload workflow remains the fallback for every other browser and must keep working.
 - **The Android backend's WRITE path is proven** (2026-08-09), from the head unit on the car: the
@@ -1377,3 +1639,190 @@ the correct polarity (wrong, and the K-line transceiver never enables — no byt
 
 Still untested, and listed in §11: the write path, break recovery, the flush polarity, backgrounding
 endurance, and 38400.
+
+---
+
+## 15. Diagnostics — measuring the write, and getting the numbers off the phone (2026-08-11)
+
+### The instrument now covers all three operations
+
+`transferTiming.ts` was armed only by `readPartialBinInner`, so §9's whole investigation looked at
+the bulk read and nothing else. Two operations were invisible, and both have levers the read does
+not:
+
+- **write** — a flash telegram's turnaround is the DME *programming cells*, not the DME *thinking*.
+  That single number decides how much a baud boost could ever be worth on the write path, and until
+  now it had only been back-derived from a README sentence (~110 ms/chunk, never measured).
+- **log** — the live poll is the one path with real host-side work in it.
+
+`TransferTimingReport` therefore carries a **`kind`** (`read` | `write` | `log`) and an explicit
+**`responseBytes`**, because the theoretical wire time is computed differently per operation: a read
+response carries the chunk (`chunkSize + 4`), a **write acknowledgement is a fixed 10 bytes** however
+much was written. Deriving it from `chunkSize` for all three would have produced a plausible number
+that quietly makes a healthy link look broken.
+
+A new lane, **`hostGap`** (previous exchange end → next exchange start), is us and nothing else. ~0
+on a bulk read. On the datalog it is where `flushLiveSamples` lands — a full `processLogData` plus a
+full VE recalculation, synchronous, inside the sample callback and O(n) in run length — and on
+Android that is not merely slow: our read loop is the only thing draining the FT232R's 256-byte FIFO
+(§14), which gives ~267 ms of headroom at 9600 before an overrun.
+
+**The write window is armed for the write telegrams only.** Not the erase (one exchange whose
+turnaround is a flash sector erase, seconds long) and not the read-back (turnaround ~40 ms, the DME
+thinking). All three in one median would blend three different physical quantities into the one
+number the measurement exists to isolate. The erase is timed separately, by a plain stopwatch.
+
+### What the first real write measured, and what it broke (2026-08-14)
+
+Two writes on the car, both clean, 0 retries, and the number the whole baud question was waiting on:
+
+| | verify | erase | write telegrams | verification | total |
+|---|---|---|---|---|---|
+| #1 | FULL | 1150 ms | 330 in 65.7 s | read-back **102.9 s** matched, checksum clean | ~170 s |
+| #2 | QUICK | 1134 ms | 330 in 66.2 s | checksum clean | **~68 s** |
+
+330, not 538: 39% of chunks were all-`0xFF` and skipped. The read-back is 103 s rather than the
+standalone read's 126 s because it starts on a DME already warmed by 330 telegrams — the same
+warm-up §9 documents, seen from the other side.
+
+**`median.turnaround` = 32.0 ms.** That is the DME's per-chunk flash programming time, measured for
+the first time; §11 had been carrying ~110 ms back-derived from a README sentence. The per-telegram
+budget at 9600 reconciles exactly:
+
+```
+request  131 B x 1.1458 = 150.1 ms   78%
+program  (DME)          =  32.0 ms   17%
+response  10 B          =  11.5 ms    6%
+                          -------
+                           193.6 ms  (measured median 192.7 / 203.0)
+```
+
+**So the write is wire-bound, not programming-bound, and the earlier estimate that a boost would cap
+around 2.2x is withdrawn.** At 125000 the same exchange is 11.5 + 32 + 0.9 = 44.4 ms, so 330
+telegrams fall from 65.7 s to ~14.7 s and a QUICK write goes from ~68 s to roughly 17 s — about 4x.
+
+**Round-trip byte-exactness, proven independently of the read-back.** Write #1 (patch OFF) sent
+`cab93360…`; the standalone READ between the two writes returned a BASE whose sha256 is `cab93360…`;
+write #2 (patch ON) then sent `07930701…`, which is bit-for-bit the hand-edited BIN that had been
+loaded in the first place. The patch is a clean involution and the flash is exact in both
+directions. A read-back verify compares against bytes held in the same process; this does not.
+
+#### Three lanes were wrong on the write path, and one was missing
+
+The lanes were modelled on a READ, whose request is 9 bytes and whose `write()` therefore resolves
+long before any echo. A write telegram is 131 bytes and takes 150 ms to leave, so:
+
+- **`echoLatency` reported −56.3 ms.** The first echo byte legitimately arrives before `write()`
+  returns. A negative latency is not a small error; the quantity does not exist for that exchange.
+  It is **NaN** now, which `JSON.stringify` renders as `null` and D1 stores as NULL.
+- **`responseWire` reported 0.0** on one write and 12.7 on the next. A 10-byte acknowledgement
+  arrives in a single rx wake, so first and last are the same instant. Also **NaN** now, gated on
+  having seen at least two response events — 0.0 read as "the response transferred instantly".
+- **`write` reported 71.7 ms**, against ~0.10 ms on a read. That one is *correct*: the transport
+  back-pressures on a 131-byte payload. Only its documentation was wrong, which said any non-zero
+  value pointed at WICG/serial#123 write-splitting.
+- **`requestWire` did not exist.** 78% of a write exchange was invisible. It is first-echo-byte to
+  last-echo-byte — our own request on the wire — with `theoreticalRequestWire` beside it, giving the
+  write the same lie-detector `responseWire` gives the read. This is the lane to watch when 125000
+  is attempted: it says whether the request really went out four times faster.
+
+`median()` now skips NaN rather than sorting it, so one measurable exchange among unmeasurable ones
+still produces the right answer. `turnaround` was never affected — it is measured from the last echo
+byte and reconciles with the arithmetic above to within a millisecond, which is why the 32 ms stands.
+
+The properties this rests on, stated rather than checked (see the note in §6): a short request keeps
+every lane, a long one reports the two structurally-unmeasurable ones as absent, and NaN survives
+serialisation as null.
+
+### The 125000 boost on the write path — armed, not yet run on the car (2026-08-14)
+
+The measurement above is what justifies this: 78% of a write telegram is our own request on the
+wire, so the rate is worth about 4x. It is also the most dangerous thing in the app, because the DME
+only accepts `0x91` from inside a programming session and the only way into one is the erase. The
+switch can therefore be attempted at exactly one moment — the moment the data area is gone.
+
+The ordering in `writePartialBinInner` is what bounds it, and it is asserted on the telegram trace
+rather than on the outcome, because "it fell back correctly" is only true if no flash data left at a
+rate that had not just answered:
+
+```
+erase (9600) -> 0x91 -> keep-alive probe -> [silence?] -> back to 9600 -> first write telegram
+```
+
+Four ways out, in order of how much they cost:
+
+1. **Refused** (`0xB0`): the port is never reopened, the write runs at 9600. Costs nothing.
+2. **Accepted and alive**: every write telegram goes at 125000, and a `finally` hands the session
+   back at 9600.
+3. **Accepted then silent**: the probe fails, the link drops to 9600, and **zero** write telegrams
+   have been sent. This is the case the harness exists for.
+4. **Dead at both rates**: the write stops with the data area erased and throws a message that says
+   so, plus the recovery — ignition off, 10 s, on, reconnect, WRITE again. `writePartialBin` always
+   restarts from the erase, so re-running it is safe. Not a brick, but not unharmed either, and the
+   confirm dialog says exactly that before the erase rather than after.
+
+**Only offered on WebUSB/FTDI**, and the gate is a transport capability (`reopenIsInPlace()`), not a
+platform test. Web Serial has to close and reopen the port to change rate; doing that on an erased
+ECU is the one host-side risk with nothing to fall back on. `setWriteBaud` refuses the arming
+outright on a transport that answers false, and `getWriteBaud` is read back into the selector — so
+the panel can never show 125000 while the link sits at 9600.
+
+**Armed on the live link, not at construction.** The first cut passed `writeBaud` as a constructor
+option, which put the control in the disconnected panel beside READ. That is wrong twice: the
+selector belongs on screen at the moment WRITE is pressed, and a dangerous mode you cannot see is
+worse than one you cannot change. It now resets to 9600 on every connect, in `connect()` rather than
+only in the `useState` initialiser, so it can never be inherited from a session the operator has
+stopped thinking about.
+
+The write timeout is derived from the rate (`programmingWriteTimeoutFor`: 3 s at >=125000, 10 s at
+38400+, 15 s below), following the reference. A fixed 15 s at 125000 would wait 340 telegram-times
+before admitting the link was gone.
+
+Nine scenarios this is written to satisfy, stated rather than checked (see the note in §6): the
+probe precedes the first write, a refused switch never reopens, an ACK-then-silent DME receives zero
+telegrams at 125000, the dead-at-both-rates throw names the erased state and the recovery, and
+arming after construction is what actually reaches the link.
+
+**Not yet run on a car.** The numbers above are arithmetic. `requestWire` is the lane that settles
+it: 150.1 ms at 9600 against a predicted ~11.5 ms.
+
+### The event log
+
+`linkEventLog.ts` — a bounded ring of phase-level lines: login, erase and its duration, the write
+telegram summary, finalize, the verification verdict, and the failure verbatim. `TransferTiming`
+answers "where did the milliseconds go"; this answers "what did we do, in what order, and what did
+the ECU say", and that is the question asked first.
+
+**Deliberately not a telegram trace.** Nothing in it is called per exchange — 538 strings on the
+critical path of an operation that erases before it writes is exactly the instrument-inside-its-own-
+measurement problem the timing file is built to avoid. A whole flash produces well under 20 lines.
+
+### The store
+
+Diagnostics upload themselves to D1 (`migrations/0003_diagnostics.sql`, `/api/diagnostics`), beside
+sessions and behind the same bearer token.
+
+Sessions sync on an explicit press, because a session is the user's work and a background task that
+quietly gave up would be a lie about where their data is. A diagnostic is the opposite: **it is
+worth most for the operations that FAILED**, which are exactly the ones that never produce a session
+worth syncing — a flash that died at chunk 300 on an already-erased ECU had nowhere to be written
+down. So it uploads by itself, best-effort and silent: `uploadDiagnostic` never throws, is never
+retried, and a failed upload leaves the downloadable copy untouched. An upload must never become the
+reason a flash reports a failure it did not have.
+
+Published on **every** path including failure, and cleared at the *start* of each operation — the
+same rule §9 paid for once, when a latency sweep came back as three byte-identical copies of the
+previous run.
+
+The list columns are denormalised out of the payload (`exchanges`, `elapsed_ms`, `baud`,
+`requested_baud`, `median_turnaround`, `median_total`, `median_host_gap`) so a sweep can be ranked
+without inflating a single row — and `requested_baud` sits beside `baud` because a refused switch
+silently falls back, and without both, four candidate rates all read as "9600".
+
+**R2 is deliberately not used.** A measured 301-exchange failed-write record, with a 300-sample gap
+trace and its event log, compresses to **594 bytes** — three orders of magnitude inside D1's
+1,000,000-byte per-value cap. A second store would buy nothing but something to keep in step, and a
+diagnostic too big for this has stopped being a summary. The endpoint rejects one over 900 KB with
+that sentence rather than letting D1 reject it generically.
+
+`npm run db:diagnostics` lists the last 30 at a desk.

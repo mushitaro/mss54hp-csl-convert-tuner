@@ -1,4 +1,7 @@
-import { LogDataPoint } from '@/lib/types';
+// `import type`: Node's type stripping cannot tell a type-only named import from a value one, so a
+// harness that loads this module directly fails on the missing export.
+import type { LogDataPoint } from '@/lib/types';
+import { timeScaleSeconds } from './filter';
 
 /**
  * Sample rate a run of log points implies, in Hz.
@@ -17,7 +20,12 @@ import { LogDataPoint } from '@/lib/types';
  */
 export function sampleRateHz(points: readonly LogDataPoint[]): number | undefined {
     if (points.length < 2) return undefined;
-    const span = points[points.length - 1].time - points[0].time;
+    // In SECONDS, whatever the column is in. A live DS2 run stamps seconds and a Testo CSV stamps
+    // milliseconds, and this used to divide by the raw span either way — so an imported CSV reported
+    // a thousandth of its real rate. Nothing crashed; the RATE cell just said 0.00, and every count
+    // that reads "at this rate" was a thousand times out. `timeScaleSeconds` is the same
+    // discrimination the filter and the rf_korr settling window already make, so all three agree.
+    const span = (points[points.length - 1].time - points[0].time) * timeScaleSeconds(points as LogDataPoint[]);
     if (!(span > 0)) return undefined;
     const hz = (points.length - 1) / span;
     return Number.isFinite(hz) ? hz : undefined;
@@ -26,6 +34,9 @@ export function sampleRateHz(points: readonly LogDataPoint[]): number | undefine
 /**
  * Same maths over bare timestamps, for the live path — it keeps a rolling window of `time` values
  * rather than whole points, so it never has to copy a LogDataPoint per sample.
+ *
+ * No unit discrimination here, and it needs none: this is only ever fed by the DS2 poll, which
+ * stamps `(performance.now() - startTime) / 1000`. Seconds, by construction.
  */
 export function sampleRateHzFromTimes(times: readonly number[]): number | undefined {
     if (times.length < 2) return undefined;

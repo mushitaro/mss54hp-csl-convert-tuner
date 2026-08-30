@@ -9,7 +9,16 @@
  * families: liveValueBlocks.ts and adaptationBlocks.ts each own their field tables, and share this.
  */
 
-export type FieldFormat = 'int7' | 'uint8' | 'uint10' | 'int15' | 'uint16' | 'int31' | 'uint32';
+/**
+ * `uint10` is gone, and its removal is the point.
+ *
+ * The reference enum has one, and it was carried across as an alias for `uint16` — same two bytes,
+ * same read, no mask. Nothing in either field table ever used it, so it was a name that would have
+ * produced a wrong number the first time somebody reached for it: a ten-bit field read as sixteen
+ * bits is off by whatever the top six hold. A format that does not decode what it is named after is
+ * worse than no format, and adding the mask would be inventing an encoding no block here uses.
+ */
+export type FieldFormat = 'int7' | 'uint8' | 'int15' | 'uint16' | 'int31' | 'uint32';
 
 export interface FieldDef {
     symbol: string;
@@ -22,7 +31,7 @@ export interface FieldDef {
 export function byteLength(format: FieldFormat): number {
     switch (format) {
         case 'int7': case 'uint8': return 1;
-        case 'uint10': case 'int15': case 'uint16': return 2;
+        case 'int15': case 'uint16': return 2;
         case 'int31': case 'uint32': return 4;
     }
 }
@@ -31,7 +40,7 @@ export function readRaw(bytes: Uint8Array, format: FieldFormat): number {
     switch (format) {
         case 'int7': return (bytes[0] << 24) >> 24; // sign-extend int8
         case 'uint8': return bytes[0];
-        case 'uint10': case 'uint16': return (bytes[0] << 8) | bytes[1];
+        case 'uint16': return (bytes[0] << 8) | bytes[1];
         case 'int15': return ((bytes[0] << 8) | bytes[1]) << 16 >> 16; // sign-extend int16
         case 'uint32': return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
         case 'int31': return (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];

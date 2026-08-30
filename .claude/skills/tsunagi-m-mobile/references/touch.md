@@ -101,6 +101,19 @@ The classic failure: a control inside an auto-fit `transform: scale()`. Designed
 
 Measured, after: arming toggles 14×8 → 42×35, filter rows ~15px tall → 39, dial 32 → 64px.
 
+## A tooltip is not a delivery mechanism
+
+**There is no hover.** So a `title` is not "the full text, available on demand" — on a phone it is text that does not exist. Write it if you like for the desk; never let it be the only copy of something the reader needs.
+
+This is the expensive one, because it fails silently and only for the people who are not testing. In this app the sentence explaining **why a control was locked** existed solely as a `title`. On a desk it looked complete. In the car it was blank, and **two complete test drives were recorded and thrown away** before anyone could see which condition had not been met.
+
+The audit is mechanical: grep for `title=` and, for each, ask *does a phone user need this to decide what to do next?* If yes, it must be rendered.
+
+- **Render it into a reserved slot** — the layout is already stable there (`tsunagi-m-design` → Layout stability), so a line that appears and disappears cannot move anything.
+- **Make it short enough not to truncate.** A reserved row is one line: `RF KORR: NEEDS PATCH ON`, not a paragraph. The paragraph stays in `title` for the mouse.
+- **Show it only when it is actionable.** A lock reason before the user has done anything is noise; the same line after a run is the answer to the only question they have.
+- The same applies to a disabled control's reason, an error's detail, and any "why is this greyed out" — see also the SAVE cell that dropped its own reason on the floor because the label was hard-coded.
+
 ## A native dialog cannot be told how tall to be
 
 `alert` and `confirm` size themselves to their text. That is fine for a line, and on a short viewport it is a trap for anything longer: the box grows, the buttons go below the fold, and the dialog becomes a thing you scroll to answer — or, more often, answer without reading. On this app the two worst offenders were the instructions shown when a run ends and **the confirmation before writing to the ECU**, which is the last thing between a tap and a flash.
@@ -154,3 +167,9 @@ openUp ? 'fixed inset-x-3 bottom-[60px] max-h-[min(calc(100svh-72px),Npx)] overf
 **Size `N` from the panel's measured natural content height, per panel.** A shared literal is a guess — three panels here needed 494, 532 and 172 against a 420 that nobody had measured, and one had a *second* scroller nested inside it overflowing 58px even on a desktop.
 
 Some viewports cannot be satisfied: a 393px-tall window cannot show a 494px panel, and no height value changes that. Say so plainly rather than shaving numbers — the fix there is a content change (two-column controls, or a full-height sheet below some height), not a cap.
+
+**And inside a scroll container the failure is not bad placement, it is an invisible open state.** For any row near the scroller's edge the menu clips away to nothing while its full-viewport scrim, transparent, goes on eating every touch — so the screen looks untouched and dead, and the only symptom the user can report is "scrolling stopped working". A scroll container cannot clip what it does not contain, so pin it as above, then three rules proven in `SessionList.tsx` (commit 27f8b38, verified at 375×812):
+
+- **Tint the scrim on the narrow layout** — `bg-slate-950/60`, `min-[1280px]:bg-transparent`. An open state nobody can see is indistinguishable from a frozen app. No `backdrop-blur`: `performance.md` §5 measured that at ~1s of phone paint for nothing behind it.
+- **Close on pointerDOWN, not click**, so the very swipe that tries to scroll dismisses it first instead of being swallowed whole.
+- **A viewport-pinned sheet needs a header naming what it acts on.** It no longer sits beside its row, so nothing else says which session the actions will hit — redundant on the desk, where the anchored menu stays exactly as it was.

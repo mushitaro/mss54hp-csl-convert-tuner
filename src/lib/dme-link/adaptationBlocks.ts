@@ -11,7 +11,11 @@
  * regulator in liveValueBlocks.ts) — a different value entirely.
  */
 
-import { FieldDef, decodeField, byteLength } from './blockDecoder';
+// `import type` for the interface, separately: Node's type stripping cannot tell a type-only named
+// import from a value one, so a verify script that reaches this module through the import graph
+// dies on "does not provide an export named 'FieldDef'". Same reason as rfKorrTuner.ts:3.
+import type { FieldDef } from './blockDecoder';
+import { decodeField, byteLength } from './blockDecoder';
 
 /**
  * Smallest payload that can still carry every field this app decodes from a block.
@@ -36,14 +40,32 @@ export interface AdaptationFieldDef extends FieldDef {
     /**
      * What this value is expected to read once cleared. NOT all zero: laa_f1/laa_f2 are
      * multiplicative trim factors on a 1/32768 scale, so their neutral is 1.0 — a factor of 0 would
-     * mean zero fuel. (The same reasoning is already in webSerialDmeLink.pollLiveMeasurement, which
-     * falls back to 1.0 as neutral trim for la_f_regler on that identical scale.) The other ten are
-     * additive and clear to 0.
+     * mean zero fuel. `la_f_regler` is on the same scale and its neutral is the same 1.0, which is
+     * exactly why the live poll must NOT hand back 1.0 for a block it did not read: there, 1.0 is a
+     * measurement meaning "the controller wanted no correction". Here it is an expectation about
+     * what a cleared cell should hold. The other ten values are additive and clear to 0.
      *
      * Advisory only — shown as an expected value, never used to decide whether a clear worked.
      * Asserting "cleared == 0" would report a false failure on the two factor rows.
+     *
+     * Only meaningful when `clearedByTuneReset` — see there.
      */
     cleared: number;
+
+    /**
+     * Whether TUNE_ADAPTATION_CLEAR actually clears this row.
+     *
+     * Split out from `cleared` on 2026-08-15, when VANOS left the clear mask on karter16's advice.
+     * The read set is defined here and the write set is defined by the mask in ds2.ts, and nothing
+     * connected the two: dropping bit 0x40 alone would have left the dialog printing "expected 0"
+     * beside two rows that are no longer touched, with an AFTER that disagrees with it and no
+     * explanation. `cleared` is advisory (it decides nothing), so nothing would have caught it.
+     *
+     * Optional, and absent means true. Snapshots persisted before the split were taken under mask
+     * 0x47, where VANOS *was* cleared — so the default reads old records correctly rather than
+     * retconning them.
+     */
+    clearedByTuneReset?: boolean;
 }
 
 /**
@@ -63,8 +85,16 @@ export const STANDARD_ADAPTATIONS_BLOCK = {
         { symbol: 'laa_offset2', label: 'Lambda adaptation offset 2', offset: 10, format: 'int15', scale: 0.002, add: 0, unit: 'ms', group: 'Lambda / Fuel Trim', cleared: 0 },
         // 'int7' is this codebase's name for a sign-extended single byte — the same thing the
         // reference's adaptation table calls Int8. Not a mismatch; see blockDecoder.ts.
-        { symbol: 'evan1_adap', label: 'Intake VANOS bank 1 adaptation', offset: 80, format: 'int7', scale: 0.1, add: 0, unit: 'deg KW', group: 'VANOS', cleared: 0 },
-        { symbol: 'avan1_adap', label: 'Exhaust VANOS bank 1 adaptation', offset: 81, format: 'int7', scale: 0.1, add: 0, unit: 'deg KW', group: 'VANOS', cleared: 0 },
+        //
+        // READ but not cleared. karter16, thread 242281 #161: "There's nothing in this tuning process
+        // that impacts them, and it's probably just a distraction to reset them and force the DME to
+        // re-learn them." The stronger version of that argument is that the re-learn moves cam phase,
+        // which moves filling — so clearing them perturbs the very thing a VE log is measuring.
+        // They stay visible because knowing where the adaptation sits is still worth something, and
+        // because the max-power cam sweep needs them cleared by its own explicit step
+        // (VANOS_ADAPTATION_CLEAR in ds2.ts), not silently by the tune reset.
+        { symbol: 'evan1_adap', label: 'Intake VANOS bank 1 adaptation', offset: 80, format: 'int7', scale: 0.1, add: 0, unit: 'deg KW', group: 'VANOS', cleared: 0, clearedByTuneReset: false },
+        { symbol: 'avan1_adap', label: 'Exhaust VANOS bank 1 adaptation', offset: 81, format: 'int7', scale: 0.1, add: 0, unit: 'deg KW', group: 'VANOS', cleared: 0, clearedByTuneReset: false },
     ] satisfies AdaptationFieldDef[],
 };
 
@@ -98,9 +128,13 @@ export interface AdaptationReading {
     /** null = the DME's response was too short to contain this field. Distinct from a decoded 0. */
     value: number | null;
     cleared: number;
+    /** Mirrors AdaptationFieldDef.clearedByTuneReset. Absent on snapshots stored before the split,
+     *  where it correctly reads as true. */
+    clearedByTuneReset?: boolean;
 }
 
-/** A decoded read of all twelve values. Plain data — it is persisted into IndexedDB as-is. */
+/** A decoded read of all twelve values — ten of which the tune reset clears. Plain data: it is
+ *  persisted into IndexedDB as-is. */
 export interface AdaptationSnapshot {
     at: number;
     readings: AdaptationReading[];
@@ -114,7 +148,14 @@ function decodeBlock(fields: readonly AdaptationFieldDef[], payload: Uint8Array)
         group: field.group,
         value: decodeField(payload, field),
         cleared: field.cleared,
+        clearedByTuneReset: field.clearedByTuneReset,
     }));
+}
+
+/** Whether the tune reset clears this row. One place, because the dialog, the mock and any future
+ *  caller must not each decide how to read an absent flag. */
+export function isClearedByTuneReset(row: { clearedByTuneReset?: boolean }): boolean {
+    return row.clearedByTuneReset !== false;
 }
 
 /** Block 0x06's six rows then block 0x16's six, in display order. */

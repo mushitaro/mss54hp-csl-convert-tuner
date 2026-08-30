@@ -71,13 +71,27 @@ function openLiveDb(): Promise<IDBDatabase> {
                 db.createObjectStore(CHUNKS_STORE, { keyPath: ['runId', 'seq'] });
             }
         };
+        // `blocked` is not terminal: the same request still fires `onsuccess` once the other tab
+        // lets go, and resolving an already-rejected promise silently leaks that open connection —
+        // which then blocks the next upgrade for good. See the fuller note in schema.ts.
+        let settled = false;
         request.onsuccess = () => {
             const db = request.result;
             db.onversionchange = () => db.close();
+            if (settled) { db.close(); return; }
+            settled = true;
             resolve(db);
         };
-        request.onerror = () => reject(request.error);
-        request.onblocked = () => reject(new Error('Live-run database upgrade is blocked by another open tab.'));
+        request.onerror = () => {
+            if (settled) return;
+            settled = true;
+            reject(request.error);
+        };
+        request.onblocked = () => {
+            if (settled) return;
+            settled = true;
+            reject(new Error('Live-run database upgrade is blocked by another open tab.'));
+        };
     });
 }
 

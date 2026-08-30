@@ -1,3 +1,4 @@
+import type { ProcessId } from '@/lib/log-engine/logProfile';
 import { useCallback, useEffect, useState } from 'react';
 import { LogDataPoint, VEMap } from '@/lib/types';
 import { TuningSession, BaseOrigin, TuneSettings, FlashRecord, AdaptationResetRecord, FlashCounterResetRecord, SessionBinariesRecord } from '@/lib/db/schema';
@@ -7,6 +8,8 @@ import {
     saveTune,
     renameSession,
     archiveSession,
+    setSessionProcess,
+    saveResearchRun,
     appendFlashRecord,
     appendAdaptationReset,
     appendFlashCounterReset,
@@ -15,6 +18,7 @@ import {
     getSessionBinaries,
     deleteSession,
 } from '@/lib/db/sessionRepository';
+import type { InertiaSample, IdleSample } from '@/lib/dme-link/types';
 
 export function useSessionDb() {
     const [sessions, setSessions] = useState<TuningSession[]>([]);
@@ -26,11 +30,11 @@ export function useSessionDb() {
         try {
             setSessions(await listSessions());
             setError(null);
-        } catch (e: any) {
+        } catch (e) {
             // Surfaced rather than swallowed: a blocked v2 upgrade lands here, and silently showing
             // an empty list would look like "my sessions are gone".
             console.error('Failed to load session DB', e);
-            setError(e?.message ?? String(e));
+            setError(e instanceof Error ? e.message : String(e));
         } finally {
             setLoading(false);
         }
@@ -66,6 +70,20 @@ export function useSessionDb() {
         await refresh();
     }, [refresh]);
 
+    const saveResearch = useCallback(async (params: {
+        sessionId: string; process: ProcessId; log: LogDataPoint[];
+        inertia?: InertiaSample[]; idle?: IdleSample[];
+    }) => {
+        const s = await saveResearchRun(params);
+        await refresh();
+        return s;
+    }, [refresh]);
+
+    const setProcess = useCallback(async (id: string, process: ProcessId) => {
+        await setSessionProcess(id, process);
+        await refresh();
+    }, [refresh]);
+
     const archive = useCallback(async (id: string) => {
         await archiveSession(id);
         await refresh();
@@ -96,7 +114,7 @@ export function useSessionDb() {
 
     return {
         sessions, loading, error, refresh,
-        newDraft, setBase, saveSessionTune, rename, archive, recordFlash, recordAdaptationReset,
+        newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
         recordFlashCounterReset, remove,
         loadLog, loadBinaries,
     };

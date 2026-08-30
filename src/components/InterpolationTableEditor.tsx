@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { InterpolationPoint } from '@/lib/types';
-import { Settings, Save, RotateCcw, Activity } from 'lucide-react';
+import { Save, RotateCcw } from 'lucide-react';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { APP_CONFIG } from '@/config/constants';
 

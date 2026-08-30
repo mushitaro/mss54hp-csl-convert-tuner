@@ -1,0 +1,138 @@
+import type { EcuItemDef, EcuScaling } from './types';
+
+/** Checksum slots, from docs/implementation-notes.md §5. Nothing in any catalog may overlap them:
+ *  they are rewritten by applyChecksumCorrection() after every other patch, so an item living
+ *  there would read back as something other than what was written. Exported — the calibration
+ *  editor's lock computation and its byte-boundary guard must read the SAME table, or a slot
+ *  reading corrected in one place silently diverges in the other. */
+export const CHECKSUM_SLOTS: ReadonlyArray<readonly [number, number]> = [
+    [0x3FFC, 0x4000], // slave
+    [0xBFFC, 0xC000], // master
+];
+export const PARTIAL_BIN_LENGTH = 0x10000;
+
+/** Half-open overlap test against both slots. Half-open is load-bearing: four parameters START
+ *  at 0x4000/0xC000 — one byte past a slot — and a closed-interval test refuses them falsely. */
+export function overlapsChecksumSlot(start: number, end: number): boolean {
+    return CHECKSUM_SLOTS.some(([cs, ce]) => start < ce && end > cs);
+}
+
+/** The identity scaling. Common enough (rpm, °C, plain counts) to be worth naming once. */
+export const IDENTITY: EcuScaling = {
+    math: 'X',
+    toPhysical: raw => raw,
+    toRaw: v => v,
+};
+
+/** `X / d`, the most common XDF form. */
+export function divideBy(d: number): EcuScaling {
+    return { math: `X/${d}`, toPhysical: raw => raw / d, toRaw: v => v * d };
+}
+
+/**
+ * `X * m`, the coarse-quantisation form.
+ *
+ * Worth naming separately from `divideBy` because the direction of the quantisation trap reverses:
+ * a `divideBy(1024)` item resolves finely and a `multiplyBy(40)` one cannot express anything
+ * between its steps at all. Every SA/WE speed threshold is `X * 40`, so "raise it by 70 rpm" is not
+ * a writable instruction — see `quantise` in lib/inertia/corrections.ts.
+ */
+export function multiplyBy(m: number): EcuScaling {
+    return { math: `X*${m}`, toPhysical: raw => raw * m, toRaw: v => v / m };
+}
+
+/** `X - offset`, used by every temperature that stores °C + 48. */
+export function minus(offset: number): EcuScaling {
+    return { math: `X-${offset}`, toPhysical: raw => raw - offset, toRaw: v => v + offset };
+}
+
+/**
+ * `X * m + c`, the two-term form.
+ *
+ * Separate from `multiplyBy` because the offset is where the traps are. `KL_RF_P_UMG_KORR`'s axis
+ * is `raw * 3 + 498.5`: the half-mbar is not decoration, it falls out of `p_umg_calc`'s
+ * `(P_UMG_FILTER - 0x3E50) / 0x60` at 1/32 mbar per count, and rounding it to 500 moves the curve's
+ * 1.0000 node off 960.5 mbar — which is the pressure the whole VE table is defined at.
+ */
+export function affine(m: number, c: number): EcuScaling {
+    return { math: `X*${m}+${c}`, toPhysical: raw => raw * m + c, toRaw: v => (v - c) / m };
+}
+
+/** `n / X` — non-affine, and the reason EcuScaling carries two functions instead of a factor. */
+export function reciprocal(n: number): EcuScaling {
+    return {
+        math: `${n}/x`,
+        toPhysical: raw => (raw === 0 ? 0 : n / raw),
+        toRaw: v => (v === 0 ? 0 : n / v),
+    };
+}
+
+/** Byte span an item occupies, per contiguous run. Used by validateCatalog. */
+function runs(def: EcuItemDef): Array<[number, number]> {
+    const span = (address: number, count: number, bits: 8 | 16): [number, number] =>
+        [address, address + count * (bits / 8)];
+    switch (def.kind) {
+        case 'constant':
+            return [span(def.address, 1, def.bits)];
+        case 'series':
+            return [span(def.values.address, def.values.n, def.values.bits)];
+        case 'curve':
+            return [span(def.x.address, def.x.n, def.x.bits),
+            span(def.values.address, def.values.n, def.values.bits)];
+        case 'map':
+            return [span(def.x.address, def.x.n, def.x.bits),
+            span(def.y.address, def.y.n, def.y.bits),
+            span(def.values.address, def.values.rows * def.values.cols, def.values.bits)];
+    }
+}
+
+/**
+ * Structural checks over a catalog. Run from a test, not at import time: a bad entry should fail a
+ * build, not blank the app at runtime.
+ *
+ * Returns the problems rather than throwing, so a caller can report all of them at once instead of
+ * one per run.
+ */
+export function validateCatalog(defs: EcuItemDef[]): string[] {
+    const problems: string[] = [];
+    const seen = new Set<string>();
+
+    for (const def of defs) {
+        const at = `${def.symbol} @0x${def.address.toString(16).toUpperCase()}`;
+
+        if (seen.has(def.symbol)) problems.push(`${at}: duplicate symbol`);
+        seen.add(def.symbol);
+
+        const expectedBank = def.address < 0x8000 ? 'slave' : 'master';
+        if (def.bank !== expectedBank) {
+            problems.push(`${at}: bank says ${def.bank}, address says ${expectedBank}`);
+        }
+
+        if (def.kind === 'curve' && def.values.n !== def.x.n) {
+            problems.push(`${at}: ${def.values.n} values against a ${def.x.n}-point axis`);
+        }
+        if (def.kind === 'series' && def.indexNames.length !== def.values.n) {
+            problems.push(`${at}: ${def.indexNames.length} index names against ${def.values.n} values`);
+        }
+        if (def.kind === 'map') {
+            if (def.values.cols !== def.x.n) {
+                problems.push(`${at}: ${def.values.cols} columns against a ${def.x.n}-point x axis`);
+            }
+            if (def.values.rows !== def.y.n) {
+                problems.push(`${at}: ${def.values.rows} rows against a ${def.y.n}-point y axis`);
+            }
+        }
+
+        for (const [start, end] of runs(def)) {
+            if (start < 0 || end > PARTIAL_BIN_LENGTH) {
+                problems.push(`${at}: run 0x${start.toString(16)}-0x${end.toString(16)} is outside the partial BIN`);
+            }
+            for (const [cs, ce] of CHECKSUM_SLOTS) {
+                if (start < ce && end > cs) {
+                    problems.push(`${at}: run 0x${start.toString(16)}-0x${end.toString(16)} overlaps the checksum slot at 0x${cs.toString(16)}`);
+                }
+            }
+        }
+    }
+    return problems;
+}

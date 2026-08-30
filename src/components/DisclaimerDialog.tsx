@@ -31,7 +31,7 @@ const TEXT = {
         bullets: [
             <>Changing or writing DME data with this Tool may cause <span className="text-slate-100 font-bold">serious damage</span> to the engine, drivetrain, vehicle, and beyond. Use it entirely <span className="text-red-400 font-bold">at your own risk</span>.</>,
             <>This Tool is provided <span className="text-slate-100 font-bold">as-is, without warranty</span>. The author and contributors accept <span className="text-red-400 font-bold">no liability whatsoever</span> for any damage arising from its use or inability to be used.</>,
-            <>Tuning is limited to <span className="text-slate-100 font-bold">legally permitted uses</span> such as competition and off-road. <span className="text-slate-100 font-bold">Legal compliance</span> for public-road use, emissions, and safety standards is the user's responsibility.</>,
+            <>Tuning is limited to <span className="text-slate-100 font-bold">legally permitted uses</span> such as competition and off-road. <span className="text-slate-100 font-bold">Legal compliance</span> for public-road use, emissions, and safety standards is the user&apos;s responsibility.</>,
             <>Always keep a <span className="text-slate-100 font-bold">backup</span> of the stock data (BASE) before writing.</>,
             <>Work only with <span className="text-slate-100 font-bold">stable battery voltage and a stable connection</span>. Interrupting a write can damage the DME.</>,
         ],

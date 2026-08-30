@@ -3,9 +3,13 @@ import dynamic from 'next/dynamic';
 import { LogDataPoint } from '@/lib/types';
 import { Layout, Config, Data } from 'plotly.js';
 import { FieldKey, LOG_FIELD_REGISTRY, isFieldPresent, DEFAULT_FIELD_VISIBILITY } from '@/lib/field-registry/registry';
+import type { PlotParams } from 'react-plotly.js';
+import type { PlotMouseEvent } from 'plotly.js';
 
 // Dynamically import Plotly to avoid SSR issues
-const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as React.ComponentType<any>;
+// Typed as react-plotly.js's own props: `dynamic()` widens the component to one with no props, so
+// a cast is unavoidable, but casting to the real type keeps every prop below checked.
+const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as React.ComponentType<PlotParams>;
 
 /** Three scales on one time axis, so three y-axes: RPM left, Load and Lambda overlaid right.
  *
@@ -61,8 +65,8 @@ const BASE_LAYOUT: Partial<Layout> = {
     },
     // Lambda (right)
     yaxis2: {
-        title: { text: 'Lambda', font: { color: LOG_FIELD_REGISTRY.lambda1.color } },
-        tickfont: { color: LOG_FIELD_REGISTRY.lambda1.color },
+        title: { text: 'Lambda', font: { color: LOG_FIELD_REGISTRY.stft1.color } },
+        tickfont: { color: LOG_FIELD_REGISTRY.stft1.color },
         overlaying: 'y',
         side: 'right',
         range: [0.65, 1.35],
@@ -148,13 +152,28 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
 }: Props) {
     const lastHoveredIndex = React.useRef<number | null>(null);
     const wrapperRef = React.useRef<HTMLDivElement>(null);
+    /**
+     * The current window, for the gesture effect to read WITHOUT depending on it.
+     *
+     * `data` in that effect's dependency list is a gesture killer, and it killed this one: a pan
+     * moves the window, the window is `data`, so the effect tore down and re-added its listeners in
+     * the middle of the drag — resetting `tracking`, `decided` and the pointer id. The drag stopped
+     * dead after its first frame while the finger was still down, and Plotly (which had the touch
+     * stream all along, see below) went on moving the chart. That is most of what "the position is
+     * wrong when I let go" was.
+     */
+    const dataRef = React.useRef(data);
+    // After every render, never during one: the gesture handlers read this from user events, which
+    // are always later than the commit that set it.
+    React.useEffect(() => { dataRef.current = data; });
     /** First timestamp of the previous window, read only inside the layout effect below. */
     const prevFirstTimeRef = React.useRef<number | null>(null);
     const presenceSource = presenceData && presenceData.length > 0 ? presenceData : data;
 
     /**
      * Two-finger horizontal swipe scrolls the shared data WINDOW. Vertical and pinch keep zooming the
-     * chart's own axis.
+     * chart's own axis. On a touchscreen the same split, by finger count: one finger sideways moves
+     * the window, two fingers magnify (see `pinch` below).
      *
      * The distinction is the whole point. Panning Plotly's x-range would move this chart and nothing
      * else, and the row table sitting beside it would go on showing a different slice of the log —
@@ -185,12 +204,15 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         const wrapper = wrapperRef.current;
         if (!wrapper) return;
         let pendingPx = 0;
+        /** Sub-point remainder of the pan, kept across frames. See where it is spent. */
+        let pendingPoints = 0;
         let frame = 0;
 
         const apply = () => {
             frame = 0;
             const px = pendingPx;
             pendingPx = 0;
+            const data = dataRef.current;
             // Plotly hangs the resolved layout off the graph div; not in @types/plotly.js because it
             // is internal, so name only the fields actually read rather than reaching for `any`.
             type ResolvedAxis = { range?: [number, number]; autorange?: boolean | string };
@@ -201,14 +223,33 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             const plotWidth = full.width - full.margin.l - full.margin.r;
             if (!(plotWidth > 0) || data.length === 0) return;
 
+            const ax = full.xaxis;
+
             if (canPanWindow && onPanWindow) {
-                // Points per pixel across the visible window — so a swipe moves the data under the
-                // fingers at the rate the eye expects, whatever the window and pane widths are.
-                onPanWindow((px / plotWidth) * data.length);
+                // Points per pixel across what is ON SCREEN — not across the window.
+                //
+                // The two are the same only when nothing is magnified, and this used to assume it
+                // always: a pixel moved `data.length / plotWidth` points whatever the axis range
+                // was, so at 2x zoom the log went past at twice the speed of the finger and at 10x,
+                // ten times. Measured at 375px on a 2,000-point window magnified 2x: a 30px drag
+                // moved the window 235 points where the finger had asked for 118.
+                //
+                // `zoom` is the fraction of the window the axis is showing — 1 fitted, 1/4 at 4x —
+                // and it is exactly the factor the rate was out by.
+                const windowSpan = data.length > 1 ? data[data.length - 1].time - data[0].time : 0;
+                const zoom = ax?.range && windowSpan > 0
+                    ? Math.min(1, (ax.range[1] - ax.range[0]) / windowSpan)
+                    : 1;
+                // Whole points only, with the remainder kept: `panWindow` rounds, so at a deep zoom
+                // a frame's worth of movement is a fraction of a point and rounding it away would
+                // stall the drag completely. The accumulator lives in this closure, which now
+                // survives the whole gesture — see `dataRef`.
+                pendingPoints += (px / plotWidth) * data.length * zoom;
+                const whole = Math.trunc(pendingPoints);
+                if (whole !== 0) { pendingPoints -= whole; onPanWindow(whole); }
                 return;
             }
 
-            const ax = full.xaxis;
             // Not zoomed means the whole log is already visible and there is nowhere to pan to.
             // Relayouting here would also cancel autorange and silently lock the view.
             if (!ax?.range || ax.autorange || !plotlyModule) return;
@@ -262,19 +303,120 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         let decided: 'horizontal' | 'vertical' | null = null;
         let lastX = 0, startX = 0, startY = 0, pointerId = -1;
 
+        /**
+         * Two fingers magnify. One finger moves the window.
+         *
+         * The same split the trackpad has had all along — a pinch there arrives as a ctrlKey wheel
+         * and is handed to Plotly untouched — and a touchscreen had no half of it: the chart could
+         * be moved but never magnified, so a stretch of a long log could be reached and not read
+         * (operator, 2026-08-25). Zoom stays chart-local for the reason stated above: it changes
+         * how much of the window is on screen, not which window that is, so the table has nothing
+         * to follow.
+         *
+         * Written here rather than left to Plotly's own touch handling because this wrapper already
+         * intercepts the pointer stream in the capture phase, and a pinch whose first finger is
+         * claimed as a horizontal drag is a window pan with a second finger resting on it. The two
+         * gestures have to be decided in one place or they arbitrate by accident.
+         *
+         * The magnification is anchored under the fingers: the time at the midpoint of the pinch
+         * stays where it is, so the chart stretches about the thing being looked at rather than
+         * about its own centre. It cannot open wider than the window — beyond that there is nothing
+         * to show, and letting it would put a range on the axis that the data does not cover.
+         */
+        const active = new Map<number, { x: number; y: number }>();
+        let pinch: { dist: number; frac: number; range: [number, number] } | null = null;
+        let zoomFrame = 0;
+
+        /** The plotting area's geometry and the range on screen, or null if Plotly is not ready. */
+        const plotState = () => {
+            type ResolvedAxis = { range?: [number, number] };
+            type ResolvedLayout = { width?: number; margin?: { l: number; r: number }; xaxis?: ResolvedAxis };
+            const gd = wrapper.querySelector('.js-plotly-plot') as (HTMLElement & { _fullLayout?: ResolvedLayout }) | null;
+            const full = gd?._fullLayout;
+            if (!gd || !full || full.width === undefined || !full.margin || !full.xaxis?.range) return null;
+            const width = full.width - full.margin.l - full.margin.r;
+            if (!(width > 0)) return null;
+            // `range` is resolved whether or not the axis is autoranging, so a pinch that starts
+            // from the fitted view magnifies from exactly what is on screen.
+            return { gd, left: full.margin.l, width, range: full.xaxis.range };
+        };
+
+        const spread = () => {
+            const [a, b] = [...active.values()];
+            return Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        };
+
+        const startPinch = () => {
+            const st = plotState();
+            if (!st) return;
+            // A finger already tracking a drag is now half of a pinch — end the drag rather than
+            // letting both run: the window would slide while the axis stretched.
+            if (decided === 'horizontal' && pointerId >= 0) {
+                try { wrapper.releasePointerCapture(pointerId); } catch { /* never captured */ }
+            }
+            tracking = false; decided = null; pointerId = -1; pendingPx = 0;
+
+            const [a, b] = [...active.values()];
+            const mid = (a.x + b.x) / 2 - wrapper.getBoundingClientRect().left - st.left;
+            pinch = {
+                dist: spread(),
+                frac: Math.min(1, Math.max(0, mid / st.width)),
+                range: [st.range[0], st.range[1]],
+            };
+        };
+
+        const applyZoom = () => {
+            zoomFrame = 0;
+            const st = plotState();
+            const data = dataRef.current;
+            if (!st || !pinch || active.size < 2 || !plotlyModule || data.length === 0) return;
+            const [r0, r1] = pinch.range;
+            const span0 = r1 - r0;
+            const first = data[0].time;
+            const last = data[data.length - 1].time;
+            // Five points is as far in as magnifying a line of samples can usefully go; past that
+            // the trace is two segments and the axis labels are noise.
+            const minSpan = Math.max(1e-6, (last - first) * (5 / data.length));
+            const span = Math.min(last - first, Math.max(minSpan, span0 * (pinch.dist / spread())));
+            const anchor = r0 + pinch.frac * span0;
+            let lo = anchor - pinch.frac * span;
+            let hi = lo + span;
+            // Clamped as a whole, exactly as the pan is: moving one edge alone would change the
+            // magnification the fingers are holding.
+            if (lo < first) { hi += first - lo; lo = first; }
+            if (hi > last) { lo -= hi - last; hi = last; }
+            void plotlyModule.relayout(st.gd, { 'xaxis.range': [lo, hi] });
+        };
+
         const onPointerDown = (e: PointerEvent) => {
-            if (e.pointerType === 'mouse' || !e.isPrimary) return;
+            if (e.pointerType === 'mouse') return;
+            active.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (active.size === 2) { startPinch(); return; }
+            if (!e.isPrimary || active.size > 2) return;
             tracking = true; decided = null; pointerId = e.pointerId;
             startX = lastX = e.clientX; startY = e.clientY;
         };
 
         const onPointerMove = (e: PointerEvent) => {
+            const held = active.get(e.pointerId);
+            if (held) { held.x = e.clientX; held.y = e.clientY; }
+            if (pinch) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!zoomFrame) zoomFrame = requestAnimationFrame(applyZoom);
+                return;
+            }
             if (!tracking || e.pointerId !== pointerId) return;
             if (decided === null) {
                 const dx = Math.abs(e.clientX - startX), dy = Math.abs(e.clientY - startY);
                 if (dx < 6 && dy < 6) return;          // below the slop threshold, no verdict yet
                 decided = dx > dy ? 'horizontal' : 'vertical';
-                if (decided === 'horizontal') wrapper.setPointerCapture(e.pointerId);
+                // Throws for a pointer the browser has no record of — every synthetic one, which is
+                // how this gesture is exercised in a test. A capture that cannot be taken costs the
+                // drag nothing here: the listeners are on the wrapper and the finger is inside it.
+                if (decided === 'horizontal') {
+                    try { wrapper.setPointerCapture(e.pointerId); } catch { /* not a live pointer */ }
+                }
             }
             if (decided !== 'horizontal') return;
             e.preventDefault();
@@ -285,6 +427,11 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         };
 
         const endPointer = (e: PointerEvent) => {
+            active.delete(e.pointerId);
+            // A pinch ends when it stops being two fingers. The one that is left does NOT become a
+            // drag: its start position is from before the stretch, so resuming would jump the
+            // window by however far the pinch moved it. It takes a fresh touch.
+            if (pinch && active.size < 2) pinch = null;
             if (e.pointerId !== pointerId) return;
             if (decided === 'horizontal' && wrapper.hasPointerCapture(e.pointerId)) {
                 wrapper.releasePointerCapture(e.pointerId);
@@ -292,20 +439,48 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             tracking = false; decided = null; pointerId = -1;
         };
 
+        /**
+         * Plotly gets no touches. It was getting all of them.
+         *
+         * A capture-phase POINTER listener cannot stop a TOUCH event — they are separate streams
+         * off the same finger — and Plotly binds its own `touchstart` on the drag layer, then
+         * `touchmove` on the document. So the note above, that routing pointer drags into `apply()`
+         * stopped Plotly panning its own axis, was simply wrong about touch: BOTH ran on every
+         * finger. Measured with the pointer handlers left untouched, a bare touch drag moved
+         * Plotly's x-range from [0, 499.75] to [137, 637] — past the end of the data — while the
+         * shared window stayed at 0. The chart moved by our pan PLUS Plotly's, which is the rest of
+         * "the position is wrong when I let go", and two fingers had Plotly's pinch fighting ours
+         * for the magnification.
+         *
+         * stopPropagation and NOT preventDefault, deliberately: preventing the default on a touch
+         * is what stops the browser synthesising the compatibility mouse events, and those are what
+         * deliver hover and the tap that selects a point. The gesture is taken away from Plotly;
+         * the tap is left alone.
+         */
+        const swallowTouch = (e: TouchEvent) => { e.stopPropagation(); };
+
+        wrapper.addEventListener('touchstart', swallowTouch, { capture: true });
+        wrapper.addEventListener('touchmove', swallowTouch, { capture: true });
         wrapper.addEventListener('wheel', onWheel, { capture: true, passive: false });
         wrapper.addEventListener('pointerdown', onPointerDown, { capture: true });
         wrapper.addEventListener('pointermove', onPointerMove, { capture: true, passive: false });
         wrapper.addEventListener('pointerup', endPointer, { capture: true });
         wrapper.addEventListener('pointercancel', endPointer, { capture: true });
         return () => {
+            wrapper.removeEventListener('touchstart', swallowTouch, { capture: true });
+            wrapper.removeEventListener('touchmove', swallowTouch, { capture: true });
             wrapper.removeEventListener('wheel', onWheel, { capture: true });
             wrapper.removeEventListener('pointerdown', onPointerDown, { capture: true });
             wrapper.removeEventListener('pointermove', onPointerMove, { capture: true });
             wrapper.removeEventListener('pointerup', endPointer, { capture: true });
             wrapper.removeEventListener('pointercancel', endPointer, { capture: true });
             if (frame) cancelAnimationFrame(frame);
+            if (zoomFrame) cancelAnimationFrame(zoomFrame);
         };
-    }, [onPanWindow, canPanWindow, data]);
+        // NOT `data`. The window changes on every frame of a pan, and re-running this effect in the
+        // middle of a gesture throws its state away — see `dataRef`, which is how the handlers read
+        // the current window without depending on it.
+    }, [onPanWindow, canPanWindow]);
 
     /**
      * Carries an active zoom along with the window, in the same frame the new data lands in.
@@ -341,7 +516,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
     /** Always five traces, in a fixed order, with the axis each one belongs to already assigned.
      *
      *  Both properties are load-bearing. Pushing the lambda traces conditionally made the array 3, 4
-     *  or 5 long and shifted lambda2's index when lambda1 was toggled; Plotly cannot diff across a
+     *  or 5 long and shifted bank 2's index when bank 1 was toggled; Plotly cannot diff across a
      *  changed trace count and tears the figure down and rebuilds it, which is the "batch redraw" this
      *  looked like. Hiding via `visible` keeps every index put, so a toggle updates the figure.
      *
@@ -351,8 +526,15 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         const points = data ?? [];
         const times = points.map(d => d.time);
 
-        const showLambda1 = !!visibleFields.lambda1 && isFieldPresent('lambda1', presenceSource);
-        const showLambda2 = !!visibleFields.lambda2 && isFieldPresent('lambda2', presenceSource);
+        const showLambda1 = !!visibleFields.stft1 && isFieldPresent('stft1', presenceSource);
+        const showLambda2 = !!visibleFields.stft2 && isFieldPresent('stft2', presenceSource);
+        const showEgt = !!visibleFields.exhaustTemp && isFieldPresent('exhaustTemp', presenceSource);
+        const showRf = !!visibleFields.rf && isFieldPresent('rf', presenceSource);
+        const showRfKorr = !!visibleFields.rfKorr && isFieldPresent('rfKorr', presenceSource);
+        const showEgtDerived = !!visibleFields.egtFromRfKorr
+            && isFieldPresent('egtFromRfKorr', presenceSource);
+        const showRfKorrDerived = !!visibleFields.rfKorrFromEgt
+            && isFieldPresent('rfKorrFromEgt', presenceSource);
 
         return [
             {
@@ -360,7 +542,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 y: points.map(d => d.rpm),
                 type: 'scatter', // SVG, for hover/click precision
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.rpm.label,
+                name: LOG_FIELD_REGISTRY.rpm.symbol,
                 line: { color: LOG_FIELD_REGISTRY.rpm.color, width: 1 },
                 yaxis: 'y',
             },
@@ -369,7 +551,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 y: points.map(d => d.rawLoad),
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.rawLoad.label,
+                name: LOG_FIELD_REGISTRY.rawLoad.symbol,
                 line: { color: LOG_FIELD_REGISTRY.rawLoad.color, width: 1, dash: 'dot' },
                 yaxis: 'y3',
             },
@@ -378,32 +560,108 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 y: points.map(d => d.correctedLoad ?? d.rawLoad), // fall back when uncorrected
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.correctedLoad.label,
+                name: LOG_FIELD_REGISTRY.correctedLoad.symbol,
                 line: { color: LOG_FIELD_REGISTRY.correctedLoad.color, width: 2 },
                 yaxis: 'y3',
             },
             {
                 x: times,
-                y: points.map(d => d.lambda1) as number[],
+                y: points.map(d => d.stft1) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.lambda1.label,
-                line: { color: LOG_FIELD_REGISTRY.lambda1.color, width: 1.5 },
+                name: LOG_FIELD_REGISTRY.stft1.symbol,
+                line: { color: LOG_FIELD_REGISTRY.stft1.color, width: 1.5 },
                 yaxis: 'y2',
                 visible: showLambda1,
             },
             {
                 x: times,
-                y: points.map(d => d.lambda2) as number[],
+                y: points.map(d => d.stft2) as number[],
                 type: 'scatter',
                 mode: 'lines',
-                name: LOG_FIELD_REGISTRY.lambda2.label,
-                line: { color: LOG_FIELD_REGISTRY.lambda2.color, width: 1.5, dash: 'dash' },
+                name: LOG_FIELD_REGISTRY.stft2.symbol,
+                line: { color: LOG_FIELD_REGISTRY.stft2.color, width: 1.5, dash: 'dash' },
                 yaxis: 'y2',
                 visible: showLambda2,
             },
+            {
+                // EGT rides y1 with RPM. Its own axis would be a fourth scale on a chart that
+                // already carries three, and the two are the same order of magnitude, so the
+                // shared axis costs nothing readable.
+                x: times,
+                y: points.map(d => d.exhaustTemp) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.exhaustTemp.symbol,
+                line: { color: LOG_FIELD_REGISTRY.exhaustTemp.color, width: 1.5 },
+                yaxis: 'y',
+                visible: showEgt,
+            },
+            {
+                // RF next to the two load traces it belongs with: rawLoad is what the throttle is
+                // doing, RF is what the DME concluded the cylinder actually got.
+                x: times,
+                y: points.map(d => d.rf) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rf.symbol,
+                line: { color: LOG_FIELD_REGISTRY.rf.color, width: 1.5, dash: 'dashdot' },
+                yaxis: 'y3',
+                visible: showRf,
+            },
+            {
+                // rf_korr sits on the lambda axis because it lives in the same 1.0-centred range,
+                // and because reading it against the trim is the whole point: a trim that dips
+                // exactly where rf_korr rises is the loop cancelling the enrichment.
+                x: times,
+                y: points.map(d => d.rfKorr) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rfKorr.symbol,
+                line: { color: LOG_FIELD_REGISTRY.rfKorr.color, width: 2, dash: 'dot' },
+                yaxis: 'y2',
+                visible: showRfKorr,
+            },
+            // The cross-check pair, appended at the END. Trace order is an index the click handler
+            // and the marker overlay both count on — see the note above — so new traces go here
+            // and nowhere else.
+            //
+            // Each rides its measured counterpart's axis so the residual reads as the gap between
+            // two adjacent lines. Dashed against that counterpart's solid/dotted: the point is to
+            // see them diverge, not to tell them apart at a glance.
+            {
+                x: times,
+                y: points.map(d => d.egtFromRfKorr) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.egtFromRfKorr.symbol,
+                line: { color: LOG_FIELD_REGISTRY.egtFromRfKorr.color, width: 1.5, dash: 'dash' },
+                yaxis: 'y',
+                // Gaps are the normal case here, not missing data: the correction profile is only
+                // invertible over part of the rpm axis. Plotly breaks the line at each undefined,
+                // which is the honest rendering — connectgaps would draw a straight run across a
+                // region the column has nothing to say about.
+                connectgaps: false,
+                visible: showEgtDerived,
+            },
+            {
+                x: times,
+                y: points.map(d => d.rfKorrFromEgt) as number[],
+                type: 'scatter',
+                mode: 'lines',
+                name: LOG_FIELD_REGISTRY.rfKorrFromEgt.symbol,
+                line: { color: LOG_FIELD_REGISTRY.rfKorrFromEgt.color, width: 1.5, dash: 'dash' },
+                yaxis: 'y2',
+                connectgaps: false,
+                visible: showRfKorrDerived,
+            },
         ];
-    }, [data, presenceSource, visibleFields.lambda1, visibleFields.lambda2]);
+    }, [
+        data, presenceSource,
+        visibleFields.stft1, visibleFields.stft2,
+        visibleFields.exhaustTemp, visibleFields.rf, visibleFields.rfKorr,
+        visibleFields.egtFromRfKorr, visibleFields.rfKorrFromEgt,
+    ]);
 
     /** Zoom persistence, and the way out of it.
      *
@@ -498,9 +756,9 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                 layout={layout}
                 config={PLOT_CONFIG}
                 useResizeHandler={true}
-                onHover={(e: any) => {
+                onHover={(e: Readonly<PlotMouseEvent>) => {
                     if (e.points && e.points.length > 0) {
-                        lastHoveredIndex.current = e.points[0].pointIndex;
+                        lastHoveredIndex.current = e.points[0].pointIndex ?? null;
                     }
                 }}
             // Click is handled on the wrapper above, not here, to avoid double triggers.

@@ -53,7 +53,7 @@ Start here, then read the file that matches what you are touching:
 
 **Shell.** `100svh`, never `vh`, and not `dvh` either. The app is sized to fit rather than to scroll, so it wants the smallest viewport the browser will ever show — `dvh` grows when the address bar retracts and the layout loses its own bottom when the bar comes back. `overscroll-behavior: none` on html and body: on a page that never scrolls, a downward swipe goes straight to Chrome's reload, and mid-session that costs the link, the log and the unsaved work.
 
-**A reload button has to actually reload.** Turning pull-to-refresh off removes the only reload an installed app had, so it needs one of its own — and once an offline cache is in front of it, `location.reload()` returns the build already on disk, which is the one the button offered to replace. Ask the waiting worker to take over first, then reload, and let every step fall through to a plain reload on a deadline.
+**A reload button has to actually reload.** Turning pull-to-refresh off removes the only reload an installed app had, so it needs one of its own — and once an offline cache is in front of it, `location.reload()` returns the build already on disk, which is the one the button offered to replace. Ask the waiting worker to take over first, then reload, and let every step fall through to a plain reload — each on **its own** deadline, because one shared budget cuts off the precache and makes the button need pressing twice.
 
 **One pane at a time below 900px.** Two panes sharing a phone is two unusable panes. Put them in one grid cell (`[grid-area:1/1]`) and make the inactive one `invisible`, not `display:none` — it stays laid out, so switching is a paint instead of a full re-solve. Then remember what that implies: **anything mounted in the invisible pane is still running.** Gate expensive children on the pane actually being on screen.
 
@@ -62,6 +62,8 @@ Start here, then read the file that matches what you are touching:
 **The menu is swept, not aimed.** It opens from the bottom centre, its lists run bottom-up so the first entry is nearest the thumb, and Close sits on the exact coordinates the press landed on. Press, slide, release — one gesture. Destructive things go at the far end, off the sweep entirely.
 
 **Never put a write-path control behind a menu.** The controls that decide what gets sent to the device stay together and visible: one tap apart, no disclosure, no scrolling. A menu is a place for navigation and readouts. And check the mirror image: the menu is mobile-only chrome, so anything that lives *only* there does not exist above the breakpoint at all — which is how this app ended up with no reload of any kind at 1440×900.
+
+**There is no hover, so a `title` is not a place to put anything.** A reason that lives only in a tooltip does not exist on a phone — two full test drives were thrown away over one. Render it, short, into a slot that is always there.
 
 **Size targets by what renders, not by what you wrote.** A scale floor is a promise about the smallest a control may become. If your floor renders the thing that arms a write at 14×8px, the floor is wrong, not the phone.
 
@@ -74,6 +76,7 @@ Colour, status semantics and motion are TSUNAGI/M-wide rather than mobile-specif
 - Dark only. Set `color-scheme: dark` in CSS **and** emit the viewport meta — the CSS property is what cascades into native controls, and mobile UAs ignore author styling on `<option>` entirely. Without it a `<select>` opens a full-screen white sheet at night.
 - `animate-spin` means *a device operation is in flight*. `animate-pulse` means *armed / busy / caution*. They never stack on one element.
 - 150ms is the house transition. 200/300/500 exist as deliberate exceptions; do not add a fourth.
+- Never `transition-all`. It animates `visibility`, which holds an element painted for the whole duration — so a hidden pane leaves its buttons on screen (`tsunagi-m-design` → Motion).
 - Before adding an entry animation, check it emits CSS. `animate-in fade-in zoom-in-95` is in this codebase five times and produces nothing — there is no `tailwindcss-animate`.
 
 ## Working style

@@ -132,6 +132,12 @@ export class WebSerialTransport extends BufferedByteTransport implements ByteTra
      * on an open port, so this closes and reopens the SAME port object at the new rate and restarts
      * the read pump. Used for DS2 baud-rate boosting (9600 ⇄ a faster rate) mid-session.
      */
+    /** Web Serial cannot change baud on an open port: `SerialPort` exposes no `setOptions`, so
+     *  `reopen` below must close and re-open, which pulses DTR/RTS and restarts the pump. */
+    reopenIsInPlace(): boolean {
+        return false;
+    }
+
     async reopen(baudRate: number): Promise<void> {
         if (!this.port) throw new DmeLinkError('Serial port is not open');
         const port = this.port;
