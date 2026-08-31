@@ -991,6 +991,8 @@ export function useDmeLink() {
      */
     const resetFlashCounter = useCallback(async (
         onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
+        /** Ticked on this reset's own confirmation. Not the data write's BOOST — see DmeLink. */
+        boost = false,
     ): Promise<FlashCounterOutcome> => {
         const link = linkRef.current;
         if (!link) return { ok: false, needsRecovery: false };
@@ -998,7 +1000,7 @@ export function useDmeLink() {
         setState('resetting');
         setTransferProgress(0);
         try {
-            const info = await link.resetFlashCounter(onBackup, makeThrottledProgress());
+            const info = await link.resetFlashCounter(onBackup, makeThrottledProgress(), boost);
             applyFlashCounter(info);
             return { ok: true, info };
         } catch (e) {

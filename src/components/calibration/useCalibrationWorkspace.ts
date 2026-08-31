@@ -95,9 +95,19 @@ export type CalibrationWorkspace = ReturnType<typeof useCalibrationWorkspace>;
  * what the workspace above is built from. Folding this in would make the two
  * hooks each other's input.
  */
+/**
+ * Which of the three readings the numbers are.
+ *
+ * It was a boolean — values or the difference — and that quietly settled a
+ * question nobody had asked it to: WHOSE values. The answer was always the
+ * subject's, so the reference's own numbers were the one thing the compare bar
+ * named that could never be looked at.
+ */
+export type CalCompareView = 'subject' | 'delta' | 'reference';
+
 export function useCalibrationCompare() {
     const [subject, setSubject] = useState<CalVariant>('tuned');
     const [reference, setReference] = useState<CalVariant>('base');
-    const [diffMode, setDiffMode] = useState(false);
-    return { subject, setSubject, reference, setReference, diffMode, setDiffMode };
+    const [view, setView] = useState<CalCompareView>('subject');
+    return { subject, setSubject, reference, setReference, view, setView };
 }

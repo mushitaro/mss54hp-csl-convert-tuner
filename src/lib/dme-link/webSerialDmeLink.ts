@@ -1604,8 +1604,9 @@ export class WebSerialDmeLink implements DmeLink {
     async resetFlashCounter(
         onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
         onProgress?: TransferProgress,
+        boost = false,
     ): Promise<FlashCounterInfo> {
-        return this.withGate(() => this.resetFlashCounterInner(onBackup, onProgress));
+        return this.withGate(() => this.resetFlashCounterInner(onBackup, onProgress, boost));
     }
 
     /**
@@ -1632,6 +1633,7 @@ export class WebSerialDmeLink implements DmeLink {
     private async resetFlashCounterInner(
         onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
         onProgress?: TransferProgress,
+        boost = false,
     ): Promise<FlashCounterInfo> {
         this.assertConnected();
         // Hard stop before anything is read, let alone erased. See FLASH_COUNTER_RESET_ENABLED: the
@@ -1723,10 +1725,12 @@ export class WebSerialDmeLink implements DmeLink {
             shouldWriteClearPrepMarker(slaveImage),
             'Flash counter reset',
             READ_SHARE, WRITE_SHARE, VERIFY_SHARE,
-            // The operator's BOOST selector reaches the counter reset the same way it reaches the
-            // data write, and by the same field. See programServiceBlocks for why the RESTORE that
-            // shares this sequence passes 9600 instead.
-            this.writeBaud,
+            // The tick on THIS reset's confirmation, not the data write's BOOST selector — see the
+            // `boost` parameter on DmeLink.resetFlashCounter for why they are not one decision, and
+            // programServiceBlocks for why the RESTORE that shares this sequence passes 9600.
+            // `programServiceBlocks` still refuses a transport that cannot change rate in place, so
+            // a tick that cannot be honoured costs the speed and nothing else.
+            boost ? 125000 : 9600,
             onProgress,
         );
     }

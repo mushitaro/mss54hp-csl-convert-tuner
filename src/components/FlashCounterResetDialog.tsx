@@ -16,7 +16,11 @@ interface Props {
     /** dmeLink.resetFlashCounter. `onBackup` must persist the 16 KB image or throw. The outcome
      *  reports whether the block was found already erased, because that decides between offering a
      *  retry and offering the restore — and the two are not interchangeable here. */
-    onReset: (onBackup: (pair: ArrayBuffer) => Promise<void>) => Promise<FlashCounterOutcome>;
+    onReset: (onBackup: (pair: ArrayBuffer) => Promise<void>, boost: boolean) => Promise<FlashCounterOutcome>;
+    /** Whether this connection can change baud on the open handle. False renders the BOOST row
+     *  disabled with the reason on it rather than hiding it — "why is this still two minutes" is
+     *  the question the row exists to answer, and a control that is not there cannot answer it. */
+    boostAvailable: boolean;
     /** Saves the pre-erase service block. Rejecting here stops the reset before anything is erased. */
     onBackup: (pair: ArrayBuffer) => Promise<void>;
     /** Reads both service blocks. Read-only. Null on failure. */
@@ -117,6 +121,9 @@ const TEXT = {
             中断を検知して<span className="text-slate-100 font-bold">「復旧を実行」</span>を表示します（消去前のデータはブラウザ内に保存されています）。
         </>),
         warnKeyCycle: '完了後は接続を切断します。キーOFF → 10秒待つ → キーON → CONNECTION で接続し直してください。',
+        boost: 'BOOST — 書き込みを 125000 baud で行う',
+        boostHint: '16 KB の書き込みが約4倍速くなります（読み出しは 9600 のまま）。レート切り替えは消去が開くプログラミングセッションの中でだけ DME が受け付けます。拒否されたら 9600 で書くだけ、受理された後に無応答になったら書き込み電文を1本も送る前に 9600 へ戻ります。',
+        boostUnavailable: 'この接続では使えません。レート切り替えはポートを開いたまま行える必要があり、それができるのは Android の USB 接続だけです。9600 で実行します。',
         resetting: 'リセット中… 中断できません。',
         phase: {
             reading: '現在のデータを読み出し中',
@@ -218,6 +225,9 @@ const TEXT = {
             detected and a <span className="text-slate-100 font-bold">Recover</span> action appears (the pre-erase data is saved in the browser).
         </>),
         warnKeyCycle: 'The connection is dropped afterwards. Key OFF → wait 10 s → key ON → reconnect with CONNECTION.',
+        boost: 'BOOST — write at 125000 baud',
+        boostHint: 'About four times faster over the 16 KB write; the reads stay at 9600. The DME accepts the rate switch only inside the programming session the erase opens. A refused switch just writes at 9600, and one that is accepted and then goes silent drops back to 9600 before a single write telegram is sent.',
+        boostUnavailable: 'Not available on this connection. The rate has to change on the open port, and only the Android USB link can do that. This will run at 9600.',
         resetting: 'Resetting… this cannot be interrupted.',
         phase: {
             reading: 'Reading the current data',
@@ -275,9 +285,12 @@ function markerHex(marker: number): string {
 
 export const FlashCounterResetDialog: React.FC<Props> = ({
     onRead, onReadRpm, onReset, onBackup, onInspect, onSaveInspection, onListBackups, onRestore,
-    onClose, onResetComplete, transferProgress, transferPhase, error, errorKind,
+    onClose, onResetComplete, transferProgress, transferPhase, error, errorKind, boostAvailable,
 }) => {
     const [phase, setPhase] = useState<Phase>('reading');
+    /** Per reset, and it starts off. The speed is worth having and the switch is still an experiment
+     *  on a path that erases before it writes, so it is chosen each time rather than remembered. */
+    const [boost, setBoost] = useState(false);
     const [before, setBefore] = useState<FlashCounterInfo | null>(null);
     const [after, setAfter] = useState<FlashCounterInfo | null>(null);
     const [blockedReason, setBlockedReason] = useState<React.ReactNode>(null);
@@ -346,7 +359,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
     const handleReset = async () => {
         if (!before) return;
         setPhase('resetting');
-        const outcome = await onReset(onBackup);
+        const outcome = await onReset(onBackup, boost && boostAvailable);
         if (!outcome.ok) {
             // Read from the outcome, never from the errorKind prop: this line runs before React has
             // re-rendered with that prop's new value. The block being already erased means an
@@ -694,6 +707,37 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                     <p className="text-[10px] font-mono text-amber-400/80 leading-relaxed border-t border-slate-800 pt-2">
                                         {t.warnRecovery}
                                     </p>
+                                    {/* SPEED, under the warnings and above the buttons, because it is
+                                        the last thing decided and the only thing on this screen that
+                                        is a choice. It was a selector in the DME strip that reset to
+                                        OFF on every connect, which is defensible for the data write
+                                        and unfindable for this: the reset is reached from a dialog,
+                                        and nobody opening it is looking at the strip behind it
+                                        (operator, 2026-08-31).
+
+                                        Its own flag, not the strip's. If this switch fails the block
+                                        that is erased is the SERVICE block and its 16 KB are already
+                                        saved — the recovery above is exactly that restore. The data
+                                        write has no such copy, so a tick made here must not still be
+                                        armed at the next flash. See DmeLink.resetFlashCounter. */}
+                                    <label className={`flex items-start gap-2 border-t border-slate-800 pt-2
+                                        ${boostAvailable ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={boost && boostAvailable}
+                                            disabled={!boostAvailable}
+                                            onChange={(e) => setBoost(e.target.checked)}
+                                            className="mt-0.5 accent-blue-500 disabled:cursor-not-allowed"
+                                        />
+                                        <span className="min-w-0">
+                                            <span className={`block text-[11px] font-mono font-bold ${boostAvailable && boost ? 'text-blue-400' : 'text-slate-400'}`}>
+                                                {t.boost}
+                                            </span>
+                                            <span className="block text-[10px] font-mono text-slate-500 leading-relaxed">
+                                                {boostAvailable ? t.boostHint : t.boostUnavailable}
+                                            </span>
+                                        </span>
+                                    </label>
                                 </div>
                                 <DialogActions>
                                     <button onClick={() => setPhase('viewing')} className="text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors">

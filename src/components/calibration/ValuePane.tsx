@@ -6,7 +6,7 @@ import { Scale } from 'lucide-react';
 import type { CalParamDef, CalVariant } from '@/lib/calibration/types';
 import type { DecodedAxis, DecodedParam, DecodedRun } from '@/lib/calibration/decode';
 import type { BulkOp } from '@/lib/calibration/edits';
-import type { CalGraphMode } from './useCalibrationWorkspace';
+import type { CalCompareView, CalGraphMode } from './useCalibrationWorkspace';
 import { displayName } from '@/lib/calibration-graph/names';
 import { t } from '@/lib/calibration-graph/calib-i18n';
 import { useDialogLang } from '@/hooks/useDialogLang';
@@ -42,12 +42,16 @@ const TEXT = {
         copyRef: 'COPY REF',
         revert: 'REVERT',
         list: 'LIST',
-        modeDelta: 'Δ',
-        modeValues: 'VALUES',
+        viewSubject: 'SUBJECT',
+        viewDelta: 'Δ',
+        viewReference: 'REFERENCE',
         bannerDelta: 'Δ SUBJECT − REFERENCE',
-        bannerValues: 'SUBJECT VALUES',
-        diffTitle: '差分そのものを表示します。押すと実値に戻ります。',
-        valuesTitle: 'SUBJECT の実値を表示中です（色は REFERENCE との差）。押すと差分そのものに切り替わります。',
+        bannerSubject: 'SUBJECT VALUES · 色は REFERENCE との差',
+        bannerReference: 'REFERENCE VALUES · 色は SUBJECT との差',
+        viewSubjectHint: 'SUBJECT の実値を表示します。編集できるのはこの表示のときだけです。',
+        viewDeltaHint: 'SUBJECT − REFERENCE の差そのものを表示します。',
+        viewReferenceHint: 'REFERENCE 側の実値を表示します。編集はできません。',
+        listTitle: '差分のある項目の一覧を開きます。',
         sameVariant: '比較対象が同じです。REFERENCE を変えると差分が出ます。',
         copyRefHint: 'この項目の全セルを REFERENCE の値で置き換えます。',
         revertHint: 'この項目の編集を取り消し、読み込み時の値に戻します。',
@@ -62,12 +66,16 @@ const TEXT = {
         copyRef: 'COPY REF',
         revert: 'REVERT',
         list: 'LIST',
-        modeDelta: 'Δ',
-        modeValues: 'VALUES',
+        viewSubject: 'SUBJECT',
+        viewDelta: 'Δ',
+        viewReference: 'REFERENCE',
         bannerDelta: 'Δ SUBJECT − REFERENCE',
-        bannerValues: 'SUBJECT VALUES',
-        diffTitle: 'Showing the differences themselves. Press for the values.',
-        valuesTitle: 'Showing SUBJECT values, tinted by their distance from REFERENCE. Press for the differences themselves.',
+        bannerSubject: 'SUBJECT VALUES · tinted vs REFERENCE',
+        bannerReference: 'REFERENCE VALUES · tinted vs SUBJECT',
+        viewSubjectHint: 'Show SUBJECT values. Editing is offered only here.',
+        viewDeltaHint: 'Show SUBJECT − REFERENCE, the difference itself.',
+        viewReferenceHint: 'Show the REFERENCE own values. Not editable.',
+        listTitle: 'Open the list of items that differ.',
         sameVariant: 'Both selectors name the same bytes — pick another REFERENCE to see a difference.',
         copyRefHint: 'Replace every cell of this item with the REFERENCE value.',
         revertHint: 'Drop this item\'s edits and go back to the values as loaded.',
@@ -78,13 +86,14 @@ const TEXT = {
     },
 } as const;
 
-function ModeButton({ on, onClick, disabled, children }: {
-    on: boolean; onClick: () => void; disabled?: boolean; children: React.ReactNode;
+function ModeButton({ on, onClick, disabled, title, children }: {
+    on: boolean; onClick: () => void; disabled?: boolean; title?: string; children: React.ReactNode;
 }) {
     return (
         <button
             onClick={onClick}
             disabled={disabled}
+            title={title}
             className={`pb-0.5 text-[9px] font-bold uppercase tracking-widest border-b-2 transition disabled:opacity-30 ${on ? 'text-blue-400 border-blue-400' : 'text-slate-600 border-transparent hover:text-slate-300'}`}
         >
             {children}
@@ -133,8 +142,8 @@ export function ValuePane({
     reference,
     onReference,
     compareOptions,
-    diffMode,
-    onDiffMode,
+    view,
+    onView,
     diffCount,
     onShowList,
     onEditCell,
@@ -159,9 +168,9 @@ export function ValuePane({
     reference: CalVariant;
     onReference: (v: CalVariant) => void;
     compareOptions: CompareOption[];
-    /** Draw the DIFFERENCE between the two variants instead of the values. */
-    diffMode: boolean;
-    onDiffMode: (on: boolean) => void;
+    /** Which of the three readings the numbers are. */
+    view: CalCompareView;
+    onView: (v: CalCompareView) => void;
     /** How many parameters differ, for the balance's badge. */
     diffCount: number | null;
     /** Ask for the list of them. It lives in the hub, which this pane does not
@@ -182,19 +191,51 @@ export function ValuePane({
      *  from this row" is half of what this bar is for. */
     const [amountSign, setAmountSign] = useState<1 | -1>(1);
     const [cellDraft, setCellDraft] = useState<string | null>(null);
-    const paneRef = useRef<HTMLDivElement>(null);
-    const [paneWidth, setPaneWidth] = useState(360);
+    /**
+     * The box the picture is actually given, measured off the element it is
+     * drawn into.
+     *
+     * The height used to be a literal — 300 for the surface, 280 for the heat
+     * field, 260 for the section — and a literal cannot know what the pane is.
+     * Measured at 1440x900 the box was 364px and the section drew 260 of it; at
+     * 1440x1100 the box was 488 and the section still drew 260. The remaining
+     * 228px was black, and it grew with the window rather than the picture.
+     *
+     * Width was already measured, but off the PANE minus its padding, which is
+     * the same number arrived at by arithmetic. One element, one observer, both
+     * numbers: they cannot drift apart.
+     */
+    const visualRef = useRef<HTMLDivElement>(null);
+    const [box, setBox] = useState({ w: 360, h: 300 });
 
     useEffect(() => {
-        const el = paneRef.current;
+        const el = visualRef.current;
         if (!el) return;
         const observer = new ResizeObserver(entries => {
-            const w = entries[0]?.contentRect.width;
-            if (w) setPaneWidth(w - 8);
+            const r = entries[0]?.contentRect;
+            // FLOOR, not round: the container scrolls, and a height rounded up
+            // past its own box is a scrollbar that then narrows the box.
+            if (r) setBox({ w: Math.floor(r.width), h: Math.floor(r.height) });
         });
         observer.observe(el);
         return () => observer.disconnect();
     }, []);
+
+    /**
+     * Fill the box exactly, with no floor under it.
+     *
+     * A floor was the obvious thing and it is wrong here: a chart taller than
+     * its scroller has to be SCROLLED to be seen, and the 3-D surface takes the
+     * drag for its own rotation. On a landscape phone (851x393 — box 157px) a
+     * floor of 180 put 23px of the picture where no finger could reach it. The
+     * old literals did the same thing four times over.
+     *
+     * So the short screen gets a short picture rather than a clipped one. The
+     * two SVG forms carry 38px of axis chrome and HeatField holds its own 80px
+     * floor under the field, which together bottom out around 118px — below any
+     * box this pane is given.
+     */
+    const chartH = box.h;
 
     // A new selection is a new question; the cell cursor does not carry over.
     const [prevDefId, setPrevDefId] = useState<string | undefined>(def?.id);
@@ -229,9 +270,13 @@ export function ValuePane({
      *  open yet. */
     const comparing = subject !== reference && diffCount !== null;
     /** ...though drawing the difference still needs both runs for THIS item. */
-    const showingDiff = diffMode && comparing && !!referenceRun;
+    const showingDiff = view === 'delta' && comparing && !!referenceRun;
+    /** The REFERENCE own numbers — the third reading the boolean could not hold. */
+    const showingReference = view === 'reference' && comparing && !!referenceRun;
+    /** Editing acts on the SUBJECT, so it is only offered while looking at it. */
+    const onSubjectValues = !showingDiff && !showingReference;
     const editable = !!def && !def.lock.locked && def.runMathOk
-        && subject === 'tuned' && !!subjectRun && !showingDiff;
+        && subject === 'tuned' && !!subjectRun && onSubjectValues;
     const amountNumber = Number(amount) * amountSign;
     const amountOk = amount.trim() !== '' && Number.isFinite(amountNumber);
     const canCopyRef = !!def && !def.lock.locked && def.runMathOk
@@ -241,8 +286,9 @@ export function ValuePane({
         !axesEqual(subjectDecoded.x, referenceDecoded.x) || !axesEqual(subjectDecoded.y, referenceDecoded.y)
     );
 
-    /** What the visual draws: the values, or subject minus reference. */
+    /** What the visual draws: whose values, or the difference between them. */
     const shownRun: DecodedRun | null = (() => {
+        if (showingReference && referenceRun) return referenceRun;
         if (!subjectRun) return null;
         if (!showingDiff || !referenceRun) return subjectRun;
         return {
@@ -299,7 +345,7 @@ export function ValuePane({
      */
     const cellEdit = (() => {
         const run = def?.run;
-        if (!run || selectedCell === null || !subjectRun || showingDiff) return null;
+        if (!run || selectedCell === null || !subjectRun || !onSubjectValues) return null;
         const value = subjectRun.phys[selectedCell];
         if (value === null || value === undefined) return null;
         const finite = subjectRun.phys.filter((p): p is number => p !== null);
@@ -344,8 +390,8 @@ export function ValuePane({
                     // In diff mode the cells ARE the difference, so colouring
                     // them against the reference a second time would be the
                     // same subtraction drawn twice.
-                    diffAgainst={showingDiff ? null : referenceRun}
-                    editedMask={subject === 'tuned' && !showingDiff ? editedMask : null}
+                    diffAgainst={showingDiff ? null : showingReference ? subjectRun : referenceRun}
+                    editedMask={subject === 'tuned' && onSubjectValues ? editedMask : null}
                     mode={showingDiff ? 'signed' : referenceRun ? 'diff' : 'heat'}
                     selected={selectedCell}
                     onSelect={setSelectedCell}
@@ -368,8 +414,8 @@ export function ValuePane({
                     selected={selected}
                     onSelectCell={(r, c) => setSelectedCell(r * cols + c)}
                     signed={showingDiff}
-                    width={paneWidth}
-                    height={280}
+                    width={box.w}
+                    height={chartH}
                 />
             );
         }
@@ -378,7 +424,7 @@ export function ValuePane({
             const grid = gridOf(shownRun);
             if (!grid) return null;
             return (
-                <div className="h-[300px]">
+                <div style={{ height: chartH }}>
                     <MapVisualizer
                         mapData={{ xAxis: xTicks.xs, yAxis: yTicks.xs, data: grid }}
                         title=""
@@ -410,15 +456,17 @@ export function ValuePane({
                 subject={slice(shownRun)!}
                 // In diff mode the single line IS the difference; a reference
                 // line beside it would be a second answer to one question.
-                reference={showingDiff ? null : slice(referenceRun)}
+                // The OTHER run, whichever this view is drawing — overlaying the
+                // reference on itself would be one line drawn twice.
+                reference={showingDiff ? null : slice(showingReference ? subjectRun : referenceRun)}
                 xLabel={(isMap && sectionAxis === 'y' ? def.yAxis?.label : def.xAxis?.label) ?? 'X'}
                 yLabel={showingDiff ? 'Δ' : (def.run?.units && def.run.units !== '-' ? def.run.units : 'value')}
                 selectedIndex={indexInSection}
                 onSelectIndex={i => setSelectedCell(
                     !isMap ? i : sectionAxis === 'x' ? at.row * cols + i : i * cols + at.col,
                 )}
-                width={paneWidth}
-                height={260}
+                width={box.w}
+                height={chartH}
             />
         );
     })();
@@ -453,7 +501,7 @@ export function ValuePane({
         // at 1000px wide the pane is 382px and overflows, at 360px it is 360px
         // and overflows, and the two would need different queries to say the
         // same thing.
-        <div ref={paneRef} className="@container h-full min-h-0 flex flex-col">
+        <div className="@container h-full min-h-0 flex flex-col">
             {/* SUBJECT vs REFERENCE, in the DIFFERENCE tab's own control and its
                 own place: the first row of the visual, above everything it governs. */}
             <CompareBar
@@ -472,24 +520,24 @@ export function ValuePane({
                     // hub now, and the count has a width whether it has a
                     // number in it or not.
                     <button
-                        onClick={() => {
-                            const next = !diffMode;
-                            onDiffMode(next);
-                            // Turning compare ON is the request to see WHICH
-                            // ones differ, which is the list's whole job.
-                            if (next) onShowList?.();
-                        }}
+                        onClick={onShowList}
                         disabled={!comparing}
-                        title={!comparing ? text.sameVariant : showingDiff ? text.diffTitle : text.valuesTitle}
-                        className={`shrink-0 flex items-center gap-1 h-[24px] px-2 rounded transition disabled:opacity-30 ${diffMode && comparing ? 'bg-slate-800 text-blue-400' : 'text-slate-400 hover:text-slate-200'}`}
+                        title={comparing ? text.listTitle : text.sameVariant}
+                        className="shrink-0 flex items-center gap-1 h-[24px] px-2 rounded transition disabled:opacity-30 text-slate-400 hover:text-slate-200"
                     >
                         <Scale className="w-3.5 h-3.5" />
-                        {/* The mode is NOT named here. It was, and 46px of
-                            label on a bar whose two selectors are already
-                            `flex-1 min-w-0` took them to 32px and 21px at
-                            360 — a switch made legible by making the controls
-                            it sits beside unusable. It is named in the form
-                            row instead, which is pinned rather than shared. */}
+                        {/* HOW MANY differ, and a way to the list of them. It
+                            also used to be the mode switch, and that was the
+                            whole of "I can only pick Δ": a two-state control
+                            cannot offer a third reading, and the label naming
+                            the state sat among the form buttons looking like
+                            one that would not press. The mode is chosen over
+                            there now, in three, and this does the one thing its
+                            count has always been about.
+
+                            No mode name here either: 46px of label on a bar
+                            whose two selectors are already `flex-1 min-w-0`
+                            took them to 32px and 21px at 360. */}
                         <span className="w-[28px] text-right tabular-nums text-[10px] font-mono">
                             {diffCount === null ? '—' : diffCount}
                         </span>
@@ -499,7 +547,11 @@ export function ValuePane({
 
             {/* The form, and the axis a section runs along. Reserved height. */}
             <div className="h-[26px] flex-none flex items-center gap-3 px-1 overflow-x-auto no-scrollbar whitespace-nowrap">
-                <span className="font-mono text-[11px] font-bold text-slate-100 truncate max-w-[38%]">
+                {/* A floor, because everything else in this row refuses to
+                    shrink and this is the only thing that will. With the view
+                    selector added it went to width 0 at 360 — the pane
+                    stopped naming what it was showing. */}
+                <span className="font-mono text-[11px] font-bold text-slate-100 truncate min-w-[64px] max-w-[38%]">
                     {def ? displayName(def.name) : '—'}
                 </span>
                 <div className="flex items-center gap-2">
@@ -508,15 +560,25 @@ export function ValuePane({
                     <ModeButton on={effectiveMode === '3d'} disabled={!can3d} onClick={() => onGraphMode('3d')}>3D</ModeButton>
                     <ModeButton on={effectiveMode === 'heat'} disabled={!canHeat} onClick={() => onGraphMode('heat')}>HEAT</ModeButton>
                 </div>
-                {/* What the numbers ARE, next to what shape they are drawn in,
-                    and before the section controls so it survives a narrow
-                    pane. It used to sit at the far end of this row — which
-                    scrolls — and only appeared while they were differences, so
-                    at 360 nothing on screen named either state. */}
+                {/* WHOSE numbers, next to what shape they are drawn in.
+                    Three readings, not two: the boolean this replaces settled
+                    "whose" without being asked, and the answer was always the
+                    subject — so the reference's own values, which the bar right
+                    above names, were the one thing that could not be looked at.
+                    Buttons rather than a label, because the label sat among
+                    these and read as one that would not press. */}
                 {comparing && (
-                    <span className={`shrink-0 whitespace-nowrap text-[9px] font-bold uppercase tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-400'}`}>
-                        {showingDiff ? text.modeDelta : text.modeValues}
-                    </span>
+                    <div className="shrink-0 flex items-center gap-2">
+                        <ModeButton on={view === 'subject'} onClick={() => onView('subject')} title={text.viewSubjectHint}>
+                            {text.viewSubject}
+                        </ModeButton>
+                        <ModeButton on={view === 'delta'} onClick={() => onView('delta')} title={text.viewDeltaHint}>
+                            {text.viewDelta}
+                        </ModeButton>
+                        <ModeButton on={view === 'reference'} onClick={() => onView('reference')} title={text.viewReferenceHint}>
+                            {text.viewReference}
+                        </ModeButton>
+                    </div>
                 )}
                 {/* Only a map has two axes to section along; a curve has one, and
                     offering the choice there would be a control that does nothing. */}
@@ -531,8 +593,8 @@ export function ValuePane({
                     which way round the subtraction goes. The short form above
                     is the one that has to survive 360px. */}
                 {comparing && (
-                    <span className={`whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
-                        {showingDiff ? text.bannerDelta : text.bannerValues}
+                    <span className={`hidden min-[900px]:inline whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {showingDiff ? text.bannerDelta : showingReference ? text.bannerReference : text.bannerSubject}
                     </span>
                 )}
             </div>
@@ -543,7 +605,7 @@ export function ValuePane({
                 {axesDiffer ? t(lang, 'axesDiffer') : ''}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-auto px-1">{visual}</div>
+            <div ref={visualRef} className="flex-1 min-h-0 overflow-auto px-1">{visual}</div>
 
             {/* UNDER the picture, because it moves the picture: the axis the
                 2-D section is pinned at. Reserved so the ops bar never shifts. */}

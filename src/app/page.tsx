@@ -5217,8 +5217,8 @@ export default function Home() {
                   reference={calCompare.reference}
                   onReference={calCompare.setReference}
                   compareOptions={calCompareOptions}
-                  diffMode={calCompare.diffMode}
-                  onDiffMode={calCompare.setDiffMode}
+                  view={calCompare.view}
+                  onView={calCompare.setView}
                   diffCount={calDiffEntries?.length ?? null}
                   onShowList={() => setCalBottomTab('list')}
                   onEditCell={calEditCell}
@@ -5577,6 +5577,10 @@ export default function Home() {
           transferPhase={dmeLink.transferPhase}
           error={dmeLink.error}
           errorKind={dmeLink.errorKind}
+          /* The same condition the DME strip's BOOST select is rendered on: only a transport that
+             can change rate on the OPEN handle may try, because the switch is sent after the erase
+             and a close/reopen is the one thing that cannot be recovered from there. */
+          boostAvailable={dmeLink.transportKind === 'web-usb-ftdi' && !dmeLink.mockMode}
         />
       )}
 

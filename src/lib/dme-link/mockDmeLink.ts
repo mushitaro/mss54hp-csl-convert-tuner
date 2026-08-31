@@ -857,6 +857,9 @@ export class MockDmeLink implements DmeLink {
     async resetFlashCounter(
         onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
         onProgress?: TransferProgress,
+        // DmeLink's third parameter, `boost`, is not declared here and that is the whole statement:
+        // PRACTICE has no wire, so there is no rate to change and no time for changing it to save. A
+        // mock that ran faster with the box ticked would be teaching a number it made up.
     ): Promise<FlashCounterInfo> {
         this.assertConnected();
         const READ_SHARE = 25, WRITE_SHARE = 45, VERIFY_SHARE = 30;

@@ -719,6 +719,17 @@ export interface DmeLink {
     resetFlashCounter(
         onBackup: (serviceBlockPair: ArrayBuffer) => Promise<void>,
         onProgress?: TransferProgress,
+        /**
+         * Write the 16 KB at 125000 instead of 9600, when the transport can change rate on the open
+         * handle. Per call, and deliberately NOT the data write's BOOST selector.
+         *
+         * They look like one decision and are not. If this switch fails, the block that is erased is
+         * the SERVICE block, its 16 KB were handed to `onBackup` seconds earlier, and the recovery is
+         * `restoreServiceBlock` from exactly those bytes. If the data write's switch fails, what is
+         * erased is the data area and nothing is holding a copy. Sharing one flag would let a tick
+         * made here, on the recoverable path, still be armed at the next flash on the other one.
+         */
+        boost?: boolean,
     ): Promise<FlashCounterInfo>;
     /**
      * Writes a previously saved service block back, for recovering from a reset that was interrupted
