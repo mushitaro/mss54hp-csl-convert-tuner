@@ -3,8 +3,7 @@ import { SlidersHorizontal, X } from 'lucide-react';
 import {
     FieldKey, LOG_FIELD_REGISTRY, fieldGroupsFor, fieldsIn, describeField, isLastOfRequiredGroup,
 } from '@/lib/field-registry/registry';
-import { useIsPreviewBuild } from '@/lib/build-variant';
-import { DEV_VARIANT_IS_PREVIEW } from '@/lib/features';
+import { usePreviewSurfaces } from '@/lib/build-variant';
 
 /** Why the last lambda bank cannot be switched off. Shown ON the checkbox, because a control that
  *  refuses a tap and says nothing is indistinguishable from one that is broken. */
@@ -37,7 +36,7 @@ export const FieldVisibilityPanel: React.FC<Props> = ({ visibleFields, onToggle,
     const [isOpen, setIsOpen] = useState(false);
     /** Read here rather than passed in: the panel is rendered from two places in the page and a prop
      *  threaded twice is a prop one of them will eventually forget. Same bit the tabs are gated on. */
-    const groups = fieldGroupsFor(useIsPreviewBuild() || DEV_VARIANT_IS_PREVIEW);
+    const groups = fieldGroupsFor(usePreviewSurfaces());
 
     return (
         <div className="relative">

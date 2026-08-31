@@ -98,7 +98,7 @@ import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
-import { useBuildVariant, useIsPreviewBuild } from '@/lib/build-variant';
+import { useBuildVariant, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
@@ -327,10 +327,37 @@ export default function Home() {
   const isPreviewBuild = useIsPreviewBuild();
   /** What this build calls itself — '' on production. The badge is on whenever it is not empty. */
   const buildVariant = useBuildVariant();
-  /** What the FEATURE gate reads: the deployed variant, with the dev server counting as preview —
-   *  the experiments must be visible where they are developed. Sync/store gating stays on the raw
-   *  `isPreviewBuild`, because dev has no /api to talk to. */
-  const featurePreview = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
+  /** What the FEATURE gate reads: the deployed variant, the dev server counting as preview, and
+   *  the scope switch, which can close it and never open it. See usePreviewSurfaces. */
+  const featurePreview = usePreviewSurfaces();
+  /** Whether the badge is currently saying AS PRODUCTION — the badge's own readout. */
+  const productionScope = useProductionScope();
+  /**
+   * SYNC needs BOTH answers and they are different questions.
+   *
+   * `isPreviewBuild` is about whether an `/api` exists to talk to — production and staging are built
+   * from a tree with no `functions/`, and dev has no backend either, so the ENGINE stays gated on
+   * the deployment. `featurePreview` is about whether the control should be on screen, and the scope
+   * switch closes that: sessionSync is `preview-only`, so a session being read as production must
+   * not show a door production does not have.
+   *
+   * The engine deliberately keeps running under the switch. The rule this mode holds to is that it
+   * changes what RENDERS, not what the app does to anything it is holding — an in-flight upload
+   * stopping because someone looked at the tab set would be a surprise nobody asked for.
+   */
+  const syncSurfaces = isPreviewBuild && featurePreview;
+  /**
+   * What the badge says, and whether it is a switch.
+   *
+   * The dev server gets one too, reading DEV. It has always BEHAVED as preview — the experiments
+   * have to be visible where they are written — and it had no badge only because the badge was
+   * derived from a meta tag that `next dev` never carries. Now that the badge is also the scope
+   * switch, "no badge" would mean the one place the work happens is the one place the switch cannot
+   * be reached.
+   */
+  const badgeLabel = productionScope ? 'AS PRODUCTION' : (buildVariant.toUpperCase() || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
+  /** Staging is production scope already and has nothing to switch; production carries no badge. */
+  const badgeSwitches = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
   // Sending sessions to the store, and what the three controls that do it say. See useSessionSync.
   const sync = useSessionSync({
@@ -4183,11 +4210,38 @@ export default function Home() {
 
               Violet rather than amber for staging, because they mean different things: amber is
               "this is not the release", violet is "this IS the release, one step early". */}
-          {buildVariant && (
-            <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
-              ${isPreviewBuild ? 'text-amber-300 bg-amber-500/15' : 'text-violet-300 bg-violet-500/15'}`}>
-              {buildVariant.toUpperCase()}
-            </span>
+          {badgeLabel && (
+            /* THE BADGE IS ALSO THE SWITCH, on preview. It already had to be on screen to say which
+               build this is, and the mode it toggles is a statement about the same thing — so one
+               element carries both rather than a second control appearing next to it.
+
+               It takes STAGING'S COLOUR in the mode, and that is the point rather than a shortage of
+               hues: violet means "this IS the release, one step early", which is exactly what a
+               preview read at production scope is standing in for. The word changes with it, so the
+               state is legible without knowing the palette.
+
+               Not a control anywhere else. Staging is already production scope and has nothing to
+               switch; production carries no badge at all. */
+            badgeSwitches ? (
+              <button
+                type="button"
+                onClick={() => setProductionScope(!productionScope)}
+                title={productionScope
+                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full preview.'
+                  : 'Click to read this preview as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
+                className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer
+                  ${productionScope
+                    ? 'text-violet-300 bg-violet-500/15 hover:bg-violet-500/25'
+                    : 'text-amber-300 bg-amber-500/15 hover:bg-amber-500/25'}`}
+              >
+                {badgeLabel}
+              </button>
+            ) : (
+              <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
+                text-violet-300 bg-violet-500/15`}>
+                {buildVariant.toUpperCase()}
+              </span>
+            )
           )}
           {/* Identity, and nothing else. It used to open CREDITS as well, on the argument that a
               version number is a label carrying no state and so costs nothing to make a control.
@@ -5031,7 +5085,7 @@ export default function Home() {
                        Preview only — see `storePanel` on the menu sheet for why — and unstyled, so
                        it takes the component's default shape: the same 10px uppercase label and 3px
                        icon NEW SESSION uses, one control's width to its left. */
-                    beforeNew={isPreviewBuild ? (
+                    beforeNew={syncSurfaces ? (
                       <div className="hidden min-[900px]:block">
                         <SessionStorePanel
                           settings={sync.settings}
@@ -5491,7 +5545,7 @@ export default function Home() {
              to, so it could only ever report failures. Assembled here rather than imported inside
              the sheet so that one gate stays in one place, and so the trigger's tone comes from the
              same describeSync the header's twin reads. */
-          storePanel={isPreviewBuild && syncLook ? (
+          storePanel={syncSurfaces && syncLook ? (
             <SessionStorePanel
               openUp
               label={`Sync${(syncStatus?.pending ?? 0) > 0 ? ` ${syncStatus?.pending}` : ''}`}
