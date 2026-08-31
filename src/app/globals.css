@@ -171,8 +171,15 @@ body {
    thin themed one. Note `thin` is the narrowest the standard property offers —
    6px is only reachable through the webkit pseudo-elements. */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  /* 3px, halved from 6 on request (operator, 2026-08-31). It is an indicator here,
+     not a control: nothing in this app is scrolled by dragging its bar — the panes
+     are touched or wheeled — so the width buys legibility rather than a hit target,
+     and 3px is enough to see where you are in a list.
+
+     Chromium only. Firefox is on `scrollbar-width: thin` below, which is the
+     narrowest the standard property offers and is unaffected by this number. */
+  width: 3px;
+  height: 3px;
 }
 
 /* No `::-webkit-slider-thumb` rule here, and that is a measured decision rather than an omission.
@@ -209,7 +216,9 @@ body {
 ::-webkit-scrollbar-thumb {
   background: #2A2A33;
   /* slate-700 (cool charcoal) */
-  border-radius: 3px;
+  /* Half the bar's width, as it was at 6px: a radius equal to the width would draw
+     a capsule and cost the thumb its ends, which is what says how long it is. */
+  border-radius: 1.5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
