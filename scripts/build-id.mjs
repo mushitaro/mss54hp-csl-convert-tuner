@@ -75,10 +75,17 @@ for (const path of walk(OUT)) {
     if (extname(path) !== '.html') continue;
     const html = readFileSync(path, 'utf8');
     if (!html.includes('</head>')) continue;
-    writeFileSync(path, html.replace(
-        /<\/head>/,
-        `<meta name="build-id" content="${id}"><meta name="build-at" content="${at}"></head>`,
-    ));
+    // STRIP FIRST, then insert. `out/` is not guaranteed to be a fresh export — Next can leave an
+    // unchanged document in place, and another session building in this checkout can leave one
+    // behind entirely — so an insert-only stamp appends a SECOND tag to a document that already had
+    // one. Measured on the preview deployment: two `build-id` metas, the stale one first, which is
+    // the one every reader takes. `ship`'s own readback reported the previous build because of it.
+    writeFileSync(path, html
+        .replace(/<meta name="build-(?:id|at)" content="[^"]*">/g, '')
+        .replace(
+            /<\/head>/,
+            `<meta name="build-id" content="${id}"><meta name="build-at" content="${at}"></head>`,
+        ));
     patched++;
 }
 
