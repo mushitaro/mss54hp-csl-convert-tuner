@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
     DmeLink, DmeIdentity, LiveMeasurement, InertiaSample, RamProbeResult, TransferPhase, AdaptationSnapshot, FlashCounterInfo,
     DmeLinkError, DmeErrorKind, isServiceBlockErasedCause, ServiceBlockDump,
-    WriteVerifyMode, WriteVerification, IdleSample,} from '@/lib/dme-link/types';
+    WriteVerifyMode, WriteVerification, IdleSample, TransferProgress,} from '@/lib/dme-link/types';
 import { ServiceBlockReport, buildServiceBlockReport } from '@/lib/dme-link/serviceBlockReport';
 import type { SpotWindow } from '@/lib/dme-link/spotCheck';
 import { MockDmeLink } from '@/lib/dme-link/mockDmeLink';
 import { WebSerialDmeLink } from '@/lib/dme-link/webSerialDmeLink';
-import { loadFastEntrySeed } from '@/lib/db/serviceBackupRepository';
+import { loadFastEntrySeed, saveServiceBackup } from '@/lib/db/serviceBackupRepository';
+import { SERVICE_BLOCK_PAIR_LENGTH, ServiceBlockLayout } from '@/lib/dme-link/flashCounter';
 import { TransportKind, detectTransportKind } from '@/lib/dme-link/byteTransport';
 import { analyzeDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
 import { dialogText } from '@/lib/dialog-text';
@@ -424,6 +425,60 @@ export function useDmeLink() {
         return () => clearInterval(id);
     }, []);
 
+    /**
+     * Take the service-block backup FAST READ needs, on the read that would otherwise be slow.
+     *
+     * It used to be a procedure the operator had to know: open the FLASH dialog, inspect, take a
+     * backup, and FAST READ arms itself on the NEXT connect. Nothing about that is a decision —
+     * there is no reason to decline a recovery artefact — so it is not a question worth asking, and
+     * a step nobody is told about is a step nobody performs.
+     *
+     * It pays for itself on the very first read rather than only on the second. The seed supplies
+     * ADDRESSES ONLY (the bytes to restore are re-read live, seconds before the erase), so the seed
+     * can be derived from a dump taken moments earlier just as well as from a stored one:
+     *
+     *     backup 16 KB at 9600   ~31 s     (65536 B measured at 122.9 s -> 1.875 ms/B)
+     *     then FAST READ         15-30 s
+     *     ----------------------------
+     *     first read             ~45-60 s  against 122.9 s for a plain 9600 read
+     *
+     * Every read after it is the 15-30 s alone. And the backup is written to the store on the way
+     * through, which is the same artefact `restoreServiceBlock` recovers from — so an ECU that has
+     * been read once now has a recovery image without anyone having remembered to take one.
+     *
+     * READ-ONLY, and that is what makes it safe to do unasked. `readServiceBlocks` sends no erase
+     * and no write; the destructive part of FAST READ is the one that already existed, already
+     * verifies its restore byte for byte BEFORE the baud switch, and is unchanged here.
+     *
+     * Skipped on PRACTICE (a mock backup must never be a restore candidate for a real ECU — `mock`
+     * is part of the record's identity) and on any transport that cannot change baud on the open
+     * handle, where the 31 s would buy nothing: `setFastRead` would arm nothing, and this is not the
+     * place to spend a read's worth of time on a recovery artefact the operator did not ask for.
+     *
+     * Failure is not a failed read. Anything here leaves the link disarmed and the read runs at
+     * 9600, which is what it would have done anyway.
+     */
+    const armFastReadFromCar = useCallback(async (link: DmeLink, onProgress: TransferProgress) => {
+        const snap = snapshotRef.current;
+        if (snap.mockMode || !link.setFastRead || (link.getFastReadArmed?.() ?? false)) return;
+        if (snap.transportKind !== 'web-usb-ftdi') return;
+        try {
+            const dump = await link.readServiceBlocks(onProgress);
+            const pair = new Uint8Array(SERVICE_BLOCK_PAIR_LENGTH);
+            pair.set(dump.master, 0);
+            pair.set(dump.slave, ServiceBlockLayout.master.length);
+            await saveServiceBackup({ at: Date.now(), vin: snap.identity?.vin, mock: false, buffer: pair.buffer });
+            // Read back through the store rather than building the seed from `dump` here, so the
+            // seed this session uses is byte-identical to the one the next connect will load. Two
+            // constructions of the same thing is two places for it to drift.
+            const seed = await loadFastEntrySeed(snap.identity?.vin, false);
+            link.setFastRead(seed);
+            setFastReadArmed(link.getFastReadArmed?.() ?? false);
+        } catch {
+            setFastReadArmed(false);
+        }
+    }, []);
+
     const read = useCallback(async (): Promise<ReadOutcome> => {
         if (!linkRef.current) return { ok: false, cancelled: false, error: 'Not connected to DME' };
         // Pinned, because the FAST READ path REPLACES linkRef.current before this function returns:
@@ -438,7 +493,12 @@ export function useDmeLink() {
         setTransferProgress(0);
         const startedAt = performance.now();
         try {
-            const buffer = await readLink.readPartialBin(makeThrottledProgress());
+            // The backup takes the first quarter of the bar and the read the rest, rather than
+            // each running 0-100: a bar that restarts reads as an operation that failed and began
+            // again, on the one screen where that is the worst thing it could say.
+            const bar = makeThrottledProgress();
+            await armFastReadFromCar(readLink, (p, phase) => bar(Math.round(p * 0.25), phase));
+            const buffer = await readLink.readPartialBin((p, phase) => bar(25 + Math.round(p * 0.75), phase));
             // Always report the measured result, not just failures. "It didn't feel faster" is not
             // something a baud rate can be judged on — that guess already cost three rates being
             // deleted on a wrong conclusion — so the read states its own elapsed time and throughput.
@@ -548,7 +608,7 @@ export function useDmeLink() {
         // `connect` is a real input and was missing: the 125000 path reconnects through it, and a
         // stale copy would rebuild the link with an out-of-date mockMode. The READ rate used to be
         // listed here too, for a "REFUSED" comparison that no longer reads React state — see above.
-    }, [clearError, failWith, publishLast, connect, setState, settleIdle]);
+    }, [clearError, failWith, publishLast, connect, setState, settleIdle, armFastReadFromCar]);
 
     // Aborts an in-progress partial-BIN read (the read() promise rejects with a cancel error,
     // which read()'s catch treats as a clean return to 'connected').
