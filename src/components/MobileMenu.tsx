@@ -138,9 +138,20 @@ export const MENU_CELL = 'w-full h-full flex flex-col items-center justify-cente
  *  themselves are 14px, which is what the header renders them at. */
 const STRIP_ITEM = 'w-10 h-10 [@media(max-height:560px)]:w-9 [@media(max-height:560px)]:h-9 flex items-center justify-center rounded transition-colors';
 
-/** One page of the SESSION carousel. Three columns on both, so the pages line up rather than
- *  sliding sideways under the thumb. */
-const PAGE = 'w-full shrink-0 snap-start grid grid-cols-3 gap-2';
+/**
+ * The SESSION row, as many columns as it has controls.
+ *
+ * It was a fixed three, from a carousel that no longer exists — there is one page now, and the
+ * comment describing "both" pages outlived them. Fixed at three, the row is only full where the
+ * third control renders: SYNC is `preview-only`, so on STAGING and in production NEW and SAVE sat
+ * in the left two thirds of the band with a hole beside them (operator, 2026-08-31).
+ *
+ * Counted rather than told, so a control that comes or goes cannot leave the row lying about how
+ * many there are. Tailwind needs the class as a literal, hence the map — a template string would
+ * not survive the compiler's scan.
+ */
+const PAGE_COLS: Record<number, string> = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3' };
+const pageClass = (cells: number) => `w-full shrink-0 snap-start grid ${PAGE_COLS[cells] ?? 'grid-cols-3'} gap-2`;
 
 /** The breathing room inside a band. Halved on a short viewport, which is the only place the sheet
  *  is short of height — nothing here is a tap target, so nothing loses one. */
@@ -483,7 +494,7 @@ export const MobileMenu: React.FC<Props> = ({
                             NEW, SAVE, SYNC — a session's life left to right, and SAVE on the centre
                             line because it is the one pressed after every run. */}
                         <div>
-                            <div className={PAGE}>
+                            <div className={pageClass(1 + (saveLook ? 1 : 0) + (storePanel ? 1 : 0))}>
                                 <button
                                     type="button"
                                     onClick={() => { onNewSession(); onClose(); }}

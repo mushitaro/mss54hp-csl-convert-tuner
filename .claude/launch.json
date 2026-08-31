@@ -11,6 +11,14 @@
             "autoPort": false
         },
         {
+            "//": "A SECOND harness dev server, for when another chat is already holding `dev`. Same launcher, its own port and its own distDir, so the two do not contend for Next's `<distDir>/dev/lock`. Added rather than renumbering `dev`: the chat holding 5057 is connected to it, and moving that entry would drop them.",
+            "name": "dev-b",
+            "runtimeExecutable": "node",
+            "runtimeArgs": ["scripts/dev-alt.mjs", "5063"],
+            "port": 5063,
+            "autoPort": false
+        },
+        {
             "//": "The static export served by the Cloudflare Pages emulator, WITH the /api functions and a local D1. `npm run dev` above has no /api at all, so the upload path can only be exercised here. Run `npm run build` first — this serves out/, it does not create it.",
             "//port": "Stated TWICE and the two must stay in step: `runtimeArgs` is what wrangler binds, `port` is where the harness connects. That is also why `autoPort` stays false — letting the harness pick a free port would only change the second one, and it would then wait on a port wrangler never bound. Moved off 8788 because another chat's preview was already holding it; on a collision, change both numbers here rather than the flag.",
             "name": "preview",

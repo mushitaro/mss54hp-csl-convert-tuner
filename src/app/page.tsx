@@ -1673,7 +1673,11 @@ export default function Home() {
     // — a SECOND Alpha-N table (0xD770) on its own axes, derived from the very grid SHAPE has just
     // finished describing. Reading it two tabs later, after RF KORR's fuel correction, put an
     // unrelated table between two views of one derivation (operator, 2026-08-26).
-    { id: 'warmup', label: 'WARMUP (DERIVED / EXP.)', enabled: !!warmupMap },
+    // The label used to read WARMUP (DERIVED / EXP.). DERIVED went because the comment above
+    // already says what it is derived from, in more detail than a tab label can, and every
+    // other tab in this list wears only the warning: SHAPE (EXP.), INERTIA (EXP.). One word
+    // per tab, and the one worth having is the one about trust (operator, 2026-08-31).
+    { id: 'warmup', label: 'WARMUP (EXP.)', enabled: !!warmupMap },
     // Enabled on the RESULT, not on the binary: the tuner only returns something when the tables
     // decoded AND the log carried an exhaust temperature, which is exactly when there is a table
     // to show. A tab that is reachable and empty says the feature is broken.
