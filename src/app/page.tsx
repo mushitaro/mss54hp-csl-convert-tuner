@@ -30,7 +30,7 @@ import {
 import { CompareBar, type CompareOption } from '@/components/CompareBar';
 import { CalibrationTab } from '@/components/calibration/CalibrationTab';
 import { ValuePane } from '@/components/calibration/ValuePane';
-import { CalibrationDiffPopover } from '@/components/calibration/CalibrationDiffPopover';
+import { CalibrationDiffList } from '@/components/calibration/CalibrationDiffList';
 import { ParamInfo } from '@/components/calibration/ParamInfo';
 import { useCalibrationWorkspace, useCalibrationCompare } from '@/components/calibration/useCalibrationWorkspace';
 import { useCalibrationEdits } from '@/hooks/useCalibrationEdits';
@@ -67,7 +67,6 @@ import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
-import { DmeIdentityDialog } from '@/components/DmeIdentityDialog';
 import { CreditsDialog } from '@/components/CreditsDialog';
 import { MobileMenu, MENU_CELL } from '@/components/MobileMenu';
 import { MessageDialog } from '@/components/MessageDialog';
@@ -1562,7 +1561,7 @@ export default function Home() {
   /** The right pane's bottom tab on CALIBRATION. The auto-rules are derivations, not stored
    *  preferences: a transfer forces DME (that is where its progress lives); a fresh selection
    *  while the link is quiet answers with INFO. */
-  const [calBottomTab, setCalBottomTab] = useState<'info' | 'dme'>('info');
+  const [calBottomTab, setCalBottomTab] = useState<'info' | 'dme' | 'list'>('info');
   useEffect(() => {
     if (dmeLink.state === 'reading' || dmeLink.state === 'writing'
       || dmeLink.state === 'tuning' || dmeLink.state === 'resetting') {
@@ -1575,7 +1574,11 @@ export default function Home() {
   const [calPrevSelected, setCalPrevSelected] = useState<string | null>(null);
   if (calWs.selected !== calPrevSelected) {
     setCalPrevSelected(calWs.selected);
-    if (calWs.selected && (dmeLink.state === 'connected' || dmeLink.state === 'disconnected')) {
+    // …and not off LIST either. LIST is itself a selection surface: every row
+    // in it changes the selection, so answering that with INFO would close the
+    // list on the first thing picked from it.
+    if (calWs.selected && calBottomTab !== 'list'
+      && (dmeLink.state === 'connected' || dmeLink.state === 'disconnected')) {
       setCalBottomTab('info');
     }
   }
@@ -3274,7 +3277,7 @@ export default function Home() {
     // generated from the VE result, and the restore repairs a table the stable workflow's own
     // history damaged. The PATCH rows are logic switches the stable workflow has always had.
     const rowFeature: Record<string, FeatureName> = {
-      alphan: 've', shape: 'lowLoad', warmup: 've', rfkorr: 'rfKorr', store: 've',
+      alphan: 've', shape: 'lowLoad', warmup: 've', rfkorr: 'rfKorr',
       idle: 'idle', inertia: 'inertia', wotfuel: 've',
       // The two Alpha-N restores ride with 've' like the WOT FUEL one above: they repair tables the
       // VE workflow's own history moved. `restorewarmup` is 've' and not 'lowLoad' because
@@ -3395,24 +3398,15 @@ export default function Home() {
             lockReason: !canTuneRfKorr ? rfKorrLockReason : undefined,
             onToggle: setWriteRfKorr,
           },
-          {
-            // A readout, not a toggle: it is a fact about the log, and the decision it drives is
-            // already spent on the two rows above. NEUTRAL is the good news that licenses them.
-            id: 'store', label: 'TRIM STORE', kind: 'readout',
-            status: storeNeutrality.verdict === 'neutral' ? 'NEUTRAL'
-              : storeNeutrality.verdict === 'learned' ? `LEARNED ${storeNeutrality.worst.toFixed(3)}`
-                : 'UNCHECKED',
-            statusTone: storeNeutrality.verdict === 'neutral' ? 'ok'
-              : storeNeutrality.verdict === 'learned' ? 'danger' : 'warn',
-            // Every verdict says something, including the good one. This row is the licence the
-            // two derivations above it are written on, and a licence that only speaks when it
-            // refuses is not one anybody can check.
-            lockReason: storeNeutrality.verdict === 'neutral' ? manifestText.trimNeutral
-              : storeNeutrality.verdict === 'learned'
-                ? manifestText.trimLearned(storeNeutrality.worst.toFixed(4))
-                : storeNeutrality.samples === 0 ? manifestText.trimNoChannel
-                  : manifestText.trimWindowOpen(storeNeutrality.frozen === null),
-          },
+          // TRIM STORE used to sit here: a readout of the neutrality verdict, on the argument that
+          // the licence the two derivations above are written on should be checkable and not only
+          // audible when it refuses. Taken out on request (operator, 2026-08-31) — four rows of the
+          // menu were spent stating a fact in its good case, which is its usual case.
+          //
+          // THE GATE ITSELF IS UNTOUCHED. `storeLockReason` still disables ALPHA-N and SHAPE on a
+          // learned store, and `manifestText.trimLearned` is still what their info reads out, so
+          // the refusal is said in full where the refusal happens. What is gone is the row that
+          // said NEUTRAL when there was nothing to refuse.
           {
             id: 'idle', label: 'IDLE', kind: 'sealed',
             lockReason: manifestText.idleSealed,
@@ -3516,7 +3510,7 @@ export default function Home() {
           .map(r => ({ ...r, infoLabel: manifestText.info })),
       }))
       .filter(g => g.rows.length > 0);
-  }, [storeNeutrality, storeLockReason, alphaNCells, alphaNAvailable, alphaNEarnedNothing,
+  }, [storeLockReason, alphaNCells, alphaNAvailable, alphaNEarnedNothing,
     shapeCells, binaryFileState.writeShape, binaryFileState.setWriteShape,
     setWriteAlphaN, binaryFileState.writeVe, lowLoadArmed, newMap,
     writeWarmup, setWriteWarmup, derivedTablesLocked, manifestText,
@@ -4098,6 +4092,25 @@ export default function Home() {
     </div>
   ) : <div className="flex-1 min-h-0" />;
 
+  /**
+   * The third side of the same slot: WHICH parameters differ.
+   *
+   * A jump list, so its rows use `jump` rather than `select` — the tree's
+   * select leaves the diagram on the block you are reading, which is right
+   * there and wrong here.
+   */
+  const calListPanel = (
+    <CalibrationDiffList
+      entries={calDiffEntries}
+      editedIds={calEditedIds}
+      selectedId={calWs.selected}
+      canCopyReference={calCompare.subject === 'tuned'}
+      onSelect={calWs.jump}
+      onCopyRef={calCopyParam}
+      onRevert={calEdits.revertParam}
+    />
+  );
+
   return (
     // 100svh, not h-screen and not dvh. This page deliberately never scrolls — everything is sized to fit the
     // viewport — and on Android `100vh` resolves to the LARGEST viewport, the one with the browser
@@ -4118,19 +4131,19 @@ export default function Home() {
           style={{ background: 'linear-gradient(to right, #0A9BDB 0 33.333%, #9B84E8 33.333% 66.667%, #F11A22 66.667% 100%)' }}
         />
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          {/* The dot is the identity's entry point, not just an LED. `p-4 -m-4` grows the hit box to
-              40px without moving anything: the padding is cancelled by the margin, so the dot still
-              occupies its 8px in the row. It needed a real target anyway — an 8px control is
-              unhittable on a phone — and it needed a destination, because the readouts beside it are
-              hidden below 900px and had nowhere else to be reached from. */}
-          <button
-            type="button"
-            onClick={() => dialogs.open('identity')}
-            title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}\n\nClick for VIN / AIF / SW.`}
-            className="shrink-0 p-4 -m-4 cursor-pointer"
-          >
-            <span className={`block w-2 h-2 rounded-full ${dmeStatusColor}`} />
-          </button>
+          {/* An LED, and only that. It used to be the way in to VIN / AIF / SW as well, on the
+              argument that an 8px dot needs a real hit box anyway so it may as well have a
+              destination. What that produced is a control nobody can see is a control: 8px of
+              colour with a 40px tap target around it, in the corner a thumb rests on, opening a
+              dialog over whatever was being read (operator, 2026-08-31).
+
+              So it states machine state and nothing else, and the identity dialog goes with it —
+              see the note where it used to render. The state is still readable on hover, where a
+              readout of this size belongs. */}
+          <span
+            title={`DME: ${dmeLink.state}${dmeLink.error ? ' — ' + dmeLink.error : ''}`}
+            className={`shrink-0 block w-2 h-2 rounded-full ${dmeStatusColor}`}
+          />
           {/* Capped on a narrow header. Dropping `shrink-0` let the ellipsis work, but flexbox still
               hands this the larger share — its content is ~300px against the identity strip's ~60 —
               so the strip was resolving to zero width and FLASH went with it. A ceiling, not a
@@ -4176,17 +4189,15 @@ export default function Home() {
               {buildVariant.toUpperCase()}
             </span>
           )}
-          {/* The version doubles as the way in to CREDITS. It is the one label in this strip that is
-              pure identity and carries no state, so nothing is lost by making it a control — and
-              attribution has to be reachable from a phone that has only ever seen the installed PWA,
-              never the README. Not in the disclaimer: that has a "don't show again" box. */}
-          <button
-            onClick={() => dialogs.open('credits')}
-            title="CREDITS"
-            className="shrink-0 text-[9px] font-mono text-slate-500 hover:text-slate-300 whitespace-nowrap transition-colors cursor-pointer"
-          >
+          {/* Identity, and nothing else. It used to open CREDITS as well, on the argument that a
+              version number is a label carrying no state and so costs nothing to make a control.
+              What that missed is that CREDITS already has a sign in both layouts — the medal above
+              900px, the menu sheet's own row below it — so this was a third, unlabelled way in, and
+              a version number that swallows a tap is a version number that cannot be read on a
+              phone without opening a dialog (operator, 2026-08-31). */}
+          <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">
             V2.2.0 β
-          </button>
+          </span>
 
           <div className="hidden min-[900px]:flex flex-1 min-w-0 items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">
             {/* The only one of the four that is a control: clicking it opens the reset dialog. The
@@ -4262,10 +4273,28 @@ export default function Home() {
             <Github className="w-5 h-5" />
           </a>
 
-          {/* The guide. Icon only, at the same w-5 h-5 as PRIVACY and GITHUB either side of it —
-              it was the one member of this row wearing a label ("TUNING SOURCE") and a smaller
-              glyph, which made a row of three equals read as two icons and a link. The destination
-              is in the tooltip, where the other two put theirs. */}
+          {/* CREDITS, which the wide layout did not have — the version string used to be the
+              desk's only way in, and it is a span now.
+
+              THIRD, not fourth, because the menu sheet reads PRIVACY GITHUB MEDAL GUIDE RELOAD and
+              the two layouts are the same five controls. Two orders for one row is a thing the
+              reader has to learn twice, and this is the layout that had it wrong: the sheet puts
+              the medal in the middle deliberately, on its own grid column, because it is the one
+              item here that is an acknowledgement rather than a tool (operator, 2026-08-31).
+
+              Same size and the same neutral tone as its neighbours: this states no machine state. */}
+          <button
+            onClick={() => dialogs.open('credits')}
+            className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+            title="Credits & attribution"
+          >
+            <Medal className="w-5 h-5" />
+          </button>
+
+          {/* The guide. Icon only, at the same w-5 h-5 as everything else in the row — it was the
+              one member wearing a label ("TUNING SOURCE") and a smaller glyph, which made a row of
+              equals read as icons and a link. The destination is in the tooltip, where the rest of
+              the row puts theirs. */}
           <a
             href="https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability"
             target="_blank"
@@ -4275,19 +4304,6 @@ export default function Home() {
           >
             <BookOpen className="w-5 h-5" />
           </a>
-
-          {/* CREDITS, which the wide layout did not have. The version string opens the same dialog
-              and always has, but a version number is not where anyone looks for attribution — the
-              menu sheet has carried an explicit medal for it since it existed, and above 900px the
-              sheet is hidden, so the desk had the entry without the sign. Same size and the same
-              neutral tone as its three neighbours: this states no machine state. */}
-          <button
-            onClick={() => dialogs.open('credits')}
-            className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-            title="Credits & attribution"
-          >
-            <Medal className="w-5 h-5" />
-          </button>
 
           {/* The wide layout's only reload, and until it existed there was none at all.
               Pull-to-refresh is off on purpose, the row that replaced it lives in the menu sheet,
@@ -4300,9 +4316,13 @@ export default function Home() {
               end of the menu sheet: it drops the link, the log being recorded and any unsaved tune.
               `confirm` guards exactly those cases and nothing else.
 
-              The label keeps a stated width so announcing an update cannot move the header — the
-              house rule that a thing which appears and disappears must not resize anything applies
-              to a word changing length just as much as to an element arriving. */}
+              Sized by its content, like the four icons before it. A stated width was tried, so
+              that announcing an update could not move the header, and it cost more than it bought:
+              the slot had to be as wide as the WORD, so the idle glyph sat 52px from the medal
+              beside it while its four neighbours sat 16px apart, and the row read as four icons and
+              a straggler (operator, 2026-08-31). The trade is that when an update does arrive the
+              four icons shift left by the difference — once per released build, on the one control
+              whose job that moment is to be noticed. */}
           {/* There is no SYNC here any more, and this note is why.
               This was a third one: a cloud with a pending count that called `sync.syncAll()` — the
               SAME action, on the same status object, as the labelled SYNC on the session bar over
@@ -4334,12 +4354,24 @@ export default function Home() {
                pulsing blue, and that same blue holding still while the icon spins on the download.
                The pulse and the spin are deliberately not both on — pulsing means "there is
                something here to take", and once it is being taken that is no longer the message. */
-            className={`${updateAvailable ? 'flex' : 'hidden min-[900px]:flex'} items-center gap-2 shrink-0 py-3 -my-3 transition-colors ${reloading ? 'text-blue-400 cursor-default' : `cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300 animate-pulse' : 'text-slate-500 hover:text-slate-300'}`}`}
+            className={`${updateAvailable ? 'flex' : 'hidden min-[900px]:flex'} items-center shrink-0 py-3 -my-3 transition-colors ${reloading ? 'text-blue-400 cursor-default' : `cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300 animate-pulse' : 'text-slate-500 hover:text-slate-300'}`}`}
           >
-            <RefreshCw className={`w-4 h-4 shrink-0 ${reloading ? 'animate-spin' : ''}`} />
-            <span className={`text-left text-[10px] uppercase font-bold tracking-wider whitespace-nowrap ${updateAvailable ? '' : 'w-[52px]'}`}>
-              {updateAvailable ? 'Update' : 'Reload'}
-            </span>
+            {/* ONE of the two, never both. Idle, this is a convenience nobody is being told about,
+                and a glyph is the whole message — the word RELOAD beside it said the same thing a
+                second time, in the strip's largest type. With an update waiting the message is not
+                "reload" at all: it is that there IS one, so the word carries it and the glyph goes,
+                because a refresh arrow is exactly what this is not asking for.
+
+                Mid-download the glyph comes back, spinning. That is the one state where the arrow
+                is literal, and the pulse stops for the same reason it always did. */}
+            {updateAvailable && !reloading ? (
+              <span className="text-[10px] uppercase font-bold tracking-wider whitespace-nowrap">Update</span>
+            ) : (
+              /* w-5, the size of the four glyphs before it, for the reason the guide link
+                 records: a row of equals with one smaller member reads as a group and a
+                 straggler. */
+              <RefreshCw className={`w-5 h-5 shrink-0 ${reloading ? 'animate-spin' : ''}`} />
+            )}
           </button>
         </div>
       </header>
@@ -5188,17 +5220,7 @@ export default function Home() {
                   diffMode={calCompare.diffMode}
                   onDiffMode={calCompare.setDiffMode}
                   diffCount={calDiffEntries?.length ?? null}
-                  diffList={
-                    <CalibrationDiffPopover
-                      entries={calDiffEntries}
-                      editedIds={calEditedIds}
-                      selectedId={calWs.selected}
-                      canCopyReference={calCompare.subject === 'tuned'}
-                      onSelect={calWs.select}
-                      onCopyRef={calCopyParam}
-                      onRevert={calEdits.revertParam}
-                    />
-                  }
+                  onShowList={() => setCalBottomTab('list')}
                   onEditCell={calEditCell}
                   onBulkOp={calBulkOp}
                   onCopyRef={calCopyRef}
@@ -5289,13 +5311,23 @@ export default function Home() {
                 the hub's natural height — exactly as before. */}
             <div className={`flex ${narrowPane === 'graph' ? SPLIT_ONLY_HIDE : SPLIT_ONLY_GROW} ${activeTab === 'calibration' ? 'basis-[38.2%] grow-0 shrink-0' : 'flex-initial'} min-h-0 overflow-y-auto px-5 pt-2 pb-2 [@media(min-height:560px)]:pt-4 [@media(min-height:560px)]:pb-5 flex-col`}>
 
-              {/* On the CALIBRATION tab this pane's bottom region is tabbed: INFO for the
-                  selected parameter, DME for the connect/write hub. ONE branch mounts at a time —
-                  the hub is one state machine and must never exist twice in the DOM. Every other
-                  tab renders the hub exactly where it always was. */}
+              {/* On the CALIBRATION tab this pane's bottom region is tabbed: DIFF for what
+                  differs between the two BINs, INFO for the selected parameter, FLASH for the
+                  connect/write hub. ONE branch mounts at a time — the hub is one state machine and
+                  must never exist twice in the DOM. Every other tab renders the hub exactly where
+                  it always was. */}
               {activeTab === 'calibration' && (
                 <div className="h-[26px] flex-none flex items-center gap-4 px-1 mb-1 border-b border-slate-900">
-                  {(['info', 'dme'] as const).map(id => (
+                  {/* Reading order, left to right: which ones differ, what this
+                      one is, and what to do with the result.
+
+                      The LABELS are not the ids. `dme` reads FLASH because the
+                      tab is named for the job — writing the binary — while the
+                      id stays with the device the rest of the file is named
+                      after (dmeLink, dmeInputsPanel, dmeStatusColor). Renaming
+                      the id would rename a state machine to match a word on a
+                      tab. */}
+                  {(['list', 'info', 'dme'] as const).map(id => (
                     <button
                       key={id}
                       onClick={() => setCalBottomTab(id)}
@@ -5303,13 +5335,18 @@ export default function Home() {
                         ? 'text-blue-400 border-blue-400'
                         : 'text-slate-600 border-transparent hover:text-slate-300'}`}
                     >
-                      {id === 'info' ? 'INFO' : 'DME'}
+                      {id === 'list' ? 'DIFF' : id === 'info' ? 'INFO' : 'FLASH'}
                       {id === 'dme' && <span className={`block w-1.5 h-1.5 rounded-full ${dmeStatusColor}`} />}
+                      {id === 'list' && calDiffEntries !== null && (
+                        <span className="font-mono text-slate-500">{calDiffEntries.length}</span>
+                      )}
                     </button>
                   ))}
                 </div>
               )}
-              {activeTab !== 'calibration' || calBottomTab === 'dme' ? dmeInputsPanel : calInfoPanel}
+              {activeTab !== 'calibration' || calBottomTab === 'dme'
+                ? dmeInputsPanel
+                : calBottomTab === 'list' ? calListPanel : calInfoPanel}
             </div >
           </div >
         </div >
@@ -5517,13 +5554,12 @@ export default function Home() {
         />
       )}
 
-      {dialogs.isOpen('identity') && (
-        <DmeIdentityDialog
-          identity={dmeLink.identity}
-          state={dmeLink.state}
-          onClose={() => dialogs.close()}
-        />
-      )}
+      {/* The DME IDENTITY dialog stood here. Its only trigger was the status dot in the header,
+          and with that back to being an LED nothing could open it — a dialog reachable from nowhere
+          is not a feature, it is a branch that never runs. `components/DmeIdentityDialog.tsx` is
+          still on disk and still compiles; giving it an entry point again is one line. The identity
+          itself is not lost either: `useDiagnosticsPublisher` still sends VIN and software version
+          with every diagnostics record. */}
 
       {dialogs.isOpen('flash') && (
         <FlashCounterResetDialog

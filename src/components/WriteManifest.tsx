@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { Info, X } from 'lucide-react';
 import { armedLabels, type ManifestGroup, type ManifestRow } from '@/lib/writeManifest';
@@ -150,6 +150,88 @@ const MenuRow: React.FC<{ row: ManifestRow; busy: boolean }> = ({ row, busy }) =
 };
 
 /**
+ * Where a menu goes on the desk, and why it is measured instead of declared.
+ *
+ * The panel is portalled to the body (see MenuPortal), so no CSS can position it against the word
+ * that opened it — there is no shared containing block left to position in. On a phone that costs
+ * nothing, because the sheet belongs at the bottom of the viewport whatever opened it. On the desk
+ * the same rule put the panel at the centre of the SCREEN, which is the middle of the MAP column,
+ * half a screen from the word that was tapped (operator, 2026-08-31).
+ *
+ * So the desk measures. The trigger's rect is taken in the click handler and turned into
+ * left / width / top-or-bottom here: centred on the word, above it when that side has more room
+ * than below, and clamped EDGE from every side. The panel takes whatever height that side has and
+ * scrolls the rest — a menu that is anchored to a word and then covers it is not anchored to
+ * anything the reader can still see.
+ */
+const PANEL_W = 280;
+/** 280 x 1.618 — the shape the panel was designed at, and the ceiling the room below is capped to. */
+const PANEL_MAX_H = 453;
+/** Below this the panel is a scroll slit rather than a menu, so it overlaps the word instead. */
+const PANEL_MIN_H = 160;
+const GAP = 8;
+const EDGE = 12;
+
+function anchoredStyle(rect: DOMRect): React.CSSProperties {
+    const left = Math.min(
+        Math.max(rect.left + rect.width / 2 - PANEL_W / 2, EDGE),
+        Math.max(EDGE, window.innerWidth - PANEL_W - EDGE));
+    const above = rect.top - GAP - EDGE;
+    const below = window.innerHeight - rect.bottom - GAP - EDGE;
+    const up = above >= below;
+    const maxHeight = Math.min(PANEL_MAX_H, Math.max(PANEL_MIN_H, up ? above : below));
+    // `bottom` for the upward case rather than a computed `top`: the panel then grows away from the
+    // word as its content does, instead of sliding over it.
+    return up
+        ? { left, width: PANEL_W, maxHeight, bottom: window.innerHeight - rect.top + GAP }
+        : { left, width: PANEL_W, maxHeight, top: rect.bottom + GAP };
+}
+
+/** The breakpoint the whole app splits on, subscribed rather than read once. */
+const DESK = '(min-width: 900px)';
+const subscribeDesk = (onChange: () => void) => {
+    const m = window.matchMedia(DESK);
+    m.addEventListener('change', onChange);
+    return () => m.removeEventListener('change', onChange);
+};
+const isDeskNow = () => window.matchMedia(DESK).matches;
+const isDeskOnServer = () => false;
+
+/**
+ * One menu's open state and the rect it hangs off.
+ *
+ * The rect is taken in the CLICK and not in an effect. An effect would have to measure and then set
+ * state synchronously, which `react-hooks/set-state-in-effect` forbids; the listeners below set
+ * state from their own callbacks, which is a different thing and is allowed.
+ */
+function useAnchoredMenu() {
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    const [open, setOpen] = useState(false);
+    const [anchor, setAnchor] = useState<DOMRect | null>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const remeasure = () => setAnchor(triggerRef.current?.getBoundingClientRect() ?? null);
+        window.addEventListener('resize', remeasure);
+        // Capture phase: the cluster sits inside scroll containers that do not bubble `scroll` to
+        // the window, and an anchor that goes stale on a scroll is worse than no anchor.
+        window.addEventListener('scroll', remeasure, true);
+        return () => {
+            window.removeEventListener('resize', remeasure);
+            window.removeEventListener('scroll', remeasure, true);
+        };
+    }, [open]);
+
+    const close = () => { setOpen(false); setAnchor(null); };
+    const toggle = () => {
+        if (open) { close(); return; }
+        setAnchor(triggerRef.current?.getBoundingClientRect() ?? null);
+        setOpen(true);
+    };
+    return { triggerRef, open, anchor, toggle, close };
+}
+
+/**
  * The convex arc of a wing: ends near the ring, middles pushed out, mirrored on the other side.
  * It read 1-8-8-1 when each side carried four rows. It is the cluster's shape, not decoration —
  * the dial is supposed to sit inside a curve of its own modifiers.
@@ -161,13 +243,14 @@ const INSETS: Record<'left' | 'right', string[]> = {
 
 const Group: React.FC<{ group: ManifestGroup; busy: boolean; align: 'left' | 'right'; inset: string }> =
     ({ group, busy, align, inset }) => {
-        const [open, setOpen] = useState(false);
+        const { triggerRef, open, anchor, toggle, close } = useAnchoredMenu();
         const armed = armedLabels(group);
 
         return (
             <div className={`relative ${inset}`}>
                 <button
-                    onClick={() => setOpen(o => !o)}
+                    ref={triggerRef}
+                    onClick={toggle}
                     className={`flex flex-col gap-1 group/row cursor-pointer ${align === 'left' ? 'items-end' : 'items-start'}`}
                 >
                     {/* A reserved slot ABOVE the title as well as below it, and it is not padding.
@@ -188,13 +271,18 @@ const Group: React.FC<{ group: ManifestGroup; busy: boolean; align: 'left' | 'ri
                     </span>
                 </button>
 
-                {open && createPortal(<MenuPortal group={group} busy={busy} onClose={() => setOpen(false)} />, document.body)}
+                {open && createPortal(<MenuPortal group={group} busy={busy} anchor={anchor} onClose={close} />, document.body)}
             </div>
         );
     };
 
-const MenuPortal: React.FC<{ group: ManifestGroup; busy: boolean; onClose: () => void }> =
-    ({ group, busy, onClose }) => (
+const MenuPortal: React.FC<{ group: ManifestGroup; busy: boolean; onClose: () => void; anchor: DOMRect | null }> =
+    ({ group, busy, onClose, anchor }) => {
+        // Subscribed rather than read once, so crossing the breakpoint with a menu open re-lays it
+        // out instead of stranding a desk panel on a phone's bottom edge.
+        const desk = useSyncExternalStore(subscribeDesk, isDeskNow, isDeskOnServer);
+        const at = desk ? anchor : null;
+        return (
                     <>
                         <div className="fixed inset-0 z-40" onClick={onClose} />
                         {/* PORTALLED TO THE BODY, and that is not a detail.
@@ -206,14 +294,17 @@ const MenuPortal: React.FC<{ group: ManifestGroup; busy: boolean; onClose: () =>
                             bottom cut off. Only leaving the transformed subtree fixes it; `max-h`
                             cannot, because the box was never the problem — the containing block is.
 
-                            Viewport-pinned sheet as the base shape, centred rather than anchored: the
-                            trigger sits mid-screen beside the dial, and anchoring is safe only while
-                            the trigger stays near the edge it aligns to. */}
-                        <div className="fixed inset-x-3 bottom-[60px] max-h-[calc(100svh-72px)] overflow-y-auto overscroll-contain
-                            min-[900px]:inset-x-auto min-[900px]:left-1/2 min-[900px]:-translate-x-1/2
-                            min-[900px]:bottom-[92px] min-[900px]:w-[280px] min-[900px]:max-h-[min(453px,70dvh)]
+                            A viewport sheet on the phone, where the sheet IS the shape. The desk
+                            used to take the same sheet and centre it, which put the panel over the
+                            MAP column — the trigger sits beside the dial in the RIGHT column, and
+                            the centre of the screen is not near it. So the desk measures the word
+                            and hangs the panel off it: see anchoredStyle. */}
+                        <div
+                            style={at ? anchoredStyle(at) : undefined}
+                            className={`fixed overflow-y-auto overscroll-contain
                             bg-slate-900 rounded-lg shadow-xl z-50 p-4
-                            animate-in fade-in zoom-in-95 duration-200 text-left">
+                            animate-in fade-in zoom-in-95 duration-200 text-left
+                            ${at ? '' : 'inset-x-3 bottom-[60px] max-h-[calc(100svh-72px)]'}`}>
                             <div className="flex items-start justify-between border-b border-slate-800 pb-2 mb-2">
                                 <div className="min-w-0">
                                     <div className="text-[10px] font-bold tracking-widest uppercase text-slate-300">{group.title}</div>
@@ -228,7 +319,8 @@ const MenuPortal: React.FC<{ group: ManifestGroup; busy: boolean; onClose: () =>
                             </div>
                         </div>
                     </>
-);
+        );
+    };
 
 /**
  * A group that does NOT flank the dial: one line, in a corner, for something used a few times a
@@ -237,11 +329,11 @@ const MenuPortal: React.FC<{ group: ManifestGroup; busy: boolean; onClose: () =>
  * after the title instead.
  */
 export const ManifestCorner: React.FC<{ group: ManifestGroup; busy: boolean }> = ({ group, busy }) => {
-    const [open, setOpen] = useState(false);
+    const { triggerRef, open, anchor, toggle, close } = useAnchoredMenu();
     const armed = armedLabels(group);
     return (
         <div className="relative">
-            <button onClick={() => setOpen(o => !o)} className="h-7 flex items-center gap-2 cursor-pointer group/row">
+            <button ref={triggerRef} onClick={toggle} className="h-7 flex items-center gap-2 cursor-pointer group/row">
                 {/* Deliberately a step quieter than a wing title: the tiny-tag size rather than the
                     control-label size, and the dimmer label grey. It is reachable, not prominent —
                     a handful of uses a year against the wings' every campaign. */}
@@ -254,7 +346,7 @@ export const ManifestCorner: React.FC<{ group: ManifestGroup; busy: boolean }> =
                     </span>
                 )}
             </button>
-            {open && createPortal(<MenuPortal group={group} busy={busy} onClose={() => setOpen(false)} />, document.body)}
+            {open && createPortal(<MenuPortal group={group} busy={busy} anchor={anchor} onClose={close} />, document.body)}
         </div>
     );
 };

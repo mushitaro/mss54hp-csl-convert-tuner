@@ -42,7 +42,12 @@ const TEXT = {
         copyRef: 'COPY REF',
         revert: 'REVERT',
         list: 'LIST',
-        diffTitle: '差分を表示',
+        modeDelta: 'Δ',
+        modeValues: 'VALUES',
+        bannerDelta: 'Δ SUBJECT − REFERENCE',
+        bannerValues: 'SUBJECT VALUES',
+        diffTitle: '差分そのものを表示します。押すと実値に戻ります。',
+        valuesTitle: 'SUBJECT の実値を表示中です（色は REFERENCE との差）。押すと差分そのものに切り替わります。',
         sameVariant: '比較対象が同じです。REFERENCE を変えると差分が出ます。',
         copyRefHint: 'この項目の全セルを REFERENCE の値で置き換えます。',
         revertHint: 'この項目の編集を取り消し、読み込み時の値に戻します。',
@@ -57,7 +62,12 @@ const TEXT = {
         copyRef: 'COPY REF',
         revert: 'REVERT',
         list: 'LIST',
-        diffTitle: 'Show differences',
+        modeDelta: 'Δ',
+        modeValues: 'VALUES',
+        bannerDelta: 'Δ SUBJECT − REFERENCE',
+        bannerValues: 'SUBJECT VALUES',
+        diffTitle: 'Showing the differences themselves. Press for the values.',
+        valuesTitle: 'Showing SUBJECT values, tinted by their distance from REFERENCE. Press for the differences themselves.',
         sameVariant: 'Both selectors name the same bytes — pick another REFERENCE to see a difference.',
         copyRefHint: 'Replace every cell of this item with the REFERENCE value.',
         revertHint: 'Drop this item\'s edits and go back to the values as loaded.',
@@ -126,7 +136,7 @@ export function ValuePane({
     diffMode,
     onDiffMode,
     diffCount,
-    diffList,
+    onShowList,
     onEditCell,
     onBulkOp,
     onCopyRef,
@@ -154,8 +164,9 @@ export function ValuePane({
     onDiffMode: (on: boolean) => void;
     /** How many parameters differ, for the balance's badge. */
     diffCount: number | null;
-    /** The list of them, rendered beside the balance while diff mode is on. */
-    diffList?: React.ReactNode;
+    /** Ask for the list of them. It lives in the hub, which this pane does not
+     *  own, so turning compare on says so rather than rendering it here. */
+    onShowList?: () => void;
     onEditCell: (index: number, physical: number) => void;
     /** `indices` is what is currently on screen; omitted means the whole run. */
     onBulkOp: (op: BulkOp, indices?: readonly number[]) => void;
@@ -452,18 +463,37 @@ export function ValuePane({
                 reference={reference}
                 onReference={v => onReference(v as CalVariant)}
                 trailing={
-                    <div className="relative flex items-center gap-1.5 shrink-0">
-                        <button
-                            onClick={() => onDiffMode(!diffMode)}
-                            disabled={!comparing}
-                            title={comparing ? text.diffTitle : text.sameVariant}
-                            className={`flex items-center gap-1 h-[24px] px-2 rounded transition disabled:opacity-30 ${diffMode && comparing ? 'bg-slate-800 text-blue-400' : 'text-slate-400 hover:text-slate-200'}`}
-                        >
-                            <Scale className="w-3.5 h-3.5" />
-                            <span className="text-[10px] font-mono">{diffCount === null ? '—' : diffCount}</span>
-                        </button>
-                        {diffMode && comparing && diffList}
-                    </div>
+                    // The balance stays put. Two things used to move it: the
+                    // list's trigger mounted beside it the moment this was
+                    // pressed, which shoved the balance 45px left — a control
+                    // that leaves when you press it — and the count is
+                    // right-aligned at the end of the bar, so every digit it
+                    // gained pushed the icon along too. The list lives in the
+                    // hub now, and the count has a width whether it has a
+                    // number in it or not.
+                    <button
+                        onClick={() => {
+                            const next = !diffMode;
+                            onDiffMode(next);
+                            // Turning compare ON is the request to see WHICH
+                            // ones differ, which is the list's whole job.
+                            if (next) onShowList?.();
+                        }}
+                        disabled={!comparing}
+                        title={!comparing ? text.sameVariant : showingDiff ? text.diffTitle : text.valuesTitle}
+                        className={`shrink-0 flex items-center gap-1 h-[24px] px-2 rounded transition disabled:opacity-30 ${diffMode && comparing ? 'bg-slate-800 text-blue-400' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                        <Scale className="w-3.5 h-3.5" />
+                        {/* The mode is NOT named here. It was, and 46px of
+                            label on a bar whose two selectors are already
+                            `flex-1 min-w-0` took them to 32px and 21px at
+                            360 — a switch made legible by making the controls
+                            it sits beside unusable. It is named in the form
+                            row instead, which is pinned rather than shared. */}
+                        <span className="w-[28px] text-right tabular-nums text-[10px] font-mono">
+                            {diffCount === null ? '—' : diffCount}
+                        </span>
+                    </button>
                 }
             />
 
@@ -478,6 +508,16 @@ export function ValuePane({
                     <ModeButton on={effectiveMode === '3d'} disabled={!can3d} onClick={() => onGraphMode('3d')}>3D</ModeButton>
                     <ModeButton on={effectiveMode === 'heat'} disabled={!canHeat} onClick={() => onGraphMode('heat')}>HEAT</ModeButton>
                 </div>
+                {/* What the numbers ARE, next to what shape they are drawn in,
+                    and before the section controls so it survives a narrow
+                    pane. It used to sit at the far end of this row — which
+                    scrolls — and only appeared while they were differences, so
+                    at 360 nothing on screen named either state. */}
+                {comparing && (
+                    <span className={`shrink-0 whitespace-nowrap text-[9px] font-bold uppercase tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-400'}`}>
+                        {showingDiff ? text.modeDelta : text.modeValues}
+                    </span>
+                )}
                 {/* Only a map has two axes to section along; a curve has one, and
                     offering the choice there would be a control that does nothing. */}
                 {effectiveMode === '2d' && isMap && (
@@ -487,8 +527,13 @@ export function ValuePane({
                         <ModeButton on={sectionAxis === 'y'} onClick={() => onSectionAxis('y')}>Y</ModeButton>
                     </div>
                 )}
-                {showingDiff && (
-                    <span className="text-[8px] font-bold tracking-widest text-blue-400">Δ SUBJECT − REFERENCE</span>
+                {/* The long form of the same fact, for the room a desk has:
+                    which way round the subtraction goes. The short form above
+                    is the one that has to survive 360px. */}
+                {comparing && (
+                    <span className={`whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {showingDiff ? text.bannerDelta : text.bannerValues}
+                    </span>
                 )}
             </div>
 

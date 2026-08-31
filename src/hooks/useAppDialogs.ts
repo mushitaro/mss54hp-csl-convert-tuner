@@ -5,7 +5,7 @@ import type { Message } from '@/components/MessageDialog';
 
 /** The modals that are opened by name from somewhere else on the page, rather than by the control
  *  they sit next to. One key per dialog; the page renders each behind its own flag. */
-export type AppDialog = 'adaptation' | 'flash' | 'identity' | 'credits';
+export type AppDialog = 'adaptation' | 'flash' | 'credits';
 
 /**
  * Every dialog the page can put up, in one place.

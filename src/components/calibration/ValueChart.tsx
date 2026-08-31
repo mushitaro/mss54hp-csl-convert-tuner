@@ -62,15 +62,24 @@ export function signedHeat(v: number, maxAbs: number): string {
     return `rgba(${v > 0 ? '241, 26, 34' : '10, 155, 219'}, ${a})`;
 }
 
-/** A constant has no shape to draw; the number is the whole story. */
+/**
+ * A constant has no shape to draw; the number is the whole story.
+ *
+ * The unit is part of that number, not a caption on it — 0.85 is not a reading
+ * until it says mbar — so it is sized and coloured to be read beside the value.
+ * It was 10px slate-600, which is #4C4C58 on a black pane: about 3:1 against
+ * the background, next to a 24px figure. Present in the DOM, invisible on the
+ * screen. `raw` stays dim because it genuinely is the aside: the count in the
+ * binary, for checking the scaling against.
+ */
 export function ScalarReadout({ value, raw, units }: { value: number | null; raw: number; units?: string }) {
     return (
         <div className="flex items-baseline gap-2 p-3">
             <span className="text-2xl font-mono text-blue-400">{fmtValue(value)}</span>
             {units && units !== '-' && (
-                <span className="text-[10px] text-slate-600 uppercase tracking-widest">{units}</span>
+                <span className="text-sm font-mono text-slate-300">{units}</span>
             )}
-            <span className="text-[9px] font-mono text-slate-600">raw {raw}</span>
+            <span className="text-[9px] font-mono text-slate-500">raw {raw}</span>
         </div>
     );
 }

@@ -44,6 +44,27 @@ export function useCalibrationWorkspace(graph: Indexed | null) {
         else if (picked) setRoot(prev => prev ?? (owningBlock(graph, picked)?.id ?? null));
     }, [graph]);
 
+    /**
+     * Go to a parameter, wherever it lives.
+     *
+     * `select` deliberately leaves the picture where it is — inside the tree
+     * you are reading one block, and a parameter is something found IN it, so
+     * moving the diagram on every row would take the block away from you.
+     *
+     * A jump list is the opposite case. It names parameters you did not know
+     * about, in blocks you are not looking at, and a row that changed the
+     * numbers without moving the picture reads as a row that did nothing. So
+     * this one re-roots: the block that owns the parameter becomes the picture.
+     */
+    const jump = useCallback((id: string) => {
+        if (!graph) return;
+        select(id);
+        const picked = graph.byId.get(id);
+        if (!picked || picked.t === 'func') return;
+        const owner = owningBlock(graph, picked)?.id;
+        if (owner) setRoot(owner);
+    }, [graph, select]);
+
     const back = useCallback((id: string) => {
         if (!graph) return;
         const picked = graph.byId.get(id);
@@ -56,7 +77,7 @@ export function useCalibrationWorkspace(graph: Indexed | null) {
     }, [graph]);
 
     return {
-        selected, root, trail, select, back,
+        selected, root, trail, select, jump, back,
         graphMode, setGraphMode,
         sectionAxis, setSectionAxis,
         treeCollapsed, setTreeCollapsed,
