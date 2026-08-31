@@ -112,10 +112,18 @@ export const PhaseLayer: React.FC<{ show: boolean; children: React.ReactNode }> 
  *
  * `lead` is the message that shares the row (the question, the completion note). Styling stays at the
  * call site — it is amber in one phase, emerald in another, and that colour is carrying meaning.
+ *
+ * It shares the row only when there is a row to share. The dialog is `min(560px, 100vw-2rem)` wide,
+ * so on a phone it is the viewport minus 32px: at 375 the three flash-counter buttons and their gaps
+ * take 176 of the 343 available and the question was left 150px to wrap into, which is where
+ * "Reset the flash counter?" came out stacked three deep and unreadable (operator, 2026-08-31).
+ * Below the width at which the box stops growing, the lead takes its own full-width line above the
+ * buttons instead. `items-end` on that arrangement keeps the buttons on the right edge they are on
+ * in the wide one, so the two layouts are the same row broken rather than two different rows.
  */
 export const DialogActions: React.FC<{ lead?: React.ReactNode; children: React.ReactNode }> = ({ lead, children }) => (
-    <div className="mt-auto pt-2 flex justify-between items-center gap-4">
-        <div className="min-w-0 flex-1">{lead}</div>
-        <div className="flex gap-4 shrink-0">{children}</div>
+    <div className="mt-auto pt-2 flex flex-col items-stretch gap-2 min-[560px]:flex-row min-[560px]:justify-between min-[560px]:items-center min-[560px]:gap-4">
+        <div className="min-w-0 min-[560px]:flex-1">{lead}</div>
+        <div className="flex gap-4 shrink-0 justify-end">{children}</div>
     </div>
 );

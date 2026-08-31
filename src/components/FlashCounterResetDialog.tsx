@@ -70,7 +70,6 @@ const TEXT = {
         close: '閉じる',
         loading: 'フラッシュカウンターを読み込み中…',
         checkingRpm: 'エンジン回転数を確認中…',
-        colItem: 'プロセッサ',
         colUsed: '使用',
         colRemaining: '残り',
         colState: '状態',
@@ -96,8 +95,10 @@ const TEXT = {
             <br />リセットはエンジン停止中にのみ実行できます。エンジンを止め、イグニッションをONにしてから、もう一度お試しください。
         </>),
         blockedRpmUnknown: (<>
-            エンジン回転数を確認できませんでした。安全のため実行を止めています。
-            <br />接続を確認して再試行してください（回転数が読めないことと、停止していることは別です）。
+            <span className="text-slate-100 font-bold">エンジンが止まっていることを確認できませんでした。</span>
+            回転数を読み取れなかっただけで、かかっている／止まっているのどちらを意味するものでもありません。
+            <br />シフトを N に入れ、エンジンを止めた状態でイグニッションを ON にし、再試行してください。
+            シフトが 1 速に入ったままでもこの表示になることが分かっています（原因は未特定）。
         </>),
         blockedDisabled: (<>
             <span className="text-slate-100 font-bold">リセットは現在無効化されています。</span>カウンターの表示のみ利用できます。
@@ -133,8 +134,6 @@ const TEXT = {
         } as Record<TransferPhase, string>,
         done: '✅ リセット完了。書き込んだ内容を読み戻して確認済みです。',
         doneKeyCycle: 'キーOFF → 10秒待つ → キーON。その後 CONNECTION で接続し直してください。',
-        colBefore: '前',
-        colAfter: '後',
         failLead: 'フラッシュカウンターの読み出し/リセットに失敗しました。',
         failHint: '接続を確認して再試行してください。',
         failHintElectrical: (<>
@@ -174,7 +173,6 @@ const TEXT = {
         close: 'Close',
         loading: 'Reading the flash counter…',
         checkingRpm: 'Checking engine speed…',
-        colItem: 'Processor',
         colUsed: 'Used',
         colRemaining: 'Left',
         colState: 'State',
@@ -200,8 +198,10 @@ const TEXT = {
             <br />The reset can only run with the engine stopped. Stop it, switch the ignition back on, then try again.
         </>),
         blockedRpmUnknown: (<>
-            Engine speed could not be confirmed, so this is being held back.
-            <br />Check the connection and retry — &quot;we couldn&apos;t read it&quot; is not the same as &quot;it is stopped&quot;.
+            <span className="text-slate-100 font-bold">Could not confirm the engine is stopped.</span>
+            {' '}The engine speed could not be READ, which means neither that it is running nor that it is not.
+            <br />Put the gearbox in neutral, stop the engine, switch the ignition on and retry. This has also been
+            seen with the shifter left in first (cause not yet known).
         </>),
         blockedDisabled: (<>
             <span className="text-slate-100 font-bold">The reset is currently disabled;</span> the counter reading still works.
@@ -237,8 +237,6 @@ const TEXT = {
         } as Record<TransferPhase, string>,
         done: '✅ Reset complete. What was written has been read back and checked.',
         doneKeyCycle: 'Key OFF → wait 10 s → key ON, then reconnect with CONNECTION.',
-        colBefore: 'Before',
-        colAfter: 'After',
         failLead: 'Failed to read / reset the flash counter.',
         failHint: 'Check the connection and retry.',
         failHintElectrical: (<>
@@ -282,6 +280,40 @@ function regionRows(info: FlashCounterInfo): FlashCounterRegion[] {
 function markerHex(marker: number): string {
     return `0x${marker.toString(16).toUpperCase().padStart(4, '0')}`;
 }
+
+/**
+ * The two processors as ONE counter, which is all this screen has ever been able to act on.
+ *
+ * They are erased and rewritten together — there is no operation here that can move one and not the
+ * other — so a reader comparing the two rows was comparing two numbers that no decision distinguishes
+ * (operator, 2026-08-31). INSPECT still reports each block separately, which is where a question
+ * about one of them belongs.
+ *
+ * Reduced CONSERVATIVELY rather than by taking master: `used` is the higher and `remaining` the
+ * lower, so a pair that has somehow drifted reports the half with less headroom — the half that runs
+ * out first is the one that decides when a reset is due. `state` reports any processor that is not
+ * available, because either one being mid-programming is what blocks the reset. Both processors stay
+ * on the title attribute, so the desk can still read them without opening anything.
+ */
+function mergedCounter(info: FlashCounterInfo) {
+    const rows = regionRows(info);
+    return {
+        used: Math.max(...rows.map(r => r.used)),
+        remaining: Math.min(...rows.map(r => r.remaining)),
+        state: rows.find(r => r.state !== 'available')?.state ?? 'available',
+        detail: rows
+            .map(r => `${r.name}  ${r.used}/${ServiceBlockLayout.limitPerProcessor}  ·  0x${r.address.toString(16).padStart(6, '0')}  ·  marker ${markerHex(r.firstOpenMarker)}`)
+            .join('\n'),
+    };
+}
+
+/** Label left, value right, one line. The house readout, and the whole of this screen's data. */
+const Line: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({ label, value, title }) => (
+    <div className="flex items-baseline justify-between gap-4" title={title}>
+        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">{label}</span>
+        <span className="text-[12px] font-mono tabular-nums">{value}</span>
+    </div>
+);
 
 export const FlashCounterResetDialog: React.FC<Props> = ({
     onRead, onReadRpm, onReset, onBackup, onInspect, onSaveInspection, onListBackups, onRestore,
@@ -408,7 +440,6 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
     const canInspect = phase === 'viewing' || phase === 'blocked' || phase === 'failed' || phase === 'recover';
     const dismissable = !busy;
     const shown = after ?? before;
-    const afterByName = new Map((after ? regionRows(after) : []).map(r => [r.name, r]));
 
     return (
         <DialogFrame
@@ -603,48 +634,85 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                     </div>
                 ) : (
                     <>
-                        <div className="flex-1 overflow-y-auto -mx-1 px-1">
-                            <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-slate-600 pb-1.5 border-b border-slate-800/60">
-                                <span className="flex-1">{t.colItem}</span>
-                                <span className="w-[64px] text-right">{after ? t.colBefore : t.colUsed}</span>
-                                {after && <span className="w-[64px] text-right">{t.colAfter}</span>}
-                                <span className="w-[52px] text-right">{t.colRemaining}</span>
-                                <span className="w-[112px] text-right">{t.colState}</span>
-                            </div>
-
-                            {regionRows(shown).map(row => {
-                                const beforeRow = before ? regionRows(before).find(r => r.name === row.name) : undefined;
-                                const afterRow = afterByName.get(row.name);
-                                // The remaining/state columns always describe the LATEST reading, so a
-                                // finished reset shows the headroom it actually produced rather than
-                                // the one it started from.
-                                const latest = afterRow ?? row;
+                        {/* `min-h-0`, or this does not shrink and the panel overflows its own bottom edge: a flex
+                            item defaults to `min-height:auto`, which floors it at its content. With the
+                            action region below it capped rather than free, that floor is what pushed the
+                            question and its buttons 64px past the rounded border. */}
+                        <div className="flex-1 min-h-0 overflow-y-auto -mx-1 px-1">
+                            {/* Three lines, one counter. This was a five-column table over two
+                                processor rows; the columns carried a BEFORE and an AFTER that only
+                                existed after a reset, so the header changed shape underneath the
+                                numbers, and the two rows said the same thing twice. */}
+                            {(() => {
+                                const now = mergedCounter(shown);
+                                const was = before ? mergedCounter(before) : now;
+                                const limit = ServiceBlockLayout.limitPerProcessor;
                                 return (
-                                    <div key={row.name} className="flex items-center gap-3 text-[11px] font-mono py-[3px]">
-                                        <span className="flex-1 text-slate-500 truncate" title={`0x${row.address.toString(16).padStart(6, '0')} · marker ${markerHex(latest.firstOpenMarker)}`}>
-                                            {row.name}
-                                        </span>
-                                        <span className="w-[64px] text-right text-slate-300">
-                                            {t.used(beforeRow?.used ?? row.used, ServiceBlockLayout.limitPerProcessor)}
-                                        </span>
-                                        {after && (
-                                            <span className="w-[64px] text-right text-emerald-400">
-                                                {t.used(afterRow?.used ?? row.used, ServiceBlockLayout.limitPerProcessor)}
-                                            </span>
-                                        )}
-                                        <span className={`w-[52px] text-right ${latest.remaining < LOW_SLOT_WARNING_THRESHOLD ? 'text-amber-400' : 'text-slate-300'}`}>
-                                            {latest.remaining}
-                                        </span>
-                                        <span className={`w-[112px] text-right ${latest.state === 'available' ? 'text-slate-600' : 'text-red-400'}`}>
-                                            {t.stateLabel[latest.state]}
-                                        </span>
+                                    <div className="space-y-2.5">
+                                        <Line label={t.colUsed} title={now.detail} value={after
+                                            ? (<>
+                                                <span className="text-slate-600">{t.used(was.used, limit)}</span>
+                                                <span className="text-slate-600 px-1.5">→</span>
+                                                <span className="text-emerald-400">{t.used(now.used, limit)}</span>
+                                            </>)
+                                            : <span className="text-slate-300">{t.used(now.used, limit)}</span>} />
+                                        <Line label={t.colRemaining} value={
+                                            <span className={now.remaining < LOW_SLOT_WARNING_THRESHOLD ? 'text-amber-400' : 'text-slate-300'}>
+                                                {now.remaining}
+                                            </span>} />
+                                        <Line label={t.colState} value={
+                                            <span className={now.state === 'available' ? 'text-slate-300' : 'text-red-400'}>
+                                                {t.stateLabel[now.state]}
+                                            </span>} />
                                     </div>
                                 );
-                            })}
+                            })()}
 
-                            <p className="mt-4 pt-2 border-t border-slate-800/60 text-[10px] font-mono text-slate-600 leading-relaxed">
+                            {/* Separated by space, not by a rule. The panel already has one divider,
+                                above the actions, and it is the only one that separates two KINDS of
+                                thing rather than two paragraphs of the same one. */}
+                            <p className="mt-5 text-[10px] font-mono text-slate-600 leading-relaxed">
                                 {t.note}
                             </p>
+
+                            {/* THE CONFIRMATION'S PROSE LIVES HERE, in the body, not in the action
+                                band below. It is four paragraphs and a list; at 375px that wraps far
+                                enough to have reserved almost the whole panel, which left the counter
+                                71px of a 127px content and the note under the numbers reading as
+                                missing.
+
+                                The band exists so the divider cannot move between phases, and that
+                                still holds — better, in fact: with only a checkbox and two buttons
+                                left in it the tallest layer is about a hundred pixels rather than
+                                three hundred, so the divider sits in one place and the reading matter
+                                goes in the region that was already built to scroll. Body is what to
+                                read, band is what to do.
+
+                                ONE caution, then procedure. There used to be two amber blocks and two
+                                rules in here, which spends the colour that means "stop and read" on
+                                something the reader is meant to work through — so neither block was
+                                the one that stood out. The consequence is amber and alone; everything
+                                under it is what to do about it, in the grey the rest of the app states
+                                procedure in, separated by space rather than by rules. */}
+                            {phase === 'confirming' && (
+                                <div className="mt-5 space-y-3">
+                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
+                                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+                                        <span>{t.warn}</span>
+                                    </p>
+                                    <ul className="text-[10px] font-mono text-slate-500 leading-relaxed space-y-1 pl-5">
+                                        <li>{t.warnPower}</li>
+                                        <li>{t.warnInterrupted}</li>
+                                        <li>{t.warnKeyCycle}</li>
+                                    </ul>
+                                    {/* Set apart from the list above rather than a fourth bullet: the
+                                        others are things to do now, this is the one to remember for a
+                                        moment when the screen may be all you have left. */}
+                                    <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
+                                        {t.warnRecovery}
+                                    </p>
+                                </div>
+                            )}
                         </div>
 
                         {/* Stacked, not switched. This action area swings from a single-line question
@@ -691,22 +759,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                             </PhaseLayer>
 
                             <PhaseLayer show={phase === 'confirming'}>
-                                <div className="space-y-2.5">
-                                    <p className="flex items-start gap-2 text-[11px] font-mono text-amber-400/90 leading-relaxed">
-                                        <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                                        <span>{t.warn}</span>
-                                    </p>
-                                    <ul className="text-[10px] font-mono text-slate-500 leading-relaxed space-y-1 pl-5">
-                                        <li>{t.warnPower}</li>
-                                        <li>{t.warnInterrupted}</li>
-                                        <li>{t.warnKeyCycle}</li>
-                                    </ul>
-                                    {/* Set apart from the list above rather than a fourth bullet: the
-                                        others are things to do now, this is the one to remember for
-                                        a moment when the screen may be all you have left. */}
-                                    <p className="text-[10px] font-mono text-amber-400/80 leading-relaxed border-t border-slate-800 pt-2">
-                                        {t.warnRecovery}
-                                    </p>
+                                <div>
                                     {/* SPEED, under the warnings and above the buttons, because it is
                                         the last thing decided and the only thing on this screen that
                                         is a choice. It was a selector in the DME strip that reset to
@@ -720,7 +773,7 @@ export const FlashCounterResetDialog: React.FC<Props> = ({
                                         saved — the recovery above is exactly that restore. The data
                                         write has no such copy, so a tick made here must not still be
                                         armed at the next flash. See DmeLink.resetFlashCounter. */}
-                                    <label className={`flex items-start gap-2 border-t border-slate-800 pt-2
+                                    <label className={`flex items-start gap-2
                                         ${boostAvailable ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
                                         <input
                                             type="checkbox"

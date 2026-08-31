@@ -45,9 +45,9 @@ const TEXT = {
         viewSubject: 'SUBJECT',
         viewDelta: 'Δ',
         viewReference: 'REFERENCE',
-        bannerDelta: 'Δ SUBJECT − REFERENCE',
-        bannerSubject: 'SUBJECT VALUES · 色は REFERENCE との差',
-        bannerReference: 'REFERENCE VALUES · 色は SUBJECT との差',
+        bannerDelta: 'SUBJECT − REFERENCE',
+        bannerSubject: 'TINT VS REFERENCE',
+        bannerReference: 'TINT VS SUBJECT',
         viewSubjectHint: 'SUBJECT の実値を表示します。編集できるのはこの表示のときだけです。',
         viewDeltaHint: 'SUBJECT − REFERENCE の差そのものを表示します。',
         viewReferenceHint: 'REFERENCE 側の実値を表示します。編集はできません。',
@@ -69,9 +69,9 @@ const TEXT = {
         viewSubject: 'SUBJECT',
         viewDelta: 'Δ',
         viewReference: 'REFERENCE',
-        bannerDelta: 'Δ SUBJECT − REFERENCE',
-        bannerSubject: 'SUBJECT VALUES · tinted vs REFERENCE',
-        bannerReference: 'REFERENCE VALUES · tinted vs SUBJECT',
+        bannerDelta: 'SUBJECT − REFERENCE',
+        bannerSubject: 'TINT VS REFERENCE',
+        bannerReference: 'TINT VS SUBJECT',
         viewSubjectHint: 'Show SUBJECT values. Editing is offered only here.',
         viewDeltaHint: 'Show SUBJECT − REFERENCE, the difference itself.',
         viewReferenceHint: 'Show the REFERENCE own values. Not editable.',
@@ -589,11 +589,22 @@ export function ValuePane({
                         <ModeButton on={sectionAxis === 'y'} onClick={() => onSectionAxis('y')}>Y</ModeButton>
                     </div>
                 )}
-                {/* The long form of the same fact, for the room a desk has:
-                    which way round the subtraction goes. The short form above
-                    is the one that has to survive 360px. */}
+                {/* Only what the lit button cannot say. It used to open by
+                    naming the view — "REFERENCE VALUES · 色は SUBJECT との差"
+                    — which is the button an inch to the left, said again, in
+                    two languages at once. The button names the view; this names
+                    the OTHER side of it: which way round Δ subtracts, and what
+                    the cell colour is measured against. 194px to 83.
+
+                    Gated on the CONTAINER, like everything else in this pane.
+                    It was `min-[900px]`, and a viewport gate is the mistake this
+                    file's own header warns about: at a viewport of exactly 900
+                    the pane is 344px, the banner turned on, and the row
+                    overflowed by 108. Everything but the name needs 392px, so
+                    520 is the width at which the banner has room — the pane is
+                    550 at 1440x900 and 344 at 900. */}
                 {comparing && (
-                    <span className={`hidden min-[900px]:inline whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
+                    <span className={`hidden @min-[520px]:inline whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
                         {showingDiff ? text.bannerDelta : showingReference ? text.bannerReference : text.bannerSubject}
                     </span>
                 )}
