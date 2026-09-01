@@ -72,7 +72,14 @@ The tool automates and combines the following steps:
 8. **Checksum correction** (replacing external checksum tools)
 9. **Direct DME communication** — read, live logging, and flashing over a K+DCAN cable (replacing separate reader/flasher tools)
 10. **DME adaptation reset** — clears the learned lambda and knock trims before a re-tune, so the next log is captured from a known baseline instead of one still shaped by the previous map. VANOS adaptation is read and shown but deliberately **not** cleared: clearing it makes the DME re-learn cam phase, and cam phase moves filling — the quantity the log exists to measure
-11. **Flash counter** — reads how many programming cycles the DME has left and can reset the counter, so a tool built around repeated flashes stops running into an invisible ceiling; includes a read-only inspection of the DME's identity records (VIN / AIF)
+11. **SHAPE** — the tuned table seen as a surface rather than as cells, and a repair for the cells
+    the drive never visited. A road log cannot fill 480 cells evenly, so the gaps are interpolated
+    from their measured neighbours and written as a *mode* on the ALPHA-N write rather than as a
+    table of its own — it cannot reach the flash unless the measured write it modifies is armed
+    first. It stays locked until the map has converged, because projecting a surface onto a map
+    that is still moving makes the drive's noise look smooth, monotone and deliberate, which is a
+    worse artefact than the bumps it removes
+12. **Flash counter** — reads how many programming cycles the DME has left and can reset the counter, so a tool built around repeated flashes stops running into an invisible ceiling; includes a read-only inspection of the DME's identity records (VIN / AIF)
 
 (The tool is completely free.)
 
@@ -107,6 +114,25 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
   rate is stored with the session and listed beside its point count.
 - **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
 - **WRITE** — flashes the tuned BIN (checksum corrected, then verified — QUICK or FULL, see Safety)
+
+### What the next write contains
+
+`WRITE` is not one thing any more. `PATCH` and `WRITE` flank the hub and `RESTORE` sits in the
+corner beneath them; each opens a menu of rows, and underneath each word is a summary of whatever
+that group currently contributes — so **"what will the next write contain" is answerable without
+opening anything**.
+
+- **WRITE** — the derived tables: `ALPHA-N` (the measured map, with `SHAPE` as a mode on it) and
+  `WARMUP`. Each row states what it would write and, where it cannot, why.
+- **PATCH** — the logic switches the ECU is left holding: MAP compensation, the LTFT window, the
+  tank vent, the WOT threshold. These change what the DME *does*, not what a table says.
+- **RESTORE** — putting a table back to the bytes the binary was loaded with. One row per table,
+  each named in the ECU's own vocabulary, and locked against the write of the same table: whichever
+  ran last would win, and a restore a tune can overwrite is not a restore.
+
+A row that cannot act is disabled with its reason on it rather than hidden, and the central ring
+will not offer WRITE at all when nothing is armed — an empty write is not an action, and offering
+one is how a flash comes back byte-identical.
 
 ### If a log is interrupted
 
@@ -222,15 +248,21 @@ second tap closes what the first opened without moving your hand.
 The controls that decide what gets written to the DME are never in that sheet. They stay on `DASH`,
 visible, one tap apart.
 
-**`−` / `＋` in the header resize the map grid** while you are on `MAP`. The setting is remembered
+**`−` / `＋` resize the map grid**, and they sit **on the grid** — on the statistics band above it
+where there is room, and as a pill floating over the bottom-right of the grid where there is not.
+They were in the header's far corner, which is the hardest place on a phone to reach and the worst
+one for the single control here meant to be used while the car is moving. The setting is remembered
 between launches. At the smallest step all 20 RPM columns fit on a head unit screen; at the largest
 the numbers are readable at arm's length.
 
 **Install it to the home screen** and it runs without browser chrome, starts with **no network at
 all**, and keeps working in a garage with no signal. Because there is no address bar there is also no
 pull-to-refresh — deliberately, since a stray downward swipe mid-log would otherwise cost the run —
-so the menu carries its own reload. When a newer build exists that row says **"Update available —
-reload"**, and pressing it actually takes the new build rather than repainting the cached one.
+so the menu carries its own reload. When a newer build exists it turns blue and pulses — in the
+sheet's icon strip and, on the desk, in the header, where the glyph is replaced by the word
+**UPDATE**. Pressing it actually takes the new build rather than repainting the cached one: the
+download starts by itself the moment the update appears, and only the switch-over waits for you,
+because swapping the page out mid-drive would take the running log and the DME link with it.
 
 ### Coming back after the ignition goes off
 
@@ -285,8 +317,9 @@ This tool can **erase and write your DME**. Flashing an ECU always carries risk.
   cannot trap the tab.
 - A write takes **about 2½ minutes** at 9600 baud with the default QUICK verification, or **about
   4½ minutes** with FULL, which adds a byte-for-byte read-back of all 65536 bytes (measured at
-  122.9 s). The progress display shows the current stage (Erasing / Writing / Verifying). **This is
-  normal — do not interrupt it.**
+  122.9 s). With **BOOST** armed on the Android path the write telegrams fall from ~68 s to roughly
+  17 s, and the verification stays at the boosted rate too. The progress display shows the current
+  stage (Erasing / Writing / Verifying). **This is normal — do not interrupt it.**
 - **VERIFY: QUICK or FULL.** Every chunk's programming verify byte is checked either way; the mode
   chooses what happens after the last chunk.
   - **QUICK** asks the DME for its own encoding checksum (DS2 `0x0A`) — one exchange, ~50 ms. Its
@@ -310,6 +343,11 @@ rewrites the whole block it sits in — the same block that holds the VIN and th
 On success those records are byte-for-byte unchanged. If power is lost part-way, they are gone.
 
 - Takes about **1.5–2 minutes**. The same power rules as a WRITE apply, and they matter more here.
+- A **BOOST** tick on the reset's own confirmation writes the 16 KB at 125000 instead of 9600, about
+  four times faster. It is a **separate** switch from the write path's, on purpose: if this one fails
+  the block that is erased is the service block, and its 16 KB were saved seconds earlier, so the
+  recovery is the restore below. The data write has no such copy, and a tick made on the recoverable
+  path must not still be armed on the other one.
 - The block is **saved inside the browser before anything is erased**, and the reset refuses to start
   if that save fails. No file is produced — writing to the DME and exporting a file stay separate
   actions in this app.
@@ -350,14 +388,60 @@ than from assumption, whether the identity records are present and which process
   the link more reliable — it stops an afternoon going into retries that cannot succeed. Observed on
   a real vehicle with the engine *stopped*, which rules out ignition EMI as the sole cause; see
   [§12 of the implementation notes](docs/implementation-notes.md).
-- **Speed**: DME communication defaults to 9600 baud, where a full read takes **~124 s measured** (530 B/s) — about 40 s more than the wire alone accounts for, and that gap is currently unexplained. Faster rates are selectable but **none is reliable yet**: 38400 has both completed and, more recently, timed out 3–10% into a read; 125000 fails outright (the DME accepts the switch, then answers nothing); 57600 / 76800 / 115200 are unconfirmed. If the DME refuses a rate the read silently falls back to 9600, so every read now reports its own elapsed time, throughput and the rate it actually used — otherwise "refused" and "didn't help" look identical. Writes always run at 9600 regardless.
+- **Speed**: everything runs at 9600 baud unless a faster rate can be reached **from inside a
+  programming session**, which is the only state the DME accepts a rate switch in — and a
+  programming session is opened by an **erase**. That one fact decides where each speed-up can exist
+  and how dangerous it is.
+  - **READ — `FAST ON`: ~123 s → 15–30 s.** A read erases nothing, so it makes a programming session
+    of its own: it erases the Free Identifiers sector, restores it immediately, verifies the restore
+    **byte for byte**, and only then asks for 125000. The switch is therefore attempted with the
+    sector already back and already proven back, so a refused or silent switch costs the speed and
+    nothing else. The bytes written back are re-read live seconds before the erase; the stored
+    backup supplies addresses only, so a stale map can only preserve too much.
+    **The first read on a DME takes that backup itself** — 16 KB, read-only, ~31 s — and is still
+    faster end to end (~45–60 s) than a plain 9600 read. Every read after it is the 15–30 s alone.
+    It also means a DME that has been read once has a recovery image without anyone having had to
+    remember to make one.
+  - **WRITE — `BOOST`: write telegrams ~68 s → ~17 s.** A write already erases, so the session is
+    there for free. A write telegram measures **150 ms of request, 32 ms of DME programming, 11 ms
+    of response** — 78 % wire, which is the part a rate can recover; the 32 ms of flash programming
+    cannot be. Unlike FAST READ this switch is sent **with the data area erased**, so it is armed
+    deliberately, resets to 9600 on every connect, and falls back to 9600 before a single write
+    telegram if the DME accepts the switch and then goes quiet.
+  - **FLASH COUNTER RESET — its own `BOOST`**, on that reset's confirmation. See the flash-counter
+    section for why it is a separate switch rather than the same one.
+  - **`QUICK VERIFY` is not a wire rate at all** — it removes a whole ~123 s read-back. See Safety.
+  - **All three switches are Android-only.** They need a transport that can change baud on the
+    already-open handle, because the switch is sent after the erase, where closing and reopening a
+    port is the one thing that cannot be recovered from. That is the WebUSB FTDI path. On desktop
+    Web Serial everything runs at 9600 and the controls that would offer otherwise are either not
+    rendered or shown disabled with the reason on them.
+  - **The read-rate selector is gone**, because the question it existed to ask has been answered.
+    38400 is closed: the switch is accepted, the wire genuinely runs at 38400 (36.0–36.8 ms measured
+    against a theoretical 36.1), and every attempt died inside the first 17 of 538 chunks over
+    eleven attempts, with the ECU silent rather than corrupt. 125000 is unreachable from a plain
+    read. The 9600 baseline is **122.9 s** for 64 KB, measured twice, identically.
+    An earlier note here said 9600 was ~40 s slower than the wire accounted for and that 38400
+    doubled the DME's turnaround. Both were the same artefact: the ECU warms up, so the head of a
+    read shows ~110 ms of turnaround against ~40 ms once settled, and 38400 never survived long
+    enough to reach the settled region it was being compared against.
+  - Every read still reports its own elapsed time, throughput and **the rate it actually ran at** —
+    a refused switch falls back silently, and without both numbers "refused" and "didn't help" look
+    identical.
 - **Browser compatibility**:
   - *File workflow*: any Chromium browser (Chrome / Edge / Opera).
   - *Direct DME workflow, desktop*: **Chrome / Edge / Opera** — it requires the Web Serial API, which Safari does not support and Firefox does not support out of the box.
   - *Direct DME workflow, Android*: **Chrome, with a USB OTG adapter.** Note that Chrome for Android does expose the Web Serial API, but only for Bluetooth serial-port emulation: a USB K+DCAN cable is invisible to it, so the app talks to the cable through WebUSB and the FTDI vendor protocol instead. Genuine FTDI chips only (FT232AM/BM/R); CH340 and other clone cables are not supported on Android.
   - *Android status*: **read, live log and write are all proven on the car.** A full 64 KB read took **126.5 s at 518 B/s**, against ~123 s / 530 B/s on desktop — 2.8% slower, so the transport costs essentially nothing. The image verified against **both of the ECU's own stored data checksums**, which together cover the whole 64 KB, so the read is byte-exact rather than merely plausible. The erase → write → verify cycle completed from a head unit on **2026-08-09**, which was the last path in this app carrying no hardware evidence. Still untested on Android specifically: break recovery, the receive-flush polarity, backgrounding endurance across a long write, and 38400 — none of them on the path that has now run. There is a bench page at **`/usb-check`** for those; it needs a bare FT232R breakout with TX and RX jumpered together, since a K+DCAN cable cannot self-echo on a desk (its K-line pull-up comes from the car).
   - *Writing from a phone*: proven, and it asks for more care than the desktop path. A write runs 4+ minutes, and if the screen switches off or you switch apps the connection can drop mid-write. The app holds a screen wake lock while writing and warns you before starting, but Android does not let a web page guarantee any of this. If a write does fail it always restarts from the erase, so re-running it is safe.
-- **Live logging caveat**: live values are decoded from the DME's measurement blocks. RPM, relative opening and coolant temperature are confirmed, but the lambda-controller factor used as the STFT input has **not** been cross-checked against a known-good Testo log. Validate it before relying on live-tuned output.
+- **Live logging — the lambda trim proves itself, every eighth sample.** The short-term trim is read
+  from four bytes of RAM rather than from a measurement block, which is what lets it be sampled at
+  the log's own rate. An address that is right in a disassembly and wrong on this particular
+  calibration would otherwise produce a whole drive of plausible, wrong trim — so the claim "these
+  four bytes are `la_f_regler`" is not taken on trust: every eighth sample carries block 19's own
+  copy of the same channel at the same instant, and the two are compared for the length of the
+  drive rather than once at the start. A run whose gate does not hold says so instead of producing
+  a map. RPM, relative opening and coolant temperature are confirmed against Testo logs as before.
 
 ## Important Note on Development
 
