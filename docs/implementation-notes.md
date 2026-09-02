@@ -1034,6 +1034,10 @@ that holds and then fails.
 
 ### FINAL: 9600, ~123 s, and the remaining lever is not software
 
+> **Superseded in its last clause on 2026-08-15.** Everything below about the 0x91 switch *sent from
+> an ordinary read* still holds, and 9600 is still the floor for one. A lever was found, and it is
+> software — it is just not a baud rate. See **"REOPENED AND ANSWERED"** at the end of this section.
+
 Six 38400 attempts died at chunks **0, 1, 4, 7, 9, 17** of 538. That is not a specific breaking point;
 it is a roughly 14%-per-chunk failure rate, under which surviving 538 chunks has probability ~0. The
 link genuinely runs at 38400 and then the ECU stops answering — zero bytes, never a corrupted frame.
@@ -1149,6 +1153,49 @@ collection armed only between a read's start and end so it is inert on the flash
   per-chunk critical path), and do **not** transfer `port.readable` — transferred streams clone every
   chunk through a MessagePort, which is strictly worse than today. Gated on the measurement: worth its
   price only if host overhead is still large after the latency timer is optimal.
+
+### REOPENED AND ANSWERED (2026-08-15): the lever was a programming session, not a baud rate
+
+Every measurement above asks the same question — *can this read go faster at this rate* — and the
+answer stayed no. The question was too narrow. **The DME accepts 0x91 only from inside a programming
+session, and a programming session is opened by an erase.** A read erases nothing, so an ordinary
+read can never be in the state where 125000 is available. That is why 125000 "ACKs and then times
+out" (§9 above): the ACK is the parameter being accepted, and the silence is the DME never having
+been in the mode that implements it.
+
+So the read makes a session of its own. `enterFastReadMode` erases the **Free Identifiers** sector —
+the one sector whose contents this app can reconstruct — restores it immediately, verifies the
+restore **byte for byte**, and only then asks for 125000.
+
+    9600, plain read       122.9 s
+    FAST READ              15-30 s
+
+**The ordering is the whole safety argument**, and it is the opposite of the write path's:
+
+1. *Reversible* — build the plan, live-read every span, check the prep marker. A failure here is
+   recorded and the read continues at 9600; not one byte has changed.
+2. *Destructive* — recycle-only, erase master, erase slave, restore every span, verify every span.
+3. *Free* — recycle-off, finalize, then 0x91. **By the time the switch is attempted the sector is
+   back and proven back**, so a refused or silent switch costs the read and nothing else. The write
+   path sends its switch with the data area erased; this one sends it with nothing outstanding,
+   which is why it is the safer of the two despite erasing more.
+
+The seed supplies **addresses only**. The bytes written back are re-read live seconds before the
+erase, so a stale map can only make the plan preserve too much — never write yesterday's identity
+over today's.
+
+**The first read on a DME takes its own backup (2026-08-31).** Arming used to be a procedure: open
+the FLASH dialog, inspect, take a backup, and FAST READ arms on the *next* connect. Nothing in that
+was a decision — there is no reason to decline a recovery artefact — and a step nobody is told about
+is a step nobody performs. `useDmeLink.read` now reads the 16 KB itself when no seed exists (~31 s,
+read-only, no erase), stores it, and arms in the same session:
+
+    31 s backup + 15-30 s read  =  ~45-60 s   against 122.9 s for a plain read
+
+So even the first read is faster, and a DME that has been read once has the image
+`restoreServiceBlock` recovers from without anyone having had to remember to make one. Skipped in
+PRACTICE, and on any transport that cannot change baud on the open handle — there the 31 s would arm
+nothing.
 
 ---
 
@@ -1445,13 +1492,18 @@ differ. Per-processor detail (used, left, marker, address) is on the tooltip.
 
 ### Backup is mandatory, and is not a file
 
-`resetFlashCounter(onBackup, onProgress)` awaits `onBackup` with the 16384-byte master+slave image
-**before any erase**, and does not catch its rejection. If the save fails, nothing is erased. That
+`resetFlashCounter(onBackup, onProgress, boost?)` awaits `onBackup` with the 16384-byte
+master+slave image **before any erase**, and does not catch its rejection. If the save fails, nothing is erased. That
 block carries the VIN, AIF and ZIF, so it is the only recovery path if the rewrite is interrupted.
 
 It is stored in a separate IndexedDB database (`mss54hp-tuner-backups`, store `serviceBlocks`, keyed
 by timestamp) — separate because adding a store to the session DB would need a `DB_VERSION` bump,
 which destroys every saved session, and because a reset can happen with no session open at all.
+
+**The same store is what arms FAST READ**, and since 2026-08-31 the first bulk read fills it by
+itself — see §9's *REOPENED AND ANSWERED*. So a DME that has been read once already has this
+recovery image before anyone opens this dialog. That is a side effect of a speed-up, and it is the
+more valuable half of it.
 
 **It does not trigger a file download.** In this app, writing to the DME and producing a file are
 separate, separately-chosen actions: WRITE never emits a file, and every download hangs off a control
@@ -1480,6 +1532,26 @@ offers no Retry at all, since retrying is the one action that makes the loss per
 
 `MockDmeLink.simulateInterruptedReset()` arms a one-shot failure just after the simulated erase, so
 the whole loop can be rehearsed offline. Nothing in the UI calls it; it exists for tests.
+
+### BOOST — its own flag, deliberately not the write path's (2026-08-31)
+
+`resetFlashCounter` takes `boost` **per call**. Ticked, the 16 KB rewrite goes at 125000 instead of
+9600, roughly four times faster; the two reads either side of it stay at 9600. The tick lives on the
+reset's own confirmation screen, under the warnings and above the buttons.
+
+It is **not** `this.writeBaud`, and that is the substance rather than the checkbox. The two switches
+look like one decision and are not:
+
+| | what is erased when the switch fails | a copy in hand |
+|---|---|---|
+| counter reset | the **service block** | **yes** — its 16 KB went to `onBackup` seconds earlier |
+| data write | the **data area** | no |
+
+Sharing one field would let a tick made on the recoverable path still be armed at the next flash on
+the other one. `programServiceBlocks` still refuses a transport that cannot change rate in place, so
+a tick that cannot be honoured costs the speed and nothing else. The RESTORE that shares that same
+sequence passes 9600 unconditionally: it is the recovery for a block that is already damaged, and
+the one path that has to work is not where an experiment belongs.
 
 ### After a reset
 
@@ -1734,7 +1806,7 @@ The properties this rests on, stated rather than checked (see the note in §6): 
 every lane, a long one reports the two structurally-unmeasurable ones as absent, and NaN survives
 serialisation as null.
 
-### The 125000 boost on the write path — armed, not yet run on the car (2026-08-14)
+### The 125000 boost on the write path (2026-08-14; run on the car 2026-08-29)
 
 The measurement above is what justifies this: 78% of a write telegram is our own request on the
 wire, so the rate is worth about 4x. It is also the most dangerous thing in the app, because the DME
@@ -1783,8 +1855,26 @@ probe precedes the first write, a refused switch never reopens, an ACK-then-sile
 telegrams at 125000, the dead-at-both-rates throw names the erased state and the recovery, and
 arming after construction is what actually reaches the link.
 
-**Not yet run on a car.** The numbers above are arithmetic. `requestWire` is the lane that settles
-it: 150.1 ms at 9600 against a predicted ~11.5 ms.
+**Run on the car, four times, all clean.** From the diagnostics store (`npm run db:diagnostics`),
+every one `ok`, with the requested rate and the rate that ran agreeing:
+
+| at | kind | baud | requested | median turnaround |
+|---|---|---|---|---|
+| 2026-08-29 09:11 | write | 125000 | 125000 | 15.8 ms |
+| 2026-08-29 10:29 | write | 125000 | 125000 | 15.8 ms |
+| 2026-08-30 06:01 | write | 125000 | 125000 | 15.8 ms |
+| 2026-08-30 08:05 | write | 125000 | 125000 | 15.9 ms |
+
+against **32.0 ms** on the two 9600 writes in the same store (2026-08-28 07:21, 2026-08-30 07:11).
+
+**That 32 → 15.8 is worth staring at, because it should not have moved.** `turnaround` was described
+here as the DME's own flash programming time, which a baud rate cannot touch. Part of the gap is the
+10-byte acknowledgement — 10.4 ms of wire at 9600 against 0.8 ms at 125000 — but that accounts for
+about 10 of the 16. The rest is unexplained, and the honest reading is that this lane is not purely
+the DME thinking: something host- or driver-side scales with the rate as well. It does not change
+what to do; it does mean **"32 ms of DME programming cannot be recovered" is an upper bound rather
+than a measurement**, and the per-telegram decomposition in §15 should be re-derived from a boosted
+run before it is quoted again.
 
 ### The event log
 
