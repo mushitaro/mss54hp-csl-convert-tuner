@@ -375,7 +375,7 @@ export const MobileMenu: React.FC<Props> = ({
                             <Medal className="w-4 h-4" />
                         </button>
                         <div className="flex items-center justify-start gap-1">
-                            <a href={CREDIT_LINKS.tuningThread} {...away} title="Methodology source: NA M3 Forum"
+                            <a href={CREDIT_LINKS.tuningThread} {...away} title="The method, as Pavlo published it on NA M3 Forums"
                                 className={`${STRIP_ITEM} text-slate-600 hover:text-amber-400`}>
                                 <BookOpen className="w-3.5 h-3.5" />
                             </a>

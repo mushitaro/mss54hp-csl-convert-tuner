@@ -4358,7 +4358,7 @@ export default function Home() {
             target="_blank"
             rel="noopener noreferrer"
             className="hidden min-[900px]:block text-slate-500 hover:text-slate-300 transition-colors"
-            title="Tuning guide — methodology source: NA M3 Forum"
+            title="Tuning guide — the method, as Pavlo published it on NA M3 Forums"
           >
             <BookOpen className="w-5 h-5" />
           </a>

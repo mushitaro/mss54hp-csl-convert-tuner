@@ -60,7 +60,7 @@ A per-claim map of which statement rests on which source is kept in
 
 This application integrates the various tuning processes for the E46 M3 CSL Conversion currently shared in the community into a single, streamlined workflow.
 
-The method is based on the [methodology shared on NA M3 Forums](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability).
+The method is based on [the methodology Pavlo published on NA M3 Forums](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability).
 
 First of all, I would like to express my gratitude to everyone who contributes daily to the research and publication of the CSL CONVERT tuning methodology.
 
