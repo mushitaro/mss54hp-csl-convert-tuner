@@ -9,6 +9,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 This tool is built on work that others published first. Each entry below names that work, and what
 in this application rests on it.
 
+**[Pavlo](https://nam3forum.com/forums/member/1552-pavlo)** — who published the method in the first
+place, in [the thread this application automates](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability).
+Everything below is what made automating it possible; this is the thing being automated. Without the
+starting point there would have been nothing to build.
+
 **[karter16](https://nam3forum.com/forums/member/9797-karter16)** — the source this tool owes the
 most to. Three distinct bodies of work, all of them published freely:
 
@@ -40,8 +45,9 @@ and the early fixes the community built upon it. The BASE this application reads
 from them.
 
 **The NA M3 Forums CSL-conversion thread** —
-[the street-tuning methodology](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability).
-This application is an automation of it.
+[thread 242281](https://nam3forum.com/forums/forum/special-interests/coding-tuning/242281-a-quick-and-easy-way-to-street-tune-your-csl-conversion-for-drivability),
+where the methodology grew. Years of reports and corrections are stacked on top of Pavlo's first
+post, and much of what this application defaults to rests on them.
 
 **BMW / Bosch Funktionsrahmen** — the 39 function-specification documents that make the disassembly
 readable. Quoted by section number in `docs/ecu-logic/90-sources.md`.

@@ -74,7 +74,7 @@
 
 | 話題 | スレッド / 投稿 |
 |---|---|
-| CSL 換装のストリートチューニング手順 | thread 242281（`k_rf_cfg = 0x02`、`K_LAA_TMOT_MIN = 100 °C`、AQ_REL 変換） |
+| CSL 換装のストリートチューニング手順 | thread 242281 **#1（Pavlo）** —— 手順そのものの原典。本アプリが自動化しているのはこれ（`k_rf_cfg = 0x02`、`K_LAA_TMOT_MIN = 100 °C`、AQ_REL 変換） |
 | **`KF_RF_KORR_DRREL` の説明と「λ=1 を追うな」** | thread 242281 page10–11（karter16 #141 ほか、Bry5on #145） |
 | **FRA バグの発見** | thread 287069 #242（karter16, 2025-09-06）、#244（Bry5on）、#245、#248 |
 | Terra の旧修正とその議論 | thread 26354（terra #1 / #11、MpowerE36 #8、ppm008） |

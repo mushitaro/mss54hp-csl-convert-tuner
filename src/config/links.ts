@@ -54,6 +54,7 @@ export const PRIVACY_POLICY_URL_DEFAULT = privacyPolicyUrl('ja');
 export const PROJECT_REPO_URL = 'https://github.com/mushitaro/mss54hp-csl-convert-tuner';
 
 export const CREDIT_LINKS = {
+    pavloProfile: 'https://nam3forum.com/forums/member/1552-pavlo',
     karter16Profile: 'https://nam3forum.com/forums/member/9797-karter16',
     bry5onProfile: 'https://nam3forum.com/forums/member/5503-bry5on',
     terraProfile: 'https://nam3forum.com/forums/member/1465-terra',
