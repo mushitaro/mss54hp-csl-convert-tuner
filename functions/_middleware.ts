@@ -22,11 +22,11 @@ export const onRequest = createGate({
     name: 'MSS54HP CSL CONVERT /// TUNER — PREVIEW',
     publicPaths: [
         '/manifest.webmanifest',
-        '/icons/mss54hp-base-dev-192.png',
-        '/icons/mss54hp-base-dev-512.png',
-        '/icons/mss54hp-base-dev-maskable-192.png',
-        '/icons/mss54hp-base-dev-maskable-512.png',
-        '/icons/mss54hp-base-dev-256.png',
-        '/icons/mss54hp-base-dev-32.png',
+        '/icons/mapping-dev-192.png',
+        '/icons/mapping-dev-512.png',
+        '/icons/mapping-dev-maskable-192.png',
+        '/icons/mapping-dev-maskable-512.png',
+        '/icons/mapping-dev-256.png',
+        '/icons/mapping-dev-32.png',
     ],
 });

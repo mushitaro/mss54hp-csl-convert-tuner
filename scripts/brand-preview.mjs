@@ -84,9 +84,11 @@ const fail = (message) => {
 };
 
 /**
- * The dev twin of a production icon: `mss54hp-base-192.png` → `mss54hp-base-dev-192.png`,
- * `mss54hp-base-maskable-512.png` → `mss54hp-base-dev-maskable-512.png` — the names
- * tsunagi-m3's `m-icons.mjs` writes.
+ * The dev twin of a production icon: `mapping-192.png` → `mapping-dev-192.png`,
+ * `mapping-maskable-512.png` → `mapping-dev-maskable-512.png` — the names
+ * tsunagi-m3's `m-icons.mjs` writes. Keyed on the shape of the name, not on the word: changing the
+ * word touches the manifest, layout.tsx and the gate's publicPaths (functions/_middleware.ts), never
+ * this.
  */
 function devIcon(src) {
     const m = /^(\/icons\/[a-z0-9-]+?)(-maskable)?-(\d+)\.png$/.exec(src);

@@ -29,18 +29,19 @@ export const metadata: Metadata = {
    * survive, so that variant carries the mark smaller; declaring one file as both would have the
    * launcher crop the full-size version and clip the outer stripes.
    *
-   * The files are the M ICON family's `mss54hp-base` set (tsunagi-m-release §4), written by
-   * tsunagi-m3's `scripts/m-icons.mjs --word mss54hp-base`: chosen, not drawn. This is PRODUCTION's
-   * set; `scripts/brand-preview.mjs` points every one of these references at the `-dev-` twin for
-   * staging and preview, which is why the dev files sit beside them in public/icons.
+   * The files are the M ICON family's `mapping` set (tsunagi-m-release §4), written by
+   * tsunagi-m3's `scripts/m-icons.mjs --word mapping`: chosen, not drawn. MAPPING is the operator's
+   * choice for TUNER (2026-09-22); `mss54hp-base` is the m3 site's own mark, not this app's. This is
+   * PRODUCTION's set; `scripts/brand-preview.mjs` points every one of these references at the
+   * `-dev-` twin for staging and preview, which is why the dev files sit beside them in public/icons.
    */
   manifest: '/manifest.webmanifest',
   icons: {
-    icon: '/icons/mss54hp-base-32.png',
+    icon: '/icons/mapping-32.png',
     // iOS reads this and nothing else — it has no manifest support for icons, and it does not
     // honour transparency, compositing anything transparent onto black. 256 as it comes: the M
     // ICON files are opaque.
-    apple: '/icons/mss54hp-base-256.png',
+    apple: '/icons/mapping-256.png',
   },
   appleWebApp: {
     capable: true,

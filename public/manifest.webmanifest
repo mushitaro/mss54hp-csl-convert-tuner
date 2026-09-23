@@ -9,25 +9,25 @@
   "theme_color": "#000000",
   "icons": [
     {
-      "src": "/icons/mss54hp-base-192.png",
+      "src": "/icons/mapping-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/mss54hp-base-512.png",
+      "src": "/icons/mapping-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/mss54hp-base-maskable-192.png",
+      "src": "/icons/mapping-maskable-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "/icons/mss54hp-base-maskable-512.png",
+      "src": "/icons/mapping-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
