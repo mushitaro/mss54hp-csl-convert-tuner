@@ -1,0 +1,73 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci
+
+      # This repository is public. Nothing tracked may be a BMW-derived binary, a third-party XDF,
+      # a database, a secret or a real VIN (scripts/check-public-tree.mjs; the deliberate
+      # exceptions, with reasons, in .public-tree-allow). Before the build, so a release carrying
+      # one never reaches the site either.
+      - name: Check the public tree
+        run: node scripts/check-public-tree.mjs
+
+      - name: Build
+        run: npm run build
+
+      # The Android launcher is a Trusted Web Activity on this origin, and
+      # Chrome will only believe that if it can fetch
+      # /.well-known/assetlinks.json. `next build` copies it out of public/ on
+      # its own; this only asserts it, because a missing asset link produces no
+      # error anywhere — Chrome silently shows its toolbar, which reads as the
+      # launcher being styled wrong rather than as a file that never shipped.
+      - name: Check the asset link survived the build
+        run: |
+          test -s out/.well-known/assetlinks.json
+          cat out/.well-known/assetlinks.json
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./out
+          # ⚠ Not optional, and not the default. v5 added this input defaulting
+          # to false, which puts `--exclude=.[^/]*` on its tar and drops every
+          # dot-path in the site. Upgrading the workflow to v5 therefore
+          # silently deleted /.well-known from the deploy while the build,
+          # the artifact upload and the deployment all reported success — the
+          # only symptom was a 404 on one URL nothing else asks for.
+          include-hidden-files: true
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

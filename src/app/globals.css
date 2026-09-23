@@ -1,0 +1,273 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000;
+  --foreground: #F2F2F5;
+
+  /* Dark-only instrument, said in CSS as well as in the viewport meta layout.tsx emits. The meta
+     tells the browser what to paint its own surfaces; this property is the one that cascades into
+     form controls, and the app has three native <select>s. Without it Chrome for Android opens
+     their option lists as a full-screen white sheet — the <option> elements carry bg-slate-900
+     classes, but mobile UAs ignore author styling on those entirely. A white sheet is what the
+     driver would get, at night, mid-session. */
+  color-scheme: dark;
+}
+
+/* ── backdrop-filter: above 900px only ─────────────────────────────────
+   Every `backdrop-blur-*` in this app is written `min-[900px]:backdrop-blur-*`, and the sites that
+   exist ONLY below that line carry none at all.
+
+   A backdrop filter composites the whole area behind the element, every frame the content behind it
+   changes — and in this app the content behind it is a live telemetry strip, a 3D surface, a 480-cell
+   grid, or the app itself under a sheet. On the device this rule is for, a head unit whose GPU is
+   the weakest thing in the car, that cost is paid against the same budget the DS2 read loop needs.
+   Measured elsewhere in this codebase at ~1s of phone paint for a full-screen scrim.
+
+   What it buys back on black is close to nothing: every surface that carried one is already 80-95%
+   opaque over #000, so the blur was refining a picture nobody can see. Above 900px there is a
+   desktop GPU and a static background, so it stays — that is where it reads as glass rather than as
+   a cost. See tsunagi-m-mobile → performance.md §5.
+   ───────────────────────────────────────────────────────────────────── */
+
+/* No pull-to-refresh, and no rubber-band handing a gesture to the browser.
+   The app never scrolls its own document — everything is sized to the viewport — so a downward
+   swipe that starts on a pane, on the menu's scrim, or on a list already at its top had nothing
+   local to do and went straight to Chrome's reload gesture. On a tool that is mid-session with a
+   DME, reloading is not a harmless refresh: it drops the link, the log in progress and the unsaved
+   tune. `none` rather than `contain` because there is no outer scroll worth chaining to either. */
+html, body {
+  overscroll-behavior: none;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  /* Both must stay pointed at variables layout.tsx actually defines. A dangling
+     var() here makes font-family invalid at computed-value time, so font-sans /
+     font-mono silently fall back to whatever is inherited instead of erroring. */
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+}
+
+/* ── TSUNAGI brand palette ──────────────────────────────────────────────
+   True-black base + cool-charcoal neutrals, keyed to the BMW ///M logo
+   tricolor. Overriding these built-in Tailwind tokens re-skins every
+   slate-* / blue-* / red-* / indigo-* utility across the app from one
+   place. Semantic roles (one color = one meaning, everywhere):
+     • M-blue   (#008AC9) → primary / interactive / "lean" heatmap
+     • M-red    (#F11A22) → danger / destructive / error / "rich" heatmap
+     • M-violet (#2B115A) → secondary / lineage / reference / diagnostic
+   The accent set is restricted to those three; the functional status layer
+   is folded into them further down rather than kept on Tailwind hues. */
+@theme {
+  /* Neutral ramp — pure-black anchor, cool charcoal */
+  --color-slate-950: #000000;
+  --color-slate-900: #0A0A0D;
+  --color-slate-800: #17171C;
+  --color-slate-700: #2A2A33;
+  --color-slate-600: #4C4C58;
+  --color-slate-500: #70707E;
+  --color-slate-400: #9A9AA8;
+  --color-slate-300: #C6C6CF;
+  --color-slate-200: #DFDFE6;
+  --color-slate-100: #F2F2F5;
+
+  /* Primary accent — shifted toward the M-blue (#008AC9), hue ≈ 199° */
+  --color-blue-100: #D6EEFA;
+  --color-blue-200: #B6E4F5;
+  --color-blue-300: #6CCBEF;
+  --color-blue-400: #26AEE4;
+  --color-blue-500: #0A9BDB;
+  --color-blue-600: #0883BD;
+  --color-blue-900: #06354E;
+
+  /* Danger / destructive — BMW ///M red (#F11A22), hue ≈ 358° */
+  --color-red-100: #FBD9DA;
+  --color-red-200: #F9C0C2;
+  --color-red-300: #F87A7F;
+  --color-red-400: #F64A50;
+  --color-red-500: #F11A22;
+  --color-red-600: #D0121A;
+  --color-red-900: #4A0A0D;
+
+  /* Secondary / lineage / diagnostic — BMW ///M navy-violet (#2B115A),
+     hue ≈ 261°. Lightened for legibility on black; the deepest step is the
+     logo navy itself, used for filled badges. The Factor column (a hardcoded
+     hex in LogDataTable) is set to the -400 step so it reads as the same
+     brand violet as the lineage badges. */
+  --color-indigo-300: #B9A6EE;
+  --color-indigo-400: #9B84E8;
+  --color-indigo-500: #7E63DB;
+  --color-indigo-600: #6547C2;
+  --color-indigo-900: #2B115A;
+
+  /* ── Functional status layer, folded into the M tricolor ──────────────
+     The instrument used to keep emerald / amber / orange at their Tailwind
+     defaults so machine state read unambiguously by hue alone. With the
+     accent set restricted to the ///M tricolor only three hues survive on
+     black — the logo navy #2B115A is 1.33:1 and can never carry text or an
+     indicator — so the status roles are separated by LIGHTNESS and MOTION
+     inside the blue and violet ramps instead of by hue:
+
+       emerald-* → ice blue   : OK / verified / data present
+       amber-*   → violet     : armed / busy / caution  (+ animate-pulse)
+       green-*   → violet     : measured diagnostic (fuel trim), 2nd action
+       orange-*  → violet -1  : configuration group, informational notice
+
+     green-* is a deliberate alias of amber-*: four roles do not fit in three
+     hues, and these two never share a container. orange-* sits one step
+     darker so the least urgent role stays the dimmest violet on screen.
+
+     The palette NAMES are kept so this stays one CSS edit instead of a
+     rename across 36 call sites — `text-emerald-400` now paints ice blue.
+     Read the name as the ROLE, not the hue. Each namespace is cleared to
+     `initial` first: an undefined step must fail to emit a utility rather
+     than silently leak real Tailwind orange back into the instrument.
+     Ratios are against the true-black base. */
+  --color-emerald-*: initial;
+  --color-emerald-100: #EAF7FD; /* 18.2:1 — text on a filled heat cell */
+  --color-emerald-200: #DCF2FC;
+  --color-emerald-300: #C9EAF8;
+  --color-emerald-400: #B6E4F5; /* 15.4:1 — verified / done / present */
+  --color-emerald-500: #8FD8F2; /* 13.2:1 — connected LED, check marks */
+  --color-emerald-600: #6CCBEF; /* 11.4:1 */
+  --color-emerald-900: #06354E;
+
+  --color-amber-*: initial;
+  --color-amber-100: #EDE7FB;
+  --color-amber-200: #DDD2F7;
+  --color-amber-300: #CBBCF2;
+  --color-amber-400: #B9A6EE; /*  9.8:1 — armed / busy / caution text */
+  --color-amber-500: #9B84E8; /*  6.9:1 — busy LED, armed toggle labels */
+  --color-amber-600: #7E63DB; /*  4.7:1 */
+  --color-amber-700: #6547C2; /*  3.2:1 — borders only, never text */
+  --color-amber-900: #2B115A;
+
+  --color-green-*: initial;
+  --color-green-300: #CBBCF2;
+  --color-green-400: #B9A6EE; /*  9.8:1 — STFT readouts */
+  --color-green-500: #9B84E8; /*  6.9:1 — 4.6:1 at the /80 it is used with */
+  --color-green-600: #7E63DB;
+
+  --color-orange-*: initial;
+  --color-orange-300: #B9A6EE;
+  --color-orange-400: #9B84E8; /*  6.9:1 — informational notice, panel toggle */
+  --color-orange-500: #7E63DB; /*  4.7:1 — accent-* on transient-filter controls */
+  --color-orange-600: #6547C2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #000000;
+    --foreground: #F2F2F5;
+  }
+}
+
+/* No font-family here on purpose: `@theme inline` inlines its values into the
+   utilities and never emits --font-sans / --font-mono as custom properties, so
+   a var() reference at this level would silently resolve to the generic system
+   stack. layout.tsx sets the body default via Inter's own className. */
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────
+   The two syntaxes cannot both be declared globally. Chromium discards every
+   ::-webkit-scrollbar rule for an element the moment a standard scrollbar-width
+   OR scrollbar-color is in effect on it, so the blanket `* { scrollbar-width:
+   thin; scrollbar-color: … }` that used to live at the bottom of this file
+   silently beat the 6px block above it — measured: sw/sc both auto gives the
+   intended 6px, the shipped combination gave Chrome's `thin`, which is 10px.
+   That is a quarter of the 44px tab row, sitting under the active tab's
+   underline.
+
+   So gate the standard properties on engines that have no ::-webkit-scrollbar
+   at all: Chromium keeps the 6px bar and its hover state, Firefox still gets a
+   thin themed one. Note `thin` is the narrowest the standard property offers —
+   6px is only reachable through the webkit pseudo-elements. */
+::-webkit-scrollbar {
+  /* 3px, halved from 6 on request (operator, 2026-08-31). It is an indicator here,
+     not a control: nothing in this app is scrolled by dragging its bar — the panes
+     are touched or wheeled — so the width buys legibility rather than a hit target,
+     and 3px is enough to see where you are in a list.
+
+     Chromium only. Firefox is on `scrollbar-width: thin` below, which is the
+     narrowest the standard property offers and is unaffected by this number. */
+  width: 3px;
+  height: 3px;
+}
+
+/* No `::-webkit-slider-thumb` rule here, and that is a measured decision rather than an omission.
+   ────────────────────────────────────────────────────────────────────────────
+   `appearance: none` on a range input does NOT stop Blink drawing a thumb. It
+   stops it drawing the default TRACK, which is what lets these be 4px and
+   `bg-slate-700` — and Chrome still paints a thumb over that track, tinted by
+   `accent-color`. So the `accent-*` class on each slider is doing real work: the
+   filter panel is blue and the transient group is violet because of it.
+
+   Supplying an author thumb here is what breaks that. `accent-color` only ever
+   tints the UA's own thumb, so replacing it with a custom one throws the accent
+   away — and a custom thumb has to be painted from something, which in practice
+   means `currentColor`, i.e. the INHERITED text colour. That is how every thumb
+   in this app came to render #C6C6CF: one near-white, blue and violet alike.
+
+   Measured in Chrome 151, headless, reading the pixels — six sliders, identical
+   but for these properties:
+     appearance:none + accent-color blue,   no thumb rule   -> blue thumb
+     appearance:none + accent-color violet, no thumb rule   -> violet thumb
+     appearance:none + accent-color + currentColor thumb    -> grey thumb (both)
+     appearance:none + color blue + currentColor thumb      -> blue thumb
+   The first two are this file's state and the ones that matter. A rule was added
+   twice on the belief that the first two render nothing; they do not.
+
+   If a bigger thumb is ever wanted for the head unit, it costs the accent — the
+   colour would have to move to a `text-*` class on every slider, and this note
+   is the reason that trade has to be made deliberately. */
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2A2A33;
+  /* slate-700 (cool charcoal) */
+  /* Half the bar's width, as it was at 6px: a radius equal to the width would draw
+     a capsule and cost the thumb its ends, which is what says how long it is. */
+  border-radius: 1.5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4C4C58;
+  /* slate-600 (cool charcoal) */
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2A2A33 transparent;
+  }
+}
+
+/* Opt-out for strips that carry their own overflow affordance instead — the tab
+   bar, which fades whichever edge still has tabs behind it. Both declarations are
+   needed: scrollbar-width covers Firefox, and it also hides the bar in Chromium,
+   but the pseudo-element rule keeps that independent of the @supports gate above. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Hide Next.js Dev Tools / Static Indicator */
+body:has([data-nextjs-toast]),
+[data-nextjs-toast],
+[data-nextjs-dialog-overlay],
+#next-route-announcer,
+[class*="nextjs-toast-errors-parent"],
+[class*="NextjsStaticIndicator"],
+nextjs-portal {
+  display: none !important;
+}

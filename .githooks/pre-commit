@@ -1,0 +1,12 @@
+#!/bin/sh
+# Nothing that must not be published goes into a commit: BMW-derived binaries, third-party XDFs,
+# databases, secrets, a real VIN. This repository is public, and a commit is forever even when the
+# file is removed later. Checks only what is staged; see scripts/check-public-tree.mjs, and
+# .public-tree-allow for the deliberate exceptions.
+#
+# The script is taken from beside this hook when the checkout committing does not have one (an
+# older branch in another worktree): the guard must not depend on which branch is checked out.
+here="$(dirname "$0")"
+script="scripts/check-public-tree.mjs"
+[ -f "$script" ] || script="$here/../scripts/check-public-tree.mjs"
+exec node "$script" --staged

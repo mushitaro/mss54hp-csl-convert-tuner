@@ -1,0 +1,73 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+# Alternate dev build dirs from scripts/dev-alt.mjs — see next.config.ts distDir.
+/.next-dev-*/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local-only reference material (not for distribution)
+/reference/
+
+# Cloudflare local secrets. The real token lives in `wrangler pages secret`, never here.
+.dev.vars
+.wrangler/
+
+# The run-store upload token. Generated locally, never committed; the authoritative
+# copy lives in \`wrangler pages secret\`. Read it from here to type into the phone.
+.upload-token.local
+
+# esbuild output from the verify-rf-korr scripts. They bundle src/ so they can run the real
+# pipeline rather than a model of it; the bundle is a build artefact of whatever src/ said
+# at the time, which is exactly the thing not to commit.
+scripts/.rf-korr-*.mjs
+scripts/.rf-korr-*.ts
+
+# 車両データの退避先。ここに置くものは D1 のダンプで、`vin` 列に実 VIN が、
+# `binaries_json_gz` に DME イメージそのものが入る。このリポジトリは PUBLIC。
+archive/
+
+# esbuild scratch bundles written by the analyze:* scripts
+scripts/.*-bundle.mjs
+scripts/.*-entry.ts
+# Every dot-prefixed file under scripts/ is a build artefact or a scratch measurement, whatever it
+# is called. The two patterns above name the two conventions that existed; a one-off bundle called
+# scripts/.w.mjs slipped past both and into a commit.
+scripts/.*.mjs
+scripts/.*.ts

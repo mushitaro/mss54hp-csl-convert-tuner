@@ -1,0 +1,139 @@
+import {
+    Env, MAX_GZ_BYTES, MAX_ROW_BYTES, bad, conflict, decodeBase64, isGzip, ok, ownerOf, rowBytes,
+    tooLarge, unauthorized,
+} from '../../_shared';
+
+/** Every column except the three blobs. The list must never inflate a session to describe it. */
+const LIST_COLUMNS = `
+    id, synced_at, label, created_at, status, vin, point_count,
+    has_tune, has_rf, has_egt, has_idle, app_build,
+    length(session_json_gz)  AS session_bytes,
+    length(log_json_gz)      AS log_bytes,
+    length(binaries_json_gz) AS binaries_bytes
+`;
+
+/**
+ * GET /api/sessions — this owner's sessions, most recent first.
+ *
+ * No pagination. This is one person's own sessions; the day it needs paging it needs a different
+ * design, and a limit that silently dropped the oldest would be worse than either.
+ */
+export const onRequestGet: PagesFunction<Env> = async ({ request, env, data }) => {
+    const owner = ownerOf(data);
+    if (!owner) return unauthorized();
+
+    const limit = Math.min(200, Math.max(1, Number(new URL(request.url).searchParams.get('limit') ?? 100)));
+    const { results } = await env.RUNS_DB
+        .prepare(`SELECT ${LIST_COLUMNS} FROM sessions WHERE owner = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(owner.id, limit)
+        .all();
+
+    return ok({ sessions: results });
+};
+
+interface SyncBody {
+    id: string;
+    label: string;
+    createdAt: number;
+    status?: string;
+    vin?: string;
+    pointCount?: number;
+    hasTune?: boolean;
+    hasRf?: boolean;
+    hasEgt?: boolean;
+    /** This session holds an idle dwell run. See migrations/0005. */
+    hasIdle?: boolean;
+    appBuild?: string;
+    /** base64 of gzipped JSON. JSON cannot carry bytes and multipart buys nothing here. */
+    sessionGz: string;
+    logGz?: string | null;
+    binariesGz?: string | null;
+}
+
+/**
+ * POST /api/sessions — store one session, exactly as the local database holds it.
+ *
+ * Idempotent on the session's own id: re-syncing replaces. That is the behaviour a phone with an
+ * unreliable connection needs, and it is also what makes "sync after every change" safe.
+ *
+ * Replaces only the caller's OWN row. The id is minted by the client, so an id that is already
+ * someone else's is refused with 409 rather than merged — the upsert's WHERE makes the update a
+ * no-op for a foreign row, and `meta.changes` is how that is told apart from a write.
+ */
+export const onRequestPost: PagesFunction<Env> = async ({ request, env, data }) => {
+    const owner = ownerOf(data);
+    if (!owner) return unauthorized();
+
+    let body: SyncBody;
+    try {
+        body = await request.json<SyncBody>();
+    } catch {
+        return bad('Body is not JSON.');
+    }
+
+    if (!body.id || !body.label || !body.sessionGz) {
+        return bad('id, label and sessionGz are all required.');
+    }
+    if (!Number.isFinite(body.createdAt)) return bad('createdAt must be a number.');
+
+    const parts: Array<{ name: string; b64: string | null | undefined }> = [
+        { name: 'sessionGz', b64: body.sessionGz },
+        { name: 'logGz', b64: body.logGz },
+        { name: 'binariesGz', b64: body.binariesGz },
+    ];
+    const blobs: Record<string, Uint8Array | null> = {};
+    for (const part of parts) {
+        if (!part.b64) { blobs[part.name] = null; continue; }
+        let bytes: Uint8Array;
+        try { bytes = decodeBase64(part.b64); } catch { return bad(`${part.name} is not valid base64.`); }
+        if (!isGzip(bytes)) return bad(`${part.name} is not gzip data.`);
+        // Checked before the insert rather than caught after it: D1's own error for an oversized
+        // value is generic, and the useful answer — which part, how far over — is only available
+        // here. Each part has its own budget, which is why they are three columns and not one.
+        if (bytes.byteLength > MAX_GZ_BYTES) {
+            return bad(
+                `${part.name} is ${(bytes.byteLength / 1024).toFixed(0)} KB compressed; the limit `
+                + `is ${(MAX_GZ_BYTES / 1024).toFixed(0)} KB per part. Split the drive into shorter runs.`,
+                413);
+        }
+        blobs[part.name] = bytes;
+    }
+
+    const values = [
+        body.id, Date.now(), body.label, body.createdAt, body.status ?? null, body.vin ?? null,
+        body.pointCount ?? 0, body.hasTune ? 1 : 0, body.hasRf ? 1 : 0, body.hasEgt ? 1 : 0,
+        body.hasIdle ? 1 : 0,
+        blobs.sessionGz, blobs.logGz, blobs.binariesGz, body.appBuild ?? null, owner.id,
+    ];
+    // The row as a whole, before anything is written. Three parts inside their own budgets can
+    // still sum past D1's row limit, and that failure would reach the client as a bare 500.
+    const bytes = rowBytes(values);
+    if (bytes > MAX_ROW_BYTES) return tooLarge(bytes);
+
+    const result = await env.RUNS_DB.prepare(`
+        INSERT INTO sessions (
+            id, synced_at, label, created_at, status, vin, point_count,
+            has_tune, has_rf, has_egt, has_idle, session_json_gz, log_json_gz, binaries_json_gz,
+            app_build, owner
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            synced_at = excluded.synced_at,
+            label = excluded.label,
+            status = excluded.status,
+            vin = excluded.vin,
+            point_count = excluded.point_count,
+            has_tune = excluded.has_tune,
+            has_rf = excluded.has_rf,
+            has_egt = excluded.has_egt,
+            has_idle = excluded.has_idle,
+            session_json_gz = excluded.session_json_gz,
+            log_json_gz = excluded.log_json_gz,
+            binaries_json_gz = excluded.binaries_json_gz,
+            app_build = excluded.app_build
+        WHERE sessions.owner = excluded.owner
+    `).bind(...values).run();
+    if (!result.meta.changes) return conflict();
+
+    const stored = parts.reduce((n, p) => n + (blobs[p.name]?.byteLength ?? 0), 0);
+    return ok({ id: body.id, storedBytes: stored });
+};

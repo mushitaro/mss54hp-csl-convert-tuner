@@ -1,0 +1,48 @@
+/**
+ * Cloudflare Pages — the PREVIEW: feat/develop, behind the owner gate (functions/_middleware.ts),
+ * for MILE buyers and past owners. Published on the public `preview` branch with its source.
+ *
+ * Production stays on GitHub Pages at mss54hp-csl-convert-tuner.tsunagi.app, deployed from `main`
+ * by .github/workflows/deploy.yml. Nothing here touches that: Pages serves one site per repo and
+ * that site is spoken for, and the service worker precaches the whole origin under scope `/`, so a
+ * second build sharing that origin would fight production's cache rather than sit beside it. A
+ * separate origin is not a preference, it is the only arrangement that works.
+ *
+ * The other reason to be here rather than on a second GitHub Pages site: an upload endpoint. The
+ * app is a static export, so on Pages there is nowhere for a POST to land. Pages Functions plus D1
+ * gives one on the same origin as the app, which means no CORS preflight in a garage on a phone
+ * with two bars of signal.
+ *
+ * ## Setup, once
+ *
+ *   npx wrangler login
+ *   npx wrangler d1 create mss54hp-tuner-runs      # copy database_id into this file
+ *   npm run db:migrate:remote
+ *   npx wrangler pages project create mss54hp-csl-convert-tuner-preview --production-branch main
+ *   # Settings → Runtime → Fail closed. Without it an exhausted Functions quota skips the gate and
+ *   # serves every asset to anyone.
+ *   # On m3: npm run access:client -- --id tuner-preview … — registers the gate's client and pipes
+ *   # M3_CLIENT_SECRET into this project, never printed. A secret reaches only later deployments.
+ *
+ * Then `npm run deploy:preview` for every build after that (it refuses until the commit's source
+ * is on GitHub's `preview` branch — `npm run publish:preview`, then `git push origin preview`).
+ */
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "mss54hp-csl-convert-tuner-preview",
+    "pages_build_output_dir": "out",
+
+    // Pinned rather than tracking "latest". A runtime that changes under a car diagnostic tool
+    // between one drive and the next is a variable nobody asked for.
+    "compatibility_date": "2026-08-01",
+
+    "d1_databases": [
+        {
+            "binding": "RUNS_DB",
+            "database_name": "mss54hp-tuner-runs",
+            // From `wrangler d1 create mss54hp-tuner-runs` (region APAC). Not a secret — it names
+            // a database, it does not open one; access still needs the account's own credentials.
+            "database_id": "af71b38c-8582-4432-be2f-054c568fa1dc"
+        }
+    ]
+}

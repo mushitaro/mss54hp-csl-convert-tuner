@@ -1,0 +1,12 @@
+#!/bin/sh
+# Only the release (main) and the published preview tree (preview) may leave
+# this machine. Development history — feat/develop and every other branch —
+# carries real VINs and DME images in its past and is never pushed.
+# (Added 2026-09-23 after claude/low-rpm-steering-vibration-ku3f70 was pushed.)
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/preview) ;;
+    *) echo "pre-push: refusing to push $local_ref -> $remote_ref (only main and preview leave this machine)" >&2; exit 1 ;;
+  esac
+done
+exit 0

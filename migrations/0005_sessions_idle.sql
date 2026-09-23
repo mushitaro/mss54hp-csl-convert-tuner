@@ -1,0 +1,13 @@
+-- What kind of run a session holds, for the list view.
+--
+-- `has_rf` and `has_egt` describe a VE drive: they ask whether the log carried relative filling and
+-- an exhaust temperature. An idle run carries neither and would list as three zeros — indis-
+-- tinguishable from a session that holds only a BASE. This is the column that tells them apart.
+--
+-- Added rather than replacing them. The three that are there describe the other build's runs, and a
+-- store that both builds can write to has to keep answering their question too; dropping a column
+-- to tidy up would make an rf-korr session unreadable by its own list view.
+--
+-- Denormalised on purpose, like every other column beside the blobs: the list must never have to
+-- decompress a session to describe it.
+ALTER TABLE sessions ADD COLUMN has_idle INTEGER NOT NULL DEFAULT 0;

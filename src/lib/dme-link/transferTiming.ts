@@ -1,0 +1,582 @@
+/**
+ * Per-chunk timing for a DS2 bulk read, built to answer one question: where do the ~76 ms per chunk
+ * that are not wire time actually go?
+ *
+ * A 64 KiB read at 9600 8E1 has a hard floor of ~83 s (538 chunks x 135 byte-times x 1.1458 ms) and
+ * measures ~124 s. Raising the baud barely helps, which is the signature of a fixed per-exchange cost
+ * dominating. Three candidates were indistinguishable from the outside:
+ *
+ *   - DME turnaround (P2) — the ECU thinking between our last echo byte and its first response byte.
+ *     If this is the residual, no amount of host-side work recovers it and the reference tool pays it
+ *     identically.
+ *   - Per-byte-arrival cost — at 9600 a byte takes 1.15 ms, so an FTDI latency timer of 1 ms emits
+ *     roughly one USB IN transfer per byte, and each one is a `reader.read()` resolution crossing
+ *     from the browser process into the renderer. ~135 of those per chunk.
+ *   - Something of ours — parking, draining, buffering.
+ *
+ * `rxEvents` per chunk is the single most decisive number here: ~135 means per-byte-arrival cost is
+ * real and the latency timer is the lever; ~10 means that hypothesis is dead.
+ *
+ * ## Why this file looks the way it does
+ *
+ * An instrument that allocates, formats, or branches much lands inside the very interval it is
+ * measuring. So: preallocated Float64Arrays sized once at read start, no push, no object literals, no
+ * strings and no console during the transfer, and every method returns early on one boolean compare
+ * when disabled. Everything stays numeric until `report()` runs after the last chunk.
+ *
+ * Deliberately dependency-free and DOM-free, matching WebSerialTransport — the transport is a
+ * candidate to move into a Worker later, and an instrument that reaches for `window` would block that.
+ */
+
+/**
+ * Which operation a report describes.
+ *
+ * The instrument started life measuring the bulk read only, and its window was armed from
+ * `readPartialBinInner`. Two operations were therefore invisible, and both turned out to have
+ * levers the read does not:
+ *
+ *  - **write** — a flash telegram's turnaround is the DME programming cells, not the DME thinking.
+ *    That is the number which decides how much a baud boost can be worth, and it had only ever been
+ *    back-derived from a README sentence.
+ *  - **log** — the live poll is the one path with real host-side work in it (a full VE recalculation
+ *    every 500 ms), so it is the one place `hostGap` below is not always ~0.
+ */
+export type TransferKind = 'read' | 'write' | 'log';
+
+/** A single exchange's decomposition, all in milliseconds unless noted. */
+export interface ChunkTiming {
+    /**
+     * Time inside transport.write().
+     *
+     * ~0 on a READ, whose request is 9 bytes. **Not** on a WRITE: a flash telegram is 131 bytes and
+     * measured 71.7 ms here, because the transport back-pressures until the chip has room. That is
+     * the transport doing its job, not the WICG/serial#123 write-splitting this lane was originally
+     * written to catch — read a large value on a write path as "the request is long", and only
+     * suspect splitting when a SHORT request takes measurable time.
+     */
+    write: number;
+    /**
+     * Write resolved -> first byte of our own echo came back. Cable + UART turnaround, and it also
+     * reveals a driver latency timer.
+     *
+     * **NaN when the request was still going out.** A 131-byte write takes 150 ms on the wire while
+     * `write()` resolves partway through, so the echo's first byte legitimately arrives BEFORE the
+     * write call returns and the subtraction goes negative. It reported -56.3 ms on a real flash.
+     * A negative latency is not a small error, it is a quantity that does not exist for that
+     * exchange, so it is recorded as absent rather than as a number nobody can use.
+     */
+    echoLatency: number;
+    /**
+     * First echo byte -> last echo byte: OUR OWN REQUEST going out, measured on the wire.
+     *
+     * The mirror of `responseWire`, and the lane the write path was missing entirely. 150 of a write
+     * telegram's 193 ms are the request, and none of it was visible — the instrument could see the
+     * DME's 32 ms of programming and the 11 ms coming back, and simply had no line for the 78% in
+     * between. Compare against `theoreticalRequestWire` for the same lie-detector `responseWire`
+     * gives a read: it says whether the link is really running at the rate the UI claims.
+     */
+    requestWire: number;
+    /** Last echo byte -> first response byte. THE number: this is the DME thinking, and it is the one
+     *  part of the residual that no host-side change can recover. */
+    turnaround: number;
+    /**
+     * First response byte -> last response byte. Compare against theory to confirm the link is
+     * really running at the baud we believe it is.
+     *
+     * **NaN when the whole response arrived in a single rx event**, which is the normal case for a
+     * 10-byte write acknowledgement: first and last are the same instant, so the difference is 0 and
+     * means nothing. A read's 126-byte response spans ~11 events and measures properly.
+     */
+    responseWire: number;
+    /** Total time the chunk's three readExact calls spent parked waiting to be woken. */
+    parked: number;
+    /** How many times the pump's reader.read() resolved during this chunk. */
+    rxEvents: number;
+    /** Wall time for the whole exchange, write through last response byte. */
+    total: number;
+    /**
+     * Previous exchange's end → this exchange's start. **Us, and nothing else.**
+     *
+     * ~0 on a bulk read, where the loop does nothing between chunks but copy bytes. On the datalog
+     * it is where `flushLiveSamples` lands: a full `processLogData` plus a full VE recalculation,
+     * synchronous, inside the sample callback and O(n) in run length. That cost has never been
+     * measured, and on the Android backend it is not merely slow — our read loop is the only thing
+     * draining the FT232R's 256-byte FIFO, which gives ~267 ms of headroom at 9600 before an
+     * overrun. This lane is how we find out how close to it we are.
+     *
+     * Zero for the first exchange, which has no predecessor.
+     */
+    hostGap: number;
+}
+
+export interface TransferTimingReport {
+    /** Which operation this describes. Reports are saved side by side, and a write report that
+     *  cannot say it is a write is one filename typo away from being read as a read. */
+    kind: TransferKind;
+    /**
+     * Whether the read ran to completion. **A failed read's timing is the most valuable kind**, so
+     * this is recorded rather than the report being discarded: `chunks` then says how far it got and
+     * `error` says what stopped it, which together are the whole diagnosis for a baud rate that dies
+     * part-way. The first version of this instrument only surfaced the report on success, and a
+     * latency sweep came back with three files that were byte-identical copies of the previous run.
+     */
+    completed: boolean;
+    /** The failure that ended the read, verbatim — including the latched pump error name, which is
+     *  what separates a receive overrun from a physical-layer fault from a silent DME. */
+    error: string | null;
+    /** Completed exchanges. On a failed read this is where it stopped. */
+    chunks: number;
+    /**
+     * Real wall clock across the chunk loop, gaps and retries included.
+     *
+     * Necessary because `chunks x median.total` does NOT reproduce it: `total` measures one exchange,
+     * and a retry's settle happens between exchanges rather than inside one, so an estimate built from
+     * the medians silently omits it. When the headline number IS the duration, it has to be measured.
+     *
+     * Excludes login and the baud switch, which happen before the loop is armed.
+     */
+    elapsedMs: number;
+    /** Payload bytes per telegram: the read/write chunk size, or 0 for the datalog, whose exchanges
+     *  are fixed-size measurement blocks rather than a chunked range. */
+    chunkSize: number;
+    /**
+     * Whole response frame length in bytes, used only to compute `theoreticalResponseWire`.
+     *
+     * Explicit rather than derived from `chunkSize`, because the relationship differs per operation
+     * and getting it wrong produces a plausible number that quietly makes a healthy link look
+     * broken: a READ response carries the chunk (`chunkSize + 4`), a WRITE response is a fixed
+     * 10-byte acknowledgement no matter how much was written, and a LOG exchange's size depends on
+     * which measurement block it was.
+     */
+    responseBytes: number;
+    /** Whole request frame length in bytes, for `theoreticalRequestWire`. A read asks with 9
+     *  bytes, a write telegram with 131 — and on a write the request IS most of the exchange. */
+    requestBytes: number;
+    /**
+     * The rate the UI ASKED for. Separate from `baud`, which is what the read actually ran at.
+     *
+     * They differ whenever the DME turns a switch down, and that used to leave no trace in the file —
+     * only a colour on the notice line. Four candidate rates were then tested on a car and every
+     * report came back saying 9600, with no way to tell from the data whether the ECU had refused them
+     * or the app had never asked. `switchOutcome` is the other half of that answer.
+     */
+    requestedBaud: number | null;
+    /** 'accepted' / 'rejected (DS2 status 0x..)' / 'failed (...)', or null when no switch was
+     *  attempted. A 0xA2 rejection is the DME saying it does not implement that rate — which is a
+     *  fact about the ECU, not about this app, and worth having in writing. */
+    switchOutcome: string | null;
+    /** The rate the read actually ran at. */
+    baud: number | null;
+    /** The DME's published maximum telegram length, if it was readable. */
+    maxTelegramLength: number | null;
+    /** Retried chunks. A retry carries 300-1600 ms of deliberate settle, which is why every stat
+     *  below is a MEDIAN — one glitchy chunk would otherwise swamp a mean and make a clean read and a
+     *  read with three faults report the same number. */
+    retries: number;
+    median: ChunkTiming;
+    /** Expected response wire time for one chunk at `baud`, from the frame size. Lets a reader see at
+     *  a glance whether the line is running at the rate the UI claims. */
+    theoreticalResponseWire: number | null;
+    /** Expected time for the REQUEST at `baud`, from `requestBytes`. On a write this is the biggest
+     *  single term in the exchange, so it is the one to check a boosted rate against. */
+    theoreticalRequestWire: number | null;
+    /** High-resolution inter-arrival gaps (ms) for a few sampled chunks. Bounded on purpose: a full
+     *  trace would be ~72,600 events. Shows the shape a median cannot — e.g. whether bytes arrive one
+     *  per ~1.15 ms (per-byte USB packets) or in bursts. */
+    samples: { chunk: number; gaps: number[] }[];
+    /**
+     * The same medians split by exchange kind — `{ block3: {...}, block19: {...}, ram4: {...} }`.
+     *
+     * Empty for everything except a datalog, whose sample is no longer one shape of exchange. This
+     * is the number `DME_TURNAROUND_MS` is waiting on: one drive says what block 3, block 19 and a
+     * RAM read each really cost, instead of one median over all three.
+     */
+    byExchange: Record<string, { count: number; turnaround: number; total: number }>;
+}
+
+/** Chunks whose full rx-arrival trace is kept: the first few, and a few from the middle. */
+const SAMPLE_HEAD = 5;
+const SAMPLE_MID = 5;
+/** Cap on retained gaps per sampled chunk. A 251-byte response cannot exceed this. */
+const MAX_GAPS_PER_SAMPLE = 300;
+
+/**
+ * Median over the entries that were actually measurable.
+ *
+ * NaN means "this quantity does not exist for this exchange", which is a different fact from zero
+ * and has to stay different: a write acknowledgement arrives in a single rx event, so its
+ * `responseWire` is structurally unmeasurable — and reporting that as 0.0 ms invited exactly the
+ * reading that the link had transferred the response instantaneously. NaN also survives to the wire
+ * correctly: `JSON.stringify` renders it as `null`, and D1 stores NULL.
+ */
+function median(values: Float64Array, count: number): number {
+    const copy: number[] = [];
+    for (let i = 0; i < count; i++) if (!Number.isNaN(values[i])) copy.push(values[i]);
+    if (copy.length === 0) return count === 0 ? 0 : NaN;
+    copy.sort((a, b) => a - b);
+    const mid = copy.length >> 1;
+    return copy.length % 2 ? copy[mid] : (copy[mid - 1] + copy[mid]) / 2;
+}
+
+export class TransferTiming {
+    /** User-facing DIAG switch. Only decides whether begin() arms collection. */
+    private enabled = false;
+    /**
+     * True only between begin() and finish(), i.e. only during a bulk read.
+     *
+     * Separate from `enabled` on purpose. `exchange()` is shared with the FLASH WRITE path, so a
+     * single `enabled` flag would leave the instrument live during programming. Nothing it does can
+     * alter control flow — every method returns void and never throws — but an instrument that is
+     * inert outside the window it was built for is easier to reason about than one that is merely
+     * harmless everywhere.
+     */
+    private collecting = false;
+
+    // Per-chunk lanes, preallocated in begin().
+    private write!: Float64Array;
+    private echoLatency!: Float64Array;
+    private turnaround!: Float64Array;
+    private requestWire!: Float64Array;
+    private responseWire!: Float64Array;
+    private parked!: Float64Array;
+    private rxEvents!: Float64Array;
+    private total!: Float64Array;
+    private hostGap!: Float64Array;
+    /**
+     * What each exchange WAS — 'block3', 'block19', 'ram4'.
+     *
+     * A per-exchange label, because a log's sample is no longer one shape of exchange. The VE
+     * profile makes a 39-byte block read, a 13-byte RAM read and — every eighth sample — a 94-byte
+     * block read, and a single median turnaround over the three answers no question anyone has: the
+     * open question is precisely whether block 19's slave-overlay wait is the ~85 ms the traces
+     * suggest and a RAM read the ~35 ms they suggest.
+     *
+     * This is what replaced a proposed bench mode. A bench would have measured the same thing in a
+     * garage with the engine idling, in exchange for a hidden control and a procedure to remember;
+     * labelling the exchanges the run already makes gets the same breakdown out of the drive that
+     * has to happen anyway.
+     */
+    private labels: string[] = [];
+
+    private capacity = 0;
+    private index = 0;
+    private tBegin = 0;
+    /** End of the previous exchange, for the hostGap lane. 0 means "no predecessor". */
+    private tPrevEnd = 0;
+    private retries = 0;
+    private kind: TransferKind = 'read';
+    private chunkSize = 0;
+    private responseBytes = 0;
+    private requestBytes = 0;
+    private requestedBaud: number | null = null;
+    private switchOutcome: string | null = null;
+    private baud: number | null = null;
+    private maxTelegramLength: number | null = null;
+
+    // Live state for the chunk in flight.
+    private active = false;
+    private tExchangeStart = 0;
+    private tWriteStart = 0;
+    private tWriteEnd = 0;
+    private tFirstRx = 0;
+    private tLastRx = 0;
+    private tEchoDone = 0;
+    private tFirstResponseRx = 0;
+    private chunkRx = 0;
+    private chunkParked = 0;
+    private tParkStart = 0;
+    /** True between echoComplete() and the end of the chunk, so the pump can tag the first rx event
+     *  after the echo as the start of the response. */
+    private awaitingResponse = false;
+    /** rx events seen AFTER the echo completed. One means the response arrived whole in a single
+     *  wake, which makes its wire time unmeasurable rather than zero. */
+    private responseRx = 0;
+
+    private sampleGaps: Float64Array | null = null;
+    private sampleGapCount = 0;
+    private samples: { chunk: number; gaps: number[] }[] = [];
+    private midSampleFrom = Number.MAX_SAFE_INTEGER;
+
+    private lastReport: TransferTimingReport | null = null;
+
+    setEnabled(enabled: boolean): void {
+        this.enabled = enabled;
+    }
+
+    isEnabled(): boolean {
+        return this.enabled;
+    }
+
+    getReport(): TransferTimingReport | null {
+        return this.lastReport;
+    }
+
+    /**
+     * Drops any previous report. Called at the very START of a read attempt, before the login and the
+     * baud switch, so that a read failing *before* begin() cannot leave the previous run's numbers
+     * sitting there looking like this one's.
+     *
+     * begin() clears the report too, but only once it is reached. The gap between those two points is
+     * exactly where a refused baud switch or a failed login lives — the failures most likely to be
+     * under investigation. "No report" is an honest answer; last time's report is not.
+     */
+    clearReport(): void {
+        this.lastReport = null;
+    }
+
+    /**
+     * Sizes every lane for a read of `expectedChunks`. Called once, before the first exchange.
+     *
+     * Named fields rather than positional: this grew to five settings, two of which are baud rates
+     * that differ only in meaning (asked-for vs actually-ran-at). Getting those the wrong way round
+     * would produce a report that looks entirely plausible and is wrong about the one thing it exists
+     * to record.
+     */
+    begin(expectedChunks: number, info: {
+        kind: TransferKind;
+        chunkSize: number;
+        responseBytes: number;
+        requestBytes: number;
+        requestedBaud: number | null;
+        switchOutcome: string | null;
+        baud: number | null;
+        maxTelegramLength: number | null;
+    }): void {
+        if (!this.enabled) return;
+        const { kind, chunkSize, responseBytes, requestBytes, requestedBaud, switchOutcome, baud, maxTelegramLength } = info;
+        // +8 of slack: a retried chunk records twice, and running off the end must never throw inside
+        // a read. Overflow beyond that is dropped by the bounds check in end().
+        const capacity = expectedChunks + 8;
+        this.write = new Float64Array(capacity);
+        this.echoLatency = new Float64Array(capacity);
+        this.turnaround = new Float64Array(capacity);
+        this.requestWire = new Float64Array(capacity);
+        this.responseWire = new Float64Array(capacity);
+        this.parked = new Float64Array(capacity);
+        this.rxEvents = new Float64Array(capacity);
+        this.total = new Float64Array(capacity);
+        this.hostGap = new Float64Array(capacity);
+        this.labels = [];
+        this.sampleGaps = new Float64Array(MAX_GAPS_PER_SAMPLE);
+        this.capacity = capacity;
+        this.index = 0;
+        this.tPrevEnd = 0;
+        this.retries = 0;
+        this.kind = kind;
+        this.chunkSize = chunkSize;
+        this.responseBytes = responseBytes;
+        this.requestBytes = requestBytes;
+        this.requestedBaud = requestedBaud;
+        this.switchOutcome = switchOutcome;
+        this.baud = baud;
+        this.maxTelegramLength = maxTelegramLength;
+        this.samples = [];
+        this.midSampleFrom = Math.max(SAMPLE_HEAD, Math.floor(expectedChunks / 2));
+        this.lastReport = null;
+        this.tBegin = performance.now();
+        this.collecting = true;
+    }
+
+    /** Start of one DS2 exchange, before the request is written. */
+    /**
+     * Names the exchange in flight, for the per-kind breakdown.
+     *
+     * Derived by the caller from the bytes it is about to send rather than passed down from the
+     * profile, so the label cannot disagree with what actually went on the wire.
+     */
+    label(name: string): void {
+        if (!this.active) return;
+        this.labels[this.index] = name;
+    }
+
+    exchangeStart(now: number): void {
+        if (!this.collecting) return;
+        this.active = true;
+        this.tExchangeStart = now;
+        this.tFirstRx = 0;
+        this.tLastRx = 0;
+        this.tEchoDone = 0;
+        this.tFirstResponseRx = 0;
+        this.chunkRx = 0;
+        this.chunkParked = 0;
+        this.awaitingResponse = false;
+        this.responseRx = 0;
+        this.sampleGapCount = 0;
+    }
+
+    writeStart(now: number): void {
+        if (!this.collecting || !this.active) return;
+        this.tWriteStart = now;
+    }
+
+    writeEnd(now: number): void {
+        if (!this.collecting || !this.active) return;
+        this.tWriteEnd = now;
+    }
+
+    /**
+     * One resolution of the pump's reader.read(). Called from the pump, which is why the transport
+     * needs the timer at all: `readExact` cannot see arrival times, only whether enough bytes exist.
+     */
+    rx(now: number): void {
+        if (!this.collecting || !this.active) return;
+        if (this.chunkRx === 0) this.tFirstRx = now;
+        else if (this.sampleGaps !== null && this.sampleGapCount < MAX_GAPS_PER_SAMPLE && this.isSampledChunk()) {
+            this.sampleGaps[this.sampleGapCount++] = now - this.tLastRx;
+        }
+        if (this.awaitingResponse) {
+            if (this.tFirstResponseRx === 0) this.tFirstResponseRx = now;
+            this.responseRx++;
+        }
+        this.tLastRx = now;
+        this.chunkRx++;
+    }
+
+    /** The echo has been fully read; everything arriving from here is the DME's response. */
+    echoComplete(now: number): void {
+        if (!this.collecting || !this.active) return;
+        // The echo's LAST byte is what the turnaround is measured from — not this call, which happens
+        // after readExact has drained the buffer and could be an event-loop turn later.
+        this.tEchoDone = this.tLastRx || now;
+        this.awaitingResponse = true;
+    }
+
+    parkStart(now: number): void {
+        if (!this.collecting || !this.active) return;
+        this.tParkStart = now;
+    }
+
+    parkEnd(now: number): void {
+        if (!this.enabled || !this.active || this.tParkStart === 0) return;
+        this.chunkParked += now - this.tParkStart;
+        this.tParkStart = 0;
+    }
+
+    retry(): void {
+        if (!this.collecting) return;
+        this.retries++;
+    }
+
+    /** End of one exchange. Folds the live state into the lanes. */
+    exchangeEnd(now: number): void {
+        if (!this.collecting || !this.active) return;
+        this.active = false;
+        const i = this.index;
+        if (i >= this.capacity) return;
+        this.write[i] = this.tWriteEnd - this.tWriteStart;
+        // NaN, not a negative number: on a long request the echo starts before write() resolves, and
+        // "the first byte came back 56 ms before we finished asking" is not a latency.
+        this.echoLatency[i] = this.tFirstRx && this.tFirstRx >= this.tWriteEnd
+            ? this.tFirstRx - this.tWriteEnd : NaN;
+        // Our own request on the wire — first echo byte to last.
+        this.requestWire[i] = this.tFirstRx && this.tEchoDone > this.tFirstRx
+            ? this.tEchoDone - this.tFirstRx : NaN;
+        this.turnaround[i] = this.tFirstResponseRx && this.tEchoDone ? this.tFirstResponseRx - this.tEchoDone : 0;
+        // Two events or it did not happen: with one, first and last are the same instant and the
+        // difference is 0 for a structural reason rather than a measured one.
+        this.responseWire[i] = this.responseRx >= 2 ? this.tLastRx - this.tFirstResponseRx : NaN;
+        this.parked[i] = this.chunkParked;
+        this.rxEvents[i] = this.chunkRx;
+        this.total[i] = now - this.tExchangeStart;
+        // Zero for the first exchange rather than a nonsense interval measured from begin(): the
+        // arming point includes the login and the baud switch, and folding those into a lane that
+        // claims to be "time we spent between exchanges" would put seconds into its median.
+        this.hostGap[i] = this.tPrevEnd ? this.tExchangeStart - this.tPrevEnd : 0;
+        this.tPrevEnd = now;
+        if (this.sampleGaps !== null && this.sampleGapCount > 0 && this.isSampledChunk()) {
+            this.samples.push({
+                chunk: i,
+                gaps: Array.prototype.slice.call(this.sampleGaps, 0, this.sampleGapCount) as number[],
+            });
+        }
+        this.index = i + 1;
+    }
+
+    /**
+     * The same medians again, split by what each exchange was.
+     *
+     * Empty when nothing labelled itself, which is every operation except a datalog — a bulk read
+     * makes 538 identical chunk reads and the headline median already describes them.
+     */
+    private foldByLabel(n: number): Record<string, { count: number; turnaround: number; total: number }> {
+        const groups = new Map<string, number[][]>();
+        for (let i = 0; i < n; i++) {
+            const name = this.labels[i];
+            if (!name) continue;
+            let g = groups.get(name);
+            if (!g) { g = [[], []]; groups.set(name, g); }
+            if (!Number.isNaN(this.turnaround[i])) g[0].push(this.turnaround[i]);
+            if (!Number.isNaN(this.total[i])) g[1].push(this.total[i]);
+        }
+        const mid = (xs: number[]) => {
+            if (!xs.length) return NaN;
+            const sorted = [...xs].sort((a, b) => a - b);
+            const m = sorted.length >> 1;
+            return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+        };
+        const out: Record<string, { count: number; turnaround: number; total: number }> = {};
+        for (const [name, [t, tot]] of groups) {
+            out[name] = { count: Math.max(t.length, tot.length), turnaround: mid(t), total: mid(tot) };
+        }
+        return out;
+    }
+
+    /** Folds the lanes into medians. Called once, after the last chunk — the only place that allocates
+     *  or formats. */
+    finish(error?: unknown): TransferTimingReport | null {
+        if (!this.collecting) return null;
+        this.collecting = false;
+        const n = this.index;
+        const report: TransferTimingReport = {
+            kind: this.kind,
+            completed: error === undefined,
+            error: error === undefined ? null : (error instanceof Error ? error.message : String(error)),
+            chunks: n,
+            elapsedMs: performance.now() - this.tBegin,
+            chunkSize: this.chunkSize,
+            responseBytes: this.responseBytes,
+            requestBytes: this.requestBytes,
+            requestedBaud: this.requestedBaud,
+            switchOutcome: this.switchOutcome,
+            baud: this.baud,
+            maxTelegramLength: this.maxTelegramLength,
+            retries: this.retries,
+            median: {
+                write: median(this.write, n),
+                echoLatency: median(this.echoLatency, n),
+                turnaround: median(this.turnaround, n),
+                requestWire: median(this.requestWire, n),
+                responseWire: median(this.responseWire, n),
+                parked: median(this.parked, n),
+                rxEvents: median(this.rxEvents, n),
+                total: median(this.total, n),
+                hostGap: median(this.hostGap, n),
+            },
+            // 8E1 puts 11 bit times on the wire per byte (start + 8 data + parity + stop). The frame
+            // size comes from the caller — see `responseBytes` for why it is not derived here.
+            theoreticalResponseWire: this.baud && this.responseBytes
+                ? (this.responseBytes * 11 * 1000) / this.baud
+                : null,
+            theoreticalRequestWire: this.baud && this.requestBytes
+                ? (this.requestBytes * 11 * 1000) / this.baud
+                : null,
+            samples: this.samples,
+            byExchange: this.foldByLabel(n),
+        };
+        this.lastReport = report;
+        return report;
+    }
+
+    private isSampledChunk(): boolean {
+        return this.index < SAMPLE_HEAD || (this.index >= this.midSampleFrom && this.index < this.midSampleFrom + SAMPLE_MID);
+    }
+}
+
+/*
+ * There was a formatTimingTail() here that compressed the medians into the DME notice line
+ * (`rx135 w0.1 ta53 wire141/144 …`). It earned its keep while numbers were being read from the
+ * driver's seat between runs of a sweep. That sweep is over, the notice line's job is the headline
+ * (`9600 baud · 64 KB / 123.2 s · 530 B/s`), and a refused switch is already stated there in full by
+ * the REFUSED branch — so the tail was repeating one thing and burying the rest. TIMING saves the
+ * file; the file has everything.
+ */

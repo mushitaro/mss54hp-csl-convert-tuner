@@ -1,0 +1,861 @@
+'use client';
+
+import React, { useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
+import { Scale } from 'lucide-react';
+import type { CalParamDef, CalVariant } from '@/lib/calibration/types';
+import type { DecodedAxis, DecodedParam, DecodedRun } from '@/lib/calibration/decode';
+import type { BulkOp } from '@/lib/calibration/edits';
+import type { CalCompareView, CalGraphMode } from './useCalibrationWorkspace';
+import { displayName } from '@/lib/calibration-graph/names';
+import { t } from '@/lib/calibration-graph/calib-i18n';
+import { useDialogLang } from '@/hooks/useDialogLang';
+import { CompareBar, type CompareOption } from '@/components/CompareBar';
+import { ChartLoading } from '@/components/ChartLoading';
+import { HeatField, ScalarReadout, SectionChart } from './ValueChart';
+import { CalibrationValueGrid } from './CalibrationValueGrid';
+
+/** The same 3-D surface the tuning tabs use, so a map looks the same wherever
+ *  it is opened. Dynamic + ssr:false for the reason every Plotly mount here is. */
+const MapVisualizer = dynamic(
+    () => import('@/components/MapVisualizer').then(m => m.MapVisualizer),
+    { ssr: false, loading: () => <ChartLoading /> },
+);
+
+/**
+ * The visualize-and-input surface.
+ *
+ * The compare bar on top is the DIFFERENCE tab's own control: SUBJECT is what
+ * is drawn, REFERENCE is what it is drawn against, and both are chosen from the
+ * app's own records — this session's bytes, the shipped reference, or a stored
+ * session. The balance beside them switches the whole visual to the DIFFERENCE
+ * between the two, which is the question those selectors exist to pose.
+ *
+ * Below it one row picks the FORM, and under the picture sit the two things
+ * that act on it: the slider that walks the pinned axis, and the edit ops.
+ */
+
+const TEXT = {
+    ja: {
+        add: 'ADD',
+        scale: '× SCALE',
+        copyRef: 'COPY REF',
+        revert: 'REVERT',
+        undo: '↶',
+        redo: '↷',
+        list: 'LIST',
+        viewSubject: 'SUBJECT',
+        viewDelta: 'Δ',
+        viewReference: 'REFERENCE',
+        bannerDelta: 'SUBJECT − REFERENCE',
+        bannerSubject: 'TINT VS REFERENCE',
+        bannerReference: 'TINT VS SUBJECT',
+        gridHint: '値そのものの表・グラフです。見出しはこの項目の形（定数・カーブ・マップ）を示します。',
+        archivedLabel: 'ARCHIVED',
+        archivedHint: 'このセッションは書き込み済みの記録なので編集できません。続きを作るには、セッション一覧の FROM TUNED から新しいセッションとして開いてください。',
+        constantCell: '値',
+        constantEditHint: '押すと下の行で編集できます。数値を打つか、スライダーで動かします。',
+        clearConstant: '編集をやめて、加算・倍率の操作に戻します。数値を押すと編集に戻れます。',
+        viewSubjectHint: 'SUBJECT の実値を表示します。編集できるのはこの表示のときだけです。',
+        viewDeltaHint: 'SUBJECT − REFERENCE の差そのものを表示します。',
+        viewReferenceHint: 'REFERENCE 側の実値を表示します。編集はできません。',
+        listTitle: '差分のある項目の一覧を開きます。',
+        sameVariant: '比較対象が同じです。REFERENCE を変えると差分が出ます。',
+        copyRefHint: 'この項目の全セルを REFERENCE の値で置き換えます。',
+        revertHint: 'この項目の編集を取り消し、読み込み時の値に戻します。',
+        undoHint: '直前の操作を一つ取り消します（Ctrl+Z）。スライダーのドラッグは一操作としてまとめます。',
+        redoHint: '取り消した操作をやり直します（Ctrl+Shift+Z / Ctrl+Y）。',
+        signHint: '符号を反転します。マイナスなら引き算・縮小になります。',
+        addHint: '表示中のセルに、この値を足します（符号ぶん引きます）。',
+        scaleHint: '表示中のセルに、この値を掛けます。',
+        clearCell: '選択を解除して一括編集に戻ります。',
+    },
+    en: {
+        add: 'ADD',
+        scale: '× SCALE',
+        copyRef: 'COPY REF',
+        revert: 'REVERT',
+        undo: '↶',
+        redo: '↷',
+        list: 'LIST',
+        viewSubject: 'SUBJECT',
+        viewDelta: 'Δ',
+        viewReference: 'REFERENCE',
+        bannerDelta: 'SUBJECT − REFERENCE',
+        bannerSubject: 'TINT VS REFERENCE',
+        bannerReference: 'TINT VS SUBJECT',
+        gridHint: 'The values themselves. The label says which shape this item is — a constant, a curve or a map.',
+        archivedLabel: 'ARCHIVED',
+        archivedHint: 'This session is a record of bytes already written, so it cannot be edited. To carry it forward, open it as a new session with FROM TUNED in the session list.',
+        constantCell: 'value',
+        constantEditHint: 'Press to edit it in the row below — type a number, or drag the slider.',
+        clearConstant: 'Stop editing and go back to the add / scale ops. Press the number to come back.',
+        viewSubjectHint: 'Show SUBJECT values. Editing is offered only here.',
+        viewDeltaHint: 'Show SUBJECT − REFERENCE, the difference itself.',
+        viewReferenceHint: 'Show the REFERENCE own values. Not editable.',
+        listTitle: 'Open the list of items that differ.',
+        sameVariant: 'Both selectors name the same bytes — pick another REFERENCE to see a difference.',
+        copyRefHint: 'Replace every cell of this item with the REFERENCE value.',
+        revertHint: 'Drop this item\'s edits and go back to the values as loaded.',
+        undoHint: 'Take back the last step (Ctrl+Z). A slider drag counts as one.',
+        redoHint: 'Put back a step that was taken away (Ctrl+Shift+Z / Ctrl+Y).',
+        signHint: 'Flip the sign — a minus subtracts, and scales down.',
+        addHint: 'Add this to every cell on screen (subtract, with the sign set to minus).',
+        scaleHint: 'Multiply every cell on screen by this.',
+        clearCell: 'Clear the selection and go back to editing the whole view.',
+    },
+} as const;
+
+function ModeButton({ on, onClick, disabled, title, children }: {
+    on: boolean; onClick: () => void; disabled?: boolean; title?: string; children: React.ReactNode;
+}) {
+    return (
+        <button
+            onClick={onClick}
+            disabled={disabled}
+            title={title}
+            className={`pb-0.5 text-[9px] font-bold uppercase tracking-widest border-b-2 transition disabled:opacity-30 ${on ? 'text-blue-400 border-blue-400' : 'text-slate-600 border-transparent hover:text-slate-300'}`}
+        >
+            {children}
+        </button>
+    );
+}
+
+/** Axis positions and their printed labels, for whichever axis a view runs along. */
+function axisTicks(axis: DecodedAxis | null, n: number): { xs: number[]; label: (i: number) => string } {
+    if (!axis) {
+        return { xs: Array.from({ length: n }, (_, i) => i), label: i => String(i) };
+    }
+    if (axis.kind === 'labels') {
+        return { xs: axis.labels.map((_, i) => i), label: i => axis.labels[i] ?? String(i) };
+    }
+    return { xs: axis.values, label: i => fmtTick(axis.values[i] ?? i) };
+}
+
+function fmtTick(v: number): string {
+    if (!Number.isFinite(v)) return '—';
+    return Number.isInteger(v) ? String(v) : v.toFixed(Math.abs(v) < 1 ? 2 : 1);
+}
+
+/** Same breakpoints in both images? Compared on the decoded arrays — the exact
+ *  values both views label their cells with. */
+function axesEqual(a: DecodedParam['x'], b: DecodedParam['x']): boolean {
+    if (!a || !b) return a === b;
+    if (a.kind === 'labels' || b.kind === 'labels') return true; // label axes have no bytes to differ
+    return a.values.length === b.values.length && a.values.every((v, i) => v === b.values[i]);
+}
+
+export function ValuePane({
+    def,
+    subjectRun,
+    referenceRun,
+    subjectDecoded,
+    referenceDecoded,
+    editedMask,
+    hasEdit,
+    canUndo,
+    canRedo,
+    onUndo,
+    onRedo,
+    graphMode,
+    onGraphMode,
+    sectionAxis,
+    onSectionAxis,
+    subject,
+    onSubject,
+    reference,
+    onReference,
+    compareOptions,
+    view,
+    onView,
+    diffCount,
+    onShowList,
+    onEditCell,
+    onBulkOp,
+    onCopyRef,
+    onRevert,
+    archived = false,
+}: {
+    def: CalParamDef | null;
+    /** The values SUBJECT holds, and REFERENCE's — null when they are the same. */
+    subjectRun: DecodedRun | null;
+    referenceRun: DecodedRun | null;
+    subjectDecoded: DecodedParam | null;
+    referenceDecoded: DecodedParam | null;
+    editedMask: boolean[] | null;
+    hasEdit: boolean;
+    canUndo: boolean;
+    canRedo: boolean;
+    onUndo: () => void;
+    onRedo: () => void;
+    graphMode: CalGraphMode;
+    onGraphMode: (m: CalGraphMode) => void;
+    sectionAxis: 'x' | 'y';
+    onSectionAxis: (a: 'x' | 'y') => void;
+    subject: CalVariant;
+    onSubject: (v: CalVariant) => void;
+    reference: CalVariant;
+    onReference: (v: CalVariant) => void;
+    compareOptions: CompareOption[];
+    /** Which of the three readings the numbers are. */
+    view: CalCompareView;
+    onView: (v: CalCompareView) => void;
+    /** How many parameters differ, for the balance's badge. */
+    diffCount: number | null;
+    /** Ask for the list of them. It lives in the hub, which this pane does not
+     *  own, so turning compare on says so rather than rendering it here. */
+    onShowList?: () => void;
+    onEditCell: (index: number, physical: number) => void;
+    /** `indices` is what is currently on screen; omitted means the whole run. */
+    onBulkOp: (op: BulkOp, indices?: readonly number[]) => void;
+    onCopyRef: () => void;
+    onRevert: () => void;
+    /**
+     * This session is a record of what was flashed, not a workspace.
+     *
+     * Every other editor in the app takes this and goes read-only; the
+     * calibration one did not, so an archived session accepted typed values,
+     * recorded them, and then had nowhere to send them — WRITE is gated on
+     * `!isArchived` and SAVE reports 'archived'. The edit went in and stopped.
+     *
+     * The way to carry an archived tune forward is FROM TUNED in the session
+     * list, which opens it as a new draft, and the lock says so.
+     */
+    archived?: boolean;
+}) {
+    const lang = useDialogLang();
+    const text = TEXT[lang];
+    const [selectedCell, setSelectedCell] = useState<number | null>(null);
+    const [amount, setAmount] = useState('');
+    /** The sign of a bulk step, as a control rather than as a character to
+     *  type: a phone's decimal keypad has no minus key, and "subtract 0.05
+     *  from this row" is half of what this bar is for. */
+    const [amountSign, setAmountSign] = useState<1 | -1>(1);
+    const [cellDraft, setCellDraft] = useState<string | null>(null);
+    /**
+     * The box the picture is actually given, measured off the element it is
+     * drawn into.
+     *
+     * The height used to be a literal — 300 for the surface, 280 for the heat
+     * field, 260 for the section — and a literal cannot know what the pane is.
+     * Measured at 1440x900 the box was 364px and the section drew 260 of it; at
+     * 1440x1100 the box was 488 and the section still drew 260. The remaining
+     * 228px was black, and it grew with the window rather than the picture.
+     *
+     * Width was already measured, but off the PANE minus its padding, which is
+     * the same number arrived at by arithmetic. One element, one observer, both
+     * numbers: they cannot drift apart.
+     */
+    const visualRef = useRef<HTMLDivElement>(null);
+    const [box, setBox] = useState({ w: 360, h: 300 });
+
+    useEffect(() => {
+        const el = visualRef.current;
+        if (!el) return;
+        const observer = new ResizeObserver(entries => {
+            const r = entries[0]?.contentRect;
+            // FLOOR, not round: the container scrolls, and a height rounded up
+            // past its own box is a scrollbar that then narrows the box.
+            if (r) setBox({ w: Math.floor(r.width), h: Math.floor(r.height) });
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, []);
+
+    /**
+     * Fill the box exactly, with no floor under it.
+     *
+     * A floor was the obvious thing and it is wrong here: a chart taller than
+     * its scroller has to be SCROLLED to be seen, and the 3-D surface takes the
+     * drag for its own rotation. On a landscape phone (851x393 — box 157px) a
+     * floor of 180 put 23px of the picture where no finger could reach it. The
+     * old literals did the same thing four times over.
+     *
+     * So the short screen gets a short picture rather than a clipped one. The
+     * two SVG forms carry 38px of axis chrome and HeatField holds its own 80px
+     * floor under the field, which together bottom out around 118px — below any
+     * box this pane is given.
+     */
+    const chartH = box.h;
+
+    // A new selection is a new question; the cell cursor does not carry over.
+    //
+    // Except on a constant, where there is exactly one cell and nothing to
+    // choose between: it starts selected, so the editor is there the moment the
+    // parameter is. Leaving it null is what made a constant read-only — every
+    // edit control in this pane hangs off a selected cell.
+    // Which section the 2-D view is pinned at — its OWN state, and this is the
+    // whole of the bug it fixes.
+    //
+    // It used to be read out of `selectedCell`, so pinning a section had to
+    // invent a cell to store it in and clearing the cell threw the pin away.
+    // That closed a loop with no way out: the slider selected a cell, a
+    // selected cell swaps this pane's edit row from BULK to single-cell, and
+    // the ✕ that brings the bulk controls back also reset the pin to 0. The
+    // only section anybody could bulk-edit was the first one.
+    //
+    // A pin and a cursor are two different questions — "which line am I
+    // looking at" and "which point am I editing" — and one may exist without
+    // the other.
+    const [sectionIndex, setSectionIndex] = useState(0);
+    const [prevAxis, setPrevAxis] = useState(sectionAxis);
+    if (prevAxis !== sectionAxis) {
+        setPrevAxis(sectionAxis);
+        setSectionIndex(0);
+    }
+
+    const [prevDefId, setPrevDefId] = useState<string | undefined>(def?.id);
+    if (prevDefId !== def?.id) {
+        setPrevDefId(def?.id);
+        setSelectedCell(def?.kind === 'constant' ? 0 : null);
+        setSectionIndex(0);
+    }
+
+    const rows = def?.rows ?? 1;
+    const cols = def?.cols ?? (def?.run ? def.run.count : 1);
+    const isMap = def?.kind === 'map' && !!def.rows && !!def.cols;
+    const isCurve = def?.kind === 'curve';
+    /**
+     * What the first tab is called.
+     *
+     * The view behind it is the same one — the values themselves, as a grid or
+     * a plot — but calling it MAP was wrong for most of what this pane opens:
+     * of the 2,529 calibration items, 1,782 are constants and 353 are curves,
+     * so the tab named the shape of 394 of them and lied about the rest. A
+     * scalar shown under a tab marked MAP reads as a map that failed to load.
+     */
+    const gridLabel = isMap ? 'MAP' : isCurve ? 'CURVE' : 'CONSTANT';
+
+    // The three drawn forms only exist for the shapes that have them; the grid
+    // always does. A mode that cannot draw is disabled rather than drawing
+    // something else, and an impossible one falls back to the grid.
+    const canHeat = isMap;
+    const can3d = isMap;
+    const can2d = isMap || isCurve;
+    const effectiveMode: CalGraphMode =
+        graphMode === 'heat' && canHeat ? 'heat'
+            : graphMode === '3d' && can3d ? '3d'
+                : graphMode === '2d' && can2d ? '2d'
+                    : 'map';
+
+    const selected = selectedCell === null ? null
+        : { row: Math.floor(selectedCell / cols), col: selectedCell % cols };
+
+    /** Whether there are two different images to subtract. A property of the
+     *  SELECTORS, not of what happens to be selected — the balance is the
+     *  compare bar's control, and it must not go dead because no parameter is
+     *  open yet. */
+    const comparing = subject !== reference && diffCount !== null;
+    /** ...though drawing the difference still needs both runs for THIS item. */
+    const showingDiff = view === 'delta' && comparing && !!referenceRun;
+    /** The REFERENCE own numbers — the third reading the boolean could not hold. */
+    const showingReference = view === 'reference' && comparing && !!referenceRun;
+    /** Editing acts on the SUBJECT, so it is only offered while looking at it. */
+    const onSubjectValues = !showingDiff && !showingReference;
+    const editable = !!def && !def.lock.locked && def.runMathOk
+        && subject === 'tuned' && !!subjectRun && onSubjectValues && !archived;
+    const amountNumber = Number(amount) * amountSign;
+    const amountOk = amount.trim() !== '' && Number.isFinite(amountNumber);
+    const canCopyRef = !!def && !def.lock.locked && def.runMathOk
+        && subject === 'tuned' && comparing && !archived;
+
+    const axesDiffer = !!referenceDecoded && !!subjectDecoded && (
+        !axesEqual(subjectDecoded.x, referenceDecoded.x) || !axesEqual(subjectDecoded.y, referenceDecoded.y)
+    );
+
+    /** What the visual draws: whose values, or the difference between them. */
+    const shownRun: DecodedRun | null = (() => {
+        if (showingReference && referenceRun) return referenceRun;
+        if (!subjectRun) return null;
+        if (!showingDiff || !referenceRun) return subjectRun;
+        return {
+            raw: subjectRun.raw,
+            phys: subjectRun.phys.map((p, i) => {
+                const r = referenceRun.phys[i];
+                return p === null || r === null || r === undefined ? null : p - r;
+            }),
+            errorCells: 0,
+        };
+    })();
+
+    /** The grid, as rows of numbers, with an undecodable cell as NaN. */
+    const gridOf = (run: DecodedRun | null): number[][] | null => {
+        if (!run || !isMap) return null;
+        const flat = run.phys.map(p => (p === null ? NaN : p));
+        const out: number[][] = [];
+        for (let r = 0; r < rows; r++) out.push(flat.slice(r * cols, (r + 1) * cols));
+        return out;
+    };
+
+    const xTicks = axisTicks(subjectDecoded?.x ?? null, cols);
+    const yTicks = axisTicks(subjectDecoded?.y ?? null, rows);
+    /** In 2-D the section is drawn ALONG one axis and pinned at the other. */
+    // Clamped rather than trusted: the axis can change under a pin that was
+    // valid for the other one.
+    const pinned = Math.min(sectionIndex, Math.max(0, (sectionAxis === 'x' ? rows : cols) - 1));
+    const fixed = sectionAxis === 'x'
+        ? { index: pinned, count: rows, label: def?.yAxis?.label ?? 'Y', ticks: yTicks }
+        : { index: pinned, count: cols, label: def?.xAxis?.label ?? 'X', ticks: xTicks };
+
+    /**
+     * Pick a cell AND bring the section to it.
+     *
+     * Picking a cell in the grid moves the pin so the 2-D view draws the line
+     * that cell is on; moving the pin does not pick a cell. The asymmetry is
+     * the point — you can look without editing.
+     */
+    const pickCell = (index: number | null) => {
+        setSelectedCell(index);
+        if (index !== null && isMap) {
+            setSectionIndex(sectionAxis === 'x' ? Math.floor(index / cols) : index % cols);
+        }
+    };
+
+    /**
+     * WHICH cells a bulk step lands on: the ones on screen.
+     *
+     * In 2-D that is the one section being drawn, so "×0.98" moves the line
+     * you are looking at and nothing else. Every other form shows the whole
+     * run, so it stays the whole run. Null means "all".
+     */
+    const scopeIndices: number[] | null = effectiveMode === '2d' && isMap
+        ? (sectionAxis === 'x'
+            ? Array.from({ length: cols }, (_, c) => pinned * cols + c)
+            : Array.from({ length: rows }, (_, r) => r * cols + pinned))
+        : null;
+    const scopeLabel = scopeIndices
+        ? `${fixed.label} ${fixed.ticks.label(fixed.index)} · ${scopeIndices.length} CELLS`
+        : `ALL ${def?.run?.count ?? 0} CELLS`;
+
+    /**
+     * The selected cell, as a number you can type and a slider you can drag.
+     *
+     * The slider spans this table's OWN range, widened a fifth either way and
+     * clamped to what the field can hold — a slider across a 16-bit field's
+     * whole domain moves thousands of counts per pixel and is no use for the
+     * nudge this is for. Anything outside that goes in the box beside it.
+     */
+    const cellEdit = (() => {
+        const run = def?.run;
+        if (!run || selectedCell === null || !subjectRun || !onSubjectValues) return null;
+        const value = subjectRun.phys[selectedCell];
+        if (value === null || value === undefined) return null;
+        const finite = subjectRun.phys.filter((p): p is number => p !== null);
+        const lo = Math.min(...finite, value);
+        const hi = Math.max(...finite, value);
+        const pad = (hi - lo || Math.abs(value) || 1) * 0.2;
+        const limits = [run.scaling.toPhysical(run.signed ? (run.bits === 8 ? -128 : -32768) : 0),
+        run.scaling.toPhysical(run.bits === 8 ? (run.signed ? 127 : 255) : (run.signed ? 32767 : 65535))]
+            .filter(Number.isFinite)
+            .sort((a, b) => a - b);
+        const min = Math.max(lo - pad, limits[0] ?? lo - pad);
+        const max = Math.min(hi + pad, limits[1] ?? hi + pad);
+        // The step is what one raw count is worth HERE — measured, because a
+        // reciprocal scaling's step varies by orders of magnitude across range.
+        const raw = subjectRun.raw[selectedCell];
+        const step = Math.abs(run.scaling.toPhysical(raw + 1) - value) || (max - min) / 100 || 1;
+        // Where in the parameter this cell is. A constant has no "where" —
+        // it is the whole parameter — so it says what it is instead of naming
+        // an axis position it does not have.
+        const where = def?.kind === 'constant'
+            ? (run.units && run.units !== '-' ? run.units : text.constantCell)
+            : isMap
+              ? `${def?.yAxis?.label ?? 'Y'} ${yTicks.label(Math.floor(selectedCell / cols))} · ${def?.xAxis?.label ?? 'X'} ${xTicks.label(selectedCell % cols)}`
+              : `${def?.xAxis?.label ?? 'X'} ${xTicks.label(selectedCell)}`;
+        return { value, min, max, step, where, index: selectedCell };
+    })();
+
+    const visual = (() => {
+        if (!def || !shownRun) {
+            return (
+                <p className="text-[11px] text-slate-500 p-2">
+                    {def ? t(lang, 'noValuesForBlock') : t(lang, 'selectPrompt')}
+                </p>
+            );
+        }
+        if (def.kind === 'constant') {
+            return (
+                <ScalarReadout
+                    value={shownRun.phys[0]}
+                    raw={shownRun.raw[0]}
+                    units={def.run?.units}
+                    editable={editable}
+                    selected={selectedCell === 0}
+                    onSelect={() => setSelectedCell(0)}
+                    hint={text.constantEditHint}
+                />
+            );
+        }
+
+        if (effectiveMode === 'map') {
+            return (
+                <CalibrationValueGrid
+                    def={def}
+                    run={shownRun}
+                    xAxis={subjectDecoded?.x ?? null}
+                    yAxis={subjectDecoded?.y ?? null}
+                    // In diff mode the cells ARE the difference, so colouring
+                    // them against the reference a second time would be the
+                    // same subtraction drawn twice.
+                    diffAgainst={showingDiff ? null : showingReference ? subjectRun : referenceRun}
+                    editedMask={subject === 'tuned' && onSubjectValues ? editedMask : null}
+                    mode={showingDiff ? 'signed' : referenceRun ? 'diff' : 'heat'}
+                    selected={selectedCell}
+                    onSelect={pickCell}
+                    onCommit={onEditCell}
+                    readOnly={!editable}
+                />
+            );
+        }
+
+        if (effectiveMode === 'heat') {
+            const grid = gridOf(shownRun);
+            if (!grid) return null;
+            return (
+                <HeatField
+                    grid={grid}
+                    xLabel={def.xAxis?.label ?? 'X'}
+                    yLabel={def.yAxis?.label ?? 'Y'}
+                    xLabels={xTicks.label}
+                    yLabels={yTicks.label}
+                    selected={selected}
+                    onSelectCell={(r, c) => pickCell(r * cols + c)}
+                    signed={showingDiff}
+                    width={box.w}
+                    height={chartH}
+                />
+            );
+        }
+
+        if (effectiveMode === '3d') {
+            const grid = gridOf(shownRun);
+            if (!grid) return null;
+            return (
+                <div style={{ height: chartH }}>
+                    <MapVisualizer
+                        mapData={{ xAxis: xTicks.xs, yAxis: yTicks.xs, data: grid }}
+                        title=""
+                        xAxisLabel={def.xAxis?.label ?? 'X'}
+                        yAxisLabel={def.yAxis?.label ?? 'Y'}
+                        zAxisLabel={showingDiff ? 'Δ' : (def.run?.units && def.run.units !== '-' ? def.run.units : 'value')}
+                        scale={showingDiff ? 'deviation' : 'magnitude'}
+                        deviationMidpoint={0}
+                    />
+                </div>
+            );
+        }
+
+        // 2-D: one section through the map, or the curve itself.
+        const slice = (run: DecodedRun | null): number[] | null => {
+            if (!run) return null;
+            const phys = run.phys.map(p => (p === null ? NaN : p));
+            if (!isMap) return phys;
+            return sectionAxis === 'x'
+                ? phys.slice(pinned * cols, (pinned + 1) * cols)
+                : Array.from({ length: rows }, (_, r) => phys[r * cols + pinned]);
+        };
+        const along = !isMap || sectionAxis === 'x' ? xTicks : yTicks;
+        // Null when nothing is picked, and null when what is picked is not ON
+        // the line being drawn: a highlighted point that belongs to another
+        // section is a lie about where the cursor is.
+        const indexInSection = !isMap
+            ? selectedCell
+            : selected === null
+              ? null
+              : sectionAxis === 'x'
+                ? (selected.row === pinned ? selected.col : null)
+                : (selected.col === pinned ? selected.row : null);
+        return (
+            <SectionChart
+                xs={along.xs}
+                xLabels={along.label}
+                subject={slice(shownRun)!}
+                // In diff mode the single line IS the difference; a reference
+                // line beside it would be a second answer to one question.
+                // The OTHER run, whichever this view is drawing — overlaying the
+                // reference on itself would be one line drawn twice.
+                reference={showingDiff ? null : slice(showingReference ? subjectRun : referenceRun)}
+                xLabel={(isMap && sectionAxis === 'y' ? def.yAxis?.label : def.xAxis?.label) ?? 'X'}
+                yLabel={showingDiff ? 'Δ' : (def.run?.units && def.run.units !== '-' ? def.run.units : 'value')}
+                selectedIndex={indexInSection}
+                onSelectIndex={i => pickCell(
+                    !isMap ? i : sectionAxis === 'x' ? pinned * cols + i : i * cols + pinned,
+                )}
+                width={box.w}
+                height={chartH}
+            />
+        );
+    })();
+
+    /** Enough digits to show a quantisation step without printing float noise. */
+    const round = (v: number) => Number(v.toPrecision(8));
+
+    const commitCell = () => {
+        if (cellDraft === null) return;
+        const parsed = Number(cellDraft);
+        if (cellEdit && cellDraft.trim() !== '' && Number.isFinite(parsed)) {
+            onEditCell(cellEdit.index, parsed);
+        }
+        setCellDraft(null);
+    };
+
+    const opButton = (label: string, enabled: boolean, onClick: () => void, title: string, tone = 'text-slate-300 hover:text-blue-400') => (
+        <button
+            onClick={onClick}
+            disabled={!enabled}
+            title={title}
+            className={`h-[22px] px-2 rounded bg-slate-800 text-[9px] font-bold tracking-widest transition ${tone} disabled:opacity-30 disabled:pointer-events-none`}
+        >
+            {label}
+        </button>
+    );
+
+    return (
+        // `@container`, because what the rows below have to fit is THIS PANE,
+        // not the viewport. The pane is 38.2% of a wide screen and the whole of
+        // a narrow one, so a viewport breakpoint gets it wrong from both sides:
+        // at 1000px wide the pane is 382px and overflows, at 360px it is 360px
+        // and overflows, and the two would need different queries to say the
+        // same thing.
+        <div className="@container h-full min-h-0 flex flex-col">
+            {/* SUBJECT vs REFERENCE, in the DIFFERENCE tab's own control and its
+                own place: the first row of the visual, above everything it governs. */}
+            <CompareBar
+                options={compareOptions}
+                subject={subject}
+                onSubject={v => onSubject(v as CalVariant)}
+                reference={reference}
+                onReference={v => onReference(v as CalVariant)}
+                trailing={
+                    // The balance stays put. Two things used to move it: the
+                    // list's trigger mounted beside it the moment this was
+                    // pressed, which shoved the balance 45px left — a control
+                    // that leaves when you press it — and the count is
+                    // right-aligned at the end of the bar, so every digit it
+                    // gained pushed the icon along too. The list lives in the
+                    // hub now, and the count has a width whether it has a
+                    // number in it or not.
+                    <button
+                        onClick={onShowList}
+                        disabled={!comparing}
+                        title={comparing ? text.listTitle : text.sameVariant}
+                        className="shrink-0 flex items-center gap-1 h-[24px] px-2 rounded transition disabled:opacity-30 text-slate-400 hover:text-slate-200"
+                    >
+                        <Scale className="w-3.5 h-3.5" />
+                        {/* HOW MANY differ, and a way to the list of them. It
+                            also used to be the mode switch, and that was the
+                            whole of "I can only pick Δ": a two-state control
+                            cannot offer a third reading, and the label naming
+                            the state sat among the form buttons looking like
+                            one that would not press. The mode is chosen over
+                            there now, in three, and this does the one thing its
+                            count has always been about.
+
+                            No mode name here either: 46px of label on a bar
+                            whose two selectors are already `flex-1 min-w-0`
+                            took them to 32px and 21px at 360. */}
+                        <span className="w-[28px] text-right tabular-nums text-[10px] font-mono">
+                            {diffCount === null ? '—' : diffCount}
+                        </span>
+                    </button>
+                }
+            />
+
+            {/* The form, and the axis a section runs along. Reserved height. */}
+            <div className="h-[26px] flex-none flex items-center gap-3 px-1 overflow-x-auto no-scrollbar whitespace-nowrap">
+                {/* A floor, because everything else in this row refuses to
+                    shrink and this is the only thing that will. With the view
+                    selector added it went to width 0 at 360 — the pane
+                    stopped naming what it was showing. */}
+                <span className="font-mono text-[11px] font-bold text-slate-100 truncate min-w-[64px] max-w-[38%]">
+                    {def ? displayName(def.name) : '—'}
+                </span>
+                <div className="flex items-center gap-2">
+                    <ModeButton
+                        on={effectiveMode === 'map'}
+                        onClick={() => onGraphMode('map')}
+                        title={text.gridHint}
+                    >
+                        {gridLabel}
+                    </ModeButton>
+                    <ModeButton on={effectiveMode === '2d'} disabled={!can2d} onClick={() => onGraphMode('2d')}>2D</ModeButton>
+                    <ModeButton on={effectiveMode === '3d'} disabled={!can3d} onClick={() => onGraphMode('3d')}>3D</ModeButton>
+                    <ModeButton on={effectiveMode === 'heat'} disabled={!canHeat} onClick={() => onGraphMode('heat')}>HEAT</ModeButton>
+                </div>
+                {/* WHOSE numbers, next to what shape they are drawn in.
+                    Three readings, not two: the boolean this replaces settled
+                    "whose" without being asked, and the answer was always the
+                    subject — so the reference's own values, which the bar right
+                    above names, were the one thing that could not be looked at.
+                    Buttons rather than a label, because the label sat among
+                    these and read as one that would not press. */}
+                {comparing && (
+                    <div className="shrink-0 flex items-center gap-2">
+                        <ModeButton on={view === 'subject'} onClick={() => onView('subject')} title={text.viewSubjectHint}>
+                            {text.viewSubject}
+                        </ModeButton>
+                        <ModeButton on={view === 'delta'} onClick={() => onView('delta')} title={text.viewDeltaHint}>
+                            {text.viewDelta}
+                        </ModeButton>
+                        <ModeButton on={view === 'reference'} onClick={() => onView('reference')} title={text.viewReferenceHint}>
+                            {text.viewReference}
+                        </ModeButton>
+                    </div>
+                )}
+                {/* Only a map has two axes to section along; a curve has one, and
+                    offering the choice there would be a control that does nothing. */}
+                {effectiveMode === '2d' && isMap && (
+                    <div className="flex items-center gap-2">
+                        <span className="text-[8px] font-bold tracking-widest text-slate-600">ALONG</span>
+                        <ModeButton on={sectionAxis === 'x'} onClick={() => onSectionAxis('x')}>X</ModeButton>
+                        <ModeButton on={sectionAxis === 'y'} onClick={() => onSectionAxis('y')}>Y</ModeButton>
+                    </div>
+                )}
+                {/* Only what the lit button cannot say. It used to open by
+                    naming the view — "REFERENCE VALUES · 色は SUBJECT との差"
+                    — which is the button an inch to the left, said again, in
+                    two languages at once. The button names the view; this names
+                    the OTHER side of it: which way round Δ subtracts, and what
+                    the cell colour is measured against. 194px to 83.
+
+                    Gated on the CONTAINER, like everything else in this pane.
+                    It was `min-[900px]`, and a viewport gate is the mistake this
+                    file's own header warns about: at a viewport of exactly 900
+                    the pane is 344px, the banner turned on, and the row
+                    overflowed by 108. Everything but the name needs 392px, so
+                    520 is the width at which the banner has room — the pane is
+                    550 at 1440x900 and 344 at 900. */}
+                {comparing && (
+                    <span className={`hidden @min-[520px]:inline whitespace-nowrap text-[8px] font-bold tracking-widest ${showingDiff ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {showingDiff ? text.bannerDelta : showingReference ? text.bannerReference : text.bannerSubject}
+                    </span>
+                )}
+            </div>
+
+            {/* One reserved caution line — it doubles as the empty spacer, so
+                nothing below it moves when the caveat appears. */}
+            <div className="h-[14px] flex-none px-1 text-[9px] text-amber-400 truncate">
+                {axesDiffer ? t(lang, 'axesDiffer') : ''}
+            </div>
+
+            <div ref={visualRef} className="flex-1 min-h-0 overflow-auto px-1">{visual}</div>
+
+            {/* UNDER the picture, because it moves the picture: the axis the
+                2-D section is pinned at. Reserved so the ops bar never shifts. */}
+            <div className="h-[20px] flex-none flex items-center gap-2 px-1">
+                {effectiveMode === '2d' && isMap && def && (
+                    <>
+                        <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap">
+                            {fixed.label} = {fixed.ticks.label(fixed.index)}
+                        </span>
+                        <input
+                            type="range"
+                            min={0}
+                            max={Math.max(0, fixed.count - 1)}
+                            value={fixed.index}
+                            // Moves the pin and NOTHING else. Selecting a cell
+                            // here is what took the bulk controls off screen.
+                            onChange={e => setSectionIndex(Number(e.target.value))}
+                            className="flex-1 min-w-0 h-1 accent-blue-500"
+                        />
+                        <span className="text-[9px] font-mono text-slate-600 whitespace-nowrap">
+                            {fixed.index + 1}/{fixed.count}
+                        </span>
+                    </>
+                )}
+            </div>
+
+            {/* ONE editing row, and WHAT it edits is the selection.
+                ────────────────────────────────────────────────────────────────
+                A cell picked means you are working on that cell: a box for the
+                value you know, a slider for the one you are looking for. None
+                picked means you are working on the view: the same step applied
+                to every cell the current form draws.
+
+                They were two rows, and that asked the reader to notice which of
+                two amount fields they were in. The selection already says which
+                job is in front of you, so it chooses. The label on the left
+                names the target either way, and clears the selection when the
+                target is a cell. */}
+            {/* Measured: the bulk-edit half needs 265px and COPY REF / REVERT
+                131, so the row wants 406 and a phone gives it 360 — REVERT went
+                off the right edge, which is exactly where a control that undoes
+                an edit must not be. It wraps below 420 instead, and the taller
+                height is RESERVED at that size rather than switched on by the
+                wrap: selecting a cell swaps the left half for a narrower one,
+                and a row that changed height on selection would jog the grid
+                above it every time. */}
+            <div className="h-[34px] @max-[420px]:h-[58px] flex-none flex flex-wrap content-center items-center gap-1.5 px-1 border-t border-slate-900">
+                {cellEdit && editable ? (
+                    <>
+                        <button
+                            onClick={() => setSelectedCell(null)}
+                            title={def?.kind === 'constant' ? text.clearConstant : text.clearCell}
+                            className="shrink-0 flex items-center gap-1 max-w-[38%] text-[9px] font-mono text-slate-400 hover:text-slate-200 transition whitespace-nowrap"
+                        >
+                            <span className="truncate">{cellEdit.where}</span>
+                            <span className="text-slate-600">✕</span>
+                        </button>
+                        <input
+                            value={cellDraft ?? String(round(cellEdit.value))}
+                            onChange={e => setCellDraft(e.target.value)}
+                            onBlur={commitCell}
+                            onKeyDown={e => {
+                                if (e.key === 'Enter') { e.preventDefault(); commitCell(); }
+                                else if (e.key === 'Escape') { e.preventDefault(); setCellDraft(null); }
+                            }}
+                            inputMode="decimal"
+                            className="w-[72px] shrink-0 bg-slate-800 rounded px-2 h-[22px] text-[10px] font-mono text-right text-blue-400 outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                        <input
+                            type="range"
+                            min={cellEdit.min}
+                            max={cellEdit.max}
+                            step={cellEdit.step}
+                            value={cellEdit.value}
+                            onChange={e => { setCellDraft(null); onEditCell(cellEdit.index, Number(e.target.value)); }}
+                            className="flex-1 min-w-0 h-1 accent-blue-500"
+                        />
+                    </>
+                ) : (
+                    <div
+                        className={`flex items-center gap-1.5 ${editable ? '' : 'opacity-40 pointer-events-none'}`}
+                        title={archived ? text.archivedHint : undefined}
+                    >
+                        <span className="shrink-0 text-[9px] font-mono text-slate-400 whitespace-nowrap">
+                            {archived ? text.archivedLabel : scopeLabel}
+                        </span>
+                        <button
+                            onClick={() => setAmountSign(s => (s === 1 ? -1 : 1))}
+                            title={text.signHint}
+                            className={`w-[22px] h-[22px] rounded bg-slate-800 text-[11px] font-bold transition ${amountSign === -1 ? 'text-red-400' : 'text-slate-300'}`}
+                        >
+                            {amountSign === -1 ? '−' : '+'}
+                        </button>
+                        <input
+                            value={amount}
+                            onChange={e => setAmount(e.target.value)}
+                            inputMode="decimal"
+                            placeholder="0.0"
+                            className="w-[60px] bg-slate-800 rounded px-2 h-[22px] text-[10px] font-mono text-right text-slate-200 placeholder:text-slate-600 outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                        {opButton(text.add, amountOk, () => onBulkOp({ kind: 'add', amount: amountNumber }, scopeIndices ?? undefined), text.addHint)}
+                        {opButton(text.scale, amountOk, () => onBulkOp({ kind: 'scale', amount: amountNumber }, scopeIndices ?? undefined), text.scaleHint)}
+                    </div>
+                )}
+                {/* These act on the whole parameter either way, so they do not
+                    move when the row's left half changes job. */}
+                <div className="ml-auto shrink-0 flex items-center gap-1.5">
+                    {opButton(text.copyRef, canCopyRef, onCopyRef, text.copyRefHint, 'text-indigo-400 hover:text-indigo-300')}
+                    {/* Beside REVERT because they answer the same question —
+                        "take that back" — at the two scales anybody needs: the
+                        last step, or the whole parameter. REVERT alone made
+                        undoing one keystroke cost every edit on the item. */}
+                    {opButton(text.undo, canUndo, onUndo, text.undoHint, 'text-slate-400 hover:text-slate-100')}
+                    {opButton(text.redo, canRedo, onRedo, text.redoHint, 'text-slate-400 hover:text-slate-100')}
+                    {opButton(text.revert, hasEdit, onRevert, text.revertHint, 'text-slate-400 hover:text-red-400')}
+                </div>
+            </div>
+        </div>
+    );
+}
