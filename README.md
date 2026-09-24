@@ -319,7 +319,9 @@ record after each DME read, write and datalog, so a failure in a car can be look
 What those contain, and how to delete them, is in the preview section of the privacy policy
 ([English](https://m3.tsunagi.app/en/privacy-policy#preview),
 [Japanese](https://m3.tsunagi.app/privacy-policy#preview)); the preview links there instead of to
-section 9. Its source, including the sign-in gate and the SYNC API, is published on this
+section 9. The first time you open the preview, its first-run dialog says what it sends and why,
+and it sends nothing until you have confirmed that dialog. Its source, including the sign-in gate
+and the SYNC API, is published on this
 repository's [`preview`](https://github.com/mushitaro/mss54hp-csl-convert-tuner/tree/preview)
 branch before each deploy.
 

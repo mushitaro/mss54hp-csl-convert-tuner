@@ -5,6 +5,7 @@ import type { LogDataPoint } from '@/lib/types';
 import type { TuningSession, SessionBinariesRecord, SessionLogRecord } from '@/lib/db/schema';
 import { getSessionLogRecord, getSessionBinaries, putSessionRaw } from '@/lib/db/sessionRepository';
 import { api, isPreviewBuild } from './owner-sync';
+import { previewNoticeAcknowledged } from './preview-notice';
 
 /**
  * Syncing a session to the deployment's store, and back.
@@ -55,17 +56,33 @@ export const canSync = (): boolean => isPreviewBuild();
  * Why a store request did not land, in the words the SYNC controls show.
  *
  * A kind as well as a message, because the kinds want different responses: `expired` is fixed by
- * signing in again, `tooLarge` by nothing short of a shorter drive, and `offline`/`failed` by
- * trying again — which is what the controls offer.
+ * signing in again, `tooLarge` by nothing short of a shorter drive, `offline`/`failed` by trying
+ * again — which is what the controls offer — and `notice` by confirming the first-run dialog, which
+ * is modal, so no control should ever show it.
  */
 export class SyncError extends Error {
     // Declared and assigned rather than a `readonly kind` parameter property: `verify:session-wire`
     // loads this module through Node's type stripping, which cannot erase that syntax.
-    readonly kind: 'expired' | 'tooLarge' | 'conflict' | 'offline' | 'failed';
+    readonly kind: 'expired' | 'tooLarge' | 'conflict' | 'offline' | 'failed' | 'notice';
     constructor(kind: SyncError['kind'], message: string) {
         super(message);
         this.kind = kind;
     }
+}
+
+/**
+ * Why nothing may go to the store from this page yet, or null when it may.
+ *
+ * Two answers. A build with no store; and, on the preview, a notice not yet confirmed — the first-run
+ * dialog says what is sent and why, and until it has been pressed nothing is (preview-notice.ts).
+ * Asked before every request below, so no path in this file reaches the network first.
+ */
+function refusal(): SyncError | null {
+    if (!canSync()) return new SyncError('failed', 'This build has no store.');
+    if (!previewNoticeAcknowledged()) {
+        return new SyncError('notice', 'Nothing is sent until the notice in the first-run dialog is confirmed. Nothing here was lost.');
+    }
+    return null;
 }
 
 /**
@@ -76,7 +93,8 @@ export class SyncError extends Error {
  * useful half of a per-part 413, which knows which part was too big.
  */
 export async function call<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-    if (!canSync()) throw new SyncError('failed', 'This build has no store.');
+    const refused = refusal();
+    if (refused) throw refused;
     const r = await api<T & { error?: string }>(path, init);
     if (r.ok) return r.data as T;
     // Told apart from a status, not from `data`: a 204 and a proxy's HTML both come back null.
@@ -259,6 +277,11 @@ export interface SyncResult {
  * stored session that is internally inconsistent with nothing to detect it.
  */
 export async function syncSession(session: TuningSession): Promise<SyncResult> {
+    // Refused before anything is read to be sent, not only at the request: before the notice, no
+    // part of a session is even gathered for the store. It stays outstanding in the local database,
+    // which is where an unsent session has always waited.
+    const refused = refusal();
+    if (refused) throw refused;
     // The whole record, not `getSessionLog`'s projection: `inertia` has no representation in
     // `LogDataPoint`, so sending the projection would upload a run the estimator cannot re-read,
     // and restoring it would then overwrite the local copy that still had them.

@@ -1,8 +1,11 @@
-import { TransferTimingReport } from '@/lib/dme-link/transferTiming';
-import { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
-import { TransportKind } from '@/lib/dme-link/byteTransport';
+// `import type`: Node's type stripping cannot tell a type-only named import from a value one, and
+// `verify:preview-notice` loads this module. Same reason as client.ts:1.
+import type { TransferTimingReport } from '@/lib/dme-link/transferTiming';
+import type { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
+import type { TransportKind } from '@/lib/dme-link/byteTransport';
 import { canSync, gzipJson, gunzipJson, toBase64, fromBase64, call, buildIdentity } from './client';
 import { api, outbox } from './owner-sync';
+import { previewNoticeAcknowledged } from './preview-notice';
 
 /**
  * Uploading what the link actually did, so a failure in a car can be read at a desk.
@@ -148,9 +151,13 @@ const settled = (status: number) =>
  * Sends what the outbox holds, oldest first, stopping at the first that has to wait. Never throws.
  * Called after any send that worked — a diagnostic or a session — because that is the moment the
  * route is known to be open.
+ *
+ * Nothing at all before the preview's notice is confirmed — not even the gate check `flush` opens
+ * with. What waits keeps waiting, and goes on the first flush after the press (useGateStatus asks
+ * again at that moment for exactly this).
  */
 export async function flushDiagnostics(): Promise<number> {
-    if (!canSync()) return 0;
+    if (!canSync() || !previewNoticeAcknowledged()) return 0;
     return pending.flush(async (body) => settled((await api('/api/diagnostics', { method: 'POST', body })).status));
 }
 
@@ -165,6 +172,10 @@ export async function flushDiagnostics(): Promise<number> {
  * in a garage with no signal is the record most worth having, and it is exactly the one a
  * send-or-lose uploader would lose. On production and staging nothing is sent and nothing is kept —
  * they have no store, and the production privacy policy says the data stays on the device.
+ *
+ * Before the preview's notice is confirmed the record is kept the same way, and not sent: the
+ * notice says what goes before any of it does (preview-notice.ts). The dialog is modal, so a record
+ * that arrives here first would be one filed by no hand — which is why this does not rely on it.
  */
 export async function uploadDiagnostic(record: DiagnosticRecord): Promise<DiagnosticUpload> {
     if (!canSync()) return { ok: false, reason: 'this build has no store' };
@@ -173,6 +184,10 @@ export async function uploadDiagnostic(record: DiagnosticRecord): Promise<Diagno
         body = await wireBody(record);
     } catch (e) {
         return { ok: false, reason: `could not encode the record: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!previewNoticeAcknowledged()) {
+        await pending.add(body);
+        return { ok: false, reason: 'kept on this device until the notice in the first-run dialog is confirmed' };
     }
     const r = await api<{ storedBytes: number }>('/api/diagnostics', { method: 'POST', body });
     if (r.ok) {

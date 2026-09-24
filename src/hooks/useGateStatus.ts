@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { gateStatus, type GateState } from '@/lib/session-sync/owner-sync';
 import { onGateExpired } from '@/lib/session-sync/client';
 import { flushDiagnostics } from '@/lib/session-sync/diagnostics';
+import { subscribePreviewNotice } from '@/lib/session-sync/preview-notice';
 
 export interface GateInfo {
     state: GateState;
@@ -28,6 +29,10 @@ const UNKNOWN: GateInfo = { state: 'unknown', label: null };
  * A signed-in answer is also the moment the route is known to be open, so diagnostics kept while
  * signed out or offline are sent then — after a re-sign-in the page reloads, and this is the first
  * thing that runs.
+ *
+ * Except before the preview's notice is confirmed: that flush sends nothing until then
+ * (flushDiagnostics). So confirming it is one more moment to ask — whatever waited goes right away,
+ * rather than the next time the tab comes back.
  */
 export function useGateStatus(enabled: boolean): GateInfo {
     const [info, setInfo] = useState<GateInfo>(UNKNOWN);
@@ -47,11 +52,13 @@ export function useGateStatus(enabled: boolean): GateInfo {
         document.addEventListener('visibilitychange', onShow);
         window.addEventListener('online', check);
         const off = onGateExpired(() => setInfo(prev => ({ state: 'expired', label: prev.label })));
+        const offNotice = subscribePreviewNotice(check);
         return () => {
             alive = false;
             document.removeEventListener('visibilitychange', onShow);
             window.removeEventListener('online', check);
             off();
+            offNotice();
         };
     }, [enabled]);
 

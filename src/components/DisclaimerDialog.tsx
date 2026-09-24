@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Check } from 'lucide-react';
-import { useDialogLang } from '@/hooks/useDialogLang';
-import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
+import { useDialogLang, type DialogLang } from '@/hooks/useDialogLang';
+import { useIsPreviewBuild } from '@/lib/build-variant';
+import { privacyPolicyUrl } from '@/config/links';
+import { PREVIEW_NOTICE, type PreviewNoticeCopy } from '@/lib/session-sync/preview-notice-copy';
 
 interface Props {
     /** 「同意して続ける」を押した時に呼ばれる。dontShowAgain が真なら次回以降は非表示にする。 */
@@ -49,13 +51,31 @@ const TEXT = {
  * (背景 div に onClick を付けず、閉じるボタンも置かない)。閉じる経路は「同意して続ける」のみ。
  * 表示可否と「今後表示しない」の永続化は useDisclaimer フックが持ち、ここは UI と同意操作だけを担う。
  * 表示言語(JA/EN)は useDialogLang で全ダイアログ共有。
+ *
+ * プレビュー版では、このダイアログが「このプレビュー版が何を、なぜ送るか」も示す(PreviewNotice)。
+ * 以前は m3 の /preview-notice ページが初回に示していたもので、2026-09-24 にアプリ側へ移した。
+ * 本番と staging の表示は変えない — verify:preview-notice が両言語のマークアップを固定している。
  */
 export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
-    const [dontShowAgain, setDontShowAgain] = useState(false);
     const lang = useDialogLang();
+    // 送信の門(lib/session-sync/preview-notice.ts)と同じビット: app-variant が preview のときだけ真。
+    // スコープ切替(AS PRODUCTION)では閉じない。あれは描画だけを本番に寄せ、送信は止めないので、
+    // 送る版で notice を隠すと、読まれていないお知らせを押下が「確認済み」にしてしまう。
+    const preview = useIsPreviewBuild();
+    return <DisclaimerDialogView lang={lang} preview={preview} onAccept={onAccept} />;
+};
+
+/**
+ * The dialog itself, as a function of its language and its build. Exported for
+ * `verify:preview-notice`, which renders it both ways in both languages — the hooks above answer
+ * only the prerender's question outside a browser.
+ */
+export const DisclaimerDialogView: React.FC<Props & { lang: DialogLang; preview: boolean }> = ({ onAccept, lang, preview }) => {
+    const [dontShowAgain, setDontShowAgain] = useState(false);
     const t = TEXT[lang];
+    const notice = preview ? PREVIEW_NOTICE[lang] : null;
     // 言語とビルドの両方で決まる。プレビュー版は `#preview` の節 — config/links.ts 参照。
-    const privacyUrl = usePrivacyPolicyUrl();
+    const privacyUrl = privacyPolicyUrl(lang, preview);
 
     return (
         <>
@@ -89,11 +109,13 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                         ))}
                     </ul>
                     <p className="text-[11px] text-slate-500">{t.agreeNote}</p>
+                    {notice && <PreviewNotice notice={notice} />}
                     {/* リンク名だけを置き、「同意したものとみなします」の類は書き足さない。この
                         ダイアログの同意対象はあくまで上の免責 5 項目であり、ポリシーへの同意まで
                         黙って増やさないため。読みたい人のための導線であって、同意の一部ではない。
                         別タブで開くのは、書き込み中や収録中にここへ来た場合に現在のタブを
-                        遷移させないため。 */}
+                        遷移させないため。プレビュー版では、お知らせの結びの一行を兼ねる
+                        (行き先は `#preview`、文言はお知らせのもの)。 */}
                     <p>
                         <a
                             href={privacyUrl}
@@ -101,7 +123,7 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
                             rel="noopener noreferrer"
                             className="text-[11px] text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
                         >
-                            {t.privacy}
+                            {notice ? notice.policy : t.privacy}
                         </a>
                     </p>
                 </div>
@@ -128,3 +150,42 @@ export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
         </>
     );
 };
+
+/**
+ * What the preview sends, and why — m3's notice, in this dialog (preview only).
+ *
+ * After the agree note, not before it: that note says pressing the button accepts "the above", and
+ * the above has to stay the five disclaimer items. This is something the owner is told and the same
+ * press confirms having seen — the m3 page it replaces said 確認して開く, not 同意 — so it must not
+ * turn into terms by where it sits.
+ *
+ * Built from the dialog's own parts so it reads as the same dialog, not a second page: the dash list,
+ * the bold of its emphasised words for each heading, its grey small print for when each is sent. The
+ * one rule above it is the line between the two things this dialog now says.
+ */
+const PreviewNotice: React.FC<{ notice: PreviewNoticeCopy }> = ({ notice: n }) => (
+    <div className="space-y-2 border-t border-slate-800 pt-3">
+        <p>{n.lead}</p>
+        <ul className="space-y-2">
+            <NoticeItem title={n.sessionsTitle} when={n.sessionsWhen}>{n.sessions}</NoticeItem>
+            <NoticeItem title={n.recordsTitle} when={n.recordsWhen}>{n.records}</NoticeItem>
+        </ul>
+        <p className="text-[11px] text-slate-500">{n.alsoSent}</p>
+        <ul className="space-y-2">
+            <NoticeItem title={n.purposeTitle}>{n.purpose}</NoticeItem>
+            <NoticeItem title={n.whereTitle}>{n.where}</NoticeItem>
+            <NoticeItem title={n.deleteTitle}>{n.deleteBody}</NoticeItem>
+        </ul>
+    </div>
+);
+
+const NoticeItem: React.FC<{ title: string; when?: string; children: React.ReactNode }> = ({ title, when, children }) => (
+    <li className="flex gap-2">
+        <span className="text-slate-600 shrink-0">—</span>
+        <span>
+            <span className="block text-slate-100 font-bold">{title}</span>
+            {children}
+            {when && <span className="block text-[11px] text-slate-500">{when}</span>}
+        </span>
+    </li>
+);
