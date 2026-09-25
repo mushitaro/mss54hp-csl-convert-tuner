@@ -207,7 +207,7 @@ export function describeSync({ phase, pending, error }: SyncStatus): SyncLook {
         case 'signedOut':
             return {
                 label: pending > 0 ? `Signed out — ${pending} waiting` : 'Signed out',
-                title: 'The preview has signed this device out, so the store will not take anything until you sign '
+                title: 'The WORKS build has signed this device out, so the store will not take anything until you sign '
                     + 'in again — SIGN IN in the header, while no cable is connected. Nothing is lost meanwhile: '
                     + 'the local database already has all of it.',
                 disabled: true,

@@ -1,7 +1,10 @@
 /**
  * Reads a branded export back, and fails when it would not pass for what it claims to be.
  *
- *   node scripts/check-branding.mjs <out-dir> <LABEL>
+ *   node scripts/check-branding.mjs <out-dir> <variant>      (preview | staging)
+ *
+ * The label it expects (WORKS, STAGING) is looked up from the variant in brand-label.mjs, the same
+ * table brand-preview.mjs writes from — never derived from it.
  *
  * brand-preview.mjs WRITES the branding; this reads what landed, from the bytes, the way a phone
  * will. Separate on purpose (tsunagi-m-release §9.3): the loop that rewrites can be wrong in ways
@@ -14,6 +17,8 @@
  *   - an icon the manifest or a document names that is not in the export: a blank tile;
  *   - a document with no, or two, `app-variant` tags: the experiments and SYNC silently shut, or
  *     the stale tag read first;
+ *   - a document with no, or two, `app-label` tags, or another build's: a badge that names no
+ *     build, or the wrong one;
  *   - a `sync-token` meta: the shared upload token of the old store, which must never ship again.
  *
  * Not a `verify:*` script: those run against main's tree on every release, and main has no
@@ -21,12 +26,15 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import { BUILD_LABEL, labelFor } from './brand-label.mjs';
 
-const [OUT, LABEL] = process.argv.slice(2);
-if (!OUT || !LABEL) {
-    console.error('usage: node scripts/check-branding.mjs <out-dir> <LABEL>');
+const [OUT, VARIANT] = process.argv.slice(2);
+if (!OUT || !VARIANT) {
+    console.error(`usage: node scripts/check-branding.mjs <out-dir> <variant>   (${Object.keys(BUILD_LABEL).join(' | ')})`);
     process.exit(1);
 }
+let LABEL;
+try { LABEL = labelFor(VARIANT); } catch (e) { console.error(`[check-branding] ${e.message}`); process.exit(1); }
 
 let failures = 0;
 const fail = (m) => { failures++; console.log(`  FAIL  ${m}`); };
@@ -59,13 +67,14 @@ function htmlFiles(dir) {
         return statSync(full).isDirectory() ? htmlFiles(full) : extname(full) === '.html' ? [full] : [];
     });
 }
-const variant = LABEL.toLowerCase();
 let docs = 0;
 for (const file of htmlFiles(OUT)) {
     const html = readFileSync(file, 'utf8');
     docs++;
     const variants = [...html.matchAll(/<meta name="app-variant" content="([^"]*)">/g)].map(m => m[1]);
-    if (variants.length !== 1 || variants[0] !== variant) fail(`${file}: app-variant ${JSON.stringify(variants)}, want ["${variant}"]`);
+    if (variants.length !== 1 || variants[0] !== VARIANT) fail(`${file}: app-variant ${JSON.stringify(variants)}, want ["${VARIANT}"]`);
+    const labels = [...html.matchAll(/<meta name="app-label" content="([^"]*)">/g)].map(m => m[1]);
+    if (labels.length !== 1 || labels[0] !== LABEL) fail(`${file}: app-label ${JSON.stringify(labels)}, want ["${LABEL}"]`);
     if (html.includes('name="sync-token"')) fail(`${file}: carries a sync-token meta`);
     for (const [src] of html.matchAll(/\/icons\/[a-z0-9-]+\.png/g)) {
         if (!/-dev-/.test(src)) fail(`${file}: names production icon ${src}`);
@@ -75,7 +84,7 @@ for (const file of htmlFiles(OUT)) {
     if (title !== undefined && title !== short) fail(`${file}: apple-mobile-web-app-title "${title}", want "${short}"`);
 }
 if (!docs) fail(`no .html in ${OUT}`);
-else if (!failures) ok(`${docs} document(s): one app-variant "${variant}", dev icons only, no sync-token`);
+else if (!failures) ok(`${docs} document(s): one app-variant "${VARIANT}", one app-label "${LABEL}", dev icons only, no sync-token`);
 
-console.log(failures ? `\n${failures} failure(s) in the ${LABEL} branding.` : `\n${LABEL} branding: ok`);
+console.log(failures ? `\n${failures} failure(s) in the ${VARIANT} (${LABEL}) branding.` : `\n${VARIANT} (${LABEL}) branding: ok`);
 process.exit(failures ? 1 : 0);

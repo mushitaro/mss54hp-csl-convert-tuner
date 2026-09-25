@@ -101,7 +101,7 @@ export async function call<T>(path: string, init: { method?: string; body?: unkn
     const detail = typeof r.data?.error === 'string' ? r.data.error : null;
     if (r.expired) {
         markGateExpired();
-        throw new SyncError('expired', 'Signed out of the preview — sign in again to sync. Nothing here was lost.');
+        throw new SyncError('expired', 'Signed out of the WORKS build — sign in again to sync. Nothing here was lost.');
     }
     if (r.tooLarge) {
         throw new SyncError('tooLarge', detail && detail !== 'too_large' ? detail : 'Too large to send — the store takes rows up to 1.9 MB.');

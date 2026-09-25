@@ -15,11 +15,17 @@ import type { DialogLang } from '@/lib/dialog-text';
  * which is sent as the connection type the records line already names). So it says the app version
  * alone (operator, 2026-09-24).
  *
+ * And `lead` names the build by the name its users know it by: 「このワークス版は」 / "this WORKS
+ * build", where m3's said プレビュー版 / preview. The operator renamed the owner builds for their
+ * users on 2026-09-25 — display only: the variant is still `preview`, and so is everything the code
+ * compares.
+ *
  * It is a claim about what `client.ts` and `diagnostics.ts` send. Change what those send and this
  * changes with them, together with the per-app list in the privacy policy's preview section
  * (m3.tsunagi.app/privacy-policy#preview, both languages) — the policy is the other copy. And if
  * what it says changes in substance, bump the version in `PREVIEW_NOTICE_KEY` (preview-notice.ts),
- * so that every owner who confirmed the old words is shown the new ones.
+ * so that every owner who confirmed the old words is shown the new ones. A new name for the build
+ * is not a change of substance, which is why the rename above left it at v1.
  *
  * Plain strings rather than JSX, so the dialog and `verify:preview-notice` read the same record.
  */
@@ -46,7 +52,7 @@ export interface PreviewNoticeCopy {
 
 export const PREVIEW_NOTICE: Record<DialogLang, PreviewNoticeCopy> = {
     ja: {
-        lead: 'このプレビュー版は、保存した記録を別の端末でも開けるよう、また不具合を調べられるよう、次のものを運営者のサーバーへ送ります。',
+        lead: 'このワークス版は、保存した記録を別の端末でも開けるよう、また不具合を調べられるよう、次のものを運営者のサーバーへ送ります。',
         sessionsTitle: '保存したセッション',
         sessions: '走行とアイドルの記録、読み出した BASE と書き込んだ TUNED の BIN（64 KB）、VIN、ソフトウェア番号',
         sessionsWhen: 'SYNC を押して保存したときに送ります。',
@@ -63,7 +69,7 @@ export const PREVIEW_NOTICE: Record<DialogLang, PreviewNoticeCopy> = {
         policy: '詳しくはプライバシーポリシー',
     },
     en: {
-        lead: 'So that what you save opens on your other devices, and so that faults can be investigated, this preview sends the following to our server.',
+        lead: 'So that what you save opens on your other devices, and so that faults can be investigated, this WORKS build sends the following to our server.',
         sessionsTitle: 'Sessions you save',
         sessions: 'drive and idle logs, the BASE and TUNED BINs (64 KB), the VIN and the software number',
         sessionsWhen: 'Sent when you press SYNC to save one.',

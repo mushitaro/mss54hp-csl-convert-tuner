@@ -28,8 +28,8 @@ exact versions.
 | Inter, JetBrains Mono (via `next/font`, self-hosted in the build) | SIL Open Font License 1.1 |
 
 The production app talks to the DME over Web Serial / WebUSB and makes one network request of its
-own: the update check, to its own origin. The **preview** build additionally sends sessions and
-diagnostic records to its own origin, behind the owner gate (see README, "The preview").
+own: the update check, to its own origin. The **WORKS** build additionally sends sessions and
+diagnostic records to its own origin, behind the owner gate (see README, "The WORKS build").
 
 Development-only tools (`wrangler`, `eslint`, `typescript`, `@cloudflare/workers-types`) are not
 shipped.
@@ -63,12 +63,12 @@ credited by name in `README.md` §Credits and in the app's own credits dialog:
 | BMW program images, bootloaders, SP-Daten, full DME/EEPROM dumps | BMW's, not ours to redistribute |
 | Third-party XDFs | their authors', not ours to redistribute |
 | Real vehicles' data from the SYNC store (VIN, BINs, logs) | the owners'. D1 dumps go to `archive/`, which is gitignored |
-| `public/data/calibration-decomp.json` on the public `main` and `preview` branches | Ghidra's decompiled C of the 0401 program — text derived from BMW firmware. The preview app serves it to signed-in owners; both published branches leave it out (`NOT_FOR_MAIN` and `NOT_FOR_PUBLIC` in `scripts/release-scope.mjs`), and the app falls back to quoted names without it |
+| `public/data/calibration-decomp.json` on the public `main` and `preview` branches | Ghidra's decompiled C of the 0401 program — text derived from BMW firmware. The WORKS build serves it to signed-in owners; both published branches leave it out (`NOT_FOR_MAIN` and `NOT_FOR_PUBLIC` in `scripts/release-scope.mjs`), and the app falls back to quoted names without it |
 | `.dev.vars`, `.env*`, tokens, `.wrangler/`, local databases | secrets and local state |
 
 `scripts/check-public-tree.mjs` refuses these by extension, name and content (including anything
 shaped like a real BMW M VIN) from `.githooks/pre-commit`, from CI, and before every release and
-preview publication.
+every publication of the `preview` branch.
 
 ### 3.2 In this repository, deliberately
 

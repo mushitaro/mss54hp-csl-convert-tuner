@@ -47,6 +47,7 @@ export const NOT_FOR_MAIN = [
     'scripts/assert-gated.mjs',
     'scripts/gate-verify.mjs',
     'scripts/brand-preview.mjs',
+    'scripts/brand-label.mjs',
     'scripts/check-branding.mjs',
     'scripts/release-to-main.mjs',
     'scripts/release-scope.mjs',

@@ -306,22 +306,22 @@ disclaimer shown on first use, and it is published in
 the same way the dialogs do. Section 9 covers this tool specifically: what it stores on your device,
 what it reads from the DME (including the VIN), and the single request it makes to the network.
 
-### The preview build
+### The WORKS build
 
-There is also a **preview** of the next version, with the experimental tabs open, at
+There is also a **WORKS** build of the next version, with the experimental tabs open, at
 `mss54hp-csl-convert-tuner-preview.pages.dev`. It is for MILE buyers and for owners whose cars
-TSUNAGI has worked on, and it is reached from the APPS PREVIEW row of the M menu on
+TSUNAGI has worked on, and it is reached from the WORKS row of the M menu on
 [m3.tsunagi.app](https://m3.tsunagi.app/): it sits behind a sign-in on m3, and opens only for an
-account that holds preview access.
+account that holds WORKS access.
 
-Unlike the public app, the preview can save sessions to your account (SYNC) and sends a diagnostic
-record after each DME read, write and datalog, so a failure in a car can be looked into afterwards.
-What those contain, and how to delete them, is in the preview section of the privacy policy
-([English](https://m3.tsunagi.app/en/privacy-policy#preview),
-[Japanese](https://m3.tsunagi.app/privacy-policy#preview)); the preview links there instead of to
-section 9. The first time you open the preview, its first-run dialog says what it sends and why,
-and it sends nothing until you have confirmed that dialog. Its source, including the sign-in gate
-and the SYNC API, is published on this
+Unlike the public app, the WORKS build can save sessions to your account (SYNC) and sends a
+diagnostic record after each DME read, write and datalog, so a failure in a car can be looked into
+afterwards. What those contain, and how to delete them, is in the WORKS section of the privacy
+policy ([English](https://m3.tsunagi.app/en/privacy-policy#preview),
+[Japanese](https://m3.tsunagi.app/privacy-policy#preview)); the WORKS build links there instead of
+to section 9. The first time you open the WORKS build, its first-run dialog says what it sends and
+why, and it sends nothing until you have confirmed that dialog. Its source, including the sign-in
+gate and the SYNC API, is published on this
 repository's [`preview`](https://github.com/mushitaro/mss54hp-csl-convert-tuner/tree/preview)
 branch before each deploy.
 
@@ -512,7 +512,7 @@ so the whole flow (read → live tune → write, plus the flash-counter reset) c
 without a cable. The simulated DME keeps state, so a reset stays reset across re-reads the way a real
 one would.
 
-### The preview's gate and SYNC, locally
+### The WORKS build's gate and SYNC, locally
 
 On the `preview` branch (which carries `functions/`, `migrations/` and `wrangler.jsonc`), the gate
 and the SYNC API run under the Pages emulator, with no Cloudflare account and no m3:

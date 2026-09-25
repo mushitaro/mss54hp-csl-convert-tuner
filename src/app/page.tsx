@@ -108,7 +108,7 @@ import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
-import { useBuildVariant, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
+import { useBuildLabel, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
@@ -326,8 +326,10 @@ export default function Home() {
   const updateAvailable = useAppUpdate(undefined, dmeLink.state !== 'disconnected');
   const install = useInstallPrompt();
   const isPreviewBuild = useIsPreviewBuild();
-  /** What this build calls itself — '' on production. The badge is on whenever it is not empty. */
-  const buildVariant = useBuildVariant();
+  /** What this build is CALLED — WORKS, STAGING, '' on production (the `app-label` meta; display only,
+   *  nothing compares it). The badge is on whenever it is not empty. Not `buildLabel`: that name is
+   *  the build id (`<count>.<sha>`) the credits and the menu show, from useDiagnosticsPublisher. */
+  const variantLabel = useBuildLabel();
   /** What the FEATURE gate reads: the deployed variant, the dev server counting as preview, and
    *  the scope switch, which can close it and never open it. See usePreviewSurfaces. */
   const featurePreview = usePreviewSurfaces();
@@ -356,7 +358,7 @@ export default function Home() {
    * switch, "no badge" would mean the one place the work happens is the one place the switch cannot
    * be reached.
    */
-  const badgeLabel = productionScope ? 'AS PRODUCTION' : (buildVariant.toUpperCase() || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
+  const badgeLabel = productionScope ? 'AS PRODUCTION' : (variantLabel || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
   /** Staging is production scope already and has nothing to switch; production carries no badge. */
   const badgeSwitches = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
@@ -5015,7 +5017,9 @@ export default function Home() {
               after opening one, not before.
 
               Read from a meta tag injected by scripts/brand-preview.mjs rather than compiled in,
-              so the variant has exactly one definition and production's build is untouched. */}
+              so the name has exactly one definition and production's build is untouched. It is
+              `app-label` (the name, from scripts/brand-label.mjs), not `app-variant` (what the
+              build is): the owner build reads WORKS while it stays the variant `preview`. */}
           {/* ANY non-production build says so, not just the preview one.
               STAGING is the build that needed this most and had it least: it is main, unmodified,
               so it carries none of the code that would mark it — and it looks identical to
@@ -5041,8 +5045,8 @@ export default function Home() {
                 type="button"
                 onClick={() => setProductionScope(!productionScope)}
                 title={productionScope
-                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full preview.'
-                  : 'Click to read this preview as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
+                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full WORKS build.'
+                  : 'Click to read this WORKS build as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
                 className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer
                   ${productionScope
                     ? 'text-violet-300 bg-violet-500/15 hover:bg-violet-500/25'
@@ -5053,7 +5057,7 @@ export default function Home() {
             ) : (
               <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
                 text-violet-300 bg-violet-500/15`}>
-                {buildVariant.toUpperCase()}
+                {variantLabel}
               </span>
             )
           )}

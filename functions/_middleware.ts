@@ -19,7 +19,7 @@ import { createGate } from './_owner-gate/gate';
 export const onRequest = createGate({
     clientId: 'tuner-preview',
     canonicalHost: 'mss54hp-csl-convert-tuner-preview.pages.dev',
-    name: 'MSS54HP CSL CONVERT /// TUNER — PREVIEW',
+    name: 'MSS54HP CSL CONVERT /// TUNER — WORKS',
     publicPaths: [
         '/manifest.webmanifest',
         '/icons/mapping-dev-192.png',

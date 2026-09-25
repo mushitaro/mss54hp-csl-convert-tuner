@@ -115,7 +115,7 @@
         "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
         "db:sessions": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(synced_at/1000,'unixepoch') AS synced, label, status, point_count, has_tune, has_rf, has_egt FROM sessions ORDER BY created_at DESC LIMIT 20\"",
         "db:diagnostics": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT datetime(created_at/1000,'unixepoch') AS at, kind, CASE completed WHEN 1 THEN 'ok' ELSE 'FAILED' END AS outcome, exchanges, elapsed_ms, baud, requested_baud, round(median_turnaround,1) AS turnaround, round(median_total,1) AS total, round(median_host_gap,1) AS host_gap, retries, CASE mock WHEN 1 THEN 'mock' ELSE transport END AS via, substr(coalesce(error,''),1,60) AS err, id FROM diagnostics ORDER BY created_at DESC LIMIT 30\"",
-        "build:preview": "next build && node scripts/build-id.mjs && node scripts/brand-preview.mjs out PREVIEW && node scripts/check-branding.mjs out PREVIEW && node scripts/gen-sw.mjs",
+        "build:preview": "next build && node scripts/build-id.mjs && node scripts/brand-preview.mjs out preview && node scripts/check-branding.mjs out preview && node scripts/gen-sw.mjs",
         "verify:wot-fuel": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-wot-fuel.mjs",
         "verify:charge-temp": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-charge-temp.mjs",
         "verify:rf-pt-korr": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-rf-pt-korr.mjs",

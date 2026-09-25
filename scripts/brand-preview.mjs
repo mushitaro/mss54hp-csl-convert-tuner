@@ -12,11 +12,12 @@
  *     short_name    <L> CSL TUNER                              the home screen
  *     description   … — <LABEL> BUILD, not the production tool.
  *     icons         the M ICON dev set (white on black), maskable entries to the dev maskable files
- *     every .html   apple-mobile-web-app-title, app-variant, and the icon/apple-touch-icon links
+ *     every .html   apple-mobile-web-app-title, app-variant, app-label, icon/apple-touch-icon links
  *
- *     CSL TUNER    production
- *     S CSL TUNER  main, unmodified — the release candidate
- *     P CSL TUNER  the development branch, behind the owner gate
+ *     variant   label     short_name
+ *     (none)    (none)    CSL TUNER    production — never branded
+ *     staging   STAGING   S CSL TUNER  main, unmodified — the release candidate
+ *     preview   WORKS     W CSL TUNER  the development branch, behind the owner gate
  *
  * The three separate on the first letter, inside the ~12 characters Android keeps, and none of
  * them drops the product: the short name used to BE the label (`STAGING`, `PREVIEW`), and with
@@ -37,17 +38,25 @@
  * that the release candidate can be looked at on a phone without being mistaken for the release.
  * main's source is never touched; this patches the bytes it produced.
  *
- * The label, because there are two non-production builds and they must not share one. A default
+ * The variant, because there are two non-production builds and they must not share one. A default
  * here would be the value one caller forgot to pass, and the symptom would be two identically
  * labelled icons — the exact failure this script exists to prevent.
  *
- * ## The label decides `app-variant`, and the short name no longer does
+ * ## The variant comes in, the label is looked up, and neither is computed from the other
  *
- * `app-variant` is the lowercased LABEL: `preview` opens the experiments and the owner SYNC,
- * `staging` does not, because `useIsPreviewBuild` tests for that one word. It used to be derived
- * from the SHORT NAME, which was the label — so adopting `P CSL TUNER` through the old script would
- * have set the variant to `p csl tuner` and closed every experiment and the whole store without a
- * word. The two are separate values now, computed separately.
+ * The caller passes the VARIANT — what the build IS — and it goes into `app-variant` as given.
+ * That is the value code compares: `preview` opens the experiments and the owner SYNC, `staging`
+ * does not, because `useIsPreviewBuild` tests for that one word. The LABEL — what the build is
+ * CALLED — comes from one table, scripts/brand-label.mjs, by the variant. It is in the name, the
+ * short name's letter, the description, and `app-label`, which the header badge shows. Nothing
+ * compares it.
+ *
+ * They were one value until 2026-09-25: `app-variant` was the lowercased label. So when the
+ * operator renamed the owner build WORKS for its users, doing it through the label would have set
+ * the variant to `works` and closed every experiment and the whole store without a word — the
+ * same failure the variant had once already, when it was derived from the SHORT NAME and adopting
+ * `P CSL TUNER` would have made it `p csl tuner`. Now a build's name can change without the build
+ * changing what it is. A variant the table does not know is refused before anything is written.
  *
  * ## Why a post-build patch and not a source edit
  *
@@ -65,23 +74,23 @@
  */
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import { BUILD_LABEL, labelFor } from './brand-label.mjs';
 
-const [OUT, LABEL] = process.argv.slice(2);
-if (!OUT || !LABEL) {
-    console.error('usage: node scripts/brand-preview.mjs <out-dir> <LABEL>');
-    process.exit(1);
-}
-if (LABEL.length > 12 || !/^[A-Z][A-Z0-9 ]*$/.test(LABEL)) {
-    console.error(`LABEL "${LABEL}" must be upper-case and at most 12 characters.`);
-    process.exit(1);
-}
 /** What the app reads back about itself. `preview` is the one value that opens the experiments. */
-const VARIANT = LABEL.toLowerCase();
+const [OUT, VARIANT] = process.argv.slice(2);
+if (!OUT || !VARIANT) {
+    console.error(`usage: node scripts/brand-preview.mjs <out-dir> <variant>   (${Object.keys(BUILD_LABEL).join(' | ')})`);
+    process.exit(1);
+}
 
 const fail = (message) => {
     console.error(`[brand-preview] ${message}`);
     process.exit(1);
 };
+
+/** What the build is called — looked up by the variant, never derived from it (see the header). */
+let LABEL;
+try { LABEL = labelFor(VARIANT); } catch (e) { fail(e.message); }
 
 /**
  * The dev twin of a production icon: `mapping-192.png` → `mapping-dev-192.png`,
@@ -162,14 +171,15 @@ for (const file of documents) {
     const before = readFileSync(file, 'utf8');
     const after = swapIcons(before)
         .replace(/(<meta name="apple-mobile-web-app-title" content=")[^"]*(")/g, `$1${shortName}$2`)
-        // Read by the header so the app says which build it is once it is already open — the
-        // manifest name only shows on the way in. Injected rather than compiled so that the
-        // variant has exactly one definition, up there.
-        // Stripped before it is written, for the reason build-id.mjs records: `out/` is not
+        // Read by the app once it is already open — the manifest name only shows on the way in.
+        // `app-variant` is what the code compares (the experiments, the store); `app-label` is what
+        // the header badge says. Injected rather than compiled so that each has exactly one
+        // definition, up there.
+        // Stripped before they are written, for the reason build-id.mjs records: `out/` is not
         // guaranteed to be a fresh export, and an insert-only stamp leaves two tags on a document
         // that already had one — with the stale one first, where every reader looks.
-        .replace(/<meta name="app-variant" content="[^"]*">/g, '')
-        .replace(/<\/head>/, `<meta name="app-variant" content="${VARIANT}"><\/head>`);
+        .replace(/<meta name="app-(?:variant|label)" content="[^"]*">/g, '')
+        .replace(/<\/head>/, `<meta name="app-variant" content="${VARIANT}"><meta name="app-label" content="${LABEL}"><\/head>`);
     if (after !== before) { writeFileSync(file, after); patched++; }
 }
 let payloads = 0;
@@ -179,5 +189,5 @@ for (const file of files(OUT, ['.txt'])) {
     if (after !== before) { writeFileSync(file, after); payloads++; }
 }
 
-console.log(`[brand-preview] ${OUT}: "${manifest.name}" / ${shortName} / variant ${VARIANT}, `
+console.log(`[brand-preview] ${OUT}: "${manifest.name}" / ${shortName} / variant ${VARIANT} / label ${LABEL}, `
     + `${moved.size} icon(s) to the dev set, manifest + ${patched} document(s) + ${payloads} payload(s)`);

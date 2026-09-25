@@ -91,7 +91,7 @@ const JA = {
     reloadBusy: 'アプリを再読み込みします。\n\nDMEとの接続は切断され、記録中のデータログと保存していないチューンは失われます。\n\n続行しますか？',
     // プレビュー版のサインインし直し。同じタブで m3 を往復するので、ページは置き換わる。
     reauthUnsaved: 'サインインし直すため、このページを m3 経由で開き直します。\n\nまだ保存していないチューンやデータログは失われます。保存済みのものはこの端末に残ります。\n\n続行しますか？',
-    reauthTitle: 'プレビュー版のサインインが切れています。押すと m3 を経由してこの画面に戻ります。SYNC はそれまで待機し、この端末のデータはそのまま残ります。',
+    reauthTitle: 'ワークス版のサインインが切れています。押すと m3 を経由してこの画面に戻ります。SYNC はそれまで待機し、この端末のデータはそのまま残ります。',
     discardLog: '今記録したデータログを破棄して、最初からやり直しますか？',
     deleteSession: (label: string) => `「${label}」を削除しますか？この操作は取り消せません。`,
     noStoredBinary: 'このセッションにはBINが保存されていません。',
@@ -355,7 +355,7 @@ const EN: NativeDialogText = {
     clearLog: 'Discard this data log (CSV)?',
     reloadBusy: 'Reload the app.\n\nThe DME link will drop, and any log being recorded or tune not yet saved will be lost.\n\nContinue?',
     reauthUnsaved: 'Signing in again reopens this page by way of m3.\n\nA tune or a log not yet saved will be lost. Everything saved stays on this device.\n\nContinue?',
-    reauthTitle: 'The preview has signed this device out. This goes through m3 and comes straight back here. SYNC waits until then, and everything on this device stays.',
+    reauthTitle: 'The WORKS build has signed this device out. This goes through m3 and comes straight back here. SYNC waits until then, and everything on this device stays.',
     discardLog: 'Discard the log just recorded and start over?',
     deleteSession: (label: string) => `Delete "${label}"? This cannot be undone.`,
     noStoredBinary: 'This session has no stored binary.',

@@ -35,9 +35,11 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { SOURCE, PREVIEW_BRANCH, PREVIEW_PROJECT } from './release-scope.mjs';
 import { dirtyPaths } from './git-dirty.mjs';
+import { labelFor } from './brand-label.mjs';
 
 const OUT = 'out';
-const LABEL = 'PREVIEW';
+/** What this build is called, for the last line of the log. The variant it deploys is `preview`. */
+const LABEL = labelFor('preview');
 
 const git = (args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const needsShell = (cmd) => process.platform === 'win32' && /^(npm|npx)$/.test(cmd);

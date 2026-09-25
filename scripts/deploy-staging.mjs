@@ -84,9 +84,10 @@ const MAIN = resolve(process.cwd(), '..', 'E46M3CSL_TuningTool-main');
 const PROJECT = 'mss54hp-csl-convert-tuner-staging';
 /** The project's production branch, so the deploy lands on the bare apex rather than an alias. */
 const BRANCH = 'main';
-/** The environment's label (brand-preview.mjs makes S CSL TUNER of it). Not PREVIEW: that one belongs
- *  to the development build. */
-const LABEL = 'STAGING';
+/** The environment's variant. brand-preview.mjs writes it to `app-variant` and looks its label up in
+ *  brand-label.mjs (STAGING, so S CSL TUNER). Not `preview`: that one belongs to the development
+ *  build. */
+const VARIANT = 'staging';
 
 const run = (cmd, args, cwd) => {
     console.log(`\n$ ${cmd} ${args.join(' ')}${cwd === process.cwd() ? '' : `    (in ${cwd})`}`);
@@ -150,8 +151,8 @@ console.log(`main's build adds: ${steps.join(', ')}`);
 
 run('npx', ['next', 'build'], MAIN);
 for (const step of steps.slice(0, -1)) run('node', [resolve(MAIN, step)], MAIN);
-run('node', [resolve('scripts', 'brand-preview.mjs'), resolve(MAIN, 'out'), LABEL], process.cwd());
-run('node', [resolve('scripts', 'check-branding.mjs'), resolve(MAIN, 'out'), LABEL], process.cwd());
+run('node', [resolve('scripts', 'brand-preview.mjs'), resolve(MAIN, 'out'), VARIANT], process.cwd());
+run('node', [resolve('scripts', 'check-branding.mjs'), resolve(MAIN, 'out'), VARIANT], process.cwd());
 run('node', [resolve(MAIN, steps[steps.length - 1])], MAIN);
 // In MAIN, not here — see the header. Everything wrangler needs is on the command line, so it
 // wants no `wrangler.jsonc`, and finding none is the correct outcome rather than a missing step.
