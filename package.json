@@ -1,11 +1,12 @@
 {
     "name": "mss54hp-csl-convert-tuner",
+    "meshProject": "dme-mapping",
     "version": "2.2.0",
     "private": true,
     "license": "MIT",
     "scripts": {
         "dev": "next dev -p 5054",
-        "build": "next build && node scripts/build-id.mjs && node scripts/gen-sw.mjs",
+        "build": "next build && node scripts/build-id.mjs && node scripts/inject-supporters.mjs && node scripts/gen-sw.mjs",
         "start": "next start",
         "lint": "eslint",
         "//verify:ds2": "Checks the DS2 wire format and the three judgements built on it: framing and checksum against literals rather than only round-tripping, the seed/key login the write path depends on, the echo classification that decides between a physical fault and a buffer desync, the verify byte, and the encoding checksum a QUICK write is licensed by.",
@@ -115,7 +116,7 @@
         "db:migrate:remote": "wrangler d1 migrations apply mss54hp-tuner-runs --remote",
         "db:sessions": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT id, datetime(synced_at/1000,'unixepoch') AS synced, label, status, point_count, has_tune, has_rf, has_egt FROM sessions ORDER BY created_at DESC LIMIT 20\"",
         "db:diagnostics": "wrangler d1 execute mss54hp-tuner-runs --remote --command \"SELECT datetime(created_at/1000,'unixepoch') AS at, kind, CASE completed WHEN 1 THEN 'ok' ELSE 'FAILED' END AS outcome, exchanges, elapsed_ms, baud, requested_baud, round(median_turnaround,1) AS turnaround, round(median_total,1) AS total, round(median_host_gap,1) AS host_gap, retries, CASE mock WHEN 1 THEN 'mock' ELSE transport END AS via, substr(coalesce(error,''),1,60) AS err, id FROM diagnostics ORDER BY created_at DESC LIMIT 30\"",
-        "build:preview": "next build && node scripts/build-id.mjs && node scripts/brand-preview.mjs out preview && node scripts/check-branding.mjs out preview && node scripts/gen-sw.mjs",
+        "build:preview": "next build && node scripts/build-id.mjs && node scripts/brand-preview.mjs out preview && node scripts/check-branding.mjs out preview && node scripts/inject-supporters.mjs && node scripts/gen-sw.mjs",
         "verify:wot-fuel": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-wot-fuel.mjs",
         "verify:charge-temp": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-charge-temp.mjs",
         "verify:rf-pt-korr": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-rf-pt-korr.mjs",
@@ -140,7 +141,8 @@
         "//verify:cal-docs": "Checks that what docs/ecu-logic cites still exists: every function address and ECU symbol in the prose resolves to a node in the artifact (or to a position inside a function body, for an instruction-level citation), and every [C bank/addr] evidence tag names a decompiled text that is really there. It does NOT check that a document is right — a machine can tell whether a citation points at something, only a person can tell whether it supports the sentence. See docs/ecu-logic/91-evidence.md.",
         "verify:cal-docs": "node scripts/verify-cal-docs.mjs",
         "//verify:release-scope": "The release and preview exclusion lists hold what they must: every deploy tool and the backend off main, every package script that names them stripped, nothing main keeps importing a file main drops, and the preview publishing its backend while leaving the VIN-bearing paths behind.",
-        "verify:release-scope": "node scripts/verify-release-scope.mjs"
+        "verify:release-scope": "node scripts/verify-release-scope.mjs",
+        "verify:supporters": "node scripts/verify-supporters.mjs"
     },
     "dependencies": {
         "clsx": "^2.1.1",

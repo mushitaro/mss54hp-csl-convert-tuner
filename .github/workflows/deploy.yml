@@ -49,6 +49,13 @@ jobs:
           test -s out/.well-known/assetlinks.json
           cat out/.well-known/assetlinks.json
 
+      # The CREDITS names are written into every page by scripts/inject-supporters.mjs, from
+      # m3.tsunagi.app/api/credits. The step stops the build if it cannot read them, so reaching this
+      # line means they were read; this asserts they also landed — one block in the start page.
+      - name: Check the CREDITS names were written in
+        run: |
+          test "$(grep -o 'id="m-supporters"' out/index.html | wc -l)" -eq 1
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:

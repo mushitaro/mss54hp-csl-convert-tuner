@@ -144,7 +144,9 @@ const readDeployed = async (url, cookie = null) => {
     const meta = (name) => html.match(new RegExp(`<meta name="${name}" content="([^"]*)"`))?.[1] ?? '(absent)';
     const api = await fetch(`${url}/api/sessions?${bust}`, { cache: 'no-store', headers, redirect: 'manual' })
         .then(r => r.status).catch(() => 0);
-    return { buildId: meta('build-id'), variant: meta('app-variant'), api };
+    // The CREDITS names, baked in by inject-supporters.mjs: exactly one block, or the build skipped it.
+    const supporters = (html.match(/id="m-supporters"/g) ?? []).length;
+    return { buildId: meta('build-id'), variant: meta('app-variant'), api, supporters };
 };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -319,7 +321,8 @@ for (const [label, url, apiShouldBe] of [['staging', STAGING_URL, '404'], ['prev
         else console.log('');   // close the row of dots before the verdict prints
     }
     if (!r) { bad++; continue; }
-    console.log(`${label.padEnd(8)} ${r.buildId.padEnd(18)} variant ${r.variant.padEnd(8)} /api ${r.api}`);
+    console.log(`${label.padEnd(8)} ${r.buildId.padEnd(18)} variant ${r.variant.padEnd(8)} /api ${r.api}  credits ${r.supporters === 1 ? 'in' : `MISSING (${r.supporters})`}`);
+    if (r.supporters !== 1) { console.error('  ^ the CREDITS names should be written in exactly once'); bad++; }
     if (!landed(label, r)) {
         console.error(label === 'staging'
             ? `  ^ does not carry main ${mainSha}. The upload succeeded and this URL is answering with something else.`
