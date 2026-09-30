@@ -77,21 +77,14 @@ export function CalibrationTab({
 
     return (
         <div className="h-full w-full min-h-0 flex">
-            <CalibrationTree
-                graph={graph}
-                selectedId={ws.selected}
-                editedIds={editedIds}
-                onSelect={select}
-                collapsed={ws.treeCollapsed}
-                onToggleCollapse={() => ws.setTreeCollapsed(!ws.treeCollapsed)}
-            />
-
+            {/* The tree sits to the RIGHT of the picture, on the side the
+                picture's inputs come from: the diagram runs right to left, so
+                what you pick in the tree enters where the tree is. */}
             <div className={`flex-1 min-w-0 min-h-0 ${showDiagram ? '' : 'hidden'}`}>
-                {ws.root || ws.selected ? (
+                {ws.subject ? (
                     <LogicDiagram
                         g={graph}
-                        rootId={ws.root ?? ws.selected!}
-                        selectedId={ws.selected ?? ws.root!}
+                        subjectId={ws.subject}
                         trail={ws.trail}
                         onSelect={ws.select}
                         onBack={ws.back}
@@ -100,6 +93,15 @@ export function CalibrationTab({
                     <p className="p-4 text-[11px] text-slate-500">{t(lang, 'selectPrompt')}</p>
                 )}
             </div>
+
+            <CalibrationTree
+                graph={graph}
+                selectedId={ws.subject}
+                editedIds={editedIds}
+                onSelect={select}
+                collapsed={ws.treeCollapsed}
+                onToggleCollapse={() => ws.setTreeCollapsed(!ws.treeCollapsed)}
+            />
         </div>
     );
 }

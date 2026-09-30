@@ -57,18 +57,16 @@ const TEXT = {
         belowReachNote: 'No sample, and none ever will: this sits BELOW the lowest opening the '
             + 'engine reached. Idle is above it, and under idle the throttle is shut and the '
             + 'injectors are off, so there is no mixture for the lambda loop to measure.',
-        band: (b: 'low' | 've') => b === 'low'
-            ? 'Low-opening band — judged on separate visits and a settled mean, because a car can park on one cell for minutes.'
-            : 'Upper band — judged on samples and how centrally they landed, because a sweep crosses a cell in a second.',
+        earned: 'Judged on how many samples landed here and how centrally — a sweep crosses a cell '
+            + 'in a second, so where they landed matters as much as how many.',
     },
     ja: {
         unvisitedNote: 'サンプルが落ちていません —— この状態を走ってください。',
         belowReachNote: 'サンプルが無く、今後も落ちません —— ここはエンジンが到達した最低開度より'
             + '下です。アイドルがそれより上にあり、その下はスロットル全閉でインジェクタが止まって'
             + 'いるので、λ ループが測れる混合気がありません。',
-        band: (b: 'low' | 've') => b === 'low'
-            ? '低開度帯 —— 独立した訪問と落ち着いた平均で判定。車は一つのセルに数分留まれるため。'
-            : '上帯 —— サンプル数と中心への寄り方で判定。スイープは一秒でセルを横切るため。',
+        earned: 'ここに落ちたサンプルの数と、どれだけ中心に寄っていたかで判定します。スイープは'
+            + '一秒でセルを横切るので、数と同じくらい落ちた位置が効きます。',
     },
 };
 
@@ -130,7 +128,7 @@ export function CoverageDetail({ cell, map, demand, rfKorr, rfKorrSpread, onHeig
            and the cells it covers are still the control — a strip that swallowed taps would make
            the bottom row of the map unselectable while it was open. */
         <div ref={box} className="absolute inset-x-0 bottom-0 z-20 pointer-events-none
-                        border-t border-slate-700 bg-slate-900/95 backdrop-blur-[2px]
+                        border-t border-slate-700 bg-slate-900/95 min-[900px]:backdrop-blur-[2px]
                         px-2 py-1.5 text-[10px] leading-tight">
             <div className="space-y-0.5">
                     <div className="font-mono text-slate-400">
@@ -143,7 +141,6 @@ export function CoverageDetail({ cell, map, demand, rfKorr, rfKorrSpread, onHeig
                         <span className="ml-2 text-slate-500">
                             {cell.samples} smp
                             {cell.weight !== undefined ? ` · w ${cell.weight.toFixed(1)}` : ''}
-                            {cell.visits !== undefined ? ` · ${cell.visits} visits` : ''}
                             {/* SHOWN FOR EVERY VISITED CELL, written or not.
                                 It used to appear only on cells the gate accepted, which threw away
                                 the reading on exactly the cells the driver is deciding whether to
@@ -176,7 +173,7 @@ export function CoverageDetail({ cell, map, demand, rfKorr, rfKorrSpread, onHeig
                                     {coverageRemedy(cell.reason, lang === 'ja' ? 'ja' : 'en')
                                         && <span>{'  ▸ '}{coverageRemedy(cell.reason, lang === 'ja' ? 'ja' : 'en')}</span>}
                                 </>
-                                : t.band(cell.band)}
+                                : t.earned}
                     </div>
             </div>
         </div>

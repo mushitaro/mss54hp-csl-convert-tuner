@@ -135,9 +135,9 @@ export interface LogDataPoint {
      * cleared at 0x026196, so at a healthy idle it is low.
      *
      * Which branch runs decides `TI_F_STAT`, the factor the DME multiplies injection time by. It
-     * is not a term in the LOW LOAD correction, so `requireTiBranchProven` — which once refused
-     * every idle cell over this — is OFF and neither branch moves a written byte. The disassembly
-     * answers which one runs; this channel is how the CAR answers it.
+     * is not a term in the `trim x rf_korr` correction, so `requireTiBranchProven` — which once
+     * refused every idle cell over this — is OFF and neither branch moves a written byte. The
+     * disassembly answers which one runs; this channel is how the CAR answers it.
      *
      * Slowest lane. A bit a diagnosis latches does not move on a timescale a sample could catch.
      */
@@ -150,17 +150,48 @@ export interface LogDataPoint {
     mdFwFilter?: number;
     mdLsDelta?: number;
     mdDpDelta?: number;
-    /** `V` — road speed, km/h. The half of the `rf_korr` gate this app has never evaluated.
-     *  Recorded, not yet gated on; see the RAM read's own note. */
+    /** `V` — road speed, km/h. The second half of the `rf_korr` gate, and since 2026-09-09 it is
+     *  actually evaluated: `rfKorrActive` refuses the correction below `k_rf_korr_v_min` (20 km/h).
+     *  A log recorded before this channel existed therefore earns no rf_korr at all and falls back
+     *  to the lambda trim — deliberate, because a missing V cannot be shown to clear the floor. */
     vehicleSpeed?: number;
+    /**
+     * THE RING, direct. `frRegler` is the integrator (1.0 neutral), `llsTv` the commanded valve
+     * duty %, `mlSoll` the total air request and `mlSollLls` the part routed to the valve.
+     *
+     * Optional because only the LLS profile reads them. Present, they replace two assumed map
+     * inversions and make `Td` measurable without a cross-correlation — which stops working
+     * precisely when the correction succeeds and the oscillation it locks onto goes away.
+     */
+    frRegler?: number;
+    llsTv?: number;
+    mlSoll?: number;
+    mlSollLls?: number;
     /** Gap between the word and byte decodes of ambient pressure, mbar. Agreement is evidence both
      *  addresses are what this app claims; a gap is evidence one is not. */
     pressureDecodeDisagreesMbar?: number;
     /** rf_korr — the EGT density correction the DME applied, measured rather than looked up:
      *  with MAP compensation off (k_rf_cfg = 0x02) the DME computes RF = rf_soll * rf_korr exactly,
      *  so rf_korr = (rf/100) / kf_rf_soll(rpm, correctedLoad). 1.0 = no correction.
-     *  Only populated when `rf` is present AND the Alpha-N interpolation is non-zero. */
+     *
+     *  **GATED.** Outside `rf_korr_calc`'s conditions the DME writes 1.000, so this is exactly 1
+     *  there however the ratio reads — see `rfKorrActive` and the block comment in
+     *  `annotateRfKorrPoint`. This is the number the correction multiplies by; `rfKorrUngated` is
+     *  the raw ratio, and their difference is what the gate removed.
+     *
+     *  Populated when `rf` is present, the Alpha-N interpolation is non-zero, the air channels
+     *  resolve a RF_PT_KORR, AND the binary's EGT tables could be read — without those tables the
+     *  gate cannot be evaluated and the calculation falls back to the trim alone. */
     rfKorr?: number;
+    /** The same ratio with the DME's gate NOT applied — `RF / (kf_rf_soll * RF_PT_KORR)` and
+     *  nothing else. Everything that makes RF differ from the table lands in it: rf_korr where the
+     *  gate is open, and the rf_soll filter's lag plus the load-axis reconstruction everywhere.
+     *
+     *  Kept because two things need it. `egtFromRfKorr` inverts it — clamping its input would make
+     *  the sensor cross-check agree by construction — and `analyze:rf-korr-mode` measures the
+     *  gate-shut population to size that artefact, which is only possible while the raw number
+     *  survives. Nothing that writes bytes may read this field. */
+    rfKorrUngated?: number;
     /** rf_soll — this app's interpolation of the Alpha-N table at (rpm, correctedLoad), i.e. the
      *  denominator `rfKorr` was measured against. Surfaced because it is what decides whether the
      *  correction's load gate was open, and because a wrong one falsifies rf_korr silently. */
@@ -198,18 +229,62 @@ export interface LogDataPoint {
      * and Δ ≤ 30" — and those two demand opposite treatment when the VE derivation divides by the
      * corrected table.
      *
-     * Only the LOAD half. The DME also requires `V > k_rf_korr_v_min` (20 km/h), and road speed is
-     * not in the blocks this app polls, so a sample below that speed reads as open here and was
-     * 1.000 in the car. See docs/ecu-logic/20-egt-correction.md §1.
+     * BOTH halves: `rf_soll > kl_rf_korr_rf_min(N)` and `V > k_rf_korr_v_min` (20 km/h). It used to
+     * be the load half alone, with a comment explaining that road speed was on no block this app
+     * polled — true when it was written, and left standing for the nine months after `V` arrived on
+     * the RAM read. Five of the eight samples that drove one cell up 11.5 % were taken at 13-15
+     * km/h. See docs/ecu-logic/20-egt-correction.md §1 and `rfKorrActive`.
      *
-     * Present exactly when `tabgDelta` is — both need the binary's tables.
+     * The ENTRY condition, not the hold: the DME's hysteresis branch keeps a previously latched
+     * value, and answering that needs the sample history. `rfKorrActive` says why this is the right
+     * trade and what it costs.
+     *
+     * Present whenever the binary's EGT tables could be read — `tabgDelta` additionally needs the
+     * exhaust sensor, so a sample can carry this verdict without one.
      */
     rfKorrGateOpen?: boolean;
+
+    /**
+     * Seconds since the DME's rf_korr correction engaged. Present only while it is engaged.
+     *
+     * The DME steps the fuel by `rf_korr` the instant the latch closes, and the lambda loop cannot
+     * see that for about a second — transport delay, sensor response, and a two-point controller
+     * running at 1-2 Hz. Inside that window `trim` still reads the mixture from BEFORE the step, so
+     * `trim x rf_korr` is inflated by nearly the whole of rf_korr.
+     *
+     * Measured over #941-#946, mean written factor against this field, alongside a control of
+     * gate-shut cells at load >= 5 which sits at -0.11 %:
+     *
+     *     0-0.5 s +9.93 % | 0.5-1 s +9.15 % | 1-1.5 s +7.44 % | 1.5-2 s +4.78 %
+     *     2-3 s   +1.69 % | 3-5 s   -2.06 % | 5+ s    -4.94 % | pooled  +2.18 %
+     *
+     * Same cells, same enrichment, sign decided by the clock. `RF_KORR_SETTLE_SEC_DEFAULT` is what
+     * `accumulatePoint` does about it.
+     *
+     * Undefined on a gate-open sample means the latch source did not cover it, which
+     * `accumulatePoint` treats as unsettled — the direction that does not inflate.
+     */
+    rfKorrDwellSec?: number;
 }
 
 export interface ProcessedLog {
     fileName: string;
     data: LogDataPoint[];
+    /**
+     * The log exactly as it came in, before any filter removed anything — the same array, not a copy.
+     *
+     * Here because a state machine inside the DME does not know this app dropped a sample. The
+     * rf_korr latch (`RfKorrLatch`) advances on every sample the car took, including the fuel-cut
+     * ones the VE filter throws away — and a fuel-cut sample is precisely one that RESETS it. Walk
+     * a filtered subset instead and the latch stays engaged longer than the DME's did, which credits
+     * an enrichment the car was not applying and raises the map. Measured over #941-#946: 0.29 % of
+     * samples get a different verdict, which is 6 % of the enriched population, all in that
+     * direction.
+     *
+     * Anything else reproducing DME state belongs on this field too. Anything measuring the DRIVE
+     * belongs on `data`.
+     */
+    rawData: LogDataPoint[];
     validCount: number;
     droppedCount: number;
     /** The same total, broken out by reason. `droppedCount` says how much of the drive was thrown
@@ -450,6 +525,19 @@ export interface LogFilterConfig {
      * are the reason the bar came back. New sessions pin it, so this closes rather than accumulates.
      */
     minVeCellWeight?: number;
+    /**
+     * Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is trusted.
+     *
+     * Default 1.0 (`RF_KORR_SETTLE_SEC_DEFAULT`). A sample younger than this is written with the
+     * lambda trim ALONE — not dropped: the enriched population lives entirely in the high-load
+     * cells, so removing it would delete the region the setting exists to fix.
+     *
+     * Distinct from `transientSettleSec`, which gates on the THROTTLE and is 0 by deliberate
+     * operator choice. This clock starts when the DME's own correction engages, which is a
+     * different event. Travels in the config so a reopened session re-derives under the number it
+     * was built with.
+     */
+    rfKorrSettleSec?: number;
     /**
      * @deprecated The lower heatmap band is the VE gate's own sample count now, not a separate
      * number. Independent, the two could contradict each other — a cell above the gate and below

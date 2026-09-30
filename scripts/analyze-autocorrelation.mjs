@@ -53,7 +53,6 @@ fs.writeFileSync(entry, [
     "export { VECalculator } from '@/lib/ve-calculator/calculator';",
     "export { readEgtTables } from '@/lib/ve-calculator/egtTables';",
     "export { readRfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';",
-    "export { LOW_LOAD_TOP_ROW } from '@/lib/ve-calculator/lowLoadTuner';",
     "export { BinaryParser } from '@/lib/binary-engine/parser';",
     "export { APP_CONFIG } from '@/config/constants';",
 ].join(NL));
@@ -108,16 +107,16 @@ for (const dir of dirs) {
     // the current map derives a correction on top of a correction, while the log it is derived
     // from was recorded against the BASE that was actually in the ECU.
     //
-    // On session #1 the two differ in 21 cells — VE's 15 plus LOW LOAD's 8, less the overlap — and
-    // the error is not small: 85 % at 2100 rpm reads 0.687 in the binary against 0.579 in the
-    // snapshot, so the correction came out -5.2 % where the truth is -16.6 %.
+    // On session #1 the two differ in 21 cells, and the error is not small: 85 % at 2100 rpm reads
+    // 0.687 in the binary against 0.579 in the snapshot, so the correction came out -5.2 % where
+    // the truth is -16.6 %.
     const veMap = new M.BinaryParser(ab).getVETable();
 
     const processed = M.processLogData(read('log.json'), session.baseFileName, cfg,
         session.tuneSettings.interpolationTable);
     const calc = new M.VECalculator();
     const ve = calc.annotateRfKorr(veMap, processed.data, M.readEgtTables(ab),
-        { curves: M.readRfPtKorrCurves(ab) });
+        { curves: M.readRfPtKorrCurves(ab) }, processed.rawData);
     const rpmAxis = veMap.xAxis ?? M.APP_CONFIG.MSS54HP.AXIS_RPM;
     const loadAxis = veMap.yAxis ?? M.APP_CONFIG.MSS54HP.AXIS_LOAD;
 

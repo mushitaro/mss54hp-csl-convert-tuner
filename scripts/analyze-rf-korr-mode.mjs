@@ -218,8 +218,12 @@ for (const dir of dirs) {
     const binaries = read('binaries.json');
     const cfg = session.tuneSettings?.filterConfig;
     const table = session.tuneSettings?.interpolationTable;
-    if (!cfg || !table || !veMap) {
-        throw new Error(dir + ': session.json is missing tuneSettings / veMapSnapshot');
+    // `veMap` used to be in this test. It is declared thirty lines DOWN, out of the binary, so the
+    // guard meant to catch a thin session.json threw a TDZ ReferenceError on every run instead —
+    // and the guard's own message named `veMapSnapshot`, which this script deliberately does not
+    // read (see the note at the declaration). Two mistakes cancelling into one dead script.
+    if (!cfg || !table) {
+        throw new Error(dir + ': session.json is missing tuneSettings.filterConfig / interpolationTable');
     }
 
     const base = Buffer.from(binaries.base, 'base64');
@@ -231,9 +235,9 @@ for (const dir of dirs) {
     // the current map derives a correction on top of a correction, while the log it is derived
     // from was recorded against the BASE that was actually in the ECU.
     //
-    // On session #1 the two differ in 21 cells — VE's 15 plus LOW LOAD's 8, less the overlap — and
-    // the error is not small: 85 % at 2100 rpm reads 0.687 in the binary against 0.579 in the
-    // snapshot, so the correction came out -5.2 % where the truth is -16.6 %.
+    // On session #1 the two differ in 21 cells, and the error is not small: 85 % at 2100 rpm reads
+    // 0.687 in the binary against 0.579 in the snapshot, so the correction came out -5.2 % where
+    // the truth is -16.6 %.
     const veMap = new BinaryParser(ab).getVETable();
     const egt = readEgtTables(ab);
     const curves = readRfPtKorrCurves(ab);
@@ -257,8 +261,10 @@ for (const dir of dirs) {
 
     const processed = processLogData(rawLog, session.baseFileName ?? 'replay.csv', cfg, table);
     const calc = new VECalculator();
-    const ve = calc.annotateRfKorr(veMap, processed.data, egt, air);
-    const tun = calc.annotateRfKorr(veMap, processed.rfKorrData ?? processed.data, egt, air);
+    // The latch walks the RAW log in both, so the two streams cannot disagree about one instant.
+    const ve = calc.annotateRfKorr(veMap, processed.data, egt, air, processed.rawData);
+    const tun = calc.annotateRfKorr(
+        veMap, processed.rfKorrData ?? processed.data, egt, air, processed.rawData);
     console.log('filter     ' + rawLog.length + ' raw -> ' + ve.length + ' for VE, '
         + tun.length + ' for rf_korr');
 
@@ -284,10 +290,26 @@ for (const dir of dirs) {
         const isOpen = gateOpen(egt, p.rpm, p.rfSoll);
         const into = isOpen ? openGroups : shutGroups;
         if (!into.has(key)) into.set(key, []);
-        into.get(key).push({ x: Math.log(p.rfKorr), y: Math.log(t) });
-        raw[isOpen ? 'open' : 'shut'].push({
-            key, x: Math.log(p.rfKorr), rfSoll: p.rfSoll, rf: p.rf,
-        });
+        /*
+         * THE CONTROL GROUP READS THE UNGATED RATIO, and it has to.
+         *
+         * The gate-shut arm exists to measure the ARTEFACT — reconstruction error and within-cell
+         * load structure — on samples where rf_korr is 1.0000 by construction, so that the
+         * gate-open slope can be read as artefact plus effect. That only works while the regressor
+         * still VARIES there.
+         *
+         * Since `annotateRfKorrPoint` started gating (2026-09-09) `rfKorr` is exactly 1 on every
+         * gate-shut sample, so sd(ln x) is 0, no group has any spread, and the control arm reported
+         * "0 samples in 0 groups" — which left the +0.525 open-arm slope with nothing to be
+         * differenced against, and the header's own rule says neither number means anything alone.
+         *
+         * `rfKorrUngated` is the number this arm always meant: the raw `RF / (kf_rf_soll x
+         * RF_PT_KORR)`, which is what the artefact lives in. The open arm keeps the gated value,
+         * because there it IS what the DME applied.
+         */
+        const x = Math.log(isOpen ? p.rfKorr : (p.rfKorrUngated ?? p.rfKorr));
+        into.get(key).push({ x, y: Math.log(t) });
+        raw[isOpen ? 'open' : 'shut'].push({ key, x, rfSoll: p.rfSoll, rf: p.rf });
         const floor = interpAt(egt.rfKorrMin.rpm, egt.rfKorrMin.values, p.rpm);
         if (floor > 0) {
             seam.push({ margin: p.rfSoll / floor, trim: t, k: p.rfKorr, rpm: p.rpm });

@@ -426,7 +426,7 @@ cannot proceed without one, not for the tune write.)
 4. **VIN decoding** (bytes 0–12 = 104 bits): if all 13 bytes are printable ASCII, treat as ASCII.
    Otherwise it's **packed 6-bit**: skip the first 2 bits, then read **17 characters × 6 bits**,
    MSB-first across byte boundaries, indexing `"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"`.
-   *(Round-trip tested: `WBSBL93453PN12345` encodes and decodes back identically.)*
+   *(Round-trip tested on a real 17-character VIN — not reproduced here: it encodes and decodes back identically.)*
 
 5. **ZIF**: BMW program number = bytes **57–63** (7-byte ASCII, repeated 3× for redundancy).
    Variant detection = first 8 raw bytes as ASCII: `21132200` → MSS54, `21132300`/`21132500` → MSS54HP.

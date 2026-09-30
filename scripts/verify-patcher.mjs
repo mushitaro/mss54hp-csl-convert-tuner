@@ -189,7 +189,7 @@ console.log('\n[checksum last, and idempotent]');
     p.setTankVentDisable(true);
     p.applyChecksumCorrection();
     const once = new Uint8Array(p.getBuffer());
-    check('the image validates afterwards', analyzeDataChecksum(once).every(s => s.stored === s.calculated),
+    check('the image validates afterwards', analyzeDataChecksum(once).every(s => s.isValid),
         JSON.stringify(analyzeDataChecksum(once)));
 
     // Running it twice must not move anything: the correction is what makes "checksum last" a rule
@@ -211,7 +211,7 @@ console.log('\n[the PATCH-ON image, which is a file rather than a reading]');
     const on = new Uint8Array(patchOnImage(buf(base), {
         applyPatch: true, applyWotDisable: true, applyTankVentDisable: true,
     }));
-    check('the image validates', analyzeDataChecksum(on).every(x => x.stored === x.calculated),
+    check('the image validates', analyzeDataChecksum(on).every(x => x.isValid),
         JSON.stringify(analyzeDataChecksum(on)));
     check('it is not the BASE', diff(base, on).length > 0);
 

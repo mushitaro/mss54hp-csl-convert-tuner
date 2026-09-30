@@ -15,6 +15,7 @@ import {
     appendFlashCounterReset,
     listSessions,
     getSessionLog,
+    getSessionLogRecord,
     getSessionBinaries,
     deleteSession,
 } from '@/lib/db/sessionRepository';
@@ -58,7 +59,7 @@ export function useSessionDb() {
 
     const saveSessionTune = useCallback(async (params: {
         sessionId: string; binaryFileName: string; tunedBinaryBuffer: ArrayBuffer;
-        veMapSnapshot: VEMap; tuneSettings: TuneSettings; log: LogDataPoint[] | null;
+        veMapSnapshot?: VEMap; tuneSettings: TuneSettings; log: LogDataPoint[] | null;
     }) => {
         const s = await saveTune(params);
         await refresh();
@@ -110,12 +111,22 @@ export function useSessionDb() {
     }, [refresh]);
 
     const loadLog = useCallback((id: string) => getSessionLog(id), []);
+    /**
+     * The raw idle samples of a stored run, or null.
+     *
+     * Separate from `loadLog` because that one returns the PROJECTION — `LogDataPoint[]`, which has
+     * no field for `md_llri` and therefore cannot carry the measurement. Reading the record instead
+     * is the whole point: a reopened idle session used to show an empty CORRECTED LOG tab while its
+     * samples sat in the database.
+     */
+    const loadIdleRun = useCallback(
+        async (id: string) => (await getSessionLogRecord(id))?.idle ?? null, []);
     const loadBinaries = useCallback((id: string): Promise<SessionBinariesRecord | null> => getSessionBinaries(id), []);
 
     return {
         sessions, loading, error, refresh,
         newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
         recordFlashCounterReset, remove,
-        loadLog, loadBinaries,
+        loadLog, loadIdleRun, loadBinaries,
     };
 }

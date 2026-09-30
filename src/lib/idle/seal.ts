@@ -1,7 +1,13 @@
 /**
- * The idle write is SEALED. Nothing derived here reaches a byte.
+ * WHICH IDLE BYTES MAY BE WRITTEN.
  *
- * ## Why — the write target has no consumer in this calibration
+ * The full derivation — the formula, the parameter, the data, the distribution — is
+ * docs/ecu-logic/70-idle-write.md. This file is the enforcement and the history.
+ *
+ * `KF_LLS_TV` is OPEN as of 2026-09-03. `KF_LLR_QVS_GRUND` is sealed permanently, and the argument
+ * for that has not weakened; it is below, unchanged, because it is the reason the target moved.
+ *
+ * ## Why KF_LLR_QVS_GRUND stays sealed — it has no consumer in this calibration
  *
  * `lls_tv_calc` (master `0x025D0A`) has exactly two call sites, and they are mutually exclusive on
  * one config byte, `cfg_m.egas` (XDF `0x8012`, master, file `0x08012`):
@@ -30,13 +36,24 @@
  * computed from the map, and says nothing about whether anything downstream reads the result.
  * (It was never implemented either; see the audit.)
  *
- * ## The second reason, which bites even if the first is overturned
+ * ## The second reason, which bit the OLD target and does not bite the new one
  *
- * `IDLE_QVS_WRITE_BOUNDS.max` is 40.0 kg/h and `setEcuMapValues` applies it to ALL 30 cells, not
- * only the ones the tuner moved. Sixteen of the thirty stock cells are above 40.0 — the cold rows
- * run to 80.0 kg/h at -40 degC — so arming any proposal would quietly rewrite the cold-start and
- * high-rpm cells down to 40.0. Neither verify script catches it: they check the tuner's proposal
- * rather than the resulting bytes.
+ * `setEcuMapValues` writes every cell of a table and applies the caller's bounds to all of them,
+ * not only to the ones the tuner moved. Against `KF_LLR_QVS_GRUND` that was fatal: the bound was
+ * 40.0 kg/h and sixteen of the thirty stock cells are above it — the cold rows run to 80.0 kg/h at
+ * -40 degC — so arming any proposal would quietly have rewritten the cold-start and high-rpm cells
+ * down to 40.0.
+ *
+ * The same question, asked of `KF_LLS_TV` and MEASURED rather than argued (`npm run inspect:lls-tv`,
+ * and `verify:idle` now asserts it so it cannot rot):
+ *
+ *     K_LLS_TV_MIN / MAX        14 / 97 %
+ *     cells                     130
+ *     min / max cell            14 / 97 %
+ *     cells outside the rails   0
+ *
+ * Every stock cell is inside the rails the DME itself applies, so a whole-table write leaves the
+ * untouched cells byte-identical. This objection does not transfer to the new target.
  *
  * ## What is NOT sealed
  *
@@ -67,20 +84,41 @@
  * This seal keeps `KF_LLR_QVS_GRUND` sealed exactly as before. Nothing above weakens the argument
  * for it; it only stops that argument from being the end of the feature.
  *
- * ## What un-seals it
+ * ## What un-sealed the new target (2026-09-03)
  *
- * The investigation in the plan, and specifically: the disassembly of the slave DPR readers
- * (`MD_LLRI` leaves the master only into `0xFF8172`, which has no resolved reader in either bank),
- * plus one on-car test — write a large delta into one warm cell and log LLS duty and rpm. Set this
- * to false only when a named parameter has been derived from the logic and shown to reach the
- * engine, and change the comment above to say which.
+ * The bar this file set was: "a named parameter derived from the logic and shown to reach the
+ * engine". Against `KF_LLS_TV`:
+ *
+ *   - DERIVED FROM THE LOGIC. `lls_tv_calc` is its only consumer and reads it in a recovered
+ *     statement — `code-confirmed`, not an xref and not an inference.
+ *   - REACHES THE ENGINE. Its output IS `LLS_TV`, the valve duty. And the claim is not left as an
+ *     argument: every run compares RAM `LLS_TV` against this map interpolated at the operating
+ *     point, and a dwell whose duty the map cannot explain is refused `model-disagrees`. That gate
+ *     is the one the OLD design could not have — it compared `LLR_QVS` against a map whose output
+ *     nothing read, and would have passed while proving nothing.
+ *   - WHOLE-TABLE WRITE IS BYTE-NEUTRAL. Measured, above.
+ *
+ * What is still NOT established, and why that is survivable: the on-car delta test. The model gate
+ * shows the map explains the duty the DME ran; it does not by itself show that changing the map
+ * changes the car. So the first campaign is damped — `stepFraction` 0.5 and `maxStepPct` 3.0 %, so
+ * one pass moves duty by at most 3 %, about 1.3 kg/h of idle air — which is large enough for the
+ * next run's model gate to see the difference and small enough not to stall the engine. That test
+ * is now something the tool performs rather than something that blocks it.
  */
-export const IDLE_WRITE_SEALED = true;
+export const IDLE_WRITE_SEALED = false;
 
 /**
- * The calibration symbols this seal covers, derived FROM the flag so a future un-seal releases
- * every consumer in one flip. The CALIBRATION tab reads this to lock direct edits of the same
- * bytes — a copy of the name over there would outlive the seal it copies.
+ * The calibration symbols that may never be written, whatever the flag above says.
+ *
+ * NOT derived from `IDLE_WRITE_SEALED` any more, and that is the whole change. It used to be, on
+ * the assumption that the seal and the dead map would be released together — but they are two
+ * different facts. `IDLE_WRITE_SEALED` was about whether this FEATURE had earned a write;
+ * `KF_LLR_QVS_GRUND` is unwritable because nothing in the car reads it, which no amount of evidence
+ * about `KF_LLS_TV` can change. Tying them together would have opened the dead map the moment the
+ * live one was proven, and a tuner who then edited it by hand would learn, from a real flash and a
+ * real drive, that idle air "does nothing".
+ *
+ * The CALIBRATION tab reads this to lock direct edits of the same bytes — a copy of the name over
+ * there would outlive the seal it copies.
  */
-export const SEALED_CAL_SYMBOLS: ReadonlySet<string> =
-    IDLE_WRITE_SEALED ? new Set(['KF_LLR_QVS_GRUND']) : new Set();
+export const SEALED_CAL_SYMBOLS: ReadonlySet<string> = new Set(['KF_LLR_QVS_GRUND']);

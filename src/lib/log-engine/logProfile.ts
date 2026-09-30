@@ -45,12 +45,14 @@ import {
     LAMBDA_TRIM_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
     AMBIENT_TEMP_RAM_READ,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
+    LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
     IDLE_VANOS_RAM_READ, IDLE_VANOS_TARGET_RAM_READ,
 } from '@/lib/dme-link/ramMap';
 import { type FieldKey, LOG_FIELD_REGISTRY } from '@/lib/field-registry/registry';
+import { featureEnabled, MODE_FEATURES, type ModeId } from '@/lib/features';
 
 /** Milliseconds of wire time for one byte, at 9600 8E1.
  *
@@ -381,7 +383,8 @@ export function lambdaTrimAgrees(fromRam: number | undefined, fromBlock19: numbe
  * (offset 77) next to the RAM copy of the same instant, so the claim that 0xFFD8F0 is that channel
  * keeps being re-checked for the whole run instead of only at the start.
  *
- * 32 at ~4.1 Hz is roughly every 8 s. The integrator's own time constant is K_LFR_TAU_IA1 = 5.12 s
+ * 32 at ~4.1 Hz is roughly every 8 s. Compare against a ~5 s settle heuristic (NOT K_LFR_TAU_IA1,
+ * which is not the idle integrator's constant — see idle/bench.ts)
  * and a dwell is 20 s, so every dwell gets two or three checks — enough to catch an address that
  * goes wrong mid-run, cheap enough that the check costs 6 ms of a 242 ms sample.
  */
@@ -446,7 +449,7 @@ export function idleTorqueAgrees(
     return Math.abs(fromRam - fromBlock19) <= IDLE_TORQUE_TRUTH_GATE.toleranceNm;
 }
 
-export type ProcessId = 'VE' | 'EGT' | 'INERTIA' | 'IDLE';
+export type ProcessId = 'VE' | 'EGT' | 'INERTIA' | 'IDLE' | 'LLS';
 
 /** A patch this run needs in the ECU before it means anything. Checked BEFORE the run, because
  *  finding out afterwards costs a drive. */
@@ -504,7 +507,7 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // 333.6 ms/sample -> 3.00 Hz, down from 4.13 when this run measured one thing. It now also
         // carries the section 7.1 preconditions, and that is the right trade: what is being
         // estimated is the steady value of an integrator whose own time constant is
-        // K_LFR_TAU_IA1 = 5.12 s, over a 20 s dwell, so the rate buys outlier rejection against
+        // a ~5 s settle heuristic, over a 20 s dwell, so the rate buys outlier rejection against
         // split RAM reads rather than bandwidth. What the extra channels buy is the answer to
         // whether the estimate is meaningful at all — and a fast measurement of a quantity whose
         // preconditions were never checked is not worth more than a slower one that checks them.
@@ -690,6 +693,47 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         produces: 'Retired — block 3 carries no lambda trim, so no correction table can come out of it',
         runnable: false,
     },
+    LLS: {
+        id: 'LLS', label: 'LLS',
+        // Block 3 carries everything the ring needs except one thing: rpm, `rawLoad` — which IS
+        // `relativer Oeffnungsquerschnitt`, the valve opening the duty is recovered from — `rf`,
+        // and `wdk1` to prove the throttle really did stay on the floor.
+        //
+        // The exception is road speed, and it is not optional. A micro-throttle drive is defined by
+        // rolling: the stopped samples at either end of a log sit at an operating point the rolling
+        // section never returns to, and including them moves the worst decile of the phase margin by
+        // 2.5 degrees. `rollingOnly` needs a speed channel to drop them, so the ambient read that
+        // carries `vehicleSpeed` is in the profile rather than being a VE nicety.
+        //
+        // What is NOT here: `FR_REGLER`, `LLS_TV`, `ML_SOLL` and `ML_SOLL_LLS`. Those would let the
+        // loop be watched from outside instead of reconstructed, and the notes ask for them (9.7).
+        // They are four new RAM reads and a decision of their own, deliberately not smuggled in
+        // with the mode surface.
+        exchanges: [
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            { kind: 'ram', name: 'T_UMG/V', ...AMBIENT_TEMP_RAM_READ, every: AMBIENT_SLOW_LANE_EVERY,
+                provides: ['ambientTemp', 'vehicleSpeed'] },
+            // THE RING, on the fast lane. Every sample, because these are the signals that
+            // oscillate — carried forward they would flatten the 0.3 Hz being measured.
+            //
+            // Three exchanges rather than one: segment 0x04 spreads them over 1,290 bytes, and a
+            // telegram spanning that would be reading mostly unrelated RAM to save a round trip.
+            // The cost is real and was measured, not guessed: expectedHz falls from 7.38 to 3.37.
+            // Worth paying — 3.37 Hz still puts ten samples in a 3 s period, and Nyquist is 1.69 Hz
+            // against a 0.3 Hz signal — but it does coarsen a cross-correlation, so `peakLag`
+            // interpolates its peak sub-sample. What the channels buy is the removal of two map
+            // inversions and the one quantity no log could ever infer, FR_REGLER itself.
+            { kind: 'ram', name: 'ML_SOLL/ML_SOLL_LLS', ...LLS_AIR_RAM_READ,
+                provides: ['mlSoll', 'mlSollLls'] },
+            { kind: 'ram', name: 'FR_REGLER', ...LLS_INTEGRATOR_RAM_READ, provides: ['frRegler'] },
+            { kind: 'ram', name: 'LLS_TV', ...LLS_DUTY_RAM_READ, provides: ['llsTv'] },
+        ],
+        // None. The ring is read out of the loaded image and the drive only has to happen; no patch
+        // changes what KF_LLS_TV, KL_AQ_ABS_LLS or kf_rf_soll say.
+        requires: [],
+        produces: 'KF_LLS_TV rebuilt as the inverse of the three maps downstream of it',
+        runnable: true,
+    },
     INERTIA: {
         id: 'INERTIA', label: 'INERTIA',
         // Polled by startInertiaRun, not by the standard live poll — a different sample type
@@ -707,6 +751,30 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         runnable: true,
     },
 };
+
+/**
+ * What the MODE corner offers, in the order it offers them.
+ *
+ * TWO filters, and both are load-bearing.
+ *
+ * `runnable` is about the profile: EGT is retired, block 3 carries no lambda trim, and a retired
+ * option left in a menu is a trap with a label on it. Derived rather than listed so that retiring
+ * the next one takes it out of the menu in the same edit.
+ *
+ * `featureEnabled` is about the BUILD. IDLE and INERTIA are experimental — production renders
+ * neither tab — so a production build offering those modes would hide the VE tabs in favour of
+ * tabs that do not exist, collapsing the strip to STARTUP with no way back but the corner. That is
+ * the trap the removed IDLE MODE switch sprang, and MODE would have shipped it. `MODE_FEATURES`
+ * names the owner of each mode so the registry answers for this surface the way it answers for
+ * tabs and for the live drive targets.
+ *
+ * The order is the operating one rather than the record's. VE is what almost every session is, and
+ * the two stationary runs follow it — a driver picking IDLE has stopped the car to do it.
+ */
+export function selectableModes(isPreview: boolean): ProcessId[] {
+    return (Object.keys(MODE_FEATURES) as ModeId[])
+        .filter(id => LOG_PROFILES[id].runnable && featureEnabled(MODE_FEATURES[id], isPreview));
+}
 
 /** Which processes a log could belong to, judged only on the channels it actually carries.
  *

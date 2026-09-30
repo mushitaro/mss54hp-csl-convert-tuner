@@ -27,8 +27,11 @@ const subscribeNever = () => () => { };
 const readTag = (): string =>
     document.querySelector('meta[name="app-variant"]')?.getAttribute('content') ?? '';
 
+const readLabel = (): string => document.querySelector('meta[name="app-label"]')?.getAttribute('content') ?? '';
+
 /**
- * What this build calls itself: `preview`, `staging`, or empty for production.
+ * What this build IS: `preview`, `staging`, or empty for production. What it is CALLED is
+ * useBuildLabel — compare this one, show that one.
  *
  * Empty is the honest answer for production rather than the string 'production', because nothing
  * writes that tag — production is the build nobody branded, and inventing a name for the absence
@@ -37,6 +40,9 @@ const readTag = (): string =>
 export function useBuildVariant(): string {
     return useSyncExternalStore(subscribeNever, readTag, () => '');
 }
+
+/** WORKS | STAGING | '' (production). Display only — brand-preview writes it from scripts/brand-label.mjs. */
+export function useBuildLabel(): string { return useSyncExternalStore(subscribeNever, readLabel, () => ''); }
 
 /**
  * Whether the EXPERIMENTS are open. Only `preview` opens them.

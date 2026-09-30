@@ -320,44 +320,49 @@ console.log('\n[the census is the cost of the threshold]');
     const r = run(log);
     check('withEvidence counts only cells that cleared', r.coverage.withEvidence === 1, r.coverage.withEvidence);
     check('withAnyData counts every cell touched', r.coverage.withAnyData >= 2, r.coverage.withAnyData);
-    // Not the whole table. The line this feeds reads "N of TOTAL cells met the evidence gate", and
-    // 480 would count the 260 cells below the seam — LOW LOAD's rows, which VE may never write —
-    // as cells VE failed to earn. Measuring a corrector against ground it is forbidden to touch
-    // makes the number say the opposite of what it means.
-    check('total is VE’s own band, not the whole map',
-        r.coverage.total === RPM.length * (LOAD.length - 13), r.coverage.total);
-    check('...which is smaller than the table', r.coverage.total < RPM.length * LOAD.length);
+    // The WHOLE table. It used to be a band — the rows above a seam at opening row 12 — because a
+    // second derivation owned everything below it under its own bars, and counting those as cells
+    // this one failed to earn measured a corrector against ground it was forbidden to touch. One
+    // derivation now, so one denominator.
+    check('total is the whole table', r.coverage.total === RPM.length * LOAD.length, r.coverage.total);
 }
 
 /**
- * The seam itself.
+ * The seam is gone, and the low-opening rows are earned like every other cell.
  *
- * `kf_rf_soll` is ONE table. Rows 0-12 are LOW LOAD's, which derives them on evidence shaped for a
- * dwell rather than a sweep. Ownership used to be settled only at composition, in `composeVeGrid`,
- * and that left a hole: wherever LOW LOAD refused a cell for thin evidence, `owned` came out false
- * and VE's value is what reached the binary. Refusing here means such a cell keeps BASE instead.
+ * `kf_rf_soll` is ONE table, and it used to be derived by two workflows: rows 0-12 by a separate
+ * low-opening tuner with its own bars (30 samples, 2 separate visits, a scatter limit), rows 13+ by
+ * this one on 3 samples and 2.5 weight. The split was justified as "a dwell is not a sweep", and
+ * the arithmetic either side of it was identical — the module that owned the low rows said so in
+ * its own header. Two derivations, one table, and an ownership rule to referee them.
+ *
+ * Removed 2026-09-09 on the operator's instruction, bars included. What has to hold now is simply
+ * that a low-opening cell is treated as a cell: same gate, same reasons, same denominator.
  */
-console.log('\n[the low band is not VE’s to write]');
+console.log('\n[the low-opening rows are earned like any other]');
 {
-    const LOW = LOAD[12];        // 3.20 %, the last row LOW LOAD owns
-    const FIRST_VE = LOAD[13];   // 5.00 %, the first row VE owns
+    const LOW = LOAD[12];        // 3.20 %, the last row the old seam kept out
+    const FIRST_VE = LOAD[13];   // 5.00 %, the first row it let through
 
-    const low = run(samples(400, 2700, LOW, 1.20));
-    check('400 samples in the low band clear nothing', low.newMap === null, typeof low.newMap);
-    check('...and the accepted map says refused', at(low.acceptedMap, 2700, LOW) === false);
-    // Refused, not invisible: the coverage heat still has to show the band was driven, because
-    // LOW LOAD judges those same samples and the driver needs to see they landed.
-    check('...but the hits are still counted', at(low.hitMap, 2700, LOW) === 400, at(low.hitMap, 2700, LOW));
-    check('...and they are kept out of the census', low.coverage.withAnyData === 0, low.coverage.withAnyData);
+    const low = run(samples(ENOUGH, 2700, LOW, 1.20));
+    check('a low-opening cell with evidence is written', low.newMap !== null, typeof low.newMap);
+    check('...and the accepted map says so', at(low.acceptedMap, 2700, LOW) === true);
+    check('...and it moves', Math.abs(at(low.newMap.data, 2700, LOW) - 60) < 0.05,
+        at(low.newMap.data, 2700, LOW));
+    check('...and it counts in the census', low.coverage.withAnyData >= 1, low.coverage.withAnyData);
 
-    const high = run(samples(400, 2700, FIRST_VE, 1.20));
-    check('the very next row up does clear', high.newMap !== null);
-    check('...and moves the cell', Math.abs(at(high.newMap.data, 2700, FIRST_VE) - 60) < 0.05,
-        at(high.newMap.data, 2700, FIRST_VE));
+    // The same bar, either side of where the seam used to be — that is the whole claim.
+    const high = run(samples(ENOUGH, 2700, FIRST_VE, 1.20));
+    check('the row above behaves identically', high.newMap !== null);
+    check('...to the same value', Math.abs(at(high.newMap.data, 2700, FIRST_VE)
+        - at(low.newMap.data, 2700, LOW)) < 0.05);
 
-    // Lowering the evidence gate must not buy a way in — the band is not a threshold.
-    const forced = run(samples(400, 2700, LOW, 1.20), { minCellSamples: 1, minCellWeight: 0.1 });
-    check('no threshold unlocks the low band', forced.newMap === null, typeof forced.newMap);
+    // And thin evidence is refused down there for the reason it is refused anywhere: thinness.
+    const thin = run(samples(2, 2700, LOW, 1.20));
+    check('two samples are refused', at(thin.acceptedMap, 2700, LOW) === false);
+    check('...for thinness, not for where it sits',
+        thin.rejectMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)] === 'thin-count',
+        String(thin.rejectMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)]));
 }
 
 /**
@@ -465,13 +470,13 @@ console.log('\n[DIRECT applies AUTHORITY, and nothing else scales the step]');
 
 console.log('\n[the structural refusals run under BOTH methods]');
 {
-    // The low band belongs to LOW LOAD whichever method is selected — it is ownership, not evidence.
-    const LOW = LOAD[12];        // 3.20 %, the last row LOW LOAD owns
-    const low = runDirect(samples(400, 2700, LOW, 1.20));
-    check('the low band is still refused under DIRECT',
+    // A low-opening cell is refused for THINNESS under DIRECT too, not for where it sits. There is
+    // no structural refusal left that depends on the row.
+    const LOW = LOAD[12];
+    const low = runDirect(samples(2, 2700, LOW, 1.20));
+    check('a thin low-opening cell is refused under DIRECT',
         low.acceptedMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)] === false, 'it was written');
-    check('...and says out-of-band',
-        low.rejectMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)] === 'out-of-band',
+    check('...for thinness', low.rejectMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)] === 'thin-count',
         String(low.rejectMap[LOAD.indexOf(LOW)][RPM.indexOf(2700)]));
     // And a cell nobody drove is refused for having nothing, not for failing a test.
     const none = runDirect(samples(ENOUGH, 2700, VE_LOAD, 1.10));

@@ -97,14 +97,18 @@ console.log('\n[a session with no tuneSettings can still say what is in the car]
         armedPatchesFromHistory({ flashHistory: [] }) === null);
 
     const armed = armedPatchesFromHistory({
-        flashHistory: [flash({ settings: { applyPatch: true, applyWotDisable: true, applyTankVentDisable: true } })],
+        flashHistory: [flash({ settings: {
+            applyPatch: true, applyWotDisable: true, applyTankVentDisable: true,
+            applyRfKorrGateDrop: true,
+        } })],
     });
-    check('a patch-on flash re-arms all three',
-        armed.applyPatch && armed.applyWotDisable && armed.applyTankVentDisable, JSON.stringify(armed));
+    check('a patch-on flash re-arms all four',
+        armed.applyPatch && armed.applyWotDisable && armed.applyTankVentDisable
+        && armed.applyRfKorrGateDrop, JSON.stringify(armed));
     // Tune CONTENT must not be re-armed from a flash record: warmup/WOT inject derived tables, and
     // a reopened workspace has not derived them.
     check('and re-arms nothing else',
-        Object.keys(armed).sort().join(',') === 'applyPatch,applyTankVentDisable,applyWotDisable',
+        Object.keys(armed).sort().join(',') === 'applyPatch,applyRfKorrGateDrop,applyTankVentDisable,applyWotDisable',
         Object.keys(armed).join(','));
 
     // The LAST flash is the state of the car — finalising has to take the patch back off.

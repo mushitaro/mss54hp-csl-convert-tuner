@@ -1,6 +1,7 @@
 import { BinaryParser } from './parser';
 import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP, TANK_VENT_GAIN,
-    COMMUNITY_WOT_FUEL_RAW, WOT_FUEL_ROWS, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP } from '@/config/constants';
+    COMMUNITY_WOT_FUEL_RAW, WOT_FUEL_ROWS, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP,
+    RF_KORR_GATE_FLOOR } from '@/config/constants';
 import type { VEMap } from '@/lib/types';
 import type { EcuMapDef } from '@/lib/ecu-items/types';
 import { analyzeDataChecksum, correctDataChecksum, DATA_PAIR_LENGTH } from '@/lib/checksum/dmeDataChecksum';
@@ -388,6 +389,43 @@ export class BinaryPatcher extends BinaryParser {
 
         raws.forEach((raw, i) => this.setUint16(addr + i * 2, raw));
     }
+
+    /**
+     * Drops `kl_rf_korr_rf_min` to 0.400 at all six rpm points, or puts it back.
+     *
+     * The Y block only — the rpm breakpoints at 0xE900 stay BMW's, because the point of the patch
+     * is to move WHERE the correction engages in filling, not to reshape the curve's rpm structure.
+     *
+     * Why this patch exists, what it earns and what it costs while it is in the car are all in
+     * `RF_KORR_GATE_FLOOR`'s own doc, with the six-drive replay behind the 0.40.
+     *
+     * The restore is the same rule as `setWOTThreshold`: write back the six the binary was loaded
+     * with, and fall back to `RF_KORR_GATE_FLOOR.STOCK_RAW` only when the loaded curve was itself
+     * already dropped and so has nothing true to say. It matters more here than for one byte,
+     * because the app READS this curve back: `readEgtTables` builds `EgtTables.rfKorrMin` from these
+     * exact bytes and `gateOpen` / `rfKorrActive` / `RfKorrLatch` / `rfKorrCensus` all decide from
+     * it. Overwriting it does not merely change the calibration, it changes which samples every
+     * later derivation believes the DME was correcting — the same trap `setWOTThreshold` documents.
+     */
+    public setRfKorrGateFloor(drop: boolean): void {
+        const addr = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
+        const n = RF_KORR_GATE_FLOOR.POINTS;
+
+        // As loaded, so a restore has something true to go back to.
+        const asLoaded: number[] = [];
+        for (let i = 0; i < n; i++) {
+            asLoaded.push((this.original[addr + i * 2] << 8) | this.original[addr + i * 2 + 1]);
+        }
+        const wasDropped = asLoaded.every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
+
+        const raws = drop
+            ? asLoaded.map(() => RF_KORR_GATE_FLOOR.DROPPED_RAW)
+            : wasDropped
+                ? [...RF_KORR_GATE_FLOOR.STOCK_RAW]
+                : asLoaded;
+
+        raws.forEach((raw, i) => this.setUint16(addr + i * 2, raw));
+    }
 }
 
 /**
@@ -423,6 +461,9 @@ export interface LogicPatches {
     applyPatch: boolean;
     applyWotDisable: boolean;
     applyTankVentDisable: boolean;
+    /** `kl_rf_korr_rf_min` dropped to 0.400 — see `BinaryPatcher.setRfKorrGateFloor`. Optional
+     *  because every stored session predates it, and absent has to keep meaning "stock floor". */
+    applyRfKorrGateDrop?: boolean;
 }
 
 export function bytesAsRun(base: ArrayBuffer, patches: LogicPatches): ArrayBuffer {
@@ -431,6 +472,7 @@ export function bytesAsRun(base: ArrayBuffer, patches: LogicPatches): ArrayBuffe
     else patcher.enableMapCorrection();
     patcher.setWOTThreshold(patches.applyWotDisable);
     patcher.setTankVentDisable(patches.applyTankVentDisable);
+    patcher.setRfKorrGateFloor(!!patches.applyRfKorrGateDrop);
     return patcher.getBuffer();
 }
 
@@ -457,6 +499,7 @@ export function patchOnImage(base: ArrayBuffer, patches: LogicPatches): ArrayBuf
     else patcher.enableMapCorrection();
     patcher.setWOTThreshold(patches.applyWotDisable);
     patcher.setTankVentDisable(patches.applyTankVentDisable);
+    patcher.setRfKorrGateFloor(!!patches.applyRfKorrGateDrop);
     // Last, after every other byte has moved — the same order buildPatchedBuffer uses.
     patcher.applyChecksumCorrection();
     return patcher.getBuffer();
@@ -476,5 +519,6 @@ export function readLogicPatches(image: ArrayBuffer): LogicPatches {
         applyPatch: parser.getMapCorrectionStatus() && parser.getTempThreshold() >= 99,
         applyWotDisable: parser.getWOTThresholdStatus(),
         applyTankVentDisable: parser.getTankVentDisabled(),
+        applyRfKorrGateDrop: parser.getRfKorrGateFloorDropped(),
     };
 }

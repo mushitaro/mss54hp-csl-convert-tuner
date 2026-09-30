@@ -5,7 +5,7 @@ import {
     MIN_SELF_SHARE, MIN_INDEPENDENT, AUTOCORR_FALLBACK,
     VE_METHOD_DEFAULT, DIRECT_AUTHORITY_DEFAULT, DIRECT_MIN_SAMPLES, VE_MIN_WEIGHT_DEFAULT, type VeMethod,
 } from '@/lib/ve-calculator/calculator';
-import { MAX_SAMPLE_SD } from '@/lib/ve-calculator/lowLoadTuner';
+import { MAX_SAMPLE_SD } from '@/lib/ve-calculator/veScatter';
 import { useFeatureEnabled } from '@/lib/build-variant';
 import {
     LogFilterConfig, RfKorrSource, resolveRfKorr, resolveTransientWindow,

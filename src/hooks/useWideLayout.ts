@@ -59,3 +59,31 @@ export function useSplitGraph(): boolean {
         () => false,
     );
 }
+
+/**
+ * Short enough that the menu sheet cannot stack its bands, and wide enough to stand them side by side.
+ *
+ * A third question rather than a reinterpretation of the two above: `SPLIT` asks whether the picture
+ * and the control panel can share a pane; this asks whether the MENU SHEET can stack five bands. On a
+ * 1024x600 head unit — about 683x400 CSS — the sheet is capped at 380px and its stacked content wants
+ * ~450, so the whole sheet scrolled and VIEW was left sitting on its 88px floor: one and a half rows
+ * of a list that needs 352 (8 tabs x 44). Side by side the same content fits with nothing scrolling.
+ *
+ * 560 is not a new number. It is the same short-viewport threshold the sheet already halves its
+ * paddings on and the visualiser's floor already switches on. `orientation: landscape` rather than a
+ * second width: the question is whether there is width to spend that the height has not got, and a
+ * 360x380 split-screen window has neither. The sheet only exists below 900px (`min-[900px]:hidden`),
+ * so no width bound belongs here.
+ */
+const SHORT_LANDSCAPE = '(max-height: 560px) and (orientation: landscape)';
+const subscribeShortLandscape = subscriber(SHORT_LANDSCAPE);
+
+/** Server snapshot `false`, for the same reason `useSplitGraph`'s is: the stacked sheet is what the
+ *  markup has always described, and it is the arrangement a narrow-and-tall phone keeps. */
+export function useShortLandscape(): boolean {
+    return useSyncExternalStore(
+        subscribeShortLandscape,
+        () => window.matchMedia(SHORT_LANDSCAPE).matches,
+        () => false,
+    );
+}

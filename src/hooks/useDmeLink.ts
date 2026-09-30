@@ -714,6 +714,40 @@ export function useDmeLink() {
      * a car that logs the slower way. The notice is surfaced rather than swallowed: "this ran the
      * old way" is exactly the fact somebody comparing two drives' rates needs.
      */
+    /**
+     * The idle run's own truth gate: is RAM 0xFFD8F0 really MD_LLRI on THIS ECU?
+     *
+     * Separate from `verifyLogProfile` rather than folded into it, because the two differ in the
+     * one way that matters — what a failure means. A VE run whose lambda claim fails still has a
+     * usable log: block 19 carries the same trim and `verifyLogProfile` returns the fallback list.
+     * An idle run has no such consolation. `pollIdleSampleInner` reads MD_LLRI from RAM
+     * unconditionally and stamps `mdLlriSource: 'ram'`, so there is no second path to fall back to;
+     * the profile's `fallback` list would only change the timing report.
+     *
+     * So this returns the VERDICT and lets the caller decide, instead of quietly returning a
+     * different list. `null` = nothing to check (no link, no such claim in the profile, or the
+     * transport does not implement the gate), which must read as "proceed", not as "failed".
+     */
+    const verifyIdleTorqueSource = useCallback(async (
+        rails: { min: number; max: number },
+    ): Promise<{ proven: boolean; detail: string } | null> => {
+        const link = linkRef.current;
+        if (!link?.verifyRamChannelSource) return null;
+        try {
+            const result = await link.verifyRamChannelSource(LOG_PROFILES.IDLE, 'idle-torque', rails);
+            if (!result) return null;
+            if (!result.proven) {
+                setWarningKind('warn');
+                setWarning(result.detail);
+            }
+            return { proven: result.proven, detail: result.detail };
+        } catch (e) {
+            // The check failing is not the same as the check passing. Reported as a failed check
+            // with the reason, so the caller asks rather than assumes.
+            return { proven: false, detail: e instanceof Error ? e.message : String(e) };
+        }
+    }, []);
+
     const verifyLogProfile = useCallback(async (profile: LogProfile): Promise<{
         exchanges: LogExchange[]; proven: boolean; detail: string | null;
     }> => {
@@ -1152,6 +1186,7 @@ export function useDmeLink() {
         startTuning,
         stopTuning,
         verifyLogProfile,
+        verifyIdleTorqueSource,
         startInertiaRun,
         startIdleRun,
         probeRam,

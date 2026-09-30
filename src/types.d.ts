@@ -35,12 +35,27 @@ declare module 'react-plotly.js' {
  *
  * This path is deliberate rather than a shortcut: the bare `plotly.js` specifier resolves to the
  * source build, which reaches traces/image and its `require('buffer/')` Node polyfill and fails the
- * Turbopack build. The dist bundle is also what react-plotly.js itself imports, so asking for it by
- * name reuses that module instead of bundling Plotly a second time.
+ * Turbopack build.
+ *
+ * `-gl3d` is the partial bundle the app is built from — see `components/PlotGl3d.tsx`. It has to be
+ * the SAME specifier that file hands to the factory, or Plotly is bundled twice.
  *
  * Only the surface actually called is declared. Widening this to `any` would quietly re-admit every
  * Plotly call the typed entry already checks.
  */
-declare module 'plotly.js/dist/plotly' {
+declare module 'plotly.js/dist/plotly-gl3d' {
     export function relayout(gd: HTMLElement, update: Record<string, unknown>): Promise<unknown>;
+    const Plotly: { relayout: typeof relayout };
+    export default Plotly;
+}
+
+/**
+ * The factory react-plotly.js exposes so a caller can supply its own Plotly build. Untyped in the
+ * package; declared here against the same PlotParams the default export is declared with, so the
+ * component this produces is checked exactly like the one it replaces.
+ */
+declare module 'react-plotly.js/factory' {
+    import type { ComponentType } from 'react';
+    import type { PlotParams } from 'react-plotly.js';
+    export default function createPlotComponent(plotly: unknown): ComponentType<PlotParams>;
 }

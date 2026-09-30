@@ -1,5 +1,16 @@
 # MSS54HP CSL CONVERT /// TUNER
 
+Tune a CSL-converted BMW E46 M3's MSS54HP DME from your own drive logs, in the browser: upload a
+partial BIN and a TESTO LOG CSV and download the tuned BIN with its checksums corrected, or connect a
+K+DCAN cable and read, log and write the DME directly. Free and open source.
+**Open it: <https://mss54hp-csl-convert-tuner.tsunagi.app/>**
+
+Part of **TSUNAGI///Matrix**, the tools for the BMW E46 M3:
+[E46M3 /// MONITORING](https://github.com/mushitaro/E46M3-Monitoring) ·
+[E46M3SMG2 /// MAPPING](https://github.com/mushitaro/e46m3smg2-mapping) ·
+[MSS54HP CSL CONVERT /// BOOT](https://github.com/mushitaro/mss54hp-csl-convert-boot) ·
+[E46 M35080 /// MIGRATION](https://github.com/mushitaro/e46-m35080-migration)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -306,6 +317,25 @@ disclaimer shown on first use, and it is published in
 the same way the dialogs do. Section 9 covers this tool specifically: what it stores on your device,
 what it reads from the DME (including the VIN), and the single request it makes to the network.
 
+### The WORKS build
+
+There is also a **WORKS** build of the next version, with the experimental tabs open, at
+`mss54hp-csl-convert-tuner-preview.pages.dev`. It is for MILE buyers and for owners whose cars
+TSUNAGI has worked on, and it is reached from the WORKS row of the M menu on
+[m3.tsunagi.app](https://m3.tsunagi.app/): it sits behind a sign-in on m3, and opens only for an
+account that holds WORKS access.
+
+Unlike the public app, the WORKS build can save sessions to your account (SYNC) and sends a
+diagnostic record after each DME read, write and datalog, so a failure in a car can be looked into
+afterwards. What those contain, and how to delete them, is in the WORKS section of the privacy
+policy ([English](https://m3.tsunagi.app/en/privacy-policy#preview),
+[Japanese](https://m3.tsunagi.app/privacy-policy#preview)); the WORKS build links there instead of
+to section 9. The first time you open the WORKS build, its first-run dialog says what it sends and
+why, and it sends nothing until you have confirmed that dialog. Its source, including the sign-in
+gate and the SYNC API, is published on this
+repository's [`preview`](https://github.com/mushitaro/mss54hp-csl-convert-tuner/tree/preview)
+branch before each deploy.
+
 ## ⚠️ Safety — please read before flashing
 
 This tool can **erase and write your DME**. Flashing an ECU always carries risk.
@@ -492,3 +522,32 @@ first-run in a car (`?transport=webserial` forces the other way). A **PRACTICE**
 so the whole flow (read → live tune → write, plus the flash-counter reset) can be exercised offline
 without a cable. The simulated DME keeps state, so a reset stays reset across re-reads the way a real
 one would.
+
+### The WORKS build's gate and SYNC, locally
+
+On the `preview` branch (which carries `functions/`, `migrations/` and `wrangler.jsonc`), the gate
+and the SYNC API run under the Pages emulator, with no Cloudflare account and no m3:
+
+```bash
+npm run db:migrate:local
+npm run build:preview && npx wrangler pages dev --port 8788
+```
+
+Put the two values it needs in `.dev.vars` (git-ignored — never commit it):
+
+```
+M3_CLIENT_SECRET=<any random value, 32 characters or more>
+GATE_DEV_ACCOUNT=<any UUID>
+```
+
+`GATE_DEV_ACCOUNT` makes the gate treat that id as signed in, and is ignored on any host that is not
+`localhost` or `127.0.0.1` (so is `GATE_DEV_M3`, which points the gate at a local m3 instead).
+Restart with a different UUID to see the store as another account sees it. `npm run gate:verify`
+checks that the gate is the canonical copy from tsunagi-m3, and `npm run check:public-tree` that
+nothing tracked is something a public repository must not hold; `npm run hooks:install` runs the
+latter before every commit.
+
+---
+
+*Integrated by tsunagi — this tool is part of the TSUNAGI community. The research continues, and
+the people who carry it are listed, at [MESH](https://m3.tsunagi.app/en/mesh).*

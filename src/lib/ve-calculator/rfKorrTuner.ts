@@ -4,7 +4,7 @@ import { axisBracket, type AxisBracket } from '@/lib/log-engine/axisBracket';
 // `import type` for the interface: Node's type stripping cannot tell a type-only named import from
 // a value one, so a harness that loads this module directly fails on the missing export.
 import type { EgtTables } from './egtTables';
-import { gateOpen, tabgModelAt } from './egtTables';
+import { gateOpen, rfKorrActive, tabgModelAt } from './egtTables';
 
 /**
  * Back-calculates KF_RF_KORR_DRREL from a data log.
@@ -27,8 +27,16 @@ import { gateOpen, tabgModelAt } from './egtTables';
  *    There is no "tune VE first, then the table" ordering.
  * 2. **The answer does not depend on what k the DME actually applied.** `k_applied` is measured
  *    (RF / rf_soll), so whether the correction's gate was open, shut, or holding a stale value
- *    through the hysteresis band, the equation is the same. This is why nothing here tries to
- *    evaluate the road-speed half of the gate, which DS2 selection 3 cannot report anyway.
+ *    through the hysteresis band, the equation is the same.
+ *
+ *    That algebra still holds, but the sentence that used to follow it — "this is why nothing here
+ *    tries to evaluate the road-speed half of the gate, which DS2 selection 3 cannot report anyway"
+ *    — was doing damage two ways. `V` has been on the RAM read since 2026-08-30, so the premise
+ *    expired; and §"Where the gate DOES matter" below is the counter-argument to the conclusion. A
+ *    shut gate does not break the equation, it breaks the EXPERIMENT: k = 1.000 then means "the DME
+ *    was not correcting", not "this Δ needs no correction". The input pass now evaluates both
+ *    halves, and `annotateRfKorrPoint` pins `rfKorr` to 1.000 outside them, so the `k_applied` read
+ *    here is what the DME applied rather than what the ratio happened to read.
  *
  * ## Where the gate DOES matter
  *
@@ -511,7 +519,12 @@ export function rfKorrCensus(
         //
         // Ordered before the hysteresis test because it is the strictly stronger statement: shut is
         // shut, whereas the band below is about a value that is real but belongs to another point.
-        if (!gateOpen(egt, p.rpm, rfSoll)) {
+        //
+        // BOTH halves, since 2026-09-09. The load half alone let a sample taken at 15 km/h through
+        // to derive a cell of KF_RF_KORR_DRREL from a `k_applied` that was 1.000 because of the
+        // SPEED floor — the same "no effect, so clamp to 1.000" failure this comment describes,
+        // arriving by the other door.
+        if (!rfKorrActive(egt, p.rpm, rfSoll, p.vehicleSpeed)) {
             report.samplesGateShut++;
             continue;
         }

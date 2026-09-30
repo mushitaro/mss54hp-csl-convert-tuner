@@ -1,5 +1,5 @@
 import { LogDataPoint } from '@/lib/types';
-import { EgtTables, gateOpen } from './egtTables';
+import { EgtTables } from './egtTables';
 
 /**
  * How far apart the two routes to rf_korr land, over one log.
@@ -21,9 +21,15 @@ import { EgtTables, gateOpen } from './egtTables';
  *
  * ## Only where the gate was open
  *
- * Below the filling floor BOTH routes return 1.000 by construction — `rfKorrFromEgt` because
- * annotateRfKorr reproduces the gate, and `rfKorr` because RF really is just rf_soll there. Two
- * numbers that are pinned to the same constant agree perfectly and confirm nothing.
+ * Outside the DME's conditions BOTH routes return 1.000 by construction, because `annotateRfKorr`
+ * now reproduces the gate on both of them. Two numbers pinned to the same constant agree perfectly
+ * and confirm nothing.
+ *
+ * `rfKorr` used to reach 1.000 there for a different and weaker reason — "RF really is just rf_soll
+ * when the correction is off". Measured over six drives that is false on 586 gate-shut samples,
+ * which read above 1.10; the ratio also carries the rf_soll filter's lag and the load-axis
+ * reconstruction. Those samples used to enter this statistic as large gaps against a pinned table
+ * route, which made the mean gap look like a route disagreement when it was an ungated ratio.
  *
  * That is not a hypothetical. On the first real drive, over the whole log this reported a mean gap
  * of 0.0115 — a comfortable pass against the 0.02 tolerance — while over the 100 samples where the
@@ -34,10 +40,14 @@ import { EgtTables, gateOpen } from './egtTables';
  *
  * ## What a gap does NOT prove
  *
- * The two are still allowed to differ where the DME's correction was gated off by ROAD SPEED: below
- * 20 km/h the DME applies 1.000 while the table still reads high. No logged channel carries road
- * speed, so those samples cannot be excluded — which is why this reports a distribution rather than
- * a verdict, and why the caller shows the number instead of a pass/fail lamp.
+ * This used to end: "the two are still allowed to differ where the DME's correction was gated off by
+ * ROAD SPEED — no logged channel carries road speed, so those samples cannot be excluded." Road
+ * speed has been logged since 2026-08-30 and `rfKorrGateOpen` has evaluated it since 2026-09-09, so
+ * they ARE excluded now and that particular excuse is gone. What remains is that both routes pass
+ * through the same Δ and the same rf_soll, so agreement is a consistency check on the offsets and
+ * the tables, not an independent confirmation of either — which is still why this reports a
+ * distribution rather than a verdict, and why the caller shows the number instead of a pass/fail
+ * lamp.
  */
 export interface RfKorrRouteAgreement {
     /** Samples where both routes produced a value AND the load gate was open — the only ones that
@@ -45,8 +55,12 @@ export interface RfKorrRouteAgreement {
     n: number;
     meanAbsGap: number;
     maxAbsGap: number;
-    /** Samples where `RF ÷ rf_soll` sat at exactly 1.000 while the table route did not. High on a
-     *  drive with a lot of low-speed running — and also the signature of a wrong RF offset. */
+    /** Samples where `RF ÷ rf_soll` sat at exactly 1.000 while the table route did not.
+     *
+     *  It used to be readable two ways — a wrong RF offset, or simply a lot of low-speed running,
+     *  which nothing could tell apart. Low-speed samples are now excluded by the gate before they
+     *  reach here, so what is left is gate-OPEN and the second reading is gone: this is the wrong-RF
+     *  -offset signature, and any non-zero count is worth chasing. */
     ratioFlatWhileTableHigh: number;
 }
 
@@ -63,7 +77,13 @@ export function rfKorrRouteAgreement(
         if (p.rfKorr === undefined || p.rfKorrFromEgt === undefined) continue;
         // `egt` optional so a caller without the binary's tables still gets the old whole-log
         // number rather than nothing. It is the worse measurement, not a broken one.
-        if (egt && (p.rfSoll === undefined || !gateOpen(egt, p.rpm, p.rfSoll))) continue;
+        //
+        // The verdict `annotateRfKorrPoint` already reached, rather than a second evaluation of it
+        // — and that verdict is now BOTH halves of the DME's condition. It has to be: since the
+        // measured route became gated, a gate-shut sample has 1.000 on both sides and would enter
+        // as a perfect agreement that measures nothing. Undefined counts as shut, because a point
+        // with no verdict was annotated without the tables and cannot be shown to have been open.
+        if (egt && !p.rfKorrGateOpen) continue;
         const gap = Math.abs(p.rfKorr - p.rfKorrFromEgt);
         n++;
         sum += gap;

@@ -1,7 +1,13 @@
 import type { DialogLang } from '@/lib/dialog-text';
 
 /**
- * 姉妹サイト m3.tsunagi.app のプライバシーポリシー。
+ * 姉妹サイト m3.tsunagi.app のプライバシーポリシー。ビルドに応じて節が違う。
+ *
+ * - 本番と staging は `#tuner`(第 9 条)。以下の説明はこちらのもの。
+ * - プレビュー版は `#preview`。プレビュー版は本番と違い、オーナーゲートの内側でアカウントに紐づけて
+ *   セッションと診断記録(VIN・BIN・エラー文・ビルド)を送る。本番の「送信は更新確認 1 本のみ」は
+ *   プレビュー版には当てはまらないので、プレビュー版から `#tuner` を指すと、読んだ人に偽の約束を
+ *   見せることになる。`preview` は app-variant が `preview` のときだけ真(useIsPreviewBuild)。
  *
  * スコープはサイトではなく `"M"/ TSUNAGI GARAGE`(サービス全体)と書かれており、個人情報の定義に
  * 車台番号(VIN)を含む — このツールが DME から読み出して表示している、まさにその値である。
@@ -25,17 +31,41 @@ import type { DialogLang } from '@/lib/dialog-text';
  *
  * 直接は使わず、`usePrivacyPolicyUrl()` 経由で読むこと(ハイドレーション不一致を避けるため)。
  */
-export function privacyPolicyUrl(lang: DialogLang): string {
+export function privacyPolicyUrl(lang: DialogLang, preview = false): string {
+    const anchor = preview ? '#preview' : '#tuner';
     return lang === 'ja'
-        ? 'https://m3.tsunagi.app/privacy-policy#tuner'
-        : 'https://m3.tsunagi.app/en/privacy-policy#tuner';
+        ? `https://m3.tsunagi.app/privacy-policy${anchor}`
+        : `https://m3.tsunagi.app/en/privacy-policy${anchor}`;
 }
 
 /**
  * プリレンダー時に埋まる値。`detectDialogLang()` が navigator の無い環境で 'ja' を返すのと
  * 同じ既定で、静的 HTML と最初のクライアント描画を一致させるためにここに固定してある。
+ * バリアントもプリレンダーでは「本番」(useIsPreviewBuild のサーバ側スナップショット)。
  */
 export const PRIVACY_POLICY_URL_DEFAULT = privacyPolicyUrl('ja');
+
+/**
+ * MESH — where this work continues, on the sister site: the connection tiers
+ * (Minds / Masters / Mainstay) and the list of the people who carry it.
+ *
+ * Linked from ONE place, the colophon at the foot of the Credits dialog. It is not
+ * an attribution — the credits record whose work this rests on; this records
+ * where the work goes next — so it does not belong among the entries, nor in the
+ * header row, nor in the disclaimer gate (which must stay a gate, not a funnel).
+ *
+ * Two languages, one function, same rule as privacyPolicyUrl: the dialog already
+ * knows its language, so read it there and pass it in. Cross-origin, therefore
+ * target="_blank" rel="noopener noreferrer" — a same-tab navigation drops the
+ * serial link and takes an unsaved run with it. A plain <a>: no <Link>, no
+ * prefetch, no favicon — the production build makes exactly one network request
+ * (the update check) and the privacy policy says so.
+ */
+export function meshUrl(lang: DialogLang): string {
+    return lang === 'ja'
+        ? 'https://m3.tsunagi.app/mesh'
+        : 'https://m3.tsunagi.app/en/mesh';
+}
 
 /**
  * Where the work this tool is built on actually lives.

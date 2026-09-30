@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Heart } from 'lucide-react';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { DialogFrame } from './DialogFrame';
-import { CREDIT_LINKS } from '@/config/links';
+import { CREDIT_LINKS, meshUrl } from '@/config/links';
+import { readSupporters } from '@/lib/supporters';
 
 /**
  * Who this tool is built on, reachable from inside the app rather than only from the README.
@@ -34,6 +35,12 @@ import { CREDIT_LINKS } from '@/config/links';
  * The Japanese is written in 敬体 — 公開してくださった, 負っている, 拠ります — because a credit that
  * reads as a bibliography honours no one, and this is the one screen in the app whose whole purpose
  * is to honour someone.
+ *
+ * The supporters — people who bought MILE for this tool on MESH and agreed to be named — are in the
+ * colophon, not among the entries: the entries record whose work this rests on, the colophon where
+ * the work goes and who carries it. Names only, most MILE first, never a figure. They are written
+ * into the page at build time (scripts/inject-supporters.mjs), so reading them costs no request and
+ * production still makes only its update check; a dev server has none and shows only the MESH line.
  *
  * Deliberately NOT in DisclaimerDialog. That is a gate with a "don't show again" checkbox: putting
  * attribution behind it means attribution disappears the moment someone ticks the box.
@@ -75,6 +82,11 @@ const TEXT = {
             + '同文書では、コミュニティによる報告と、本解析による導出（未検証を含む）とを'
             + '区別しています。',
         build: 'ビルド',
+        meshLead: '本ツールは TSUNAGI のコミュニティに繋がっています。研究の続きと、支えてくださる方々の一覧は',
+        meshTail: 'に。',
+        supportersLead: 'このツールを支えてくださっている方々',
+        supportersOthers: 'ほか、名前を出さずに支えてくださっている方々',
+        supportersAsOf: (date: string) => `${date} 時点・MILE の多い順`,
     },
     en: {
         title: 'CREDITS',
@@ -109,6 +121,11 @@ const TEXT = {
             + 'docs/ecu-logic/90-sources.md, which distinguishes what was reported by the community '
             + 'from what was derived here and remains unverified.',
         build: 'Build',
+        meshLead: 'This tool is part of the TSUNAGI community. The research continues, and the people who carry it are listed, at',
+        meshTail: '.',
+        supportersLead: 'Carried by',
+        supportersOthers: '…and others who chose not to be named',
+        supportersAsOf: (date: string) => `As of ${date}, most MILE first`,
     },
 };
 
@@ -139,6 +156,9 @@ const Entry: React.FC<{ who: React.ReactNode; children: React.ReactNode }> = ({ 
 export const CreditsDialog: React.FC<Props> = ({ onClose, buildLabel }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
+    // Read once, when the dialog opens: the list is in the page, not the bundle.
+    const [supporters] = useState(readSupporters);
+    const named = supporters && (supporters.names.length > 0 || supporters.others);
 
     return (
         <DialogFrame
@@ -192,6 +212,41 @@ export const CreditsDialog: React.FC<Props> = ({ onClose, buildLabel }) => {
                         {t.build} {buildLabel}
                     </p>
                 )}
+
+                {/* A colophon, not a credit. The entries above record whose work this rests on;
+                    this line records where the work continues. Kept dim and last so it reads as a
+                    footer, and neutral — it states no machine state, so it borrows no accent. One
+                    hairline, the same one the build line uses; a second device on the same edge
+                    would draw a box. Plain <a>, no prefetch: see meshUrl in config/links.ts. */}
+                <div className="pt-2 mt-1 border-t border-slate-800 text-[10px] leading-relaxed text-slate-600">
+                    <span className="font-mono uppercase tracking-widest">integrated by tsunagi</span>
+                    {supporters && named && (
+                        <div className="mt-2">
+                            <p className="text-slate-500">{t.supportersLead}</p>
+                            {supporters.names.length > 0 && (
+                                <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-400">
+                                    {supporters.names.map((n, i) => (
+                                        <span key={`${i}:${n}`}>{n}</span>
+                                    ))}
+                                </p>
+                            )}
+                            {supporters.others && <p className="mt-1">{t.supportersOthers}</p>}
+                            <p className="mt-1 font-mono text-[9px] tracking-wider">{t.supportersAsOf(supporters.asOf)}</p>
+                        </div>
+                    )}
+                    <p className="mt-2">
+                        {t.meshLead}{' '}
+                        <a
+                            href={meshUrl(lang)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-500 hover:text-slate-300 underline underline-offset-2 transition-colors"
+                        >
+                            MESH
+                        </a>
+                        {t.meshTail}
+                    </p>
+                </div>
             </div>
         </DialogFrame>
     );

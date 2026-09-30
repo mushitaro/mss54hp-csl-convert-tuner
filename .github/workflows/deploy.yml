@@ -27,6 +27,14 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm ci
+
+      # This repository is public. Nothing tracked may be a BMW-derived binary, a third-party XDF,
+      # a database, a secret or a real VIN (scripts/check-public-tree.mjs; the deliberate
+      # exceptions, with reasons, in .public-tree-allow). Before the build, so a release carrying
+      # one never reaches the site either.
+      - name: Check the public tree
+        run: node scripts/check-public-tree.mjs
+
       - name: Build
         run: npm run build
 
@@ -40,6 +48,13 @@ jobs:
         run: |
           test -s out/.well-known/assetlinks.json
           cat out/.well-known/assetlinks.json
+
+      # The CREDITS names are written into every page by scripts/inject-supporters.mjs, from
+      # m3.tsunagi.app/api/credits. The step stops the build if it cannot read them, so reaching this
+      # line means they were read; this asserts they also landed — one block in the start page.
+      - name: Check the CREDITS names were written in
+        run: |
+          test "$(grep -o 'id="m-supporters"' out/index.html | wc -l)" -eq 1
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

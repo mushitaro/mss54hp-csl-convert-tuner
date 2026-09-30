@@ -25,6 +25,23 @@ export function index(raw: Graph): Indexed {
     push(inc, e.d, e);
   }
 
+  // The same node under the spelling Ghidra is able to hold.
+  //
+  // 69 parameters carry `?` in their XDF name — `K_SMG_???_DAT_0008a862` — and
+  // `?` is not a character a Ghidra symbol may contain, so whoever imported
+  // them replaced each one with `_`. The decompiled C therefore spells that
+  // very calibration `K_SMG_____DAT_0008a862`, and until this alias existed the
+  // tree and the CODE view showed one address under two names with nothing
+  // connecting them. 68 of the 69 appear in the C, so it was not a corner.
+  //
+  // Registered here rather than at each of the five places that read
+  // `nameIndex`, so a name that reaches one reaches all of them.
+  for (const n of raw.nodes) {
+    if (!n.name?.includes("?")) continue;
+    const ghidraSpelling = n.name.replace(/\?/g, "_");
+    if (!(ghidraSpelling in raw.nameIndex)) raw.nameIndex[ghidraSpelling] = n.id;
+  }
+
   const params = raw.nodes.filter((n) => n.t === "param");
   const categoryMembers = new Map<number, GraphNode[]>();
   for (const p of params) {

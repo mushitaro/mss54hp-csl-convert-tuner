@@ -64,7 +64,7 @@ const processed = M.processLogData(read('log.json'), session.baseFileName, cfg,
     session.tuneSettings.interpolationTable);
 const calc = new M.VECalculator();
 const ve = calc.annotateRfKorr(veMap, processed.data, M.readEgtTables(ab),
-    { curves: M.readRfPtKorrCurves(ab) });
+    { curves: M.readRfPtKorrCurves(ab) }, processed.rawData);
 const res = calc.calculateNewVEMap(veMap, ve, { egt: M.readEgtTables(ab) });
 
 console.log(NL + '='.repeat(92));

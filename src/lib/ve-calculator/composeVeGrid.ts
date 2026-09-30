@@ -1,83 +1,50 @@
 /**
  * The one place kf_rf_soll is composed before it is written.
  *
- * Three workflows own cells in this table — VE (mid/high opening rows), LOW LOAD (the low-opening
- * rows), and eventually IDLE (the lowest rows, currently sealed). Before this module existed each
- * of them wrote the whole 24x20 grid itself, and the arbitration was call order alone: the LOW
- * LOAD write ran AFTER the VE write while its own comment claimed the opposite, so arming both
- * reverted every VE-corrected cell above the low rows to BASE — silently, with both panels still
- * reading armed and the file still named Tune_. docs/ecu-logic/65-workflows.md, defect 1.
+ * TWO workflows own cells in this table — the measured derivation (`VECalculator`) and SHAPE, the
+ * log-free geometric repair. Before this module existed each wrote the whole 24x20 grid itself and
+ * the arbitration was call order alone, which reverted corrected cells to BASE silently, with both
+ * panels still reading armed and the file still named Tune_. docs/ecu-logic/65-workflows.md,
+ * defect 1.
  *
  * The rule, stated once: every cell has exactly one owner.
  *
- *   - LOW LOAD owns the cells it measured or repaired (`owned[r][c]`) — not because it applies a
- *     different correction (it applies the identical `trim x rf_korr`) but because the VE path
- *     refuses that band outright (`veOwnsRow = r > LOW_LOAD_TOP_ROW`) and LOW LOAD is the only
- *     one carrying evidence gates shaped for a dwell rather than a sweep.
- *   - VE owns every cell it accepted.
+ *   - The measurement owns every cell it accepted.
+ *   - SHAPE overlays the cells it repaired.
  *   - Everything else stays BASE.
  *
- * ## The two invariants this composition rests on
+ * There used to be a THIRD owner, a second measured derivation of the same table; it is gone, and
+ * one derivation on one set of bars now decides every cell. What is left to arbitrate is the
+ * measurement against SHAPE.
  *
- * The function never sees the BASE grid, and does not need to, because both inputs already carry
- * it in their untouched cells:
+ * ## The invariant this composition rests on
  *
- *   1. The VE calculator pushes `oldVal` for every cell that did not clear the evidence gate
- *      (calculator.ts, the `acceptedMap` branch) — so `veMap`'s non-accepted cells are
- *      byte-identical to BASE.
- *   2. The low-load tuner seeds its grid from `currentMap.data` and writes only the cells it
- *      marks `measured`/`repaired` (lowLoadTuner.ts, `tuned = stock.map(r => [...r])`) — so
- *      `lowLoad.grid`'s non-owned cells are byte-identical to BASE.
- *
- * Therefore "start from whichever grid exists, then overwrite the owned cells" implements the
- * ownership rule exactly. verify:compose asserts invariant 2 against the real tuner on every run,
- * because the composition silently stops being correct the day either invariant breaks.
+ * The function never sees the BASE grid, and does not need to, because its input already carries it
+ * in the untouched cells: the calculator pushes `oldVal` for every cell that did not clear the
+ * evidence gate (calculator.ts, the `acceptedMap` branch), so a non-accepted cell is byte-identical
+ * to BASE. verify:compose asserts that against the real calculator on every run, because the
+ * composition silently stops being correct the day it breaks.
  */
-
-/** A low-load derivation armed for writing: the full grid plus which cells it actually owns. */
-export interface LowLoadArm {
-    /** 24x20, BASE-seeded, only owned cells changed. `LowLoadResult.tuned`. */
-    grid: number[][];
-    /** 24x20, true where the tuner measured or repaired the cell. `LowLoadResult.owned`. */
-    owned: boolean[][];
-}
 
 export interface ComposedVe {
     /** The single grid to hand to `setVETableData` — the only writer of kf_rf_soll. */
     grid: number[][];
-    /** How many cells LOW LOAD contributed. For the manifest and the write dialog. */
-    lowLoadCells: number;
 }
 
 /**
- * Compose the kf_rf_soll grid from every armed contribution.
+ * Compose the kf_rf_soll grid from the armed derivation.
  *
- * Pass null for a contribution whose toggle is off — an OFF toggle and an underived table are the
- * same fact here ("this workflow contributes nothing"), which is what keeps the write gate in one
- * place. Returns null when nothing contributes, and the caller must then not touch the table at
- * all: BASE bytes stay BASE bytes, rather than being rewritten with a copy of themselves.
+ * Pass null when the toggle is off — an OFF toggle and an underived table are the same fact here
+ * ("this workflow contributes nothing"), which is what keeps the write gate in one place. Returns
+ * null when nothing contributes, and the caller must then not touch the table at all: BASE bytes
+ * stay BASE bytes, rather than being rewritten with a copy of themselves.
+ *
+ * A copy, not the input. The SHAPE overlay in `writtenVeGrid` writes into what this returns, and
+ * handing back the caller's own grid would let a repair mutate the tuned map behind it.
  */
-export function composeVeGrid(
-    veMap: number[][] | null,
-    lowLoad: LowLoadArm | null,
-): ComposedVe | null {
-    if (!veMap && !lowLoad) return null;
-
-    const seed = veMap ?? lowLoad!.grid;
-    const grid = seed.map(row => [...row]);
-
-    let lowLoadCells = 0;
-    if (lowLoad) {
-        for (let r = 0; r < grid.length; r++) {
-            for (let c = 0; c < grid[r].length; c++) {
-                if (lowLoad.owned[r]?.[c]) {
-                    grid[r][c] = lowLoad.grid[r][c];
-                    lowLoadCells++;
-                }
-            }
-        }
-    }
-    return { grid, lowLoadCells };
+export function composeVeGrid(veMap: number[][] | null): ComposedVe | null {
+    if (!veMap) return null;
+    return { grid: veMap.map(row => [...row]) };
 }
 
 /** The SHAPE repair armed for writing: the repaired grid plus which cells it actually changed. */
@@ -108,10 +75,9 @@ export interface ShapeArm {
  */
 export function writtenVeGrid(
     veMap: number[][] | null,
-    lowLoad: LowLoadArm | null,
     shape: ShapeArm | null,
 ): number[][] | null {
-    const composed = composeVeGrid(veMap, lowLoad);
+    const composed = composeVeGrid(veMap);
     if (!composed) return null;
     const grid = composed.grid;
     if (shape) {

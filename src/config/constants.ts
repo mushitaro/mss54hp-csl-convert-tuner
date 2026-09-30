@@ -403,6 +403,62 @@ export const TANK_VENT_GAIN = {
     DISABLED_RAW: 0x00,
 } as const;
 
+/**
+ * `kl_rf_korr_rf_min` — the filling floor, per rpm, above which `rf_korr` may engage at all.
+ *
+ * Master, 6 x u16 at `0xE90C`, `x/1000`; the rpm breakpoints sit at `0xE900` and are NOT touched.
+ * Verified against session #946's BASE: x = 1400/1600/2000/2500/3300/4000 rpm,
+ * y = 700/550/650/650/650/800 raw, i.e. 0.70/0.55/0.65/0.65/0.65/0.80 RF.
+ *
+ * ## Why an app patch exists for it
+ *
+ * `KF_RF_KORR_DRREL` is derived as `A(Δ)/A(0) = k(Δ)·STFT(Δ) / [k(0)·STFT(0)]`, so it needs, in one
+ * VE cell, a gate-open sample at Δ ≈ 0 to divide by. On this car those two conditions are mutually
+ * exclusive, and the six-drive measurement says so exactly: of 3,063 gate-open samples the smallest
+ * Δ ever seen was 46 °C and NONE reached the table's 30 °C anchor row, while Δ ≤ 30 itself is
+ * abundant — 13,228 samples of it — all of it below the floor with the gate shut. The floor is what
+ * separates them: it admits only filling above 0.55-0.80, where `kf_rf_tabg_modell` reads 600-750 °C
+ * and a Pt200 with the exhaust system's thermal mass behind it (τ ≈ 148 s, docs/ecu-logic/
+ * 60-tuning-logic.md §6.1.6) never catches up inside a road pull.
+ *
+ * Dropping the floor moves the gate down to where Δ ≈ 0 already exists. Replayed over the same six
+ * drives, with no change to how they were driven:
+ *
+ *     floor   gate-open   anchors (Δ<=30)   VE cells with an anchor AND ratio samples
+ *     0.70       2,412            0            0      <- stock, and why the tuner writes nothing
+ *     0.50       8,212           21            1
+ *     0.45      12,480           93            6
+ *     0.40      19,113          319           13
+ *     0.35      27,151          908           18
+ *
+ * 0.40 is the value the toggle writes: the first floor that earns a double-figure cell count.
+ *
+ * ## What it costs while it is in the car
+ *
+ * The gate is what keeps this correction off the light-load part of the map. With the floor at 0.40
+ * the DME applies `rf_korr` across a much wider region — and since Δ sits at 130-300 °C whenever the
+ * car is moving under load, that means the Δ=200/300 rows, i.e. +5 to +28 % of enrichment where
+ * there was none. RF is inflated with it, so ignition and the torque model move too. TUNING ONLY,
+ * for one measurement drive, with the VE write disarmed.
+ */
+export const RF_KORR_GATE_FLOOR = {
+    /** The Y block. The X block at 0xE900 is deliberately absent: the breakpoints stay BMW's. */
+    VALUES_ADDRESS: 0xE90C,
+    POINTS: 6,
+    /** 0.400 RF. */
+    DROPPED_RAW: 400,
+    /**
+     * A floor at or below this counts as "this app dropped it", for the same reason
+     * `setWOTThreshold` tests `> 1000`: a restore has to know whether the loaded bytes are a
+     * measurement to go back to or this patch looking at itself. BMW's lowest point is 0.55, so
+     * anything at 0.45 or under is not a calibration this car shipped with.
+     */
+    DROPPED_MAX_RAW: 450,
+    /** Where a restore lands when the loaded BASE was ALREADY dropped and so cannot say what it
+     *  held before. Read off session #946's BASE, not transcribed from a document. */
+    STOCK_RAW: [700, 550, 650, 650, 650, 800],
+} as const;
+
 // Stock WOT Threshold Map (4x4) - Transcribed
 // Scaling: x/10 (Raw = Val * 10)
 export const CSL_STOCK_WOT_THRESHOLD_MAP: number[][] = [

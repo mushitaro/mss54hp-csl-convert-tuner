@@ -66,10 +66,36 @@ console.log('\n[the production channel set, as a literal]');
             ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1'].sort()),
         ridingAlong.join(', '));
 
+    /*
+     * This asked whether every core/tuning channel was on a kept VE exchange, which was the same
+     * question as "does a production log carry what a tune needs" right up until there were two
+     * derivations. The LLS ring's four channels are `tuning` — an LLS tune is read from them — and
+     * live on the LLS profile alone, so the old form reported them as unaccounted for.
+     *
+     * Restated, in two halves rather than by widening into a union that would let a VE channel go
+     * missing behind an LLS one:
+     *   - nothing is orphaned: every core/tuning channel is provided by SOME runnable profile;
+     *   - nothing is dropped: within each profile, the tuning channels it provides survive the
+     *     production narrowing.
+     */
+    const RUNNABLE = Object.keys(LOG_PROFILES).filter(id => LOG_PROFILES[id].runnable);
+    const providedAnywhere = set(RUNNABLE.flatMap(id =>
+        [...(LOG_PROFILES[id].exchanges ?? []), ...(LOG_PROFILES[id].fallback ?? [])]
+            .flatMap(x => [...(x.provides ?? [])])));
     const wanted = keys.filter(k => rel(k) !== 'debug');
-    const missing = wanted.filter(k => !recorded.includes(k) && !COMPUTED.includes(k));
-    check('every core/tuning channel is either on a kept exchange or computed', missing.length === 0,
-        `unaccounted: ${missing.join(', ')}`);
+    const orphaned = wanted.filter(k => !providedAnywhere.includes(k) && !COMPUTED.includes(k));
+    check('every core/tuning channel is provided by some runnable profile, or computed',
+        orphaned.length === 0, `unaccounted: ${orphaned.join(', ')}`);
+
+    for (const id of RUNNABLE) {
+        const all = LOG_PROFILES[id].exchanges ?? [];
+        const mine = set(all.flatMap(x => [...(x.provides ?? [])])).filter(k => rel(k) !== 'debug');
+        if (!mine.length) continue;
+        const kept = set(productionExchanges(all).flatMap(x => [...(x.provides ?? [])]));
+        const dropped = mine.filter(k => !kept.includes(k));
+        check(`${id}: production keeps every core/tuning channel it provides`, dropped.length === 0,
+            `dropped by the narrowing: ${dropped.join(', ')}`);
+    }
     const staleComputed = COMPUTED.filter(k => recorded.includes(k));
     check('nothing in COMPUTED is also claimed by an exchange', staleComputed.length === 0, staleComputed.join(', '));
 }

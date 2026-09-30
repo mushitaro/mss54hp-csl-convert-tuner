@@ -5,6 +5,7 @@ import type { LogDataPoint, VEMap, LogFilterConfig, InterpolationPoint } from '@
 // rfKorrTuner.ts:3 and adaptationBlocks.ts:14.
 import type { AdaptationSnapshot } from '@/lib/dme-link/adaptationBlocks';
 import type { EgasMeasurement, InertiaSample, IdleSample } from '@/lib/dme-link/types';
+import type { LlsSample } from '@/lib/lls/fromLog';
 import type { CalEdit } from '@/lib/calibration/edits';
 
 export const DB_NAME = 'mss54hp-tuner-db';
@@ -50,6 +51,18 @@ export interface TuneSettings {
      * know which a session was is that this was written down.
      */
     applyTankVentDisable?: boolean;
+    /**
+     * `kl_rf_korr_rf_min` dropped to 0.400 — the rf_korr gate floor.
+     *
+     * Recorded for the same reason `applyTankVentDisable` is, and more sharply: this curve is what
+     * `readEgtTables` builds `EgtTables.rfKorrMin` from, so it decides which samples of a drive the
+     * app believes the DME was correcting. A log taken with the floor dropped and one taken without
+     * are not comparable, and the replay reads the BASE plus these flags to find out which it has.
+     *
+     * Optional, and absent means the stock floor: no session saved before this field existed could
+     * have carried the patch, because nothing could write it.
+     */
+    applyRfKorrGateDrop?: boolean;
     writeWarmup: boolean;
     /** @deprecated Retired 2026-08-21 with `generateWOTMap`, which derived this table as
      *  `stock x (newVE / stockVE)` — the VE correction applied a second time, lean by c^2. A stored
@@ -86,10 +99,36 @@ export interface TuneSettings {
      * manifest), not for interpreting the past.
      */
     writeVe?: boolean;
-    /** Write the low-opening rows of kf_rf_soll (composed with the VE map by composeVeGrid — one
-     *  table, one writer). Absence reads as false: no session saved before this field existed
-     *  could have had the block, the arming state was never persisted. */
-    writeLowLoad?: boolean;
+    /**
+     * Write the idle valve duty map, `KF_LLS_TV`.
+     *
+     * The last of the derived writers to get a field here, and it was missing for the whole time
+     * the write was sealed — which cost nothing then and would have cost the reproduction the
+     * moment it opened: a session that flashed idle bytes and did not record the arming cannot
+     * rebuild them, so its stored sha256 would disagree with its own replay and the tune would look
+     * corrupt rather than unrecorded.
+     *
+     * Absence reads as false, and here that is a fact rather than a lenient default: no session
+     * saved before this existed could have carried idle bytes, because IDLE_WRITE_SEALED refused
+     * them at the byte boundary.
+     *
+     * The PROPOSAL itself is not stored beside the flag. It is re-derived from the run's own
+     * samples — which `SessionLogRecord.idle` keeps unprojected for exactly this reason — so there
+     * is one source for the bytes rather than a flag and a snapshot that can disagree.
+     */
+    writeIdle?: boolean;
+    /**
+     * Write `KF_LLS_TV` from the micro-throttle ring solve.
+     *
+     * A SECOND flag for the same table, and that is deliberate rather than an oversight: the two
+     * derivations answer different questions from different drives, and a single `writeIdle` could
+     * not say which one a reopened session had armed. `composeLlsTv` is what keeps them from both
+     * owning a cell; this pair is what keeps the record able to say who owned what.
+     *
+     * Absence reads as false. Same rule as `writeIdle`: the proposal is not stored beside the flag,
+     * because it is re-derived from `SessionLogRecord.lls` plus the session's own BASE image.
+     */
+    writeLls?: boolean;
     /**
      * The CALIBRATION tab edits ARMED at save time — self-contained raw runs
      * (address/bits/signed/raw), the same records buildPatchedBuffer applied, so a
@@ -103,7 +142,8 @@ export interface TuneSettings {
 export interface FlashRecord {
     at: number;
     sha256: string;
-    settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'applyTankVentDisable' | 'writeWarmup' | 'writeWot' | 'restoreWotFuel'>;
+    settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'applyTankVentDisable'
+        | 'applyRfKorrGateDrop' | 'writeWarmup' | 'writeWot' | 'restoreWotFuel'>;
     /** Did these bytes carry a derived map, or only the patches? `settings` cannot answer that — a
      *  patch-armed BASE and a patch-armed tune record identically — and the flash count is now a mix
      *  of both, so the history has to say which each one was.
@@ -297,6 +337,16 @@ export interface SessionLogRecord {
      * drive once.
      */
     idle?: IdleSample[];
+    /**
+     * The micro-throttle run's raw samples.
+     *
+     * Same rule as the two above, and one more of its own: the projection into `data` has no column
+     * for road speed on every row, and `rollingOnly` needs it to drop the stopped samples. A run
+     * stored only as the projection would replay with its stationary head and tail included, which
+     * moves the worst decile of the phase margin by 2.5 degrees — a wrong answer rather than a
+     * missing one.
+     */
+    lls?: LlsSample[];
     /**
      * Runs recorded against the abandoned DS2 selection-83 design, kept readable.
      *

@@ -65,12 +65,21 @@ check('it names at least twenty channels', named.size >= 20, `${named.size}`);
 check('every entry copies the field of the same name', mismatched.length === 0, mismatched.join(', '));
 
 console.log('\n[every channel an exchange provides reaches the log]');
-for (const which of ['exchanges', 'fallback']) {
-    const list = LOG_PROFILES.VE[which] ?? [];
-    const provided = [...new Set(list.flatMap(x => [...(x.provides ?? [])]))].sort();
-    const missing = provided.filter(k => !named.has(k));
-    check(`VE ${which}: ${provided.length} provided, all on the bridge`, missing.length === 0,
-        `dropped between the link and the log: ${missing.join(', ')}`);
+// EVERY runnable profile, not just VE. This read LOG_PROFILES.VE alone, which was true to the two
+// drives it was written after and silently blind to any mode added later: LLS polls three RAM
+// exchanges of its own and none of them would have been covered. A profile that cannot be started
+// is skipped, because a channel nothing can record cannot be dropped on the way to a log.
+const RUNNABLE = Object.keys(LOG_PROFILES).filter(id => LOG_PROFILES[id].runnable);
+check('more than one runnable profile is checked', RUNNABLE.length > 1, RUNNABLE.join(', '));
+for (const id of RUNNABLE) {
+    for (const which of ['exchanges', 'fallback']) {
+        const list = LOG_PROFILES[id][which] ?? [];
+        const provided = [...new Set(list.flatMap(x => [...(x.provides ?? [])]))].sort();
+        if (!provided.length) continue;
+        const missing = provided.filter(k => !named.has(k));
+        check(`${id} ${which}: ${provided.length} provided, all on the bridge`, missing.length === 0,
+            `dropped between the link and the log: ${missing.join(', ')}`);
+    }
 }
 
 console.log('\n[and nothing on the bridge is a channel the registry does not know]');

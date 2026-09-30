@@ -68,9 +68,9 @@ export type IdleRejectReason =
     // --- cell level --------------------------------------------------------------------------
     | 'no-evidence'
     | 'single-dwell'
-    | 'off-breakpoint'
     | 'stall-column'
     | 'cold-row'
+    | 'authority-floor-row'
     | 'below-authority-floor'
     | 'sub-quantum';
 
@@ -83,8 +83,8 @@ export const EMPTY_IDLE_REJECTS: IdleRejectCounts = {
     'too-short': 0, 'thin-count': 0, unsteady: 0, 'integrator-drifting': 0,
     'adaptation-moved': 0, 'ndiff-reset': 0, 'integrator-railed': 0,
     'duty-railed-low': 0, 'duty-railed-high': 0, 'limp-branch': 0,
-    'no-evidence': 0, 'single-dwell': 0, 'off-breakpoint': 0, 'stall-column': 0,
-    'cold-row': 0, 'below-authority-floor': 0, 'sub-quantum': 0,
+    'no-evidence': 0, 'single-dwell': 0, 'stall-column': 0,
+    'cold-row': 0, 'authority-floor-row': 0, 'below-authority-floor': 0, 'sub-quantum': 0,
 };
 
 export interface IdleTuneOptions {
@@ -108,6 +108,8 @@ export interface IdleTuneOptions {
     maxAdaptDriftNm: number;
     adaptSettleSec: number;
     // --- dwell ----------------------------------------------------------------------------------
+    /** How long a bridgeable excursion may last before it cuts the window. See findDwells. */
+    maxExcursionSec: number;
     dwellSec: number;
     minDwellSamples: number;
     maxMdLlriDriftNm: number;
@@ -129,8 +131,16 @@ export interface IdleTuneOptions {
     maxModelDeltaPct: number;
     minCellDwells: number;
     minCellSamples: number;
-    maxOffsetFrac: number;
-    minRpmTolerance: number;
+    /**
+     * GONE, and the note is the point: there were `maxOffsetFrac` and `minRpmTolerance` here, which
+     * refused a dwell that sat too far from the breakpoint it was binned onto.
+     *
+     * They implemented a design that binned each dwell onto ONE cell, and this car cannot satisfy
+     * it: it idles at 880 rpm against breakpoints at 800 and 950, so every dwell it will ever
+     * produce sat 0.467 of a span away and was refused. The fix was not a looser tolerance — see
+     * `lookupNodes`. A dwell is now evidence for every cell the DME reads it from, weighted, so
+     * there is no "off" a breakpoint to be.
+     */
     minTmotTolerance: number;
     qvsFloorFrac: number;
     qvsCeilingFrac: number;
@@ -147,9 +157,17 @@ export interface IdleTuneOptions {
  * up describing the tool's assumptions instead of the engine's behaviour.
  */
 export const IDLE_TUNE_DEFAULTS: IdleTuneOptions = {
-    /** KF_LLR_QVS_GRUND's own y[4] breakpoint, not the adaptation's 70 degC. A dwell taken here
-     *  bins onto the row it will be written to instead of bleeding weight into the 40 degC row. */
-    minCoolantC: 80,
+    /**
+     * The FALLBACK only — `readIdleTables` supplies `K_LFR_TMOT_ADAPT` from the loaded binary and
+     * that wins. See `IdleTables.adaptTmotC`.
+     *
+     * It was 80, taken from `KF_LLR_QVS_GRUND`'s y[4] COOLANT breakpoint so a dwell binned onto the
+     * row it would be written to. That map is dead and `KF_LLS_TV` has no coolant axis — its y is
+     * air demand, and a cooler engine asks for more air and lands on a higher row by itself. The 80
+     * survived the retarget as a leftover and cost a whole run: session #937 never rose above
+     * 77 degC and all 1080 of its samples were refused `not-warm`.
+     */
+    minCoolantC: 70,
     /** Above this KL_LFR_N_TOG starts lifting the target on oil temperature. */
     maxCoolantC: 105,
     /** Half of LLSync's own K_LL_DN_MAX (50 rpm). K_LFR_DN_EINGEREGELT is 200 rpm, which is the
@@ -172,8 +190,24 @@ export const IDLE_TUNE_DEFAULTS: IdleTuneOptions = {
     useAdaptationSum: true,
     maxAdaptDriftNm: 0.5,
     adaptSettleSec: 45,
-    /** Four time constants of K_LFR_TAU_IA1 (5.12 s). The "3 s in one direction is a feedforward
-     *  error" note is the DETECTION threshold; this is what it takes to put a number on it. */
+    /** A settle wait of ~20 s. Chosen as four times 5.12 s, which was believed to be the idle
+     *  integrator's time constant and is not — K_LFR_TAU_IA1 is only read in LFR_ZUSTAND 8, where
+     *  LFR_MDI has already been zeroed, and the idle rate is the KF_LFR_DQI map. The NUMBER is
+     *  kept because it is the right order of magnitude for a settle wait and changing it would
+     *  invalidate every stored session; the JUSTIFICATION is withdrawn. The "3 s in one direction
+     *  is a feedforward error" note is the DETECTION threshold; this is what it takes to put a
+     *  number on it. */
+    /**
+     * Under half of the 5.12 s settle constant above — see that note for why the constant is a
+     * heuristic rather than the ECU's idle time constant.
+     *
+     * Session #936 is 169 s of unbroken warm idle that the detector cut into eight windows, because
+     * 12 samples of ordinary governor wander crossed `maxSpeedErrorRpm`. Five of the eight were then
+     * too short to count. The excursion is not a different steady state — the governor moving off
+     * target IS the governor working — and the whole-window drift bound still decides steadiness, so
+     * this only decides whether to CUT.
+     */
+    maxExcursionSec: 2.0,
     dwellSec: 20.0,
     minDwellSamples: minDwellSamplesFor(20.0),
     maxMdLlriDriftNm: 3.0,
@@ -210,8 +244,6 @@ export const IDLE_TUNE_DEFAULTS: IdleTuneOptions = {
      *  repeated 120 times, which is a different thing from two observations. */
     minCellDwells: 2,
     minCellSamples: 120,
-    maxOffsetFrac: 0.35,
-    minRpmTolerance: 40,
     minTmotTolerance: 5,
     qvsFloorFrac: 0.70,
     qvsCeilingFrac: 1.50,
@@ -248,7 +280,8 @@ export interface IdleDwell {
     endIndex: number;
     durationSec: number;
     samples: number;
-    /** Where this evidence SAT, for the off-breakpoint test. */
+    /** Where this evidence SAT. With `mlSollLlsMean` it is the operating point the correction is
+     *  distributed from — see `lookupNodes` — and the point the gain's slope is evaluated at. */
     rpmMean: number;
     tmotMean: number;
     /**
@@ -278,6 +311,23 @@ export interface IdleDwell {
     mdLlraMean: number;
     mdLlraDrift: number;
     llsTvMean: number | null;
+    /**
+     * The four window statistics the gates compare against, kept on the dwell rather than recomputed.
+     *
+     * They were locals inside the detector, which meant the LIVE rack could only show them by
+     * computing them a second time — and a bar that says "inside" beside a census that refused the
+     * window for exactly that gate is worse than no bar. Reported whether or not the gate they feed
+     * is the one that fired, because "the voltage was steady" is worth seeing on a window refused
+     * for something else.
+     */
+    /** Spread of `ub` across the window, V — a load being SWITCHED. */
+    ubDrift: number;
+    /** |mean(ub) - the run's resting ub|, V — a load that was on for this whole window. */
+    ubOffset: number;
+    /** Spread of `n_soll`, rpm. The target itself moving. */
+    nSollDrift: number;
+    /** |trimmed mean - median| of md_llri, Nm. An EVENT rather than a steady state. */
+    statDisagree: number;
     /** `mdLlri + (useAdaptationSum ? mdLlra : 0) - idleTargetNm`, Nm. Positive = needs more air. */
     error: number;
     rejected: IdleRejectReason | null;

@@ -17,7 +17,8 @@
  * Everything here runs the real VECalculator against a real-shaped stock table, so the assertions
  * are about the shipped arithmetic and not a restatement of it.
  */
-import { VECalculator, RF_TRUNCATION_MEAN_PERCENT } from '../src/lib/ve-calculator/calculator.ts';
+import { VECalculator, RF_TRUNCATION_MEAN_PERCENT, RF_KORR_SETTLE_SEC_DEFAULT } from '../src/lib/ve-calculator/calculator.ts';
+import { RfKorrLatch } from '../src/lib/ve-calculator/egtTables.ts';
 import { APP_CONFIG } from '../src/config/constants.ts';
 
 /**
@@ -50,7 +51,17 @@ const FLAT_AIR = {
  * app adds back.
  */
 const inAir = (sample) => ({
-    intakeTemp: 20, ambientPressure: 960.5, ...sample,
+    // Moving, by default. `rf_korr_calc`'s condition has TWO operands and the second is
+    // `k_rf_korr_v_min < V`, so a sample with no road speed is a sample that cannot be shown to
+    // have cleared a 20 km/h floor — and `rfKorrActive` refuses it. Defaulted here rather than
+    // written into thirty call sites, because "was the car moving" is not what most of these
+    // checks are about; the ones that ARE override it.
+    //
+    // SETTLED by default, for the same reason. A gate-open sample younger than
+    // `RF_KORR_SETTLE_SEC_DEFAULT` (1.0 s) is written with the trim alone, because the lambda loop
+    // has not answered the enrichment yet. Every check below is about the DIVISOR rather than the
+    // clock, so they say 30 s and the one section that IS about the clock overrides it.
+    intakeTemp: 20, ambientPressure: 960.5, vehicleSpeed: 80, rfKorrDwellSec: 30, ...sample,
     ...(sample.rf === undefined ? {} : { rf: sample.rf - RF_TRUNCATION_MEAN_PERCENT }),
 });
 
@@ -89,8 +100,12 @@ const calc = new VECalculator();
 const mapOf = (v) => ({ xAxis: RPM, yAxis: LOAD, data: LOAD.map(() => RPM.map(() => v)) });
 
 /** One sample through the real path; returns the cell's nominal and tuned corrections. */
-function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tunedTable = tuned } = {}) {
-    const point = calc.annotateRfKorrPoint(map, inAir(sample), egt, air);
+function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tunedTable = tuned, gate = null } = {}) {
+    // `gate` is the latch's verdict, and it is passed EXPLICITLY on every call. null means "no
+    // history — decide from the entry condition alone", which is what a lone synthetic sample can
+    // honestly claim. The section below is the one that exercises a real latch; everywhere else the
+    // sample is built to be unambiguous either way.
+    const point = calc.annotateRfKorrPoint(map, inAir(sample), egt, air, gate);
     const grid = calc.createGrid();
     // Enough copies to clear the evidence gate, which is 10 samples and weight 5.
     for (let i = 0; i < 40; i++) calc.accumulatePoint(grid, point, { source: 'rf-ratio', apply }, writeRfKorr ? tunedTable : null);
@@ -121,6 +136,168 @@ console.log('\n[the gate verdict is recorded on the sample]');
     check('shut below the filling floor', shut.point.rfKorrGateOpen === false);
     check('open above it', open.point.rfKorrGateOpen === true);
     check('Δ is model − TABG either way', shut.point.tabgDelta === 300 && open.point.tabgDelta === 300);
+}
+
+console.log('\n[the SPEED half of the gate — the operand nothing in this app evaluated]');
+{
+    /*
+     * `rf_korr_calc` is ONE `if` with two operands:
+     *
+     *     if (rf_korr_rf_min < rf_soll && k_rf_korr_v_min < V)  rf_korr = KF_RF_KORR_DRREL(...)
+     *     else ... rf_korr = 0x400;                                                    // 1.000
+     *
+     * The load half has been reproduced since the divisor fix above. The speed half was not — `V`
+     * was on no block this app read when the code was written, and when it arrived on the RAM read
+     * (2026-08-30) nothing was changed to use it. `EgtTables.vMin` said so in its own comment for
+     * nine months.
+     *
+     * What that cost, on the car. Session #941, cell 2400 rpm / 7.5 % opening, eight samples
+     * reached the calculation. FIVE were taken at 13-15 km/h, so `rf_korr_calc` fell through both
+     * branches to `rf_korr = 0x400` and the correction really was 1.000. The app measured
+     * `RF / rf_soll` = 1.161 and wrote `trim x that` = 0.957 x 1.161 = +11.3 %; the bytes moved
+     * +11.5 %. `rfKorrFromEgt`, which already reproduced the load half, said 1.000 on all eight —
+     * two routes, one gated and one not, and the map was built from the ungated one.
+     *
+     * Repeated over six drives the cell climbed 0.637 to 0.851 (+32 %, and 12 % above CSL stock)
+     * while the lambda controller moved the opposite way: 0 samples near its rich clamp on #941,
+     * 96 on #946, one of them 1.4 % off the 0.700 floor.
+     */
+    const s = { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 };
+    const opts = { writeRfKorr: false };
+    const moving = run(OPEN, { ...s, vehicleSpeed: 80 }, opts);
+    const crawling = run(OPEN, { ...s, vehicleSpeed: 15 }, opts);
+    const atFloor = run(OPEN, { ...s, vehicleSpeed: 20 }, opts);
+    const unknown = run(OPEN, { ...s, vehicleSpeed: undefined }, opts);
+
+    check('above the floor and moving -> open', moving.point.rfKorrGateOpen === true);
+    check('...and rf_korr is the measured ratio', near(moving.point.rfKorr, 1.1, 1e-9),
+        String(moving.point.rfKorr));
+    check('...so the correction carries it', near(moving.correction, 1.1, 1e-9),
+        String(moving.correction));
+
+    check('above the floor but under 20 km/h -> SHUT', crawling.point.rfKorrGateOpen === false);
+    check('...and rf_korr is exactly 1, whatever the ratio read',
+        crawling.point.rfKorr === 1, String(crawling.point.rfKorr));
+    check('...so the cell is moved by the trim alone', near(crawling.correction, 1.0, 1e-9),
+        String(crawling.correction));
+    check('...which is a 10.0 % difference on this sample',
+        Math.abs(moving.correction / crawling.correction - 1) > 0.09,
+        String(moving.correction / crawling.correction - 1));
+
+    // `k_rf_korr_v_min < V`, strictly. A car sitting exactly on the floor has not cleared it.
+    check('exactly at the floor is not above it', atFloor.point.rfKorrGateOpen === false);
+    // Refuse rather than assume — assuming it passed is precisely what produced the paragraph above.
+    check('no road speed at all -> shut, not assumed open', unknown.point.rfKorrGateOpen === false);
+    check('...and no rf_korr credited', unknown.point.rfKorr === 1, String(unknown.point.rfKorr));
+
+    // The raw ratio survives, because two things need it: `egtFromRfKorr` inverts it against the
+    // TABG sensor, and clamping its input would make that cross-check agree by construction.
+    check('the ungated ratio is still recorded', near(crawling.point.rfKorrUngated, 1.1, 1e-9),
+        String(crawling.point.rfKorrUngated));
+    check('...and it is what the EGT cross-check was inverted from',
+        crawling.point.egtFromRfKorr !== undefined && crawling.point.egtFromRfKorr < 400,
+        String(crawling.point.egtFromRfKorr));
+    // ...while the table route reads the gate, so the two disagree on purpose here. That
+    // disagreement is the instrument: it is what says "these are different questions".
+    check('the table route is pinned at 1.000 where the gate is shut',
+        crawling.point.rfKorrFromEgt === 1.0, String(crawling.point.rfKorrFromEgt));
+}
+
+console.log('\n[the HOLD branch — the third outcome, which no per-sample test can reach]');
+{
+    /*
+     * `rf_korr_calc` has three branches, not two:
+     *
+     *     if (floor < rf_soll && vMin < V)               enter, read the table
+     *     else if (floor - hys <= rf_soll && vMin <= V)   HOLD whatever was latched
+     *     else                                           reset to 1.000
+     *
+     * So a sample sitting in the hysteresis band is enriched or not according to how the car
+     * ARRIVED, and the entry condition alone calls every one of them shut. Measured over
+     * #941-#946 that mislabels 930 samples — 28.4 % of the truly enriched population — and writes
+     * -8.25 % on them where the correct factor is -0.53 %.
+     *
+     * The floor here is 0.55 and hys is 0.1, so rf_soll 0.50 is inside the band: above 0.45, below
+     * 0.55. Same sample, same everything, two arrival histories.
+     */
+    const BAND = mapOf(0.50);
+    const latch = new RfKorrLatch();
+    const s = (rf) => inAir({ time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf, exhaustTemp: 100 });
+
+    // The band, reached from BELOW: nothing was ever latched, so the DME is at 1.000.
+    check('cold: entry condition alone says shut in the band',
+        latch.step(egt, 2200, 0.50, 80) === false);
+    // Cross above the floor: the DME enters and reads the table.
+    check('crossing above the floor enters', latch.step(egt, 2200, 0.70, 80) === true);
+    // Fall back INTO the band: the hold branch keeps it engaged.
+    check('falling back into the band HOLDS', latch.step(egt, 2200, 0.50, 80) === true);
+    // Fall below floor - hys: reset.
+    check('falling under floor - hys resets', latch.step(egt, 2200, 0.40, 80) === false);
+    // Speed alone resets it, even inside the band.
+    latch.step(egt, 2200, 0.70, 80);
+    check('dropping under 20 km/h resets it', latch.step(egt, 2200, 0.50, 15) === false);
+
+    // And what that verdict is worth, on the cell.
+    const held = run(BAND, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 55, exhaustTemp: 100 }, { writeRfKorr: false, gate: true });
+    const cold = run(BAND, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 55, exhaustTemp: 100 }, { writeRfKorr: false, gate: false });
+    check('held: the measured enrichment is credited', near(held.point.rfKorr, 1.1, 1e-9),
+        String(held.point.rfKorr));
+    check('cold: it is not', cold.point.rfKorr === 1, String(cold.point.rfKorr));
+    check('...and the two write a 10 % different correction',
+        Math.abs(held.correction / cold.correction - 1) > 0.09,
+        String(held.correction / cold.correction - 1));
+    // The raw ratio is identical either way — the ONLY thing that differs is arrival history.
+    check('the sample itself is the same measurement',
+        near(held.point.rfKorrUngated, cold.point.rfKorrUngated, 1e-12));
+}
+
+console.log('\n[the settle clock — an enrichment the loop has not answered is not evidence]');
+{
+    /*
+     * The DME steps the fuel by rf_korr the instant its latch closes; the lambda loop cannot see
+     * that for about a second. Inside the window `trim` still reads the mixture from BEFORE the
+     * step, so `trim x rf_korr` credits the cell with the whole of rf_korr and measures nothing.
+     *
+     * Measured over #941-#946 by seconds since the latch closed, against a control of gate-shut
+     * cells at load >= 5 sitting at -0.11 %:
+     *
+     *     0-0.5 s +9.93 %  |  1-1.5 s +7.44 %  |  2-3 s +1.69 %  |  5+ s -4.94 %  |  pooled +2.18 %
+     *
+     * Replacing everything under N with the trim alone lands the pooled figure at -0.76 % for
+     * N = 1.0 and overshoots to -4.66 % by N = 3, because by then the loop HAS responded.
+     *
+     * The sample below is the same sample four times, differing only in its clock.
+     */
+    const s = { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 };
+    const at = (dwell) => run(OPEN, { ...s, rfKorrDwellSec: dwell }, { writeRfKorr: false });
+
+    check('the default is one second', RF_KORR_SETTLE_SEC_DEFAULT === 1.0,
+        String(RF_KORR_SETTLE_SEC_DEFAULT));
+    check('settled: the correction carries rf_korr', near(at(30).correction, 1.1, 1e-9),
+        String(at(30).correction));
+    check('just over the threshold: still carried', near(at(1.0).correction, 1.1, 1e-9),
+        String(at(1.0).correction));
+    check('just under it: the trim alone', near(at(0.99).correction, 1.0, 1e-9),
+        String(at(0.99).correction));
+    check('the instant it engaged: the trim alone', near(at(0).correction, 1.0, 1e-9),
+        String(at(0).correction));
+
+    // NOT dropped. The whole objection to a settle FILTER on this path is that the enriched
+    // population lives in the high-load cells, so removing it deletes the region being fixed.
+    check('an unsettled sample still reaches its cell', at(0).w > 0, String(at(0).w));
+    check('...with the same weight a settled one carries', near(at(0).w, at(30).w, 1e-12));
+    // And the measurement itself is untouched — only what is DONE with it changes.
+    check('rf_korr is still recorded on the sample', near(at(0).point.rfKorr, 1.1, 1e-9),
+        String(at(0).point.rfKorr));
+
+    // A gate-open sample with no clock at all cannot be shown to have settled.
+    const noClock = run(OPEN, { ...s, rfKorrDwellSec: undefined }, { writeRfKorr: false, gate: true });
+    check('no clock on a gate-open sample reads as unsettled',
+        near(noClock.correction, 1.0, 1e-9), String(noClock.correction));
+    // A gate-SHUT sample has no step to wait for, so the clock must not gate it.
+    const shutNoClock = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, rfKorrDwellSec: undefined }, { writeRfKorr: false });
+    check('a gate-shut sample is never held back by the clock',
+        near(shutNoClock.correction, 0.9, 1e-9), String(shutNoClock.correction));
 }
 
 console.log('\n[gate SHUT: the DME applies 1.000, so nothing may be divided out]');
@@ -249,7 +426,13 @@ console.log('\n[the density really does divide out of the measurement]');
             pUmg: { x: [849.5, 897.5, 960.5, 1038.5], values: [0.8828, 0.9375, 1.0000, 1.0781] },
         },
     };
-    const map = mapOf(0.60);
+    // 0.80, not 0.60. RF_PT_KORR is 0.915 at 40 °C and 888 mbar, so a 0.60 table put rf_soll at
+    // 0.549 — three thousandths UNDER the 0.55 floor — and the low-altitude sample came back
+    // gate-shut at exactly 1.000 while the sea-level one measured 1.12. That is the gate working,
+    // and it made a check about PRESSURE fail for a reason that had nothing to do with pressure.
+    // 0.80 keeps both ends of the range clear of the floor so the check measures what it is named
+    // after.
+    const map = mapOf(0.80);
     // The SAME engine, the same trim, measured at two altitudes. RF is what the DME reported, and
     // the DME's rf_soll includes RF_PT_KORR — so RF moves with the air even though nothing about
     // the engine did.
@@ -267,8 +450,10 @@ console.log('\n[the density really does divide out of the measurement]');
         const k = ptk(tempC, pMbar);
         return calc.annotateRfKorrPoint(map, {
             // rf_soll * RF_PT_KORR * rf_korr, less the step the DME's truncations lose.
-            rpm: 3000, rawLoad: 40, rf: 100 * 0.60 * k * 1.12 - RF_TRUNCATION_MEAN_PERCENT,
+            rpm: 3000, rawLoad: 40, rf: 100 * 0.80 * k * 1.12 - RF_TRUNCATION_MEAN_PERCENT,
             exhaustTemp: 200, stft1: 1.0, stft2: 1.0, intakeTemp: tempC, ambientPressure: pMbar,
+            // Built without `inAir`, so the road speed the gate needs is spelled out here.
+            vehicleSpeed: 80,
         }, egt, air).rfKorr;
     };
     const road = at(40, 888), home = at(40, 960.5), hot = at(60, 960.5);
@@ -278,7 +463,7 @@ console.log('\n[the density really does divide out of the measurement]');
     check('...and it is the rf_korr that went in', near(home, 1.12, 1e-9), String(home));
     // Without the division these would differ by the pressure ratio, which is the whole defect.
     check('while the raw ratio would have differed by 7.9 %',
-        Math.abs((0.60 * ptk(40, 960.5)) / (0.60 * ptk(40, 888)) - 1) > 0.07);
+        Math.abs((0.80 * ptk(40, 960.5)) / (0.80 * ptk(40, 888)) - 1) > 0.07);
 }
 
 console.log('\n[the step the DME truncates away]');

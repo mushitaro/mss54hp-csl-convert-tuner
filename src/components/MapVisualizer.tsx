@@ -14,7 +14,12 @@ import type { PlotParams } from 'react-plotly.js';
 // Typed as react-plotly.js's own props rather than `any`. `dynamic()` widens the component to one
 // with no props at all, so the cast is unavoidable — but casting to the REAL prop type means the
 // twenty-odd props below are still checked, which is what `any` was throwing away.
-const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as React.ComponentType<PlotParams>;
+const Plot = dynamic(() => import('./PlotGl3d'), { ssr: false, loading: () => <ChartLoading /> }) as React.ComponentType<PlotParams>;
+
+/** Module scope, for the same reference-equality reason LogTimeSeriesChart's own config is:
+ *  react-plotly.js hands `config` straight to Plotly.react, and a fresh object literal every render
+ *  is a fresh identity, so opening a menu redrew a 3D surface. */
+const PLOT_CONFIG = { responsive: true, displayModeBar: false } as const;
 
 /** Sequential — absolute magnitude (RF %). The ///M tricolor in one climb, weighted so blue owns the
  *  body of the range and red is the top note rather than the subject: deep blue → M-blue → violet →
@@ -208,7 +213,7 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
         // nothing to the download. The package root pulls lib/index.js, which reaches an optional
         // image dependency this project does not install — the build fails on it rather than
         // tree-shaking it away. Lazy either way, because this component renders on the server too.
-        void import('plotly.js/dist/plotly').then(m => {
+        void import('plotly.js/dist/plotly-gl3d').then(m => {
             if (!cancelled) plotly = ((m as unknown as { default?: unknown }).default ?? m) as typeof plotly;
         });
 
@@ -437,7 +442,7 @@ export const MapVisualizer: React.FC<Props> = React.memo(function MapVisualizer(
                         layout={layout}
                         useResizeHandler={true}
                         className="w-full h-full"
-                        config={{ responsive: true, displayModeBar: false }}
+                        config={PLOT_CONFIG}
                         onInitialized={(_figure, graphDiv) => { gdRef.current = graphDiv; }}
                     />
                 )

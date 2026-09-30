@@ -81,7 +81,7 @@ function derive(dir) {
         session.tuneSettings.interpolationTable);
     const calc = new M.VECalculator();
     const ve = calc.annotateRfKorr(veMap, processed.data, egt,
-        { curves, assumedPressureMbar: cfg.assumedAmbientPressure });
+        { curves, assumedPressureMbar: cfg.assumedAmbientPressure }, processed.rawData);
     return {
         session, veMap,
         direct: calc.calculateNewVEMap(veMap, ve, { egt }),
@@ -136,7 +136,6 @@ for (let i = 0; i < A.direct.hitMap.length; i++) {
     for (let j = 0; j < A.direct.hitMap[i].length; j++) {
         const na = A.direct.hitMap[i][j], nb = B.direct.hitMap[i][j];
         if (!na || !nb) continue;
-        if (A.direct.rejectMap[i][j] === 'out-of-band') continue;   // LOW LOAD's band, not VE's
         cells.push({
             rpm: rpmAxis[j], load: loadAxis[i], old: A.veMap.data[i][j], na, nb,
             da: A.direct.demandMap[i][j], db: B.direct.demandMap[i][j],
@@ -145,7 +144,7 @@ for (let i = 0; i < A.direct.hitMap.length; i++) {
     }
 }
 if (!cells.length) {
-    console.log(NL + '  The two drives share NO cell in the VE band. Nothing to compare.');
+    console.log(NL + '  The two drives share NO cell with evidence in both. Nothing to compare.');
     process.exit(0);
 }
 
@@ -161,7 +160,7 @@ const pctB = cells.map(c => 100 * (c.db - 1));
 const diff = cells.map(c => 100 * (c.db - c.da));
 
 console.log(NL + '2. WHAT THE TWO DRIVES DEMAND OF THE SAME CELL' + NL);
-console.log('   cells with evidence in BOTH drives, in the VE band: ' + cells.length);
+console.log('   cells with evidence in BOTH drives: ' + cells.length);
 console.log('   demand ' + nameA.padEnd(6) + '%   ' + line(pctA));
 console.log('   demand ' + nameB.padEnd(6) + '%   ' + line(pctB));
 console.log('   B - A        %   ' + line(diff));

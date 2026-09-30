@@ -7,6 +7,7 @@ import { PROJECT_REPO_URL, CREDIT_LINKS } from '@/config/links';
 import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import type { InstallState } from '@/hooks/useInstallPrompt';
 import { describeSave, describeSync, SaveStatus, SyncStatus } from '@/lib/session-sync/status';
+import { useShortLandscape } from '@/hooks/useWideLayout';
 
 /**
  * Everything the header used to carry, for windows too narrow to carry it.
@@ -195,14 +196,23 @@ const Field: React.FC<{ label: string; children?: React.ReactNode }> = ({ label,
  * band holds its own height. VIEW puts its scroller in `children`, so its heading stays put for the
  * same reason without needing to be told to.
  */
-const Band: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className = 'shrink-0', children }) => (
-    <div className={`flex flex-col border-b border-slate-800 ${className}`}>
+const Band: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className = 'shrink-0 border-b border-slate-800', children }) => (
+    <div className={`flex flex-col ${className}`}>
         <h4 className="shrink-0 px-4 pt-3 pb-2 [@media(max-height:560px)]:pt-1.5 [@media(max-height:560px)]:pb-1 text-[9px] font-bold uppercase tracking-widest text-slate-600 text-center">
             {title}
         </h4>
         {children}
     </div>
 );
+
+/**
+ * How wide the destination board is, from how many destinations there are.
+ *
+ * Four across is what a 683x400 head unit holds at the 44px floor with room to spare (two rows for
+ * the 8 tabs production ships). A preview build carrying ten needs five to stay two rows deep. Fewer
+ * than five get a column each rather than a half-empty grid — INERTIA mode is three tabs.
+ */
+const boardColumns = (count: number) => (count <= 4 ? Math.max(count, 1) : count <= 8 ? 4 : 5);
 
 export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
@@ -211,6 +221,15 @@ export const MobileMenu: React.FC<Props> = ({
     updateAvailable, reloading, installState, onInstall, sync, save, onSave, onNewSession, storePanel,
     buildLabel,
 }) => {
+    /**
+     * Side by side rather than stacked — a head unit, or a phone on its side.
+     *
+     * Only the ARRANGEMENT changes: every band renders the same children either way, and the sweep,
+     * the close row and the nothing-that-writes rule are untouched. Read through a hook rather than
+     * written as a Tailwind variant because the DOM structure differs — the two readout bands become
+     * one grid row and VIEW's scrolling list becomes a board — and a variant cannot restructure.
+     */
+    const wings = useShortLandscape();
     const syncLook = sync && describeSync(sync);
     const saveLook = save && describeSave(save);
     /** Which row the finger is currently over, keyed by the `data-menu-key` below. */
@@ -320,12 +339,17 @@ export const MobileMenu: React.FC<Props> = ({
 
     return (
         <>
-            <div className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm min-[900px]:hidden" onClick={dismiss} />
+            {/* No backdrop-blur. It blurred the whole viewport every frame while the app behind it kept
+                updating — and on the screen this sheet exists for, a 400px-tall head unit, the sheet
+                covers 95% of what it was blurring: ~20px of visible effect for a full-screen composite,
+                on the weakest GPU the app runs on. SessionList already made this call for its own
+                sheet, and performance.md measured the class at ~1s of phone paint. */}
+            <div className="fixed inset-0 z-[90] bg-slate-950/70 min-[900px]:hidden" onClick={dismiss} />
             {/* Up from the bottom, not in from the side: it opens from a control on the footer, so it
                 comes from where the finger already is. Capped short of the full height so the scrim
                 above stays visible — the way out has to be on screen. 95 rather than 90 because on a
                 400px viewport the missing 5% is 20px of list, and Close is the real way out anyway. */}
-            <div className="fixed inset-x-0 bottom-0 z-[95] max-h-[95svh] flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none">
+            <div className={`fixed inset-x-0 bottom-0 z-[95] ${wings ? 'h-[95svh]' : 'max-h-[95svh]'} flex flex-col bg-slate-900 border-t border-slate-800 rounded-t-xl min-[900px]:hidden touch-none`}>
 
                 {/* The backstop, and only that.
                     ────────────────────────────────────────────────────────────────────────────────
@@ -357,6 +381,13 @@ export const MobileMenu: React.FC<Props> = ({
                         centred in the footer this sheet opens from. */}
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center">
                         <div className="flex items-center justify-end gap-1">
+                            {/* On a short landscape screen the build stamp rides IN this row instead of
+                                under it. 13px of height back for the board below, and there is width to
+                                spare at 683px. `mr-auto` parks it on the sheet's left edge while the
+                                two icons stay gathered around the medal. */}
+                            {wings && buildLabel && (
+                                <span className="mr-auto min-w-0 truncate font-mono text-[9px] text-slate-700">{buildLabel}</span>
+                            )}
                             <a href={privacyUrl} {...away} title="Privacy policy"
                                 className={`${STRIP_ITEM} text-slate-600 hover:text-slate-300`}>
                                 <Shield className="w-3.5 h-3.5" />
@@ -414,16 +445,25 @@ export const MobileMenu: React.FC<Props> = ({
                         first thing asked when a device behaves differently from the desk — and a
                         service worker serving a stale bundle is a real failure mode here, which is
                         why the cache name rides along. */}
-                    {buildLabel && (
+                    {!wings && buildLabel && (
                         <p className="pb-1 text-center font-mono text-[9px] leading-none text-slate-700 break-all">{buildLabel}</p>
                     )}
                 </div>
 
+                {/* VEHICLE and SESSION: one above the other on a phone, side by side when the height
+                    to stack them is not there. `contents` makes the wrapper disappear in the stacked
+                    case, so that arrangement is byte-identical to what it was.
+
+                    Side by side, the two readout columns line up as one table — VIN beside NAME, AIF
+                    beside BASE — and the divider between them lands on the sheet's centre line, the
+                    same line the medal above and the ✕ below already sit on. */}
+                <div className={wings ? 'grid grid-cols-2 shrink-0 border-b border-slate-800' : 'contents'}>
+
                 {/* Laid out to fit, and never scrolled: the flash count is the one control in here
                     and a band that scrolls can hide it. `shrink-0`, so a short viewport takes its
                     height out of VIEW instead — VIEW is the only band that absorbs a squeeze. */}
-                <Band title="Vehicle">
-                    <div className={BAND_BODY}>
+                <Band title="Vehicle" className={wings ? 'min-h-0' : undefined}>
+                    <div className={`${BAND_BODY} ${wings ? 'flex-1 flex flex-col' : ''}`}>
                         <div className={READOUT_COLUMN}>
                             <Field label="VIN">{identity?.vin ?? <span className="text-slate-600">{linkState === 'disconnected' ? 'not connected' : 'reading'}</span>}</Field>
                             <Field label="AIF">{identity?.aif}</Field>
@@ -435,7 +475,9 @@ export const MobileMenu: React.FC<Props> = ({
                         <button
                             type="button"
                             {...row('flash', () => { onOpenFlash(); onClose(); }, !flashEnabled)}
-                            className={`mt-2 [@media(max-height:560px)]:mt-1 w-full flex items-center justify-center gap-2 min-h-[44px] [@media(max-height:560px)]:min-h-[36px] rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
+                            /* Side by side, this sits on the band's bottom edge so it shares a baseline
+                               with NEW/SAVE opposite it; stacked, it keeps the gap it always had. */
+                            className={`${wings ? 'mt-auto' : 'mt-2 [@media(max-height:560px)]:mt-1'} w-full flex items-center justify-center gap-2 min-h-[44px] [@media(max-height:560px)]:min-h-[36px] rounded enabled:cursor-pointer disabled:cursor-default ${lit('flash')}`}
                         >
                             <Gauge className="w-3.5 h-3.5 shrink-0 text-slate-600" />
                             <span className="text-[9px] uppercase tracking-widest text-slate-600">Flash</span>
@@ -449,8 +491,8 @@ export const MobileMenu: React.FC<Props> = ({
                     the three labels against em-dashes and the downloads greyed out. A band that
                     changed height would move VIEW under the thumb between one glance and the next,
                     and a control that vanishes cannot say why it is not available. */}
-                <Band title="Session">
-                    <div className={BAND_BODY}>
+                <Band title="Session" className={wings ? 'min-h-0 border-l border-slate-800' : undefined}>
+                    <div className={`${BAND_BODY} ${wings ? 'flex-1 flex flex-col' : ''}`}>
                         <div className={`${READOUT_COLUMN} mb-2 [@media(max-height:560px)]:mb-1`}>
                             <Field label="Name">
                                 {session && (
@@ -493,7 +535,7 @@ export const MobileMenu: React.FC<Props> = ({
 
                             NEW, SAVE, SYNC — a session's life left to right, and SAVE on the centre
                             line because it is the one pressed after every run. */}
-                        <div>
+                        <div className={wings ? 'mt-auto' : undefined}>
                             <div className={pageClass(1 + (saveLook ? 1 : 0) + (storePanel ? 1 : 0))}>
                                 <button
                                     type="button"
@@ -545,32 +587,86 @@ export const MobileMenu: React.FC<Props> = ({
                     </div>
                 </Band>
 
-                {/* The only band that scrolls, and the only one that gives ground. Ten destinations
-                    do not fit under two bands of readouts and controls, and on a landscape phone
-                    neither does much else — so this is where the squeeze goes, by being the only
-                    `flex-1` in the column. It reaches one row on a 375px-tall viewport and scrolls
-                    from there; the two bands above keep every control they have. */}
-                <Band title="View" className="flex-1 min-h-[88px]">
-                    <div ref={tabScroller} className="no-scrollbar flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 pb-2">
-                        {/* The tab row, unrolled and turned upside down. Horizontally it was 916px of
-                            labels in a 360px window; here STARTUP — the first tab — sits closest to
-                            the button that opened this, and the list climbs away from the thumb.
-                            Disabled entries stay listed rather than hidden: which map does not exist
-                            yet is the same information as which one does. */}
-                        <div className="flex flex-col">
-                            {[...tabs].reverse().map(t => (
-                                <button
-                                    key={t.id}
-                                    type="button"
-                                    {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
-                                    className={`flex items-center justify-center text-center min-h-[44px] py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
-                                        : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default'}`}
-                                >
-                                    {t.label}
-                                </button>
-                            ))}
+                </div>
+
+                {/* The only band that gives ground, and — stacked — the only one that scrolls. Ten
+                    destinations do not fit under two bands of readouts and controls, so this is where
+                    the squeeze goes, by being the only `flex-1` in the column. It reaches one row on a
+                    375px-tall viewport and scrolls from there; the two bands above keep every control
+                    they have.
+
+                    Side by side there is no squeeze to absorb and nothing scrolls: the board below
+                    fills whatever height is left. No `min-h-[88px]` there either — that floor exists to
+                    stop a scroller collapsing, and a grid has no scroller to collapse. And no bottom
+                    border, because the close row underneath already draws one. */}
+                <Band title="View" className={wings ? 'flex-1 min-h-0' : 'flex-1 min-h-[88px] border-b border-slate-800'}>
+                    {wings ? (
+                        /* The destinations as a board rather than a list.
+                           ────────────────────────────────────────────────────────────────────────
+                           A list climbing away from the thumb is right on a phone, where the sheet is
+                           tall and narrow. On a head unit the sheet is short and wide, and that same
+                           list had 88px in which to put 352px of rows. Laid across, the eight tabs
+                           production ships are two rows of four — the desktop tab row wrapped, read in
+                           its own order with STARTUP first — and all of them are on screen at once.
+
+                           Rows are `minmax(44px, 1fr)`: 44 is the floor a finger needs, `1fr` spends
+                           whatever the bands above did not. Measured at 683x400 that lands around 47px
+                           a tile, and the tiles are about 160 wide.
+
+                           The same `row()` as the list, so press-slide-release still selects, and a
+                           destination that does not exist yet is still listed rather than hidden. */
+                        <div
+                            className="grid flex-1 min-h-0 gap-1.5 px-4 pb-2 [@media(max-height:560px)]:pb-1.5"
+                            style={{
+                                gridTemplateColumns: `repeat(${boardColumns(tabs.length)}, minmax(0, 1fr))`,
+                                gridAutoRows: 'minmax(44px, 1fr)',
+                            }}
+                        >
+                            {tabs.map(t => {
+                                const isActive = activeTab === t.id;
+                                const isHot = hot === `tab:${t.id}`;
+                                // Each of the three is decided once. Two Tailwind classes for one
+                                // property are settled by the order the compiler emitted them in, not
+                                // by the order they are written here.
+                                const fill = isHot ? 'bg-slate-800' : t.enabled ? 'bg-slate-800/40' : 'bg-transparent';
+                                const tone = isActive ? 'text-blue-400' : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default';
+                                // The 2px indicator the footer's pane switch wears, on the edge a
+                                // footer-born sheet reads from: the top.
+                                const edge = isActive ? 'border-blue-400' : 'border-transparent';
+                                return (
+                                    <button
+                                        key={t.id}
+                                        type="button"
+                                        {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
+                                        className={`flex items-center justify-center text-center px-1.5 rounded border-t-2 text-[11px] font-bold tracking-widest leading-tight transition-colors ${fill} ${tone} ${edge}`}
+                                    >
+                                        {t.label}
+                                    </button>
+                                );
+                            })}
                         </div>
-                    </div>
+                    ) : (
+                        <div ref={tabScroller} className="no-scrollbar flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 pb-2">
+                            {/* The tab row, unrolled and turned upside down. Horizontally it was 916px of
+                                labels in a 360px window; here STARTUP — the first tab — sits closest to
+                                the button that opened this, and the list climbs away from the thumb.
+                                Disabled entries stay listed rather than hidden: which map does not exist
+                                yet is the same information as which one does. */}
+                            <div className="flex flex-col">
+                                {[...tabs].reverse().map(t => (
+                                    <button
+                                        key={t.id}
+                                        type="button"
+                                        {...row(`tab:${t.id}`, () => { onSelectTab(t.id); onClose(); }, !t.enabled)}
+                                        className={`flex items-center justify-center text-center min-h-[44px] py-3 px-2 -mx-2 rounded text-[11px] font-bold tracking-widest transition-colors ${lit(`tab:${t.id}`)} ${activeTab === t.id ? 'text-blue-400'
+                                            : t.enabled ? 'text-slate-400' : 'text-slate-700 cursor-default'}`}
+                                    >
+                                        {t.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                 </Band>
 
                 </div>

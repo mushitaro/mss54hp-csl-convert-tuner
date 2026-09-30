@@ -1,0 +1,17 @@
+# Deliberate exceptions to scripts/check-public-tree.mjs — one path or value per line.
+#
+# Each entry is a decision about something ALREADY public (both files have been on the public
+# `main` since before the check existed). Listing a new one is a decision too: write down why here,
+# beside it, or do not add it.
+
+# PRACTICE's simulated DME. The CSL 0401 Community Patch v1 partial, which the E46 M3 community
+# publishes openly; the mock bench serves it so PRACTICE can be run with no car and no cable.
+# Removing it removes PRACTICE. THIRD-PARTY-NOTICES.md says what it is.
+public/mock/csl-0401-community-patch-v1.partial.bin
+
+# The BASE of recorded session 920: the 64 KB calibration partial (no VIN in it as text) from the
+# developer's own car, the fixture verify:model-gate, verify:shape-repair and verify:restore-tables
+# run against. EXCLUDED from the public preview branch (NOT_FOR_PUBLIC in scripts/release-scope.mjs).
+# It is already on origin/main and stays on feat/develop and main until the operator decides whether
+# main keeps it; the suites SKIP without it.
+scripts/fixtures/session-920-base.bin

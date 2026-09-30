@@ -47,7 +47,46 @@ interface Props {
 // styled here as a fixed column rather than a toggleable data channel.
 const FACTOR_COLOR = '#9B84E8'; // M-violet (secondary / diagnostic) — matches lineage badges
 
-export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, active = true }) => {
+/**
+ * Row height, STATED rather than measured at runtime.
+ *
+ * The windowing below is arithmetic on this number, and a row that disagrees with it drifts the
+ * scroll position away from the data. Measured on the auto-laid table it replaces, at 683x400:
+ * every row 24px (py-1 around a 10px/16 line). Cells are `whitespace-nowrap` so nothing can wrap
+ * into a second line and make a row taller than this.
+ */
+const ROW_H = 24;
+
+/** Rows kept above and below the viewport, so a flick does not show a blank band before React
+ *  catches up. Eight is about a third of a screen at 683x400 (nine rows visible). */
+const OVERSCAN = 8;
+
+/**
+ * Column width, stated so `table-fixed` can skip measuring every cell — the 6.9s-first-paint trap
+ * MapEditor already learnt, on a table with twice the cells.
+ *
+ * TWO things have to fit, and the first attempt at this only counted one, which cut "123.4" to
+ * "123…" in the rf column on a desktop screenshot:
+ *
+ *   the header — uppercase with tracking, about 6.5px a character at `text-[10px]` mono, and it
+ *     cannot be cut because it is the channel's NAME; the reader matches it against the
+ *     Funktionsrahmen and the disassembly.
+ *   the value — the same face without tracking, about 6px a character, up to seven of them
+ *     (`1234.56`, `-0.123`). A cut value is a misread number, which is worse than a wide column.
+ *
+ * Plus px-3 either side. Checked against what the auto layout produced: la_f_regler1 102 -> 102,
+ * aq_rel 63 -> 66, rf 54 -> 66 (the auto one was 12px from cutting its own values).
+ */
+const VALUE_CHARS = 7;
+const colWidth = (label: string) => Math.round(24 + Math.max(label.length * 6.5, VALUE_CHARS * 6));
+
+/**
+ * `React.memo` because this is the most expensive thing the page renders and most of what makes the
+ * page render has nothing to do with it — opening the menu, a status change, the hub's own state.
+ * During a run its data really does change twice a second and the memo cannot help then; that is
+ * what the windowing below is for.
+ */
+export const LogDataTable: React.FC<Props> = React.memo(function LogDataTable({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, active = true }) {
     /**
      * `data` is already the shared window, so this renders it whole and indexes it directly.
      *
@@ -72,6 +111,66 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
     // session. A toggleable channel shows when the source provides it and the user has it enabled.
     const presenceSource = presenceData && presenceData.length > 0 ? presenceData : displayData;
     const columns: FieldKey[] = TOGGLEABLE_FIELDS.filter(key => visibleFields[key] && isFieldPresent(key, presenceSource));
+    /** In the same order as the header row below: Time, rpm, rawLoad, Factor, correctedLoad, then
+     *  whatever is toggled on. Stated once so the colgroup, the header and the spacer rows cannot
+     *  disagree about how many columns there are. */
+    const colWidths = [
+        colWidth('Time'),
+        colWidth(LOG_FIELD_REGISTRY.rpm.symbol),
+        colWidth(LOG_FIELD_REGISTRY.rawLoad.symbol),
+        colWidth('Factor'),
+        colWidth(LOG_FIELD_REGISTRY.correctedLoad.symbol),
+        ...columns.map(key => colWidth(LOG_FIELD_REGISTRY[key].symbol)),
+    ];
+
+    /**
+     * Only the rows on screen are built.
+     *
+     * The window above decides WHICH 2,000 samples this table is showing; this decides which of them
+     * exist as DOM. They are different questions, and conflating them is what desynced the chart from
+     * the rows once already — every index the chart can offer is still addressable here, it is simply
+     * scrolled to rather than found.
+     *
+     * The cost it removes is the reason: 2,000 rows x 14 columns is 28,000 cells, and the browser
+     * builds all of them on every render of this component. Measured at 683x400 on a 6x-throttled
+     * CPU, the LOG tab's own longtask was 1,162ms of React DOM work with the chart already gated off.
+     * Nine rows are visible.
+     */
+    const scrollerRef = React.useRef<HTMLDivElement>(null);
+    const [view, setView] = React.useState({ top: 0, height: 0 });
+    const frame = React.useRef(0);
+
+    // Coalesced to one read per frame: a scroll handler that reads layout at the pointer's rate is
+    // the same mistake as a drag handler that does — see FilterPanelControls' slider.
+    const onScroll = React.useCallback(() => {
+        if (frame.current) return;
+        frame.current = requestAnimationFrame(() => {
+            frame.current = 0;
+            const el = scrollerRef.current;
+            if (el) setView({ top: el.scrollTop, height: el.clientHeight });
+        });
+    }, []);
+
+    React.useEffect(() => () => { if (frame.current) cancelAnimationFrame(frame.current); }, []);
+
+    // The scroller's height, once it exists and whenever it changes — a pane switch, a rotation, the
+    // hint line opening. Without it the first paint would render a single row's worth.
+    React.useEffect(() => {
+        const el = scrollerRef.current;
+        if (!el) return;
+        const read = () => setView(v => (v.height === el.clientHeight && v.top === el.scrollTop
+            ? v : { top: el.scrollTop, height: el.clientHeight }));
+        read();
+        const ro = new ResizeObserver(read);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [active]);
+
+    const first = Math.max(0, Math.floor(view.top / ROW_H) - OVERSCAN);
+    const last = Math.min(displayData.length, Math.ceil((view.top + Math.max(view.height, ROW_H)) / ROW_H) + OVERSCAN);
+    const rows = displayData.slice(first, last);
+    const padTop = first * ROW_H;
+    const padBottom = Math.max(0, (displayData.length - last) * ROW_H);
 
     /**
      * Bring the selected row to the middle — including when the selection was made while this table
@@ -89,10 +188,16 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
      *   • Nothing re-ran when the pane came back. The selection had not changed by then, so the
      *     effect keyed on it alone had already had its turn and missed. `active` is in the deps for
      *     exactly that: the pane becoming visible is the second chance.
+     *
+     * It is arithmetic now rather than `scrollIntoView`, because the row it wants may not be in the
+     * DOM yet — that is the point of the window above. Same landing place, from the same two facts:
+     * every row is ROW_H tall, and the container is what scrolls.
      */
     React.useEffect(() => {
         if (!active || selectedIndex === undefined || selectedIndex === null) return;
-        document.getElementById(`log-row-${selectedIndex}`)?.scrollIntoView({ block: 'center' });
+        const el = scrollerRef.current;
+        if (!el) return;
+        el.scrollTop = Math.max(0, (selectedIndex + 0.5) * ROW_H - el.clientHeight / 2);
     }, [selectedIndex, active]);
 
     return (
@@ -121,10 +226,21 @@ export const LogDataTable: React.FC<Props> = ({ data, selectedIndex, onRowClick,
                 )}
             </div>
 
-            <div className="flex-1 overflow-auto relative">
-                <table className="w-full text-right border-collapse text-[10px] font-mono">
+            <div ref={scrollerRef} onScroll={onScroll} className="flex-1 overflow-auto relative">
+                {/* `table-fixed` with every width stated, for the reason MapEditor states its own: an
+                    auto layout has to measure every cell in the table before it can settle a column,
+                    and "every cell" here is the whole window whether or not it is on screen. The
+                    width is the sum of the columns, so the horizontal scroll this table has always
+                    had still works — `w-full` would divide the pane between 14 columns instead. */}
+                <table
+                    className="table-fixed text-right border-collapse text-[10px] font-mono"
+                    style={{ width: colWidths.reduce((sum, w) => sum + w, 0) }}
+                >
+                    <colgroup>
+                        {colWidths.map((w, i) => <col key={i} style={{ width: w }} />)}
+                    </colgroup>
                     <thead className="sticky top-0 bg-slate-950 z-10 text-slate-500 font-bold uppercase tracking-wider">
-                        <tr>
+                        <tr className="[&>th]:truncate [&>th]:whitespace-nowrap">
                             <th className="py-2 px-3 text-left border-b border-slate-800 sticky left-0 bg-slate-950">Time</th>
                             {/* Headers are DME symbols in a monospace face, hover for the description and
                                 the selection/offset they arrived at. Lowercase is preserved deliberately:
@@ -149,12 +265,19 @@ Computed by this app — the DME never sent this.">Factor</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/50">
-                        {displayData.map((row, index) => (
+                        {/* The rows above and below the window, as height rather than as DOM. The
+                            scrollbar then describes the whole window, which is what the reader is
+                            scrolling through, while the browser only ever builds a screenful. */}
+                        {padTop > 0 && <tr aria-hidden style={{ height: padTop, borderTopWidth: 0 }} />}
+                        {rows.map((row, i) => {
+                            const index = first + i;
+                            return (
                             <tr
                                 key={index}
                                 id={`log-row-${index}`}
+                                style={{ height: ROW_H }}
                                 onClick={() => onRowClick && onRowClick(index)}
-                                className={`cursor-pointer transition-colors ${selectedIndex === index
+                                className={`cursor-pointer transition-colors [&>td]:truncate [&>td]:whitespace-nowrap ${selectedIndex === index
                                     ? 'bg-blue-900/40 hover:bg-blue-900/50'
                                     : 'hover:bg-slate-800/50'
                                     }`}
@@ -180,10 +303,12 @@ Computed by this app — the DME never sent this.">Factor</th>
                                     );
                                 })}
                             </tr>
-                        ))}
+                            );
+                        })}
+                        {padBottom > 0 && <tr aria-hidden style={{ height: padBottom, borderTopWidth: 0 }} />}
                     </tbody>
                 </table>
             </div>
         </div>
     );
-};
+});

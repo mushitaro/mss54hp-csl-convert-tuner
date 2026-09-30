@@ -132,7 +132,7 @@ export const EMPTY_CENSUS: DropCensus = {
  * Measured on two real drives before this gate existed: 1,814 of 7,751 samples (23%) sat at exactly
  * 1.000 at 1500-3500 rpm with the throttle at 0.1% and the load at 0.4%, and **1,197 of them — 28%
  * of everything the VE calculation was averaging — reached the map.** Every one of them pulled a
- * low-load cell toward "no correction", which is where 94 of the 98 evidence cells live.
+ * low-opening cell toward "no correction", which is where 94 of the 98 evidence cells live.
  *
  * THREE conditions, and all three are needed:
  *

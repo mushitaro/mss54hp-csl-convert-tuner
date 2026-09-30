@@ -13,13 +13,21 @@
  *
  * Run: npm run verify:restore-tables
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { BinaryPatcher } from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
 import { APP_CONFIG, EXPERIMENTAL_CONFIG } from '../src/config/constants.ts';
 
 const REFERENCE = 'public/mock/csl-0401-community-patch-v1.partial.bin';
 const DRIFTED = 'scripts/fixtures/session-920-base.bin';
+
+// The drifted image is a recorded session from the developer's own car, and it is left off the
+// public preview branch (NOT_FOR_PUBLIC in scripts/release-scope.mjs). Every check below restores
+// FROM it, so without it there is nothing to check.
+if (!existsSync(DRIFTED)) {
+    console.log(`\n  SKIP  ${DRIFTED} is absent — the restores are measured against the drifted image.`);
+    process.exit(0);
+}
 
 const bytes = (path) => {
     const b = readFileSync(path);

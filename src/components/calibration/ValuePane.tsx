@@ -41,6 +41,8 @@ const TEXT = {
         scale: '× SCALE',
         copyRef: 'COPY REF',
         revert: 'REVERT',
+        undo: '↶',
+        redo: '↷',
         list: 'LIST',
         viewSubject: 'SUBJECT',
         viewDelta: 'Δ',
@@ -48,6 +50,12 @@ const TEXT = {
         bannerDelta: 'SUBJECT − REFERENCE',
         bannerSubject: 'TINT VS REFERENCE',
         bannerReference: 'TINT VS SUBJECT',
+        gridHint: '値そのものの表・グラフです。見出しはこの項目の形（定数・カーブ・マップ）を示します。',
+        archivedLabel: 'ARCHIVED',
+        archivedHint: 'このセッションは書き込み済みの記録なので編集できません。続きを作るには、セッション一覧の FROM TUNED から新しいセッションとして開いてください。',
+        constantCell: '値',
+        constantEditHint: '押すと下の行で編集できます。数値を打つか、スライダーで動かします。',
+        clearConstant: '編集をやめて、加算・倍率の操作に戻します。数値を押すと編集に戻れます。',
         viewSubjectHint: 'SUBJECT の実値を表示します。編集できるのはこの表示のときだけです。',
         viewDeltaHint: 'SUBJECT − REFERENCE の差そのものを表示します。',
         viewReferenceHint: 'REFERENCE 側の実値を表示します。編集はできません。',
@@ -55,6 +63,8 @@ const TEXT = {
         sameVariant: '比較対象が同じです。REFERENCE を変えると差分が出ます。',
         copyRefHint: 'この項目の全セルを REFERENCE の値で置き換えます。',
         revertHint: 'この項目の編集を取り消し、読み込み時の値に戻します。',
+        undoHint: '直前の操作を一つ取り消します（Ctrl+Z）。スライダーのドラッグは一操作としてまとめます。',
+        redoHint: '取り消した操作をやり直します（Ctrl+Shift+Z / Ctrl+Y）。',
         signHint: '符号を反転します。マイナスなら引き算・縮小になります。',
         addHint: '表示中のセルに、この値を足します（符号ぶん引きます）。',
         scaleHint: '表示中のセルに、この値を掛けます。',
@@ -65,6 +75,8 @@ const TEXT = {
         scale: '× SCALE',
         copyRef: 'COPY REF',
         revert: 'REVERT',
+        undo: '↶',
+        redo: '↷',
         list: 'LIST',
         viewSubject: 'SUBJECT',
         viewDelta: 'Δ',
@@ -72,6 +84,12 @@ const TEXT = {
         bannerDelta: 'SUBJECT − REFERENCE',
         bannerSubject: 'TINT VS REFERENCE',
         bannerReference: 'TINT VS SUBJECT',
+        gridHint: 'The values themselves. The label says which shape this item is — a constant, a curve or a map.',
+        archivedLabel: 'ARCHIVED',
+        archivedHint: 'This session is a record of bytes already written, so it cannot be edited. To carry it forward, open it as a new session with FROM TUNED in the session list.',
+        constantCell: 'value',
+        constantEditHint: 'Press to edit it in the row below — type a number, or drag the slider.',
+        clearConstant: 'Stop editing and go back to the add / scale ops. Press the number to come back.',
         viewSubjectHint: 'Show SUBJECT values. Editing is offered only here.',
         viewDeltaHint: 'Show SUBJECT − REFERENCE, the difference itself.',
         viewReferenceHint: 'Show the REFERENCE own values. Not editable.',
@@ -79,6 +97,8 @@ const TEXT = {
         sameVariant: 'Both selectors name the same bytes — pick another REFERENCE to see a difference.',
         copyRefHint: 'Replace every cell of this item with the REFERENCE value.',
         revertHint: 'Drop this item\'s edits and go back to the values as loaded.',
+        undoHint: 'Take back the last step (Ctrl+Z). A slider drag counts as one.',
+        redoHint: 'Put back a step that was taken away (Ctrl+Shift+Z / Ctrl+Y).',
         signHint: 'Flip the sign — a minus subtracts, and scales down.',
         addHint: 'Add this to every cell on screen (subtract, with the sign set to minus).',
         scaleHint: 'Multiply every cell on screen by this.',
@@ -133,6 +153,10 @@ export function ValuePane({
     referenceDecoded,
     editedMask,
     hasEdit,
+    canUndo,
+    canRedo,
+    onUndo,
+    onRedo,
     graphMode,
     onGraphMode,
     sectionAxis,
@@ -150,6 +174,7 @@ export function ValuePane({
     onBulkOp,
     onCopyRef,
     onRevert,
+    archived = false,
 }: {
     def: CalParamDef | null;
     /** The values SUBJECT holds, and REFERENCE's — null when they are the same. */
@@ -159,6 +184,10 @@ export function ValuePane({
     referenceDecoded: DecodedParam | null;
     editedMask: boolean[] | null;
     hasEdit: boolean;
+    canUndo: boolean;
+    canRedo: boolean;
+    onUndo: () => void;
+    onRedo: () => void;
     graphMode: CalGraphMode;
     onGraphMode: (m: CalGraphMode) => void;
     sectionAxis: 'x' | 'y';
@@ -181,6 +210,18 @@ export function ValuePane({
     onBulkOp: (op: BulkOp, indices?: readonly number[]) => void;
     onCopyRef: () => void;
     onRevert: () => void;
+    /**
+     * This session is a record of what was flashed, not a workspace.
+     *
+     * Every other editor in the app takes this and goes read-only; the
+     * calibration one did not, so an archived session accepted typed values,
+     * recorded them, and then had nowhere to send them — WRITE is gated on
+     * `!isArchived` and SAVE reports 'archived'. The edit went in and stopped.
+     *
+     * The way to carry an archived tune forward is FROM TUNED in the session
+     * list, which opens it as a new draft, and the lock says so.
+     */
+    archived?: boolean;
 }) {
     const lang = useDialogLang();
     const text = TEXT[lang];
@@ -238,16 +279,52 @@ export function ValuePane({
     const chartH = box.h;
 
     // A new selection is a new question; the cell cursor does not carry over.
+    //
+    // Except on a constant, where there is exactly one cell and nothing to
+    // choose between: it starts selected, so the editor is there the moment the
+    // parameter is. Leaving it null is what made a constant read-only — every
+    // edit control in this pane hangs off a selected cell.
+    // Which section the 2-D view is pinned at — its OWN state, and this is the
+    // whole of the bug it fixes.
+    //
+    // It used to be read out of `selectedCell`, so pinning a section had to
+    // invent a cell to store it in and clearing the cell threw the pin away.
+    // That closed a loop with no way out: the slider selected a cell, a
+    // selected cell swaps this pane's edit row from BULK to single-cell, and
+    // the ✕ that brings the bulk controls back also reset the pin to 0. The
+    // only section anybody could bulk-edit was the first one.
+    //
+    // A pin and a cursor are two different questions — "which line am I
+    // looking at" and "which point am I editing" — and one may exist without
+    // the other.
+    const [sectionIndex, setSectionIndex] = useState(0);
+    const [prevAxis, setPrevAxis] = useState(sectionAxis);
+    if (prevAxis !== sectionAxis) {
+        setPrevAxis(sectionAxis);
+        setSectionIndex(0);
+    }
+
     const [prevDefId, setPrevDefId] = useState<string | undefined>(def?.id);
     if (prevDefId !== def?.id) {
         setPrevDefId(def?.id);
-        setSelectedCell(null);
+        setSelectedCell(def?.kind === 'constant' ? 0 : null);
+        setSectionIndex(0);
     }
 
     const rows = def?.rows ?? 1;
     const cols = def?.cols ?? (def?.run ? def.run.count : 1);
     const isMap = def?.kind === 'map' && !!def.rows && !!def.cols;
     const isCurve = def?.kind === 'curve';
+    /**
+     * What the first tab is called.
+     *
+     * The view behind it is the same one — the values themselves, as a grid or
+     * a plot — but calling it MAP was wrong for most of what this pane opens:
+     * of the 2,529 calibration items, 1,782 are constants and 353 are curves,
+     * so the tab named the shape of 394 of them and lied about the rest. A
+     * scalar shown under a tab marked MAP reads as a map that failed to load.
+     */
+    const gridLabel = isMap ? 'MAP' : isCurve ? 'CURVE' : 'CONSTANT';
 
     // The three drawn forms only exist for the shapes that have them; the grid
     // always does. A mode that cannot draw is disabled rather than drawing
@@ -276,11 +353,11 @@ export function ValuePane({
     /** Editing acts on the SUBJECT, so it is only offered while looking at it. */
     const onSubjectValues = !showingDiff && !showingReference;
     const editable = !!def && !def.lock.locked && def.runMathOk
-        && subject === 'tuned' && !!subjectRun && onSubjectValues;
+        && subject === 'tuned' && !!subjectRun && onSubjectValues && !archived;
     const amountNumber = Number(amount) * amountSign;
     const amountOk = amount.trim() !== '' && Number.isFinite(amountNumber);
     const canCopyRef = !!def && !def.lock.locked && def.runMathOk
-        && subject === 'tuned' && comparing;
+        && subject === 'tuned' && comparing && !archived;
 
     const axesDiffer = !!referenceDecoded && !!subjectDecoded && (
         !axesEqual(subjectDecoded.x, referenceDecoded.x) || !axesEqual(subjectDecoded.y, referenceDecoded.y)
@@ -312,12 +389,27 @@ export function ValuePane({
 
     const xTicks = axisTicks(subjectDecoded?.x ?? null, cols);
     const yTicks = axisTicks(subjectDecoded?.y ?? null, rows);
-    const at = selected ?? { row: 0, col: 0 };
-
     /** In 2-D the section is drawn ALONG one axis and pinned at the other. */
+    // Clamped rather than trusted: the axis can change under a pin that was
+    // valid for the other one.
+    const pinned = Math.min(sectionIndex, Math.max(0, (sectionAxis === 'x' ? rows : cols) - 1));
     const fixed = sectionAxis === 'x'
-        ? { index: at.row, count: rows, label: def?.yAxis?.label ?? 'Y', ticks: yTicks }
-        : { index: at.col, count: cols, label: def?.xAxis?.label ?? 'X', ticks: xTicks };
+        ? { index: pinned, count: rows, label: def?.yAxis?.label ?? 'Y', ticks: yTicks }
+        : { index: pinned, count: cols, label: def?.xAxis?.label ?? 'X', ticks: xTicks };
+
+    /**
+     * Pick a cell AND bring the section to it.
+     *
+     * Picking a cell in the grid moves the pin so the 2-D view draws the line
+     * that cell is on; moving the pin does not pick a cell. The asymmetry is
+     * the point — you can look without editing.
+     */
+    const pickCell = (index: number | null) => {
+        setSelectedCell(index);
+        if (index !== null && isMap) {
+            setSectionIndex(sectionAxis === 'x' ? Math.floor(index / cols) : index % cols);
+        }
+    };
 
     /**
      * WHICH cells a bulk step lands on: the ones on screen.
@@ -328,8 +420,8 @@ export function ValuePane({
      */
     const scopeIndices: number[] | null = effectiveMode === '2d' && isMap
         ? (sectionAxis === 'x'
-            ? Array.from({ length: cols }, (_, c) => at.row * cols + c)
-            : Array.from({ length: rows }, (_, r) => r * cols + at.col))
+            ? Array.from({ length: cols }, (_, c) => pinned * cols + c)
+            : Array.from({ length: rows }, (_, r) => r * cols + pinned))
         : null;
     const scopeLabel = scopeIndices
         ? `${fixed.label} ${fixed.ticks.label(fixed.index)} · ${scopeIndices.length} CELLS`
@@ -362,9 +454,14 @@ export function ValuePane({
         // reciprocal scaling's step varies by orders of magnitude across range.
         const raw = subjectRun.raw[selectedCell];
         const step = Math.abs(run.scaling.toPhysical(raw + 1) - value) || (max - min) / 100 || 1;
-        const where = isMap
-            ? `${def?.yAxis?.label ?? 'Y'} ${yTicks.label(at.row)} · ${def?.xAxis?.label ?? 'X'} ${xTicks.label(at.col)}`
-            : `${def?.xAxis?.label ?? 'X'} ${xTicks.label(selectedCell)}`;
+        // Where in the parameter this cell is. A constant has no "where" —
+        // it is the whole parameter — so it says what it is instead of naming
+        // an axis position it does not have.
+        const where = def?.kind === 'constant'
+            ? (run.units && run.units !== '-' ? run.units : text.constantCell)
+            : isMap
+              ? `${def?.yAxis?.label ?? 'Y'} ${yTicks.label(Math.floor(selectedCell / cols))} · ${def?.xAxis?.label ?? 'X'} ${xTicks.label(selectedCell % cols)}`
+              : `${def?.xAxis?.label ?? 'X'} ${xTicks.label(selectedCell)}`;
         return { value, min, max, step, where, index: selectedCell };
     })();
 
@@ -377,7 +474,17 @@ export function ValuePane({
             );
         }
         if (def.kind === 'constant') {
-            return <ScalarReadout value={shownRun.phys[0]} raw={shownRun.raw[0]} units={def.run?.units} />;
+            return (
+                <ScalarReadout
+                    value={shownRun.phys[0]}
+                    raw={shownRun.raw[0]}
+                    units={def.run?.units}
+                    editable={editable}
+                    selected={selectedCell === 0}
+                    onSelect={() => setSelectedCell(0)}
+                    hint={text.constantEditHint}
+                />
+            );
         }
 
         if (effectiveMode === 'map') {
@@ -394,7 +501,7 @@ export function ValuePane({
                     editedMask={subject === 'tuned' && onSubjectValues ? editedMask : null}
                     mode={showingDiff ? 'signed' : referenceRun ? 'diff' : 'heat'}
                     selected={selectedCell}
-                    onSelect={setSelectedCell}
+                    onSelect={pickCell}
                     onCommit={onEditCell}
                     readOnly={!editable}
                 />
@@ -412,7 +519,7 @@ export function ValuePane({
                     xLabels={xTicks.label}
                     yLabels={yTicks.label}
                     selected={selected}
-                    onSelectCell={(r, c) => setSelectedCell(r * cols + c)}
+                    onSelectCell={(r, c) => pickCell(r * cols + c)}
                     signed={showingDiff}
                     width={box.w}
                     height={chartH}
@@ -444,11 +551,20 @@ export function ValuePane({
             const phys = run.phys.map(p => (p === null ? NaN : p));
             if (!isMap) return phys;
             return sectionAxis === 'x'
-                ? phys.slice(at.row * cols, (at.row + 1) * cols)
-                : Array.from({ length: rows }, (_, r) => phys[r * cols + at.col]);
+                ? phys.slice(pinned * cols, (pinned + 1) * cols)
+                : Array.from({ length: rows }, (_, r) => phys[r * cols + pinned]);
         };
         const along = !isMap || sectionAxis === 'x' ? xTicks : yTicks;
-        const indexInSection = !isMap ? selectedCell : sectionAxis === 'x' ? at.col : at.row;
+        // Null when nothing is picked, and null when what is picked is not ON
+        // the line being drawn: a highlighted point that belongs to another
+        // section is a lie about where the cursor is.
+        const indexInSection = !isMap
+            ? selectedCell
+            : selected === null
+              ? null
+              : sectionAxis === 'x'
+                ? (selected.row === pinned ? selected.col : null)
+                : (selected.col === pinned ? selected.row : null);
         return (
             <SectionChart
                 xs={along.xs}
@@ -462,8 +578,8 @@ export function ValuePane({
                 xLabel={(isMap && sectionAxis === 'y' ? def.yAxis?.label : def.xAxis?.label) ?? 'X'}
                 yLabel={showingDiff ? 'Δ' : (def.run?.units && def.run.units !== '-' ? def.run.units : 'value')}
                 selectedIndex={indexInSection}
-                onSelectIndex={i => setSelectedCell(
-                    !isMap ? i : sectionAxis === 'x' ? at.row * cols + i : i * cols + at.col,
+                onSelectIndex={i => pickCell(
+                    !isMap ? i : sectionAxis === 'x' ? pinned * cols + i : i * cols + pinned,
                 )}
                 width={box.w}
                 height={chartH}
@@ -555,7 +671,13 @@ export function ValuePane({
                     {def ? displayName(def.name) : '—'}
                 </span>
                 <div className="flex items-center gap-2">
-                    <ModeButton on={effectiveMode === 'map'} onClick={() => onGraphMode('map')}>MAP</ModeButton>
+                    <ModeButton
+                        on={effectiveMode === 'map'}
+                        onClick={() => onGraphMode('map')}
+                        title={text.gridHint}
+                    >
+                        {gridLabel}
+                    </ModeButton>
                     <ModeButton on={effectiveMode === '2d'} disabled={!can2d} onClick={() => onGraphMode('2d')}>2D</ModeButton>
                     <ModeButton on={effectiveMode === '3d'} disabled={!can3d} onClick={() => onGraphMode('3d')}>3D</ModeButton>
                     <ModeButton on={effectiveMode === 'heat'} disabled={!canHeat} onClick={() => onGraphMode('heat')}>HEAT</ModeButton>
@@ -631,10 +753,9 @@ export function ValuePane({
                             min={0}
                             max={Math.max(0, fixed.count - 1)}
                             value={fixed.index}
-                            onChange={e => {
-                                const i = Number(e.target.value);
-                                setSelectedCell(sectionAxis === 'x' ? i * cols + at.col : at.row * cols + i);
-                            }}
+                            // Moves the pin and NOTHING else. Selecting a cell
+                            // here is what took the bulk controls off screen.
+                            onChange={e => setSectionIndex(Number(e.target.value))}
                             className="flex-1 min-w-0 h-1 accent-blue-500"
                         />
                         <span className="text-[9px] font-mono text-slate-600 whitespace-nowrap">
@@ -669,7 +790,7 @@ export function ValuePane({
                     <>
                         <button
                             onClick={() => setSelectedCell(null)}
-                            title={text.clearCell}
+                            title={def?.kind === 'constant' ? text.clearConstant : text.clearCell}
                             className="shrink-0 flex items-center gap-1 max-w-[38%] text-[9px] font-mono text-slate-400 hover:text-slate-200 transition whitespace-nowrap"
                         >
                             <span className="truncate">{cellEdit.where}</span>
@@ -697,8 +818,13 @@ export function ValuePane({
                         />
                     </>
                 ) : (
-                    <div className={`flex items-center gap-1.5 ${editable ? '' : 'opacity-40 pointer-events-none'}`}>
-                        <span className="shrink-0 text-[9px] font-mono text-slate-400 whitespace-nowrap">{scopeLabel}</span>
+                    <div
+                        className={`flex items-center gap-1.5 ${editable ? '' : 'opacity-40 pointer-events-none'}`}
+                        title={archived ? text.archivedHint : undefined}
+                    >
+                        <span className="shrink-0 text-[9px] font-mono text-slate-400 whitespace-nowrap">
+                            {archived ? text.archivedLabel : scopeLabel}
+                        </span>
                         <button
                             onClick={() => setAmountSign(s => (s === 1 ? -1 : 1))}
                             title={text.signHint}
@@ -721,6 +847,12 @@ export function ValuePane({
                     move when the row's left half changes job. */}
                 <div className="ml-auto shrink-0 flex items-center gap-1.5">
                     {opButton(text.copyRef, canCopyRef, onCopyRef, text.copyRefHint, 'text-indigo-400 hover:text-indigo-300')}
+                    {/* Beside REVERT because they answer the same question —
+                        "take that back" — at the two scales anybody needs: the
+                        last step, or the whole parameter. REVERT alone made
+                        undoing one keystroke cost every edit on the item. */}
+                    {opButton(text.undo, canUndo, onUndo, text.undoHint, 'text-slate-400 hover:text-slate-100')}
+                    {opButton(text.redo, canRedo, onRedo, text.redoHint, 'text-slate-400 hover:text-slate-100')}
                     {opButton(text.revert, hasEdit, onRevert, text.revertHint, 'text-slate-400 hover:text-red-400')}
                 </div>
             </div>

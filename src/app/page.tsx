@@ -18,13 +18,25 @@ import { activeExclusion } from '@/lib/log-engine/driveSplit';
 import { DropCensusLine } from '@/components/DropCensus';
 import {
   type ProcessId, LOG_PROFILES, expectedHz, describeExchanges, missingPatches, deriveRoute,
+  selectableModes as selectableModesFor,
   productionExchanges,
 } from '@/lib/log-engine/logProfile';
 import { InertiaWorkflow } from '@/components/InertiaWorkflow';
-import { IdleWorkflow } from '@/components/IdleWorkflow';
+import { IdleWorkflow, type IdleControls } from '@/components/IdleWorkflow';
+import { tuneIdleFeedforward, withPool } from '@/lib/idle/tuner';
+import { IDLE_TUNE_DEFAULTS } from '@/lib/idle/types';
+import { learnIdleGain } from '@/lib/idle/campaign';
+import { ModeCorner, type ModeLock } from '@/components/ModeCorner';
+import type { IdleSample } from '@/lib/dme-link/types';
+import { loadCalCatalog, type IndexedCatalog } from '@/lib/calibration/catalog';
+import { readRingTables, solveLlsTv, ringDrift, RING_GAIN_DEFAULTS } from '@/lib/lls/ringGain';
+import { idleReachIfLlsTakes } from '@/lib/lls/composeLlsTv';
+import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
+import LlsPanel from '@/components/LlsPanel';
 import { WriteManifest, ManifestCorner, anythingArmed, type ManifestGroup } from '@/components/WriteManifest';
 import {
-  enabledTabs, featureEnabled, enabledDriveViews, DEV_VARIANT_IS_PREVIEW,
+  enabledTabs, featureEnabled, enabledDriveViews, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
+  writeRowInMode,
   type TabId, type FeatureName, type DriveView,
 } from '@/lib/features';
 import { CompareBar, type CompareOption } from '@/components/CompareBar';
@@ -37,13 +49,11 @@ import { useCalibrationEdits } from '@/hooks/useCalibrationEdits';
 import { useCalibrationData, useCalibrationDiff } from '@/hooks/useCalibrationData';
 import { useCalVariantBuffers } from '@/hooks/useCalVariantBuffers';
 import { armedWriterSpans, changedCellCount, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
-import { readIdleTablesResult } from '@/lib/idle/idleTables';
+import { readIdleTablesResult, type IdleTables } from '@/lib/idle/idleTables';
 import { useShapeWorkspace } from '@/components/shape/shapeWorkspace';
 import { ShapeGrid } from '@/components/shape/ShapeGrid';
 import { ShapeGraph } from '@/components/shape/ShapeGraph';
 import { ShapeControls } from '@/components/shape/ShapeControls';
-import { readAlphaNTables } from '@/lib/ve-calculator/alphaNTable';
-import { composeVeGrid } from '@/lib/ve-calculator/composeVeGrid';
 import { buildCoverage, coverageCensus } from '@/lib/ve-calculator/cellCoverage';
 import type { ShapeRepairResult } from '@/lib/ve-calculator/lowLoadShape';
 import { CoverageDetail } from '@/components/CoverageDetail';
@@ -52,12 +62,12 @@ import { MANIFEST_TEXT, type RfKorrBlock } from '@/lib/manifest-text';
 import { writtenVeGrid } from '@/lib/ve-calculator/composeVeGrid';
 import { VECalculator, VE_METHOD_DEFAULT, DIRECT_MIN_SAMPLES, DIRECT_AUTHORITY_DEFAULT } from '@/lib/ve-calculator/calculator';
 import { useDialogLang } from '@/hooks/useDialogLang';
-import { tuneLowLoad } from '@/lib/ve-calculator/lowLoadTuner';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
 import { SessionStorePanel } from '@/components/SessionStorePanel';
-import { canSync } from '@/lib/session-sync/client';
+import { reauthHref } from '@/lib/session-sync/owner-sync';
+import { useGateStatus } from '@/hooks/useGateStatus';
 import type { SaveStatus } from '@/lib/session-sync/status';
 import { describeSave, describeSync } from '@/lib/session-sync/status';
 import type { WriteVerifyMode } from '@/lib/dme-link/types';
@@ -67,6 +77,7 @@ import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
+import { GuideCarousel } from '@/components/GuideCarousel';
 import { CreditsDialog } from '@/components/CreditsDialog';
 import { MobileMenu, MENU_CELL } from '@/components/MobileMenu';
 import { MessageDialog } from '@/components/MessageDialog';
@@ -98,7 +109,7 @@ import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
-import { useBuildVariant, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
+import { useBuildLabel, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
@@ -111,7 +122,7 @@ import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHz } from '@/lib/log-engine/rate';
 import { sha256Hex } from '@/lib/db/sessionRepository';
-import { useBinaryFile, type PatchExtras } from '@/hooks/useBinaryFile';
+import { writeClaimsTune, useBinaryFile, type PatchExtras } from '@/hooks/useBinaryFile';
 import { useLogFile } from '@/hooks/useLogFile';
 import { useVeCalculation } from '@/hooks/useVeCalculation';
 import { useComparison, type MapVariant } from '@/hooks/useComparison';
@@ -122,8 +133,10 @@ import { useUnloadGuard } from '@/hooks/useUnloadGuard';
 import { useScreenWakeLock } from '@/hooks/useScreenWakeLock';
 import { useHiddenWitness } from '@/hooks/useHiddenWitness';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
+import { useGuide } from '@/hooks/useGuide';
 import { useLiveRun } from '@/hooks/useLiveRun';
 import { LiveTelemetryStrip } from '@/components/LiveTelemetryStrip';
+import { LlsLiveStrip } from '@/components/LlsLiveStrip';
 import { LiveDriveStrip } from '@/components/LiveDriveStrip';
 import { MapZoomButtons } from '@/components/MapZoomButtons';
 
@@ -169,42 +182,23 @@ export default function Home() {
   const fieldVisibility = useFieldVisibility();
   const dmeLink = useDmeLink();
   /**
-   * The low-opening derivation, and THE tuned map both derivations compose into.
+   * THE tuned map — the grid every view and every write path reads.
    *
-   * Up here, ahead of `useComparison`, because of what that fixes: `newMap` used to be the VE
-   * calculator's output alone, and the low-opening cells were merged only inside
+   * Up here, ahead of `useComparison`, because of what that fixes: `newMap` used to reach this line
+   * carrying only part of the table, and the rest of the earned cells were merged in inside
    * `buildPatchedBuffer` — at download/flash time. So TUNED MAP and DIFFERENCE % rendered a grid
-   * that was NOT the grid the WRITE would send. On session #920 the difference is the whole story:
-   * VE earns 4 cells and the low-opening band earns 48, so a 52-minute drive looked like it had
-   * changed almost nothing while 92 % of its result sat in a table nobody could see. A tab called
-   * TUNED MAP has to show the map that gets written.
+   * that was NOT the grid the WRITE would send. On session #920 the gap was the whole story: of the
+   * 52 cells that drive earned, 4 reached the screen and 48 did not, so a 52-minute drive looked
+   * like it had changed almost nothing while 92 % of its result sat in a table nobody could see. A
+   * tab called TUNED MAP has to show the map that gets written.
    *
-   * `buildPatchedBuffer` still composes, and that stays correct: it overwrites the owned cells with
-   * the same values they already hold here, so composing twice is the same as composing once.
+   * Held regardless of whether ALPHA-N is armed, because this answers "what did this log derive",
+   * not "what will be flashed" — the manifest answers the second.
+   *
+   * `buildPatchedBuffer` still composes, and that stays correct: it overwrites the cells with the
+   * same values they already hold here, so composing twice is the same as composing once.
    */
-  const alphaNTables = useMemo(
-    () => (binaryFileState.binaryBuffer ? readAlphaNTables(binaryFileState.binaryBuffer) : null),
-    [binaryFileState.binaryBuffer]);
-  const lowLoadResult = useMemo(() => {
-    const map = binaryFileState.currentMap;
-    const log = logFileState.processedLog;
-    if (!alphaNTables || !log?.data?.length || !map) return null;
-    return tuneLowLoad(log.data, alphaNTables, map);
-  }, [alphaNTables, logFileState.processedLog, binaryFileState.currentMap]);
-  /**
-   * Composed regardless of whether ALPHA-N is armed, because this answers "what did this log
-   * derive", not "what will be flashed" — the manifest answers the second, and with one toggle
-   * arming both bands the two can no longer disagree about which half goes.
-   */
-  const tunedMap = useMemo(() => {
-    const ve = veCalc.newMap;
-    const arm = lowLoadResult?.acceptable
-      ? { grid: lowLoadResult.tuned, owned: lowLoadResult.owned } : null;
-    const composed = composeVeGrid(ve?.data ?? null, arm);
-    if (!composed) return ve;
-    const axes = ve ?? binaryFileState.currentMap;
-    return axes ? { xAxis: [...axes.xAxis], yAxis: [...axes.yAxis], data: composed.grid } : ve;
-  }, [veCalc.newMap, lowLoadResult, binaryFileState.currentMap]);
+  const tunedMap = veCalc.newMap;
 
   const comparison = useComparison(tunedMap, binaryFileState.initialMapData, sessionDb.sessions);
 
@@ -291,18 +285,25 @@ export default function Home() {
    */
   const [verifyMode, setVerifyMode] = useState<WriteVerifyMode>('full');
   /**
-   * What the run in progress is for — which DS2 blocks a sample is made of, and therefore what the
-   * log can answer afterwards.
+   * MODE — what this session measures. Which DS2 exchanges a sample is made of, which tabs are
+   * standing, and therefore what the log can answer afterwards.
    *
-   * It used to be a RUN selector in the connection cluster, chosen before START TUNE. That selector
-   * is gone, and there is nothing left for it to ask: EGT is retired, so VE is the only thing this
-   * button can start, and INERTIA has never run from here — it is driven from its own panel, which
-   * owns the arming, the gear check and the estimate.
+   * There was a RUN selector here once; it went when EGT was retired and VE was the only thing the
+   * dial could start. It comes back as MODE because there are three things again, and because the
+   * interim arrangement — nobody declares the run, and whoever starts one flips this for the
+   * duration — could only ever describe a run that had already begun. A choice that can only be
+   * made by starting something cannot gate what is on screen BEFORE it starts, which is exactly
+   * what an idle run needs: the eight VE tabs are unusable standing beside a running car and can
+   * only be picked by mistake.
    *
-   * So it is set by whoever actually starts a run rather than chosen in advance:
-   * `startInertiaRunWithDiagnostics` flips it to INERTIA for the duration and back after. Every
-   * branch that reads it still reads a true statement about the run that is happening — including
-   * the hub's STOP, which must not run the VE teardown over an inertia run.
+   * It is a property of the SESSION rather than of the app. `session.process` has been in the
+   * schema since profiles existed, absent reading as VE; what changed is WHEN it is written — at
+   * the choice rather than at START TUNE — so the session list has something to show from the
+   * moment a draft is created, and so the mode is still legible on a session reopened a month
+   * later.
+   *
+   * Settable from NEW SESSION until the session holds a log. After that it is a record of what was
+   * measured, and the corner says so rather than disappearing. See `modeLock`.
    */
   const [logProcess, setLogProcess] = useState<ProcessId>('VE');
   const connectedVin = dmeLink.identity?.vin ?? null;
@@ -322,11 +323,15 @@ export default function Home() {
   const [narrowPane, setNarrowPane] = useState<'map' | 'graph' | 'dash'>('map');
   const { ask } = dialogs;
   const [menuOpen, setMenuOpen] = useState(false);
-  const updateAvailable = useAppUpdate();
+  /* The second argument is "a cable is live": see useAppUpdate. It defers the background
+     download of a new build, not the notice that there is one. */
+  const updateAvailable = useAppUpdate(undefined, dmeLink.state !== 'disconnected');
   const install = useInstallPrompt();
   const isPreviewBuild = useIsPreviewBuild();
-  /** What this build calls itself — '' on production. The badge is on whenever it is not empty. */
-  const buildVariant = useBuildVariant();
+  /** What this build is CALLED — WORKS, STAGING, '' on production (the `app-label` meta; display only,
+   *  nothing compares it). The badge is on whenever it is not empty. Not `buildLabel`: that name is
+   *  the build id (`<count>.<sha>`) the credits and the menu show, from useDiagnosticsPublisher. */
+  const variantLabel = useBuildLabel();
   /** What the FEATURE gate reads: the deployed variant, the dev server counting as preview, and
    *  the scope switch, which can close it and never open it. See usePreviewSurfaces. */
   const featurePreview = usePreviewSurfaces();
@@ -355,19 +360,21 @@ export default function Home() {
    * switch, "no badge" would mean the one place the work happens is the one place the switch cannot
    * be reached.
    */
-  const badgeLabel = productionScope ? 'AS PRODUCTION' : (buildVariant.toUpperCase() || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
+  const badgeLabel = productionScope ? 'AS PRODUCTION' : (variantLabel || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
   /** Staging is production scope already and has nothing to switch; production carries no badge. */
   const badgeSwitches = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
+  /** Where this browser stands with the owner gate — preview only; production and staging have no
+   *  gate and ask nothing. Names the SYNC destination, and drives the SIGN IN chip. */
+  const gate = useGateStatus(isPreviewBuild);
   // Sending sessions to the store, and what the three controls that do it say. See useSessionSync.
   const sync = useSessionSync({
     sessions: sessionDb.sessions,
     refresh: sessionDb.refresh,
     isPreviewBuild,
+    signedOut: gate.state === 'expired',
     online,
   });
-  const uploadSettings = sync.settings;
-  const uploadSettingsRef = sync.settingsRef;
   /**
    * The session an operation is running under, readable after the operation ends.
    *
@@ -382,7 +389,6 @@ export default function Home() {
     lastTransferTimingRef: dmeLink.lastTransferTimingRef,
     lastEventLogRef: dmeLink.lastEventLogRef,
     sessionIdRef: currentSessionIdRef,
-    settingsRef: uploadSettingsRef,
   });
   /* `diagUpload` is deliberately not destructured any more: nothing on screen reads it. The record
      is still built and still uploaded — see the note where the DIAG marker used to be — it simply
@@ -412,8 +418,13 @@ export default function Home() {
    *  finger from there and commits on release. Cleared on pointerup wherever it lands, so a tap
    *  that merely opens the sheet leaves it in ordinary tap-to-choose mode. */
   const [menuDrag, setMenuDrag] = useState<{ x: number; y: number } | null>(null);
+  /** Stable, because the sheet's sweep effect depends on it: an inline arrow made every render of
+   *  this page tear down and re-attach three window listeners inside the open menu. */
+  const clearMenuDrag = useCallback(() => setMenuDrag(null), []);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
+  // 同意の直後に一度だけ出す「使い方」。免責は門のままにして、使い方はその外に置く。
+  const guide = useGuide();
   // ポリシーの URL はブラウザ言語で日英を出し分ける。ヘッダーのリンクは静的 HTML に焼き込まれる
   // ため、判定はマウント後 — 理由は hooks/usePrivacyPolicyUrl.ts に書いてある。
   const privacyUrl = usePrivacyPolicyUrl();
@@ -422,6 +433,7 @@ export default function Home() {
     currentMap, binaryBuffer, patchStatus,
     applyPatch, setApplyPatch, applyWotDisable, setApplyWotDisable,
     applyTankVentDisable, setApplyTankVentDisable,
+    applyRfKorrGateDrop, setApplyRfKorrGateDrop,
     writeWarmup, setWriteWarmup, restoreWotFuel, setRestoreWotFuel, writeRfKorr, setWriteRfKorr,
     restoreVe, setRestoreVe, restoreWarmup, setRestoreWarmup,
   } = binaryFileState;
@@ -460,49 +472,20 @@ export default function Home() {
 
   const { mapData, hitMap, weightMap, tunedRfKorr } = veCalc;
   /**
-   * The two PER-CELL views, composed the same way the grid above is — and for the same reason.
+   * The two PER-CELL views.
    *
    * `correctionMap` feeds LAMBDA FEEDBACK and `acceptedMap` paints the "rewritten" band on every
-   * map view. Both came from the VE calculator alone, which pushes 1.000 and `false` for every cell
-   * it did not accept — and it refuses the whole low-opening band by design. So on session #920 the
-   * lambda view read a flat 1.000 across rows 0-12 while the low-opening derivation had measured
-   * corrections in 48 of them, and the heatmap painted those same 48 cells as never rewritten.
+   * map view. Both are the calculation's own verdict taken as it recorded it: a cell shows a
+   * correction when the correction was ACTED on, never re-derived here from a sample count.
    *
-   * calculator.ts already says why that is the worst kind of wrong: "Colour and calculation
-   * disagreeing is exactly what tying the band to the gate was meant to end, and the colour is what
-   * gets looked at." It tied the colour to VE's gate; there are two gates.
-   *
-   * `owned` rather than "every cell the low-opening tuner has a number for", so both halves follow
-   * the same rule: a cell shows a correction when the correction was ACTED on. The per-cell reasons
-   * for the refusals are the LOW LOAD tab's job, and it names all nine of them.
+   * calculator.ts says why that rule is worth keeping: "Colour and calculation disagreeing is
+   * exactly what tying the band to the gate was meant to end, and the colour is what gets looked
+   * at." Session #920 is what it costs when the two do come apart — the lambda view read a flat
+   * 1.000 across rows 0-12 while 48 cells in those rows carried measured corrections, and the
+   * heatmap painted the same 48 as never rewritten.
    */
-  const { correctionMap, acceptedMap } = useMemo(() => {
-    const ve = { correctionMap: veCalc.correctionMap, acceptedMap: veCalc.acceptedMap };
-    const ll = lowLoadResult;
-    // NOT gated on `acceptable` any more. That flag governs the WRITE, and gating the composition
-    // on it meant an unacceptable low-opening run displayed the VE band's flat 1.000 across every
-    // cell it had in fact measured. cellCoverage already draws this distinction for the per-cell
-    // verdicts — "an unacceptable result still knows, per cell, which bar refused it" — and the
-    // corrections deserve the same treatment. `accepted` below still waits for `acceptable`.
-    if (!ll || !ve.correctionMap || !ve.acceptedMap) return ve;
-    const correction = ve.correctionMap.map(row => [...row]);
-    const accepted = ve.acceptedMap.map(row => [...row]);
-    for (let r = 0; r < accepted.length; r++) {
-      for (let c = 0; c < accepted[r].length; c++) {
-        const llCell = ll.cells[r]?.[c];
-        // OWNED decides what was WRITTEN; having a measurement decides what is SHOWN. They were
-        // one test, so a low-opening cell the tuner measured and then refused displayed the VE
-        // band's 1.000 — the reading thrown away on exactly the cells the driver is deciding
-        // whether to go back to (operator, 2026-08-28). Same rule as the VE band's own refusals.
-        if (ll.acceptable && ll.owned[r]?.[c]) accepted[r][c] = true;
-        if (llCell && llCell.samples > 0) correction[r][c] = llCell.correction;
-      }
-    }
-    return { correctionMap: correction, acceptedMap: accepted };
-  }, [veCalc.correctionMap, veCalc.acceptedMap, lowLoadResult]);
-  /** The composed grid, under the name every consumer below already uses. `veCalc.newMap` is VE's
-   *  own half and is read only where that distinction matters — the coverage census, which counts
-   *  what VE'S evidence gate accepted. */
+  const { correctionMap, acceptedMap } = veCalc;
+  /** The tuned grid, under the name every consumer below already uses. */
   const newMap = tunedMap;
   /** The coverage bands every grid in this page tints with, resolved once from the session's filter
    *  config. Passed explicitly rather than let each MapEditor fall back to its own default, so a
@@ -528,25 +511,24 @@ export default function Home() {
    *  this component re-renders for everything, including a narrow-layout pane switch, which then
    *  re-rendered a 480-cell grid it had not changed. */
   /**
-   * One verdict per cell, from whichever derivation owns it — the model the TUNED MAP reads.
+   * One verdict per cell — the model the TUNED MAP reads.
    *
    * Built once per calculation rather than per cell per render, for the reason written beside
    * `coverageBands` below: this component re-renders for everything, and 480 cells is a grid.
    */
   const coverage = useMemo(() => buildCoverage({
     hitMap, weightMap, correctionMap, rejectMap: veCalc.rejectMap,
-    lowLoad: lowLoadResult,
     // Dimensions off whatever exists. No BASE and no grid means no coverage to show,
     // which is the honest empty rather than an invented 24x20 of nothing.
     rows: currentMap?.yAxis.length ?? hitMap?.length ?? 0,
     cols: currentMap?.xAxis.length ?? hitMap?.[0]?.length ?? 0,
-  }), [hitMap, weightMap, correctionMap, veCalc.rejectMap, lowLoadResult, currentMap]);
+  }), [hitMap, weightMap, correctionMap, veCalc.rejectMap, currentMap]);
   const coverageCounts = useMemo(() => coverageCensus(coverage), [coverage]);
   /**
    * Which cells this tune MEASURED — the cells a shape repair must never move.
    *
-   * Read off the composed coverage rather than from either derivation's own accepted map, so it
-   * means exactly what the map paints: `written` is a cell the drive earned, `settled` is one it
+   * Read off the coverage the grids are painted from rather than off the accepted map directly, so
+   * it means exactly what the map paints: `written` is a cell the drive earned, `settled` is one it
    * earned and found correct. Both are measurements and both are frozen; only the cells that carry
    * no measurement are a repair's business.
    */
@@ -677,6 +659,10 @@ export default function Home() {
     // re-derives under the method it was built with. See VeMethod in calculator.ts.
     veMethod: config.veMethod,
     directAuthority: config.directAuthority,
+    // How long an rf_korr enrichment must have been engaged before the trim has answered it. Same
+    // rule as the two above: it travels in the config so a reopened session re-derives under the
+    // number it was built with. See RF_KORR_SETTLE_SEC_DEFAULT.
+    rfKorrSettleSec: config.rfKorrSettleSec,
     // Switched off, the gate becomes 1 sample / 0 weight rather than 0 / 0: a cell nothing landed
     // in still has nothing to say. Note this only ever moved the two STRUCTURAL bars — under the
     // statistical method the self-share, independence and significance tests are constants and
@@ -739,10 +725,11 @@ export default function Home() {
      WOT DISABLE changes what the log MEANS, not just what a later write will contain. */
   const lambdaLimits = useMemo(
     () => (binaryBuffer
-      ? new BinaryParser(bytesAsRun(binaryBuffer, { applyPatch, applyWotDisable, applyTankVentDisable }))
+      ? new BinaryParser(bytesAsRun(binaryBuffer,
+        { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop }))
         .readLambdaLimits()
       : null),
-    [binaryBuffer, applyPatch, applyWotDisable, applyTankVentDisable]);
+    [binaryBuffer, applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop]);
 
   // Push it into the log hook so every later re-process (a filter drag, a table edit) uses the same
   // gates that produced the tune. Call sites that load a log in the same tick as a new binary pass
@@ -756,7 +743,7 @@ export default function Home() {
     // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
-      filterConfig.veMethod, filterConfig.directAuthority,
+      filterConfig.veMethod, filterConfig.directAuthority, filterConfig.rfKorrSettleSec,
       filterConfig.enableVeCellGate, filterConfig.enableRfKorrCellGate, filterConfig.normaliseChargeTemp,
       filterConfig.assumedAmbientPressure,
       filterConfig.minVeCellSamples, filterConfig.minVeCellWeight,
@@ -1124,10 +1111,10 @@ export default function Home() {
               : 'tooFewCells';
   const rfKorrLockReason = manifestText.rfKorr[rfKorrBlock];
 
-  /** The TUNED download. The body went missing in a20cfa4 — an edit that was threading
-   *  `tunedLowLoad` through the other two artifact builders emptied this one instead, and nothing
-   *  complained because a () => void that does nothing is type-correct. It carries the same extras
-   *  as the session-save and DME-write paths, because all three must produce identical bytes. */
+  /** The TUNED download. The body went missing in a20cfa4 — an edit that was threading a second
+   *  grid through the other two artifact builders emptied this one instead, and nothing complained
+   *  because a () => void that does nothing is type-correct. It carries the same extras as the
+   *  session-save and DME-write paths, because all three must produce identical bytes. */
   const handleDownloadBin = () => {
     binaryFileState.downloadBin(newMap, writeExtras);
   };
@@ -1166,6 +1153,7 @@ export default function Home() {
       applyPatch: !!p.applyPatch,
       applyWotDisable: !!p.applyWotDisable,
       applyTankVentDisable: !!p.applyTankVentDisable,
+      applyRfKorrGateDrop: !!p.applyRfKorrGateDrop,
     });
     downloadBlob(image, `${fileSafe(session.label)}_PatchON.bin`, MIME_BIN);
   };
@@ -1222,7 +1210,10 @@ export default function Home() {
       // TANK VENT is in the list because finalising is where the promise to put the evaporative
       // system back gets kept. Leaving it out meant a tune logged with the purge valve held shut
       // went to the road that way, and the FINAL badge said road state.
-      { applyPatch: false, applyWotDisable: false, applyTankVentDisable: false, writeWarmup: false, restoreWotFuel: false },
+      // RF GATE joins TANK VENT here for the stronger version of the same reason: it leaves the DME
+      // enriching over a region BMW gated off, and finalising is where that comes back out.
+      { applyPatch: false, applyWotDisable: false, applyTankVentDisable: false,
+        applyRfKorrGateDrop: false, writeWarmup: false, restoreWotFuel: false },
     );
     if (!map) return;
     // After loadFromBuffer, and after the resetDerived above that clears it. These bytes are the
@@ -1270,14 +1261,15 @@ export default function Home() {
     // carries no `transientSettleSec`, the fallback that positions that slider at all.
     const hz = live ?? sampleRateHz(logFileState.rawLogData ?? processedLog.data) ?? null;
     if (hz === null) return null;
-    // The RUN this rate belongs to, which is not always the one the button would start.
+    // The RUN this rate belongs to.
     //
-    // `logProcess` describes the run in PROGRESS and resets to VE when there is none, so a reopened
-    // EGT or INERTIA session had its 6.6 Hz measured against VE's 3.0 expectation and read as though
-    // the link had gone twice as fast as it could. The session records what it was recorded as; that
-    // is the authority whenever nothing is running.
-    const profile = LOG_PROFILES[
-      dmeLink.state === 'tuning' ? logProcess : (currentSession?.process ?? logProcess)];
+    // One expression now, where it used to be two. `logProcess` described the run in PROGRESS and
+    // reset to VE when there was none, so a reopened EGT or INERTIA session had its 6.6 Hz measured
+    // against VE's 3.0 expectation and read as though the link had gone twice as fast as it could;
+    // the session's own record had to be consulted instead whenever nothing was running. MODE is
+    // adopted FROM that record when a session opens, so the two cannot disagree and there is
+    // nothing left to choose between.
+    const profile = LOG_PROFILES[logProcess];
     // The list the link actually settled on, when there is one. A VE run whose RAM lambda-trim check
     // failed is polling the fallback, and comparing its rate against the fast profile's expectation
     // would report a correct run as a slow one.
@@ -1311,15 +1303,6 @@ export default function Home() {
   // of theirs instead of a lie of omission. As a plain array it changed identity every render, so
   // naming it in either dependency list would have fired that effect on every render — which is why
   // it was left out, and why the React Compiler could not preserve the memo.
-  /**
-   * The low-opening Alpha-N derivation.
-   *
-   * Reads the SAME processed log the VE map does, but from `lowLoadData` — validData plus the rows
-   * the idle gate dropped, which is the only set containing the samples this needs. Memoised rather
-   * than run in the flush loop because it is a whole-log pass and, unlike the VE grid, has no
-   * incremental form: a cell's verdict depends on how many distinct VISITS it collected, which is
-   * not a quantity that can be accumulated one sample at a time.
-   */
   /**
    * Whether the DME's long-term fuel stores were neutral for this run — the precondition EVERY
    * derivation here rests on and none of them could previously check.
@@ -1360,43 +1343,435 @@ export default function Home() {
   const [idleSaveError, setIdleSaveError] = useState<string | null>(null);
 
   /**
-   * IDLE MODE — show only the tabs an idle run needs.
+   * THE MICRO-THROTTLE RING.
    *
-   * The reason the idle tuner was briefly a separate application. Standing beside a running car,
-   * the whole job is READ, measure, look at the bytes; the other eight tabs are a VE workflow that
-   * cannot be used from the driver's seat and can only be picked by mistake. That is a case for
-   * hiding tabs, which is what this does — it was never a case for a second codebase, and being a
-   * second codebase is what put the measurement and its lever in different repositories.
-   *
-   * Persisted, because the device that wants it is a phone that gets opened in a garage, and a
-   * setting that resets on every load is one more thing to do with cold hands.
+   * Three of its six tables — KL_AQ_ABS_LLS, KL_FR_INEG and kf_rf_soll — are not in the bundled
+   * item catalog, so this reads through the CALIBRATION artifact. That is a 6 MB fetch, taken only
+   * when LLS MODE is actually chosen rather than on every load, and LLS stands up the CALIBRATION
+   * tab anyway so the cost is one the mode was already paying.
    */
-  // The switch is gone from STARTUP at the operator's direction (2026-08-24). It was the only one,
-  // so the mode is off and unreachable rather than half-present: a persisted flag with no control
-  // is the trap the note above warns about, and someone who had turned it on would have opened the
-  // app to three tabs and no way back. `mss54.idleMode` is deliberately not read any more — an old
-  // '1' in a phone's localStorage must not decide what this build shows.
-  //
-  // Nothing else was removed. The IDLE and CALIBRATION tabs are where they were, the filter below
-  // still knows which three the mode leaves standing, and putting a control back is one JSX block
-  // wherever it belongs — the menu sheet is the obvious home if it comes back at all.
-  const idleMode = false;
+  const [calCatalog, setCalCatalog] = useState<IndexedCatalog | null>(null);
+  const [calCatalogLoading, setCalCatalogLoading] = useState(false);
+  useEffect(() => {
+    if (logProcess !== 'LLS' || calCatalog || calCatalogLoading) return;
+    setCalCatalogLoading(true);
+    loadCalCatalog()
+      .then(setCalCatalog)
+      .catch(() => setCalCatalog(null))
+      .finally(() => setCalCatalogLoading(false));
+  }, [logProcess, calCatalog, calCatalogLoading]);
 
+  const llsTables = useMemo(() => {
+    if (!binaryFileState.binaryBuffer || !calCatalog) return null;
+    return readRingTables(binaryFileState.binaryBuffer, calCatalog);
+  }, [binaryFileState.binaryBuffer, calCatalog]);
 
-  /** Same shape for the low-opening block: the toggle ANDed with derivability, so a switch left on
-   *  from a session whose log had low-load evidence cannot write into one whose log has none. */
-  const lowLoadArmed = binaryFileState.writeLowLoad && !!lowLoadResult?.acceptable
-    && featureEnabled('lowLoad', featurePreview);
   /**
-   * What the one ALPHA-N row reports, across both bands of the one table it writes.
+   * The drive, as the ring reads it.
    *
-   * Summed rather than shown as two numbers because the row is one decision: "how much of
-   * kf_rf_soll did this drive earn". Which band each cell came from is the coverage map's job and
-   * the LOW LOAD tab's, both of which say it per cell rather than as a pair of totals.
+   * Derived from the ordinary log rather than a sample type of its own, because the LLS profile
+   * polls the ordinary exchanges — block 3 plus the ambient read that carries road speed. There is
+   * no bespoke poller to keep in step, which is one fewer thing that can drift.
+   *
+   * `rf` is divided by 100: the channel is per cent and the ring works on 0-1.
+   *
+   * `rawData`, NOT `data`. The VE filter exists to keep steady, loaded samples and drops exactly
+   * the kind this mode is made of — the IDLE profile carries the same warning in as many words.
+   * Reading the filtered array would hand the ring a drive with its own subject removed.
    */
-  // One count off the COMPOSED acceptance grid. Summing VE's own total and the low-opening tuner's
-  // report would double-count now that `acceptedMap` carries both halves, and two ways of counting
-  // the same thing is how the hub and the menu come to disagree.
+  const llsSamples = useMemo<LlsSample[]>(() => (processedLog?.rawData ?? [])
+    .filter(p => p.rf !== undefined && p.vehicleSpeed !== undefined)
+    .map(p => ({
+      tS: p.time,
+      rpm: p.rpm,
+      rf: (p.rf as number) / 100,
+      aqRelPct: p.rawLoad,
+      speedKmH: p.vehicleSpeed as number,
+      frRegler: p.frRegler,
+      llsTvPct: p.llsTv,
+      mlSollLlsKgH: p.mlSollLls,
+      throttlePct: p.wdk1,
+    })), [processedLog]);
+
+  const llsSummary = useMemo(
+    () => (llsTables && llsSamples.length ? summariseSession(llsTables, llsSamples) : null),
+    [llsTables, llsSamples]);
+
+  /**
+   * The solve. Confined to the rows the DRIVE reached — not to the constant — so a session that
+   * never entered the valve region writes nothing rather than writing from the defaults.
+   */
+  /**
+   * Which row the solve holds. Selectable, because it is a real choice with a measured cost on
+   * either side and no answer that is right for every drive — see RingGainOptions.anchorMlKgH.
+   */
+  const [llsAnchor, setLlsAnchor] = useState<number>(RING_GAIN_DEFAULTS.anchorMlKgH);
+
+  const llsEdits = useMemo(() => {
+    if (!llsTables) return null;
+    // reachedRows reports what the DRIVE reached; solveLlsTv skips the anchor itself, so the two
+    // stay independent and moving the anchor cannot silently change which rows had evidence.
+    const rows = llsSummary?.reachedRows ?? [];
+    if (!rows.length) return null;
+    return solveLlsTv(llsTables, { anchorMlKgH: llsAnchor, writableMlKgH: rows });
+  }, [llsTables, llsSummary, llsAnchor]);
+
+  /**
+   * What IDLE could still move at its own operating point if this were armed.
+   *
+   * Computed here rather than in the panel so the number the reader sees is derived from the very
+   * edit list the WRITE row would carry — not from the rows they selected, which is a different
+   * thing the moment a row turns out to have no solution.
+   */
+  const llsIdleReach = useMemo(() => {
+    if (!llsTables || !llsEdits?.length) return null;
+    return idleReachIfLlsTakes(llsTables.llsTv, [...new Set(llsEdits.map(e => e.mlKgH))]);
+  }, [llsTables, llsEdits]);
+
+  /**
+   * Whether `KF_LLS_TV` is still the solution to the maps beside it.
+   *
+   * `kf_rf_soll` is an INPUT to the solve, so a VE write invalidates the idle-valve table — the two
+   * are only valid as a matched pair (notes 9.9-11) and the app writes them from two places that do
+   * not know about each other. Asked by SOLVING AGAIN rather than by a flag or a timestamp: the
+   * answer is exact, it needs no threshold, and it closes itself the moment the result is written.
+   *
+   * Not gated on a drive. The rows are whatever the last run reached, or the defaults, and the
+   * question "would this change" is answerable from the image alone — which is the point, because
+   * the moment it becomes true is a VE write, not a micro-throttle run.
+   */
+  const llsRingDrift = useMemo(() => {
+    if (!llsTables) return null;
+    const rows = llsSummary?.reachedRows?.length ? llsSummary.reachedRows : undefined;
+    return ringDrift(llsTables, { anchorMlKgH: llsAnchor, ...(rows ? { writableMlKgH: rows } : {}) });
+  }, [llsTables, llsSummary, llsAnchor]);
+
+  const llsMovedCells = useMemo(
+    () => (llsEdits ?? []).filter(e => Math.abs(e.afterPct - e.beforePct) >= 0.02).length,
+    [llsEdits]);
+
+  /**
+   * MODE decides which tabs are standing, and that is the whole of what IDLE MODE used to be.
+   *
+   * It was a persisted boolean with a switch on STARTUP, removed at the operator's direction
+   * (2026-08-24) because that switch was the only one: a stored flag with no control could strand
+   * you in three tabs with no way back. The filter it drove was never the problem, and it is kept
+   * here — now keyed on something a session actually declares, so there is no stored flag left to
+   * strand anyone.
+   *
+   * It is also the answer to whether the idle tuner should be its own application. Standing beside
+   * a running car the whole job is READ, measure, look at the bytes — a case for hiding tabs,
+   * which is this. It was never a case for a second codebase, and being a second codebase is what
+   * once put the measurement and its lever in different repositories.
+   *
+   * The lists themselves are in the registry — see MODE_TABS, which owns their ORDER too. There
+   * is no longer one reading order to be the page's: VE reads current → measured → derived, and an
+   * idle run reads run → evidence → bytes.
+   */
+  /** What this BUILD may offer. `featurePreview` and not a constant — see selectableModes. */
+  const selectableModes = useMemo(() => selectableModesFor(featurePreview), [featurePreview]);
+
+  /**
+   * Why MODE cannot be changed right now, or null.
+   *
+   * The window opens at NEW SESSION and closes at the first sample, and it closes for a reason
+   * rather than out of caution: MODE decides which channels a run records, so a session that holds
+   * a log and then changes its mode is a session whose label disagrees with the samples in it.
+   * That is the one failure `session.process` exists to prevent.
+   *
+   * `hasLog` as well as the two workspace tests, because a session reopened from the store has its
+   * log in the database rather than in `logFile`.
+   */
+  const modeLock: ModeLock =
+    !currentSession ? 'no-session'
+      : isArchived ? 'archived'
+        : dmeLink.state === 'tuning' ? 'running'
+          : (logFile || processedLog || currentSession.hasLog) ? 'has-log'
+            : null;
+
+  /**
+   * Whether the VE workspace's own controls describe the open session.
+   *
+   * RO CORRECTION, RAW FILTER and LOG FIELDS all configure one thing: the Alpha-N derivation and
+   * the table it fills. VALID / TOTAL count what survived that derivation's filter. A stationary
+   * run has none of it — no interpolation, no transient gate, no correction — so in IDLE or INERTIA
+   * these are three panels and two numbers that describe a calculation nothing is running.
+   *
+   * Hidden rather than disabled. A disabled control still claims the width, in the one bar that has
+   * already been cleared twice for want of room, and still says the feature belongs here.
+   */
+  const veSurfaces = logProcess === 'VE' || logProcess === 'EGT';
+
+  /** The choice and the record of it, in one place. Persisted at the choice rather than at START
+   *  TUNE: the session list reads `process`, and a mode chosen but not written is a mode the tree
+   *  cannot show. A failed write costs the label only — the run polls what `logProcess` says. */
+  const handleModeChange = (next: ProcessId) => {
+    setLogProcess(next);
+    if (currentSession) {
+      void sessionDb.setProcess(currentSession.id, next).catch(() => { /* label only */ });
+    }
+  };
+
+  /**
+   * The open session's mode, adopted when the session changes.
+   *
+   * Render-time prior-state adjustment rather than an effect — the same pattern this file uses for
+   * the calibration panes, and for the same reason: an effect would render one frame of the
+   * outgoing session's mode. Keyed on the ID alone, so `setProcess` refreshing the list (a new
+   * object, the same id) cannot bounce the choice that was just made.
+   */
+  const [modePrevSessionId, setModePrevSessionId] = useState<string | null>(null);
+  if ((currentSession?.id ?? null) !== modePrevSessionId) {
+    setModePrevSessionId(currentSession?.id ?? null);
+    setLogProcess(currentSession?.process ?? 'VE');
+  }
+
+  /**
+   * A stored idle run, handed back to IdleWorkflow so a reopened session shows its rows.
+   *
+   * Read through `loadIdleRun` and not `loadLog`: the log store keeps a `LogDataPoint` projection
+   * of every research run, and that projection has no field for `md_llri` — the entire
+   * measurement. The unprojected samples sit in the same record, and this is their only reader.
+   */
+  const [restoredIdle, setRestoredIdle] = useState<IdleSample[] | null>(null);
+  const loadIdleRun = sessionDb.loadIdleRun;
+  useEffect(() => {
+    if (!currentSession?.id || (currentSession.process ?? 'VE') !== 'IDLE' || !currentSession.hasLog) {
+      setRestoredIdle(null);
+      return;
+    }
+    let alive = true;
+    void loadIdleRun(currentSession.id)
+      .then(rows => { if (alive) setRestoredIdle(rows); })
+      .catch(() => { /* the tab is empty either way */ });
+    return () => { alive = false; };
+  }, [currentSession?.id, currentSession?.process, currentSession?.hasLog, loadIdleRun]);
+
+  /**
+   * The idle run's START and STOP, reached from the hub.
+   *
+   * IdlePanel has said "START IDLE at the hub begins a run" since it was written, and the button it
+   * named did not exist: `controlsRef` was never passed, so the one instruction on screen pointed
+   * at nothing. The panel is right about where the control belongs — the ring is where "what do I
+   * do next" is answered, and a run IS the next thing — so this is the wiring, not a second button.
+   *
+   * A ref rather than lifted state because the samples must stay inside IdleWorkflow: it publishes
+   * four times a second and page.tsx is the whole application.
+   */
+  const idleControlsRef = useRef<IdleControls | null>(null);
+
+  /**
+   * WHAT AN IDLE RUN CURRENTLY PROPOSES — published up from IdleWorkflow, not armed.
+   *
+   * The panel used to carry its own ARM button beside the proposal. It is gone: the hub's WRITE
+   * menu is the one place that answers "what will this flash change", and a second control for the
+   * same decision is the confusion the DOWNLOAD BIN pair already taught this codebase. So the WRITE
+   * row is now a real toggle rather than a disarm-only one, and to arm it the page needs the
+   * VALUES, which live inside the run's own container.
+   *
+   * Null whenever the run has not earned a write — `IdleWorkflow` publishes exactly what its own
+   * `acceptable` test admits, so the row cannot be armed with something the patcher would refuse.
+   */
+  const [idleProposal, setIdleProposal] = useState<number[][] | null>(null);
+
+  /** How many cells the idle write would move: the armed array when there is one, otherwise what
+   *  the run proposes — so the row can say "2 cells" BEFORE it is switched on rather than only
+   *  after. Counted against the loaded map either way, which is the table the bytes go into. */
+  const idleTunedCells = useMemo(() => {
+    const t = binaryFileState.tunedIdleTv ?? idleProposal;
+    const stock = idleTables?.llsTv.values;
+    if (!t || !stock) return 0;
+    return t.reduce((n, row, r) => n + row.filter((v, c) => v !== stock[r]?.[c]).length, 0);
+  }, [binaryFileState.tunedIdleTv, idleProposal, idleTables]);
+
+  /**
+   * THE CAMPAIGN'S LEARNED GAIN — every earlier idle run in this session's ancestry, pooled.
+   *
+   * `gain.ts` could always learn this and never had a caller, so `gainOverride` stayed undefined
+   * and every campaign ran forever on the deliberately low 0.40 prior. The design's promise was
+   * that a wrong gain costs an extra pass rather than stability; without a learner it costs an
+   * extra pass on every pass, for ever.
+   *
+   * Walks PARENT links rather than the whole session list. A campaign is a chain — each session
+   * branched from the tune before it — and pooling unrelated sessions would pair runs taken on
+   * binaries that share no history. Oldest first, because `learnIdleGain` pairs everything against
+   * the first run (see it for why not against the previous one).
+   *
+   * Loading is deliberately quiet. A missing binary, a session whose log was cleared, a parent that
+   * was a VE run — all of them just contribute nothing, because the fallback is the prior and the
+   * prior is safe. The one thing this must never do is report a gain it did not measure, which is
+   * what `learned` on the result is for.
+   */
+  const [idleGain, setIdleGain] = useState<{ gain: number; learned: boolean } | undefined>(undefined);
+  const loadBinaries = sessionDb.loadBinaries;
+  const allSessions = sessionDb.sessions;
+  useEffect(() => {
+    if (!currentSession || !idleTables || (currentSession.process ?? 'VE') !== 'IDLE') {
+      setIdleGain(undefined);
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      // Oldest first. `seen` guards a parent cycle, which a corrupted store could produce and which
+      // would otherwise hang this effect rather than degrade it.
+      const chain: TuningSession[] = [];
+      const seen = new Set<string>();
+      let node: TuningSession | undefined = currentSession;
+      while (node && !seen.has(node.id)) {
+        seen.add(node.id);
+        if ((node.process ?? 'VE') === 'IDLE' && node.hasLog) chain.unshift(node);
+        node = node.parentSessionId
+          ? allSessions.find(s => s.id === node?.parentSessionId)
+          : undefined;
+      }
+      if (chain.length < 2) { if (alive) setIdleGain(undefined); return; }
+
+      const runs: { samples: IdleSample[]; tables: IdleTables }[] = [];
+      for (const s of chain) {
+        const [samples, bins] = await Promise.all([loadIdleRun(s.id), loadBinaries(s.id)]);
+        if (!samples?.length || !bins) continue;
+        // The binary the run was RECORDED against, which is the BASE of its own session — the
+        // tuned bytes are what came out of it, not what the DME was holding while it was recorded.
+        const t = readIdleTablesResult(bins.baseBinaryBuffer);
+        if (!t.ok) continue;
+        runs.push({ samples, tables: t.tables });
+      }
+      if (!alive) return;
+      if (runs.length < 2) { setIdleGain(undefined); return; }
+      const learned = learnIdleGain(runs);
+      setIdleGain(learned.learned ? { gain: learned.gain, learned: true } : undefined);
+    })();
+    return () => { alive = false; };
+  }, [currentSession, idleTables, allSessions, loadIdleRun, loadBinaries]);
+
+  /**
+   * EVERY EARLIER IDLE RUN RECORDED ON THIS EXACT BINARY, as extra evidence for the write.
+   *
+   * `minCellDwells` asks for two INDEPENDENT dwells, because one 120-sample window is one
+   * observation of the operating point repeated rather than two. Four runs on this car produced one
+   * accepted window each — three of them on the same BASE, at the same 880 rpm / 18 kg/h — and every
+   * session refused to write because it could only see its own. Three drives on three occasions is
+   * a better answer to "independent" than three dwells in one sitting, and the tool was throwing it
+   * away on a filing technicality.
+   *
+   * ## Keyed on the BASE sha256, not on the parent chain
+   *
+   * The gain learner above walks PARENT links, and that is right for it: a gain is learned from how
+   * the map CHANGED between passes, so the runs have to be a chain. Evidence is the opposite. An
+   * error only means anything against the map it was measured on, so what pooling needs is not
+   * shared history but an IDENTICAL binary — and `baseSha256` is that test, exactly. Flash a new
+   * tune and the sha moves, the pool empties, and the next campaign starts from its own evidence.
+   *
+   * ## Laid out end to end on the timeline
+   *
+   * Each run is shifted to sit before the current one with a gap wider than `compressorLockoutSec`,
+   * so `findDwells` cannot merge a window across two different drives or reach a compressor
+   * engagement in one from the other. The samples are otherwise untouched.
+   *
+   * Quiet on failure, like the gain walk: a session whose log was cleared or whose binary is gone
+   * contributes nothing, and the fallback is this run's own evidence.
+   */
+  const [pooledIdle, setPooledIdle] = useState<IdleSample[]>([]);
+  const [pooledRuns, setPooledRuns] = useState(0);
+  useEffect(() => {
+    const base = currentSession?.baseSha256;
+    if (!currentSession || !idleTables || !base || (currentSession.process ?? 'VE') !== 'IDLE') {
+      setPooledIdle([]); setPooledRuns(0);
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      const siblings = allSessions
+        .filter(s => s.id !== currentSession.id && s.baseSha256 === base
+          && (s.process ?? 'VE') === 'IDLE' && s.hasLog)
+        .sort((a, b) => a.createdAt - b.createdAt);
+      const out: IdleSample[] = [];
+      let runs = 0;
+      let offset = 0;
+      for (const s of siblings) {
+        const samples = await loadIdleRun(s.id);
+        if (!samples?.length) continue;
+        const t0 = samples[0].time;
+        const span = samples[samples.length - 1].time - t0;
+        for (const x of samples) out.push({ ...x, time: x.time - t0 + offset });
+        // Wider than the compressor lockout, so no window and no exclusion reaches across a seam.
+        offset += span + IDLE_TUNE_DEFAULTS.compressorLockoutSec * 4;
+        runs++;
+      }
+      // ...and the live run starts after all of them, which IdleWorkflow arranges by appending.
+      if (alive) { setPooledIdle(out); setPooledRuns(runs); }
+    })();
+    return () => { alive = false; };
+  }, [currentSession, idleTables, allSessions, loadIdleRun]);
+
+  /**
+   * What a STORED idle run proposes — derived once, here, and handed both ways.
+   *
+   * One call rather than two. IdleWorkflow needs it to show the reopened run's proposal, and the
+   * re-arm below needs it to put the same bytes back; deriving in both places would be two callers
+   * of one pure function that could drift apart the moment either grew a condition.
+   *
+   * This is also how the idle write reproduces. Every other derived writer here re-derives from the
+   * session's own log on reopen rather than storing a snapshot — `writeRfKorr` and `writeVe` are
+   * booleans for that reason — and idle now works the same way: `SessionLogRecord.idle` keeps the
+   * samples unprojected, and `writeIdle` says whether they were armed.
+   */
+  const restoredIdleResult = useMemo(
+    // The learned gain goes in HERE as well as into the live run. It is what the proposal was
+    // derived with, so a re-arm that left it out would rebuild different bytes than the session's
+    // own sha256 records — the reproduction failure A3 exists to prevent, reintroduced one level up.
+    () => (restoredIdle?.length && idleTables
+      ? tuneIdleFeedforward(withPool(pooledIdle, restoredIdle), idleTables, undefined, idleGain)
+      : null),
+    [restoredIdle, idleTables, idleGain, pooledIdle]);
+
+  /**
+   * Put a reopened session's idle arming back.
+   *
+   * Restoring a CHOICE, not making one — which is the distinction that decides whether this belongs
+   * here at all. IdleWorkflow deliberately does not derive-and-arm when it adopts a stored run,
+   * because arming a three-minute measurement on the operator's behalf is a decision. But
+   * `writeIdle` in the record IS their decision, taken earlier, and a workspace that dropped it
+   * would rebuild different bytes than the session's own sha256 describes.
+   */
+  const armIdle = binaryFileState.setTunedIdleTv;
+  useEffect(() => {
+    if (!currentSession?.tuneSettings?.writeIdle) return;
+    if (!restoredIdleResult?.acceptable) return;
+    armIdle(restoredIdleResult.tuned);
+  }, [currentSession?.id, currentSession?.tuneSettings?.writeIdle, restoredIdleResult, armIdle]);
+
+  /** Whether the idle run has rows worth a tab. A boolean off IdleWorkflow's own count, for the
+   *  reason its trace flag is one: it crosses the boundary twice per run, not four times a second. */
+  const [idleHasRows, setIdleHasRows] = useState(false);
+  /** ...and whether it has a TRACE worth the narrow layout's GRAPH destination. Two booleans and
+   *  not one: one row is a table, where one point is not a line. */
+  const [idleHasTrace, setIdleHasTrace] = useState(false);
+  /** Where IdleWorkflow portals that trace — the visualisation pane's own element. */
+  const [idleGraphSlot, setIdleGraphSlot] = useState<HTMLElement | null>(null);
+  /** ...and where it portals the gauge rack, which is what the IDLE tab's own pane shows. */
+  const [idleGaugeSlot, setIdleGaugeSlot] = useState<HTMLElement | null>(null);
+  /**
+   * Whether THIS session's link has proven the MD_LLRI address against block 19.
+   *
+   * `null` = not asked yet, or nothing to ask (a mock link, or a transport without the gate).
+   * Deliberately three-valued: "not checked" and "checked and failed" are different facts about a
+   * run, and collapsing them to a boolean would let the panel report a mock run as verified.
+   */
+  const [idleSourceProven, setIdleSourceProven] = useState<boolean | null>(null);
+  /** Where IdleWorkflow portals those rows — the LOG pane's own element, once it mounts. */
+  const [idleTableSlot, setIdleTableSlot] = useState<HTMLElement | null>(null);
+
+
+  /**
+   * What the one ALPHA-N row reports for the one table it writes.
+   *
+   * One number, because the row is one decision: "how much of kf_rf_soll did this drive earn".
+   * What any single cell is worth is the coverage map's job, which says it per cell rather than as
+   * a total.
+   */
+  // One count, off the acceptance grid itself rather than summed from separate reports: two ways
+  // of counting the same thing is how the hub and the menu come to disagree.
   const alphaNCells = acceptedMap?.flat().filter(Boolean).length ?? 0;
   const shapeCells = appliedShape?.shapedCount ?? 0;
   /** The same shape as every other armed contribution: the toggle ANDed with the thing
@@ -1451,22 +1826,15 @@ export default function Home() {
    * while moving the first.
    */
   const shapeSurface = shape.surface;
-  const alphaNAvailable = !!newMap || !!lowLoadResult?.acceptable;
+  const alphaNAvailable = !!newMap;
   /** True when a log WAS derived and simply earned nothing — a different fact from "no log yet",
    *  and a different next action, so the row must not say the same thing for both. */
-  const alphaNEarnedNothing = !!lowLoadResult && !lowLoadResult.acceptable && !newMap;
-  /** One decision, two stores. Hoisted out of the manifest rather than written as a closure over
-   *  `binaryFileState` there, so the memo can depend on this one stable function instead of on the
-   *  whole hook object — which would rebuild every row on any unrelated binary state change. */
-  const { setWriteVe, setWriteLowLoad } = binaryFileState;
-  const setWriteAlphaN = useCallback((on: boolean) => {
-    setWriteVe(on);
-    setWriteLowLoad(on);
-  }, [setWriteVe, setWriteLowLoad]);
-  /** Memoised for the same reason `shapeWrite` is — see the note there. */
-  const lowLoadWrite = useMemo(() => (
-    lowLoadArmed ? { grid: lowLoadResult!.tuned, owned: lowLoadResult!.owned } : null
-  ), [lowLoadArmed, lowLoadResult]);
+  const alphaNEarnedNothing = !!logFileState.processedLog?.data.length && !newMap;
+  /** Hoisted out of the manifest rather than written as a closure over `binaryFileState` there, so
+   *  the memo can depend on this one stable function instead of on the whole hook object — which
+   *  would rebuild every row on any unrelated binary state change. */
+  const { setWriteVe } = binaryFileState;
+  const setWriteAlphaN = setWriteVe;
 
   // --- CALIBRATION workbench --------------------------------------------------------------------
   /**
@@ -1475,13 +1843,13 @@ export default function Home() {
    * manifest and the bytes cannot disagree about who owns what.
    */
   const calConflictSpans = useMemo<RunSpan[]>(() => armedWriterSpans({
-    veWrite: (binaryFileState.writeVe && !!newMap) || !!lowLoadWrite || !!shapeWrite,
+    veWrite: (binaryFileState.writeVe && !!newMap) || !!shapeWrite,
     warmup: !!newMap && writeWarmup,
     restoreVe,
     restoreWarmup,
     restoreWotFuel,
     rfKorr: !!rfKorrWrite,
-  }), [binaryFileState.writeVe, newMap, lowLoadWrite, shapeWrite, writeWarmup,
+  }), [binaryFileState.writeVe, newMap, shapeWrite, writeWarmup,
     restoreVe, restoreWarmup, restoreWotFuel, rfKorrWrite]);
   const calEdits = useCalibrationEdits(binaryBuffer, calConflictSpans);
   /** A reopened session's stored edits, staged until the NEW buffer is in state (the hook's
@@ -1512,8 +1880,8 @@ export default function Home() {
   const calDiffEntries = useCalibrationDiff(
     calData, calEdits.edits, calCompare.subject, calCompare.reference);
   /** The adapted def behind the current selection, when it is a parameter. */
-  const calSelectedDef = calWs.selected
-    ? calData.catalog?.byId.get(calWs.selected) ?? null
+  const calSelectedDef = calWs.subject
+    ? calData.catalog?.byId.get(calWs.subject) ?? null
     : null;
   // Derivations for the value pane. Memoised — the working overlay builds fresh 480-element
   // arrays, and a fresh identity per page render (this component re-renders on live-run
@@ -1547,10 +1915,16 @@ export default function Home() {
       ? calSelectedEdit.raw.map((r, i) => r !== calSelectedEdit.baseRaw[i])
       : null),
     [calSelectedEdit]);
+  // An archived session is read-only, and these are the two doors into the edit
+  // set. The pane is told as well, so the controls go dim rather than dead —
+  // but the refusal lives here, because a prop can be forgotten at a call site
+  // and this is the one place every calibration edit passes through.
   const calEditCell = (index: number, physical: number) => {
+    if (isArchived) return;
     if (calSelectedDef && calSelectedBase?.value) calEdits.editCell(calSelectedDef, calSelectedBase.value, index, physical);
   };
   const calBulkOp = (op: BulkOp, indices?: readonly number[]) => {
+    if (isArchived) return;
     if (calSelectedDef && calSelectedBase?.value) {
       calEdits.bulkOp(calSelectedDef, calSelectedBase.value, op, indices);
     }
@@ -1567,6 +1941,28 @@ export default function Home() {
   }, [calData.catalog, calParamOf, calRunOf, calCompare.reference, calEdits]);
   const calCopyRef = () => { if (calSelectedDef) calCopyParam(calSelectedDef.id); };
   const calEditedIds = useMemo(() => new Set(calEdits.edits.keys()), [calEdits.edits]);
+
+  /**
+   * Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, while CALIBRATION is the tab in front.
+   *
+   * Not bound while the caret is in a field. The amount box and the cell box
+   * have their own undo — the browser's, over the text being typed — and taking
+   * that away to undo a calibration edit instead would be the wrong one, at the
+   * moment the reader is most sure what they meant.
+   */
+  useEffect(() => {
+    if (activeTab !== 'calibration') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) { e.preventDefault(); calEdits.undo(); }
+      else if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); calEdits.redo(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeTab, calEdits]);
   /**
    * What the two selectors offer: this session's bytes, the reference image the
    * app ships, and every stored session.
@@ -1599,12 +1995,12 @@ export default function Home() {
   // stands must not yank the reader off the DME tab. Render-time prior-state adjustment —
   // the same pattern as the file's other tab derivations, with no one-frame stale panel.
   const [calPrevSelected, setCalPrevSelected] = useState<string | null>(null);
-  if (calWs.selected !== calPrevSelected) {
-    setCalPrevSelected(calWs.selected);
+  if (calWs.subject !== calPrevSelected) {
+    setCalPrevSelected(calWs.subject);
     // …and not off LIST either. LIST is itself a selection surface: every row
     // in it changes the selection, so answering that with INFO would close the
     // list on the first thing picked from it.
-    if (calWs.selected && calBottomTab !== 'list'
+    if (calWs.subject && calBottomTab !== 'list'
       && (dmeLink.state === 'connected' || dmeLink.state === 'disconnected')) {
       setCalBottomTab('info');
     }
@@ -1616,14 +2012,24 @@ export default function Home() {
    */
   const writeExtras = useMemo<PatchExtras>(() => ({
     tunedRfKorr: rfKorrWrite,
-    tunedLowLoad: lowLoadWrite,
     tunedShape: shapeWrite,
+    // The idle proposal, feature-gated like the calibration edits below it and for the same reason:
+    // what the write carries and what the manifest can name must be filtered by one registry.
+    //
+    // This line is the whole of A1, and its absence is what made the un-sealing inert: the byte
+    // boundary was open, the manifest row was a toggle, the panel armed a proposal — and nothing
+    // put that proposal in the bag the patcher reads. Threading a new field through three call
+    // sites and forgetting the fourth is the failure this memo exists to prevent, and it happened
+    // to the fourth field anyway (operator, 2026-09-03).
+    tunedIdleTv: featureEnabled('idle', featurePreview) ? binaryFileState.tunedIdleTv ?? null : null,
+    tunedLlsTv: featureEnabled('lls', featurePreview) ? binaryFileState.tunedLlsTv ?? null : null,
     // Feature-gated like rfKorrArmed above it: what the write carries and what the manifest
     // can name must be filtered by the same registry, or one day they diverge.
     calibrationEdits: featureEnabled('calibration', featurePreview) && calEdits.armedEdits.length
       ? { edits: calEdits.armedEdits, conflictSpans: calConflictSpans }
       : null,
-  }), [rfKorrWrite, lowLoadWrite, shapeWrite, calEdits.armedEdits, calConflictSpans, featurePreview]);
+  }), [rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
+    calEdits.armedEdits, calConflictSpans, featurePreview]);
 
   /**
    * `kf_rf_soll_kath`, derived from THE SAME grid the flash gets — never from a snapshot.
@@ -1645,7 +2051,7 @@ export default function Home() {
   const warmupMap = useMemo(() => {
     if (!newMap) return null;
     const written = writtenVeGrid(
-      binaryFileState.writeVe ? newMap.data : null, lowLoadWrite, shapeWrite,
+      binaryFileState.writeVe ? newMap.data : null, shapeWrite,
     );
     try {
       return new VECalculator().generateWarmupMap(written ? { ...newMap, data: written } : newMap);
@@ -1653,7 +2059,7 @@ export default function Home() {
       console.error('Failed to generate the derived warmup table', e);
       return null;
     }
-  }, [newMap, binaryFileState.writeVe, lowLoadWrite, shapeWrite]);
+  }, [newMap, binaryFileState.writeVe, shapeWrite]);
 
   const ALL_TABS: { id: TabId; label: string; enabled: boolean }[] = useMemo(() => [
     { id: 'startup', label: 'STARTUP', enabled: true },
@@ -1664,11 +2070,18 @@ export default function Home() {
     { id: 'lambda', label: 'LAMBDA FEEDBACK', enabled: !!correctionMap },
     { id: 'new', label: 'TUNED MAP', enabled: !!newMap },
     { id: 'diff', label: 'DIFFERENCE %', enabled: !!currentMap },
-    { id: 'log', label: 'CORRECTED LOG', enabled: !!processedLog },
+    // The one tab whose LABEL moves with the mode, because a label is a promise about what it
+    // produces. There is no correction in an idle dwell — nothing is interpolated, nothing is
+    // divided by an Alpha-N factor — so calling the pane CORRECTED LOG there would promise an
+    // arithmetic that never ran. Its gate moves with it: an idle run has no `processedLog` while it
+    // is happening, and the projection a finished one leaves behind is not what this tab renders.
+    logProcess === 'IDLE'
+      ? { id: 'log' as const, label: 'IDLE LOG', enabled: idleHasRows }
+      : { id: 'log' as const, label: 'CORRECTED LOG', enabled: !!processedLog },
     // Straight after the log, and before the derived tables, because it is read in that order: the
     // log says what was measured, SHAPE says what the surface now looks like and what the tune did
     // to it, and only then is there a reason to look at anything derived FROM that surface.
-    { id: 'lowload', label: 'SHAPE (EXP.)', enabled: !!newMap },
+    { id: 'shape', label: 'SHAPE (EXP.)', enabled: !!newMap },
     // Straight after SHAPE, because it is the same surface seen cold. WARMUP is `kf_rf_soll_kath`
     // — a SECOND Alpha-N table (0xD770) on its own axes, derived from the very grid SHAPE has just
     // finished describing. Reading it two tabs later, after RF KORR's fuel correction, put an
@@ -1694,25 +2107,39 @@ export default function Home() {
     // own DS2 exchanges and reads every threshold straight out of the binary, so it is useful the
     // moment there are bytes to read — and its write is SEALED, so it proposes and never patches.
     { id: 'idle', label: 'IDLE (EXP.)', enabled: !!idleTables },
+    // Enabled on a loaded image for the same reason IDLE is: the ring is read out of the binary,
+    // so the panel has something true to say before any drive. What the drive adds is which rows
+    // it may write — until then the solve is shown against the map alone.
+    { id: 'lls', label: 'LLS (EXP.)', enabled: !!binaryFileState.binaryBuffer },
     // Read-only, and the same prerequisite as IDLE. This is where the idle thresholds can be
     // checked against the bytes they were decoded from, cell by cell. It exists as its own tab so
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
     // RF KORR, which needs a VE drive before it will open.
     { id: 'calibration', label: 'CALIBRATION', enabled: !!binaryFileState.binaryBuffer },
-  ], [currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables, binaryFileState.binaryBuffer]);
+  ], [currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables,
+    binaryFileState.binaryBuffer, logProcess, idleHasRows]);
 
-  /** What IDLE MODE leaves standing. Filtered rather than rebuilt, so a tab cannot end up with two
-   *  definitions of when it is enabled. */
-  const IDLE_MODE_TABS: readonly TabId[] = ['startup', 'idle', 'calibration'];
-  // Order: feature filter first (may this variant render it at all), then IDLE MODE (what the
-  // driver wants to see right now). Both filter — neither reorders; layout stays the page's.
+  // MODE chooses the tabs AND their sequence; the variant then closes whatever it closes. Built by
+  // walking the mode's list rather than filtering the page's, so a mode reads in its own order —
+  // IDLE puts its own panel second, where the VE list would have had it fourth. `enabled` still
+  // comes from ALL_TABS, so a tab cannot end up with two definitions of when it is available.
   const variantTabs = enabledTabs(featurePreview);
   const TABS = useMemo(
-    () => ALL_TABS
-      .filter(t => variantTabs.has(t.id))
-      .filter(t => !idleMode || IDLE_MODE_TABS.includes(t.id)),
+    () => {
+      const byId = new Map(ALL_TABS.map(t => [t.id, t]));
+      // A mode this build cannot offer arranges NOTHING. A session recorded as IDLE and reopened in
+      // a production build still says IDLE in the corner — that is what it measured — but giving it
+      // the idle arrangement would leave the operator on STARTUP alone, with the run's own tab
+      // closed by the registry and no way back except the corner. The record is shown; the surfaces
+      // fall back to the VE workflow.
+      const wanted = selectableModes.includes(logProcess) ? MODE_TABS[logProcess] : MODE_TABS.VE;
+      return wanted.flatMap(id => {
+        const tab = byId.get(id);
+        return tab && variantTabs.has(id) ? [tab] : [];
+      });
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ALL_TABS, idleMode, featurePreview]);
+    [ALL_TABS, selectableModes, logProcess, featurePreview]);
 
   /** A tab move armed before its target exists, released the moment it does.
    *
@@ -1766,16 +2193,15 @@ export default function Home() {
     map: newMap,
     base: binaryBuffer,
     rfKorr: rfKorrWrite,
-    lowLoad: lowLoadWrite,
     logLen: logFileState.rawLogData?.length ?? 0,
     patch: applyPatch,
     wotThreshold: applyWotDisable,
     tankVent: applyTankVentDisable,
+    rfGate: applyRfKorrGateDrop,
     warmup: writeWarmup,
     restoreWot: restoreWotFuel,
     writeVe: binaryFileState.writeVe,
     rfKorrArmed,
-    lowLoadArmed,
     // Identity of the armed edit list — a cell commit, revert or hold changes it, so an
     // unsaved calibration change reads as "something to save" like every other input.
     calEditsArmed: calEdits.armedEdits,
@@ -1819,7 +2245,15 @@ export default function Home() {
           // same test or the button and the handler disagree about whether there is a drive. A
           // cold-soak log is 100 % filtered out BY DESIGN (minTemp 65 degC) and is still a
           // complete recording.
-          : !newMap ? (logFileState.rawLogData?.length
+          : !newMap ? (
+            // Calibration edits, with or without a drive behind them. FIRST,
+            // because they are the one unsaved thing here that lives only on
+            // the heap: a BASE is written as it is read and a run is written as
+            // it stops, but a value the operator typed exists nowhere until
+            // this button is pressed. Reporting 'baseOnly' over it said "there
+            // is nothing further to save" about the only thing that was.
+            calEdits.armedEdits.length > 0 ? (nothingToSave ? 'saved' : 'ready')
+            : logFileState.rawLogData?.length
             ? (nothingToSave ? 'saved' : 'logOnly')
             // An idle or inertia run is written to the session as it ends, so by the time this is
             // read the samples are already on the device. Reporting 'baseOnly' here said "BASE
@@ -1830,18 +2264,26 @@ export default function Home() {
             // label never moved, the cell stayed pressable, and there was no way to tell a save
             // that had happened from one that had not.
             : nothingToSave ? 'saved' : 'ready',
-  }), [dmeLink.state, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave]);
+  }), [dmeLink.state, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave,
+    // Without this the button never noticed the first calibration edit: the memo
+    // held the phase it was built with, so SAVE stayed dark over unsaved work.
+    calEdits.armedEdits.length]);
   const saveLook = describeSave(saveStatus);
 
   const buildSettings = (): TuneSettings => ({
-    filterConfig, interpolationTable, applyPatch, applyWotDisable, applyTankVentDisable, writeWarmup, restoreWotFuel,
+    filterConfig, interpolationTable, applyPatch, applyWotDisable, applyTankVentDisable,
+    applyRfKorrGateDrop, writeWarmup, restoreWotFuel,
     restoreVe, restoreWarmup,
     // The armed value, not the raw toggle: `rfKorrArmed` is what actually reached the bytes, and a
     // session must record what it did rather than what was switched on at the time.
     writeRfKorr: rfKorrArmed,
-    // Same rule for the two kf_rf_soll contributions: record what the composition actually took.
+    // Record what the composition actually took, not the raw toggle.
     writeVe: binaryFileState.writeVe && !!newMap,
-    writeLowLoad: lowLoadArmed,
+    // The ARMED idle proposal, as a boolean. The bytes are not stored beside it: they are re-derived
+    // from `SessionLogRecord.idle` on reopen, the same rule VE and RF KORR follow, so there is one
+    // source for them rather than a flag and a snapshot that can come apart.
+    writeIdle: !!binaryFileState.tunedIdleTv,
+    writeLls: !!binaryFileState.tunedLlsTv,
     // The ARMED calibration edits — the exact records the build applied. Recording the raw
     // toggle-side set instead would describe bytes the flash never carried.
     calibrationEdits: calEdits.armedEdits.length ? calEdits.armedEdits : undefined,
@@ -1919,6 +2361,7 @@ export default function Home() {
         applyPatch: session.tuneSettings.applyPatch,
         applyWotDisable: session.tuneSettings.applyWotDisable,
         applyTankVentDisable: session.tuneSettings.applyTankVentDisable,
+        applyRfKorrGateDrop: session.tuneSettings.applyRfKorrGateDrop,
         writeWarmup: session.tuneSettings.writeWarmup,
         restoreWotFuel: session.tuneSettings.restoreWotFuel ?? false,
         // Absent reads false, and here that is a fact rather than a default: no session predating
@@ -1929,7 +2372,6 @@ export default function Home() {
         // Absent writeVe reads TRUE: sessions from before the field always wrote the map, and the
         // reopened workspace must rebuild the same bytes. See TuneSettings.writeVe.
         writeVe: session.tuneSettings.writeVe ?? true,
-        writeLowLoad: session.tuneSettings.writeLowLoad ?? false,
       }
       : armedPatchesFromHistory(session) ?? undefined;
 
@@ -1960,6 +2402,7 @@ export default function Home() {
             applyPatch: !!armed?.applyPatch,
             applyWotDisable: !!armed?.applyWotDisable,
             applyTankVentDisable: !!armed?.applyTankVentDisable,
+            applyRfKorrGateDrop: !!armed?.applyRfKorrGateDrop,
           })).readLambdaLimits(),
         );
         if (processed) {
@@ -2109,6 +2552,7 @@ export default function Home() {
         applyPatch: session.tuneSettings.applyPatch,
         applyWotDisable: session.tuneSettings.applyWotDisable,
         applyTankVentDisable: session.tuneSettings.applyTankVentDisable,
+        applyRfKorrGateDrop: session.tuneSettings.applyRfKorrGateDrop,
         writeWarmup: session.tuneSettings.writeWarmup,
         restoreWotFuel: session.tuneSettings.restoreWotFuel ?? false,
         // Absent reads false, and here that is a fact rather than a default: no session predating
@@ -2119,7 +2563,6 @@ export default function Home() {
         // Absent writeVe reads TRUE: sessions from before the field always wrote the map, and the
         // reopened workspace must rebuild the same bytes. See TuneSettings.writeVe.
         writeVe: session.tuneSettings.writeVe ?? true,
-        writeLowLoad: session.tuneSettings.writeLowLoad ?? false,
       }
       : armedPatchesFromHistory(session) ?? undefined;
     const map = await binaryFileState.loadFromBuffer(
@@ -2138,6 +2581,7 @@ export default function Home() {
         applyPatch: !!armed?.applyPatch,
         applyWotDisable: !!armed?.applyWotDisable,
         applyTankVentDisable: !!armed?.applyTankVentDisable,
+        applyRfKorrGateDrop: !!armed?.applyRfKorrGateDrop,
       })).readLambdaLimits());
     if (processed) {
       // Same stale-scope reason as the archived rebuild: `loadFromBuffer` above only scheduled
@@ -2220,6 +2664,43 @@ export default function Home() {
     // exists: it stores BASE + log + process and deliberately sets no sha256, so the session never
     // offers a downloadable TUNED it never derived.
     if (!newMap) {
+      /**
+       * Calibration edits with no drive behind them — the whole of this app's
+       * second way to produce a tune.
+       *
+       * Inherit a BASE from a previous session (or READ one off the car), open
+       * CALIBRATION, change some values, and there is no log and no derived
+       * map: `!newMap` sent it to the research branch, which needs a log, which
+       * returned. SAVE did nothing at all, so the only way to keep the work was
+       * to flash the car — and the edits lived on the heap until then, where a
+       * reload lost them.
+       *
+       * These bytes are a tune by the same test everything else uses: they
+       * differ from the BASE and they are what would go into the ECU.
+       */
+      if (calEdits.armedEdits.length > 0 && binaryBuffer) {
+        const target = await ensureDraft();
+        if (!target) return;
+        if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
+        const patched = binaryFileState.buildPatchedBuffer(null, undefined, writeExtras);
+        if (!patched) return;
+        await sessionDb.saveSessionTune({
+          sessionId: target.id,
+          binaryFileName: binaryFileState.buildFileName(null, writeExtras),
+          tunedBinaryBuffer: patched,
+          tuneSettings: buildSettings(),
+          log: logFileState.rawLogData,
+        });
+        // `saveSessionTune` stores the log but not what KIND of run it was, and
+        // this branch now runs in front of `saveResearch` — which was the only
+        // thing recording it. An EGT drive plus a calibration edit would
+        // otherwise have lost its process label.
+        if (logFileState.rawLogData?.length) {
+          await sessionDb.setProcess(target.id, logProcess).catch(() => { /* label only */ });
+        }
+        setSavedInputs({ ...saveInputs, sessionId: target.id });
+        return;
+      }
       // RAW, not filtered. The guard here used to read `processedLog.data.length` while the line
       // below saved `rawLogData` — it refused to save the very array it was about to write. A log
       // taken at ignition-on with the engine cold has every sample dropped by the 65 degC coolant
@@ -2434,8 +2915,13 @@ export default function Home() {
     // the panel is where measuring happens. Placed above every side effect below — `setProcess`,
     // the sample-buffer clear, `beginLiveRun` — so a mis-press costs nothing and destroys no
     // existing recovery record.
-    if (logProcess === 'INERTIA') {
-      goToTab('inertia');
+    // IDLE degrades the same way and worse: `startIdleRun` polls seven RAM windows this path
+    // never asks for, so an idle run started here would come back with block 3 and nothing else —
+    // no md_llri, which is the entire measurement — while the session went on calling itself IDLE.
+    // Routing rather than refusing, for the reason above: the operator pressing this wants to
+    // measure, and the panel is where measuring happens.
+    if (logProcess === 'INERTIA' || logProcess === 'IDLE') {
+      goToTab(logProcess === 'INERTIA' ? 'inertia' : 'idle');
       setNarrowPane('map');
       return;
     }
@@ -2520,6 +3006,13 @@ export default function Home() {
           mdFwFilter: sample.mdFwFilter,
           mdLsDelta: sample.mdLsDelta,
           mdDpDelta: sample.mdDpDelta,
+          // The ring. Listed here for the reason the paragraph above gives — this literal is the
+          // one place the chain "link reads it / registry names it / profile asks for it" can still
+          // silently end in a log that carries none of it.
+          frRegler: sample.frRegler,
+          llsTv: sample.llsTv,
+          mlSoll: sample.mlSoll,
+          mlSollLls: sample.mlSollLls,
         };
         // Record it, price the rate, pace the flush and the recovery write. Nothing in there
         // renders anything — see useLiveRun for why that matters at four samples a second.
@@ -2547,30 +3040,76 @@ export default function Home() {
    *  than inside InertiaWorkflow because uploading a record is the page's job — the workflow owns an
    *  EGAS run, not a session. */
   /**
-   * The only way an inertia run starts, which is why it is also the only place `logProcess` says so.
+   * The inertia run, with the diagnostics publish the datalog also does.
    *
-   * With the RUN selector gone, nothing declares the process in advance any more — so it is
-   * declared by the thing that actually begins the run, and withdrawn when it ends. The branches
-   * that depend on it are not cosmetic: the hub's STOP reads it to avoid running the VE teardown
-   * over an inertia run, which would flush an empty sample buffer, report a datalog that does not
-   * exist and drop the link.
+   * It used to flip `logProcess` to INERTIA for the duration and back to VE afterwards, because
+   * with the RUN selector gone nothing declared the run in advance and the branches that read it
+   * are not cosmetic — the hub's STOP consults it to avoid running the VE teardown over an inertia
+   * run, which would flush an empty sample buffer, report a datalog that does not exist and drop
+   * the link.
    *
-   * Reset in the same callback that publishes the diagnostics, so it happens on a failed run as
-   * well as a finished one. Leaving it stuck on INERTIA would make the next START TUNE route to the
-   * inertia panel instead of starting a VE log.
+   * Both halves of that are gone. MODE declares it before the run starts, and the INERTIA tab this
+   * is driven from is only standing in INERTIA mode, so the flip could only ever set what was
+   * already true. Removing the RESET is the part that matters: it wrote VE over the session's own
+   * declared mode at the end of every run, which with a persisted MODE would have silently
+   * relabelled the session as a drive.
    */
   const startInertiaRunWithDiagnostics = useCallback(
-    (onSample: Parameters<typeof dmeLink.startInertiaRun>[0], onEnd?: (failure: string | null) => void) => {
-      setLogProcess('INERTIA');
-      return dmeLink.startInertiaRun(onSample, failure => {
-        setLogProcess('VE');
+    (onSample: Parameters<typeof dmeLink.startInertiaRun>[0], onEnd?: (failure: string | null) => void) =>
+      dmeLink.startInertiaRun(onSample, failure => {
         publishDiagnostics('log');
         onEnd?.(failure);
-      });
-    },
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dmeLink.startInertiaRun],
   );
+
+  /**
+   * START IDLE — the hub's entry to the idle run.
+   *
+   * Goes to the tab as well as starting, and the order is deliberate: the census, the preflight and
+   * the dwell count are the only things that say whether the three minutes about to be spent are
+   * being spent on anything, and finding that out afterwards costs the whole sitting.
+   *
+   * No preflight DIALOG. IdlePanel renders the section 7.1 preconditions live, against the samples
+   * as they arrive — which is the right shape for a check whose inputs do not exist until the run
+   * has started, and the reason the VE path's pre-run modal has no counterpart here.
+   */
+  const handleStartIdle = async () => {
+    /**
+     * THE ONE CHECK THIS RUN CANNOT SKIP.
+     *
+     * Everything the idle tuner produces is `MD_LLRI`. That address is right in a disassembly of
+     * the 0401 master; whether it is right in THIS ECU is a question only this ECU can answer, and
+     * answering it wrong does not produce an error — it produces three minutes of plausible numbers
+     * that then get written into KF_LLS_TV. The gate reads RAM, block 19, and RAM again, and asks
+     * whether the two agree inside the binary's own clamps.
+     *
+     * The same shape as the VE run's lambda check, in the same place — before a single sample —
+     * because that is the last moment nothing is at stake. It costs about a second of standing
+     * still against a run that costs three minutes and a procedure.
+     *
+     * Overridable, and never silent. The VE gate degrades instead of asking because block 19 gives
+     * it a usable second path; this one has none (see verifyIdleTorqueSource), so the choice is the
+     * operator's and the dialog states what a wrong address actually looks like.
+     */
+    if (idleTables) {
+      const verdict = await dmeLink.verifyIdleTorqueSource(idleTables.mdLlriRange);
+      setIdleSourceProven(verdict ? verdict.proven : null);
+      if (verdict && !verdict.proven) {
+        const t = dialogText();
+        const go = await ask({
+          title: t.titleIdleSource, icon: <AlertCircle className="w-3 h-3" />,
+          body: t.idleSourceUnproven(verdict.detail),
+          confirmLabel: t.btnIdleRunAnyway, cancelLabel: t.btnCancel, danger: true,
+        });
+        if (!go) return;
+      }
+    }
+    goToTab('idle');
+    setNarrowPane('map');
+    idleControlsRef.current?.start();
+  };
 
   const handleStopTune = async () => {
     dmeLink.stopTuning();
@@ -2595,15 +3134,18 @@ export default function Home() {
     // Absent on every session saved before this existed, and `undefined !== false` would report a
     // drift that never happened on all of them. Coerced, not compared loosely.
     cmp('TANK VENT', !!s.applyTankVentDisable, applyTankVentDisable);
+    cmp('RF GATE', !!s.applyRfKorrGateDrop, applyRfKorrGateDrop);
     cmp('WRITE WARMUP', s.writeWarmup, writeWarmup);
     cmp('RESTORE WOT FUEL', s.restoreWotFuel ?? false, restoreWotFuel);
     cmp('RESTORE VE', s.restoreVe ?? false, restoreVe);
     cmp('RESTORE WARMUP', s.restoreWarmup ?? false, restoreWarmup);
     cmp('WRITE RF KORR', storedWriteRfKorr(s), rfKorrArmed);
-    // Absent writeVe reads TRUE (pre-field sessions always wrote the map); writeLowLoad reads
-    // false (the arming was never persisted). Both compare the ARMED value, like RF KORR above.
+    // Absent writeVe reads TRUE: pre-field sessions always wrote the map. Compares the ARMED
+    // value, like RF KORR above.
     cmp('WRITE VE', s.writeVe ?? true, binaryFileState.writeVe && !!newMap);
-    cmp('WRITE LOW LOAD', s.writeLowLoad ?? false, lowLoadArmed);
+    // Absent reads false, and that is a fact: no session saved before this field existed could have
+    // carried idle bytes, because the seal refused them at the byte boundary.
+    cmp('WRITE IDLE', s.writeIdle ?? false, !!binaryFileState.tunedIdleTv);
     // Calibration edits: the armed RUNS, not a boolean — a different cell set is drift too.
     const storedCal = s.calibrationEdits ?? [];
     const nowCal = calEdits.armedEdits;
@@ -2657,7 +3199,10 @@ export default function Home() {
     const confirmed = await ask({
       title: tWrite.titleWriteConfirm, icon: <Zap className="w-3 h-3" />,
       body: tWrite.writeConfirm({
-        tuned: Boolean(newMap),
+        // The same question the filename and the flash record ask, asked once — a dialog that
+        // said "no tune" over a derived table would be the label defect in the one place it is
+        // most expensive.
+        tuned: writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras),
         patchOn: applyPatch || applyWotDisable,
         drift,
         // Stated here rather than left to the selector alone. The mode changes what "verified"
@@ -2667,6 +3212,7 @@ export default function Home() {
         // lands on an erased ECU. It is never implied.
         boostBaud: dmeLink.writeBaud !== 9600 ? dmeLink.writeBaud : null,
         tankVentOff: applyTankVentDisable,
+        rfGateDropped: applyRfKorrGateDrop,
         // Which campaign shape this write is part of, and — for route B only — that it rests on a
         // division no car has checked. Stated here rather than left to the hub because this is the
         // dialog whose job is the consequence of the thing about to happen.
@@ -2732,12 +3278,45 @@ export default function Home() {
         // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
         if (target) await sessionDb.recordFlash(target.id, {
           at: flashedAt, sha256, settings: flashedSettings,
-          tuned: finalizeArmedRef.current || (writeExtras.calibrationEdits?.edits.length ?? 0) > 0,
+          tuned: finalizeArmedRef.current || writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras),
           verifyMode: verification.mode,
           // Read through the snapshot, not `dmeLink.mockMode`: this handler was built several
           // renders ago and a write takes minutes. See DmeLinkSnapshot.
           practice: dmeLink.readLinkState().mockMode,
         });
+
+        /**
+         * ...and KEEP the bytes, when they are a tune.
+         *
+         * The paragraph above explains why a bare PATCH-ON flash must not be
+         * saved as a TUNED: those bytes are the BASE, and storing them would be
+         * "a BASE dressed as a TUNED". Calibration edits are the other case and
+         * the same reasoning inverts — the bytes differ from the BASE by the
+         * values the operator typed, and they are now in the ECU.
+         *
+         * Without this the session recorded that a tune had gone out and kept
+         * nothing of it: the TUNED badge lit, the row offered no download, and
+         * FINALIZE answered "no tune to finalize" about a car that was running
+         * those very bytes.
+         *
+         * `veMapSnapshot` is left off rather than faked — nothing was derived,
+         * and an earlier save's map is preserved by the repository.
+         */
+        // DRAFT only, and with a BASE — the same guard the tuned branch below
+        // uses, and it is load-bearing: an archived session's TUNED is already
+        // stored and must not be rewritten, because its earlier flash record
+        // points at those exact bytes. FINALIZE re-flashes an archived session
+        // and would otherwise have overwritten the thing it was finalising.
+        if (target?.status === 'draft' && target.baseOrigin
+          && (writeExtras.calibrationEdits?.edits.length ?? 0) > 0 && patchedBuffer) {
+          await sessionDb.saveSessionTune({
+            sessionId: target.id,
+            binaryFileName: binaryFileState.buildFileName(newMap, writeExtras),
+            tunedBinaryBuffer: patchedBuffer,
+            tuneSettings: flashedSettings,
+            log: logFileState.rawLogData,
+          });
+        }
 
         alert(dialogText().patchWriteDone(verification));
         await dmeLink.disconnect();
@@ -2755,9 +3334,10 @@ export default function Home() {
           // missing and got away with it because that patch leaves a trace uploadBinary re-detects
           // — but it is the same omission class the clear() comment in useBinaryFile records as
           // having already shipped once, and a bag that is right by accident is not right.
-          { applyPatch, applyWotDisable, applyTankVentDisable, writeWarmup, restoreWotFuel,
+          { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop,
+            writeWarmup, restoreWotFuel,
             restoreVe, restoreWarmup, writeRfKorr,
-            writeVe: binaryFileState.writeVe, writeLowLoad: binaryFileState.writeLowLoad },
+            writeVe: binaryFileState.writeVe },
         );
         goToTab('current');
         return;
@@ -3018,13 +3598,15 @@ export default function Home() {
   const bytesPatched = !!patchStatus && patchStatus.mapOff && patchStatus.tempLimit;
   const bytesWotDisabled = !!patchStatus && patchStatus.wotDisabled;
   const bytesTankVentShut = !!patchStatus && patchStatus.tankVentDisabled;
+  const bytesRfGateDropped = !!patchStatus && patchStatus.rfKorrGateDropped;
   // All three, because all three are things that have to come back OFF before the car is handed back
   // to the road. TANK VENT was missing here while being listed in the write confirm and the flash
   // record, so a tune logged with the purge valve shut had no route to a patch-off write at all: no
   // drift, no WRITE PATCH-OFF, nothing to finalize with.
   const patchDrift = !!patchStatus && (bytesPatched !== applyPatch
     || bytesWotDisabled !== applyWotDisable
-    || bytesTankVentShut !== applyTankVentDisable);
+    || bytesTankVentShut !== applyTankVentDisable
+    || bytesRfGateDropped !== applyRfKorrGateDrop);
 
   /** A draft is a workspace, so drift in either direction there is you arming something. An archived
    *  session is a record, and the only legitimate reason to send it to the ECU again is finalising —
@@ -3032,7 +3614,8 @@ export default function Home() {
    *  replayed would raise drift by accident (its stored settings say PATCH ON, its BASE bytes are
    *  unpatched) and the hub would offer a patch write in place of READ, which is the one thing that
    *  state actually needs. */
-  const patchWriteAllowed = !isArchived || (!applyPatch && !applyWotDisable && !applyTankVentDisable);
+  const patchWriteAllowed = !isArchived
+    || (!applyPatch && !applyWotDisable && !applyTankVentDisable && !applyRfKorrGateDrop);
 
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
    *  render, never stored.
@@ -3049,7 +3632,59 @@ export default function Home() {
    *  TUNE would record STFT through the DME's own map correction, which is the wrong next step.
    *  Unlike 'tune' it is NOT gated on !isArchived: finalising is exactly an archived session's job. */
   const idleAction: 'read' | 'tune' | 'write' | 'writePatch' =
-    newMap ? 'write'
+    /**
+     * IDLE first, because almost none of the chain below is about it.
+     *
+     * An idle run derives no map, so `newMap` is never set; its own write is SEALED, so there is no
+     * idle artifact to offer; and its profile `requires` nothing, so `patchDrift` must NOT outrank
+     * the run the way it outranks START TUNE. That last one is the trap: the VE ordering exists
+     * because logging STFT through the DME's own map correction is the wrong next step, and the
+     * patches change FUELLING while this measures AIR. Left in the VE chain, an unpatched car would
+     * have offered WRITE PATCH where the operator was standing at the bonnet waiting to record.
+     *
+     * What survives is the CALIBRATION edits: the item browser is in this mode's tab set, its edits
+     * are ordinary bytes, and a mode that could arm one and not send it would be a dead end.
+     */
+    logProcess === 'IDLE'
+      // An ARMED proposal outranks starting another run, the way `newMap` outranks START TUNE in
+      // the VE chain and for the same reason: the next thing to do with a derivation you have
+      // decided to keep is to send it. Without this the ring said START IDLE over an armed
+      // proposal and WRITE was unreachable — the seal was open and nothing could pass through it.
+      //
+      // Disarming on the manifest row returns the ring to START IDLE, so "measure again instead"
+      // is one tap away and never hidden behind the write.
+      ? (idleTunedCells > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
+        : (calEdits.armedEdits.length > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
+          // `idleTables` and not `currentMap`: the run reads every threshold out of the image, and
+          // an image whose idle calibration will not decode cannot start one. That is also why the
+          // fall-through is READ — the answer is a different image, and the notice line says which.
+          : (idleTables && currentSession && !isArchived) ? 'tune'
+            : 'read'
+      /**
+       * LLS, and this is the IDLE paragraph above happening a second time.
+       *
+       * Reported from the car: an armed LLS row and the ring still offering START TUNE, with no
+       * way to reach WRITE (operator, 2026-09-22). The cause is the one the comment above already
+       * names — the VE chain's first test is `newMap`, a micro-throttle run never derives one, so
+       * the whole chain falls through to `tune`. Adding a second mode whose artifact is not a VE
+       * map reproduced the identical defect the IDLE branch was written to fix.
+       *
+       * The other two reasons carry over unchanged. Its profile `requires` nothing, so `patchDrift`
+       * must not outrank the run and send the operator to WRITE PATCH while they are waiting to
+       * record. And the CALIBRATION edits survive, because that tab is in this mode's set too.
+       *
+       * Gated on the proposal EXISTING, not on it being armed — same as IDLE. An unarmed row
+       * leaves the ring disabled with the manifest's reason under it, which is the house rule:
+       * a ring that cannot say why it is dead is the control that gets reported as broken.
+       */
+      : logProcess === 'LLS'
+        ? (llsMovedCells > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
+          : (calEdits.armedEdits.length > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
+            // `llsTables` rather than `currentMap`: the ring is read out of the image, and an
+            // image whose six tables will not decode cannot start this run either.
+            : (llsTables && currentSession && !isArchived) ? 'tune'
+              : 'read'
+      : newMap ? 'write'
       // Route A step 1: a correction table with no VE map behind it. An EGT run produces exactly
       // that — its log has no trim, so `newMap` stays null — and without this branch there would be
       // no way to send it. buildPatchedBuffer already writes KF_RF_KORR_DRREL outside its
@@ -3082,11 +3717,24 @@ export default function Home() {
 
   // Names the bytes by what they will carry once written, not by what is in the ECU now — the label
   // is a promise about the file being sent, the same rule DOWNLOAD PATCH-ON follows.
+  /**
+   * What this write SENDS, not what the car currently is.
+   *
+   * A derived table outranks the patch state, which is why RF KORR was already above PATCH-ON: the
+   * patch is configuration and the table is the artifact. IDLE and LLS belong at that same level
+   * and were missing, so an armed KF_LLS_TV read as `WRITE PATCH-OFF` — a label describing the one
+   * thing the write was NOT about (operator, 2026-09-22).
+   *
+   * Gated on ARMED rather than on a proposal existing, because this names the bytes going out. A
+   * derived table nobody armed is not in them.
+   */
   const writePatchLabel = writeRoute === 'A1' ? 'WRITE RF KORR'
-    : (applyPatch || applyWotDisable || applyTankVentDisable) ? 'WRITE PATCH-ON'
-      // Calibration edits alone: the artifact is the BASE plus those cells, and the label says so.
-      : calEdits.armedEdits.length > 0 ? 'WRITE CAL'
-        : 'WRITE PATCH-OFF';
+    : binaryFileState.tunedLlsTv?.length ? 'WRITE LLS'
+      : binaryFileState.tunedIdleTv ? 'WRITE IDLE'
+        : (applyPatch || applyWotDisable || applyTankVentDisable || applyRfKorrGateDrop) ? 'WRITE PATCH-ON'
+          // Calibration edits alone: the artifact is the BASE plus those cells, and the label says so.
+          : calEdits.armedEdits.length > 0 ? 'WRITE CAL'
+            : 'WRITE PATCH-OFF';
 
 
   // Which stage the hub's arc, percentage and phase label are all painted for. transferPhase lags
@@ -3202,8 +3850,16 @@ export default function Home() {
     (activeTab === 'warmup' && warmupMap) ||
     (activeTab === 'rfkorr' && tunedRfKorr) ||
     // SHAPE draws here now, so the narrow layout's GRAPH tab is a destination on it.
-    (activeTab === 'lowload' && newMap) ||
-    (activeTab === 'log' && processedLog) ||
+    (activeTab === 'shape' && newMap) ||
+    // IDLE's two pictures. The gauge rack has content the moment the mode is chosen — the
+    // thresholds are read from the binary, so the bars are drawn before a run starts and that is
+    // exactly when a driver wants to see what they are about to be judged against. The trace needs
+    // two points, and only the LOG tab shows it.
+    (activeTab === 'idle' && logProcess === 'IDLE' && !!idleTables) ||
+    (activeTab === 'log' && logProcess === 'IDLE' && idleHasTrace) ||
+    // ...and the VE chart is not the IDLE LOG's. That tab draws rows and nothing else, so on an
+    // idle session GRAPH would have landed on the empty box this whole flag exists to prevent.
+    (activeTab === 'log' && processedLog && logProcess !== 'IDLE') ||
     // CALIBRATION: the selected parameter's chart/table, once it has decodable values.
     (activeTab === 'calibration' && calSelectedDef?.run && binaryBuffer)
   );
@@ -3308,24 +3964,27 @@ export default function Home() {
     // generated from the VE result, and the restore repairs a table the stable workflow's own
     // history damaged. The PATCH rows are logic switches the stable workflow has always had.
     const rowFeature: Record<string, FeatureName> = {
-      alphan: 've', shape: 'lowLoad', warmup: 've', rfkorr: 'rfKorr',
-      idle: 'idle', inertia: 'inertia', wotfuel: 've',
+      alphan: 've', shape: 'shape', warmup: 've', rfkorr: 'rfKorr',
+      idle: 'idle', lls: 'lls', inertia: 'inertia', wotfuel: 've',
       // The two Alpha-N restores ride with 've' like the WOT FUEL one above: they repair tables the
-      // VE workflow's own history moved. `restorewarmup` is 've' and not 'lowLoad' because
-      // kf_rf_soll_kath is written by the WARMUP derivation, which is inside the VE trunk.
+      // measured derivation's own history moved. `restorewarmup` is 've' rather than its own
+      // feature because kf_rf_soll_kath is written by the WARMUP derivation, inside the same trunk.
       restoreve: 've', restorewarmup: 've',
       patch: 've', map: 've', ltft: 've', tankvent: 've', wotth: 've',
+      // Rides with 'rfKorr', not 've': the floor exists to feed the KF_RF_KORR_DRREL derivation,
+      // and a build that does not offer that derivation has no use for the patch that supplies it.
+      rfgate: 'rfKorr',
     };
     /**
      * Is anything armed that writes DERIVED cells into `kf_rf_soll`?
      *
-     * The three contributions the composition can take — VE's band, LOW LOAD's band, and SHAPE's
-     * interpolated cells — against the one row that puts the whole table back. They are locked
-     * against each other because they are the same 960 bytes: whichever ran last would win, and a
+     * The two contributions the composition can take — the derived grid, and SHAPE's interpolated
+     * cells — against the one row that puts the whole table back. They are locked against each
+     * other because they are the same 960 bytes: whichever ran last would win, and a
      * restore that a tune can overwrite is not a restore. `buildPatchedBuffer` enforces the same
      * order independently, so this lock is the explanation rather than the mechanism.
      */
-    const veTuneArmed = binaryFileState.writeVe || lowLoadArmed
+    const veTuneArmed = binaryFileState.writeVe
       || (binaryFileState.writeShape && shapeCells > 0);
 
     /**
@@ -3338,7 +3997,7 @@ export default function Home() {
      * repair was being dropped in silence while the row read as armed. A switch reading ON while
      * the write would contribute nothing is the lie this manifest exists to end.
      */
-    const alphaNArmed = binaryFileState.writeVe || lowLoadArmed;
+    const alphaNArmed = binaryFileState.writeVe;
 
     /** CALIBRATION tab edits, one WRITE row per symbol. Held-back and conflicted edits stay
      *  listed — a row that vanishes when locked reads as data loss, and the count on it is the
@@ -3365,23 +4024,16 @@ export default function Home() {
         id: 'write', title: 'WRITE', caption: manifestText.captionWrite,
         rows: [
           {
-            // ONE ROW FOR ONE TABLE. `kf_rf_soll` is a single 24x20 map, and VE and LOW LOAD are
-            // two derivations over different bands of it — since TI_F_STAT came out of the
-            // correction and `ltft` went into both, they are now the SAME expression,
-            // `Old x stft x ltft x rf_korr`, differing only in the evidence each band demands.
-            // Two toggles over one table asked the reader to make a decision the arithmetic no
-            // longer offers, and let one be armed while the other was not — which is a table
-            // written half from a drive and half from BASE, with nothing on screen saying so.
-            //
-            // The split stays INSIDE, and deliberately: a stationary idle can park on a cell for
-            // minutes while a sweep crosses it in a second, so the two bands need different bars;
-            // and the additive trim store this ECU cannot read is the one an idle learns into, so
-            // the risk carried by the neutrality inference is concentrated below the seam. That is
-            // a reason to keep reporting the bands apart, not to keep asking about them apart.
+            // ONE ROW FOR ONE TABLE. `kf_rf_soll` is a single 24x20 map derived one way,
+            // `Old x stft x ltft x rf_korr`, on one set of evidence bars — so one toggle arms it.
+            // It carried two for a while, from a time when the low-opening rows were derived
+            // separately: two toggles over one table asked the reader to make a decision the
+            // arithmetic does not offer, and let one be armed while the other was not — which is a
+            // table written half from a drive and half from BASE, with nothing on screen saying so.
             //
             // Same shape as the PATCH row below, which arms TANK VENT with it for the same reason.
             id: 'alphan', label: 'ALPHA-N', kind: 'toggle',
-            checked: binaryFileState.writeVe || lowLoadArmed,
+            checked: binaryFileState.writeVe,
             disabled: !alphaNAvailable || !!storeLockReason || restoreVe,
             // RESTORE VE first, because it is the thing the operator just switched and the only one
             // of the three they can undo in one tap. Then the store gate: a map derived through a
@@ -3439,13 +4091,57 @@ export default function Home() {
           // the refusal is said in full where the refusal happens. What is gone is the row that
           // said NEUTRAL when there was nothing to refuse.
           {
-            id: 'idle', label: 'IDLE', kind: 'sealed',
-            lockReason: manifestText.idleSealed,
+            /**
+             * IDLE — a toggle since 2026-09-03, and `KF_LLS_TV` rather than the map this row was
+             * sealed over. See lib/idle/seal.ts and docs/ecu-logic/70-idle-write.md.
+             *
+             * `symbol` carries the definition the way the RESTORE rows do, because that is the
+             * question a reader has here more than anywhere else in this menu: the feature spent
+             * months pointed at a different map, and the row that says which one it writes now is
+             * the row that has to name it.
+             */
+            id: 'idle', label: 'IDLE', kind: 'toggle',
+            symbol: 'KF_LLS_TV · 0x9E10 · 13x10',
+            checked: !!binaryFileState.tunedIdleTv,
+            disabled: !idleProposal || !idleTunedCells,
+            lockReason: !idleHasRows ? manifestText.idleNeedsRun
+              : !idleTunedCells ? manifestText.idleNothingDerived
+                : manifestText.idleArmed(idleTunedCells),
+            status: idleTunedCells ? `${idleTunedCells} cells` : undefined,
+            // A FULL TOGGLE now. It was disarm-only, with ARM living on the IDLE panel beside
+            // the proposal — two controls for one decision, and the hub is the place this app
+            // answers "what will the flash change". The evidence is still where it was: the panel
+            // shows the grid and the census, this row states the map, the address and the cell
+            // count, and the flash dialog names it again before anything is erased.
+            onToggle: (on: boolean) =>
+              binaryFileState.setTunedIdleTv(on ? idleProposal : null),
+          },
+          {
+            id: 'lls', label: 'LLS', kind: 'toggle',
+            symbol: 'KF_LLS_TV · 0x9E10 · 13x10',
+            checked: !!binaryFileState.tunedLlsTv,
+            disabled: !llsEdits || !llsMovedCells,
+            lockReason: !llsSummary?.rolling ? manifestText.llsNeedsRun
+              : !llsMovedCells ? manifestText.llsNothingDerived
+                : manifestText.llsArmed(llsMovedCells),
+            status: llsMovedCells ? `${llsMovedCells} cells` : undefined,
+            // The SAME TABLE the IDLE row above writes. That is safe because neither row carries
+            // bytes: both hand a contribution to composeLlsTv, which gives every cell one owner.
+            // Arming both is therefore allowed and says so — the cost, when the anchor puts them
+            // in contention, is stated on the panel rather than by refusing the toggle.
+            onToggle: (on: boolean) =>
+              binaryFileState.setTunedLlsTv(on ? llsEdits : null),
           },
           {
             id: 'inertia', label: 'INERTIA', kind: 'info', status: 'proposal only',
             lockReason: manifestText.inertiaProposal,
           },
+          // Edited on the CALIBRATION tab, one row per symbol. These belong HERE and were under
+          // RESTORE, which is the opposite claim: a RESTORE row puts a table back to stock, and
+          // one of these sends a value the operator typed. Under that heading they were not
+          // findable — the operator went looking for what they had just edited among the things
+          // that go OUT and did not find it (operator, 2026-09-03).
+          ...calManifestRows,
         ],
       },
       {
@@ -3498,7 +4194,6 @@ export default function Home() {
             status: wotFuelDrift ? 'drift!' : undefined, statusTone: 'warn',
             onToggle: setRestoreWotFuel,
           },
-          ...calManifestRows,
         ],
       },
       {
@@ -3527,6 +4222,17 @@ export default function Home() {
             status: applyWotDisable ? '102.3' : 'OEM', statusTone: applyWotDisable ? 'warn' : 'muted',
             onToggle: setApplyWotDisable,
           },
+          {
+            id: 'rfgate', label: 'RF GATE', kind: 'toggle',
+            symbol: 'kl_rf_korr_rf_min · 0xE90C · 6pt',
+            checked: applyRfKorrGateDrop, disabled: !patchStatus,
+            lockReason: !patchStatus ? manifestText.needBinary : manifestText.rfGateNote,
+            status: applyRfKorrGateDrop ? '0.400' : 'OEM',
+            // `danger`, matching TANK VENT rather than the two `warn` rows above it: those change
+            // what the DME reports, this changes what it INJECTS, over a region BMW left alone.
+            statusTone: applyRfKorrGateDrop ? 'danger' : 'muted',
+            onToggle: setApplyRfKorrGateDrop,
+          },
         ],
       },
     ];
@@ -3538,18 +4244,33 @@ export default function Home() {
         rows: g.rows
           .filter(r => featureEnabled(
             r.id.startsWith('cal:') ? 'calibration' : rowFeature[r.id], featurePreview))
+          // ...and by MODE, in the WRITE group only. A WRITE row is a DERIVATION, and the mode
+          // decides which derivation this session is making — so an IDLE run is no longer offered
+          // ALPHA-N, SHAPE, WARMUP and RF KORR, four derivations of `kf_rf_soll` it produces no
+          // evidence for. RESTORE and PATCH are not derivations (putting a drifted table back, or
+          // turning the MAP diagnostic off, is true whichever run you are on) and are not filtered.
+          // See MODE_WRITES.
+          .filter(r => g.id !== 'write' || writeRowInMode(r.id, logProcess))
           .map(r => ({ ...r, infoLabel: manifestText.info })),
       }))
       .filter(g => g.rows.length > 0);
   }, [storeLockReason, alphaNCells, alphaNAvailable, alphaNEarnedNothing,
+    // The LLS row is derived from the drive, so it has to recompute when the drive does —
+    // without these the row stays disabled after a run that earned it.
+    llsEdits, llsMovedCells, llsSummary?.rolling,
+    binaryFileState.tunedLlsTv, binaryFileState.setTunedLlsTv,
+    applyRfKorrGateDrop, setApplyRfKorrGateDrop,
     shapeCells, binaryFileState.writeShape, binaryFileState.setWriteShape,
-    setWriteAlphaN, binaryFileState.writeVe, lowLoadArmed, newMap,
+    setWriteAlphaN, binaryFileState.writeVe, newMap,
     writeWarmup, setWriteWarmup, derivedTablesLocked, manifestText,
     rfKorrArmed, canTuneRfKorr, rfKorrLockReason, setWriteRfKorr,
     restoreWotFuel, setRestoreWotFuel, wotFuelDrift, wotFuelTitle, applyPatch, setApplyPatch,
     restoreVe, setRestoreVe, restoreWarmup, setRestoreWarmup, stockDrift, binaryFileState.binaryBuffer,
     applyTankVentDisable, setApplyTankVentDisable, applyWotDisable, setApplyWotDisable,
-    patchStatus, featurePreview, calEdits]);
+    patchStatus, featurePreview, calEdits,
+    // The IDLE row's three inputs. Missing since it became a toggle, so arming a proposal
+    // left the row reading "no idle run yet" until something else re-rendered the memo.
+    idleTunedCells, idleHasRows, binaryFileState.setTunedIdleTv, idleProposal, logProcess]);
 
   /** Whether the next write would carry anything at all. The ring's WRITE gates on it: an empty
    *  write is not an action, and offering it is how a flash comes back byte-identical. */
@@ -3571,12 +4292,24 @@ export default function Home() {
       case 'disconnected': return { label: 'CONNECTION', Icon: PlugZap, onClick: handleDmeConnect, disabled: false, spin: false };
       case 'connecting': return { label: 'CONNECTING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
       case 'reading': return { label: 'READING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
-      // An inertia run reaches 'tuning' through startInertiaRun, not through handleStartTune, so
-      // the ordinary STOP would run the VE teardown over it: finishLog flushes an empty sample
-      // buffer, reports a datalog that does not exist, and disconnects the link. Stopping the poll
-      // is all that is wanted — InertiaWorkflow's own onEnd then computes and stores the estimate.
-      case 'tuning': return logProcess === 'INERTIA'
-        ? { label: 'STOP', Icon: Square, onClick: () => { dmeLink.stopTuning(); goToTab('inertia'); setNarrowPane('map'); }, disabled: false, spin: false }
+      // The two stationary runs reach 'tuning' through their own starters, not through
+      // handleStartTune, so the ordinary STOP would run the VE teardown over them: finishLog
+      // flushes an empty sample buffer, reports a datalog that does not exist, and disconnects the
+      // link. Stopping the poll is all that is wanted — each workflow's own onEnd then derives and
+      // stores what the run measured.
+      case 'tuning': return logProcess === 'INERTIA' || logProcess === 'IDLE'
+        ? {
+          label: 'STOP', Icon: Square, disabled: false, spin: false,
+          onClick: () => {
+            // Through the workflow's own stop for IDLE, so the panel leaves the recording state in
+            // the same tick rather than waiting for the poll's onEnd to come back down the cable.
+            // It calls the same `dmeLink.stopTuning` underneath.
+            if (logProcess === 'IDLE') idleControlsRef.current?.stop();
+            else dmeLink.stopTuning();
+            goToTab(logProcess === 'INERTIA' ? 'inertia' : 'idle');
+            setNarrowPane('map');
+          },
+        }
         : { label: 'STOP', Icon: Square, onClick: handleStopTune, disabled: false, spin: false };
       case 'writing': return { label: 'WRITING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
       // The reset dialog owns the screen while this runs; the hub is disabled rather than hidden so
@@ -3598,12 +4331,18 @@ export default function Home() {
             disabled: !writeCarriesSomething, spin: false,
           };
           // Tuning is a draft-only act: an archived session must never re-derive its own map.
-          // Labelled for where it goes. handleStartTune refuses INERTIA and routes to the panel, but
-          // a button that says START TUNE and then navigates is a surprise — and the surprise is the
-          // whole failure mode being fixed here.
+          // Labelled for where it goes. handleStartTune refuses both stationary runs and routes to
+          // their panels, but a button that says START TUNE and then navigates is a surprise — and
+          // the surprise is the whole failure mode being fixed here.
+          // INERTIA still ROUTES rather than starts: that workflow owns an arming step and a gear
+          // check the ring cannot speak for, so the panel is genuinely the next thing. IDLE does
+          // not — its preconditions are read from the samples once they are arriving — so the ring
+          // starts it, which is what IdlePanel has been telling the operator to do all along.
           case 'tune': return logProcess === 'INERTIA'
             ? { label: 'INERTIA PANEL', Icon: Gauge, onClick: handleStartTune, disabled: false, spin: false }
-            : { label: 'START TUNE', Icon: Play, onClick: handleStartTune, disabled: false, spin: false };
+            : logProcess === 'IDLE'
+              ? { label: 'START IDLE', Icon: Play, onClick: handleStartIdle, disabled: false, spin: false }
+              : { label: 'START TUNE', Icon: Play, onClick: handleStartTune, disabled: false, spin: false };
           case 'read': return { label: 'READ', Icon: Zap, onClick: handleDmeRead, disabled: false, spin: false };
         }
     }
@@ -3644,6 +4383,44 @@ export default function Home() {
     if (busy && !confirm(dialogText().reloadBusy)) return;
     void reloadForUpdate();
   }, [reloading, dmeLink.state, processedLog, newMap]);
+
+  /**
+   * Signing in again, when the owner gate's session has ended — or undefined when it must not be
+   * offered right now.
+   *
+   * It is a same-tab navigation to the gate and back through m3 (m3 only sees its own cookie on a
+   * top-level navigation), so it replaces this document exactly as a reload does. Hence the same
+   * rules as RELOAD and stricter: never while a cable is connected or anything is running — the
+   * link and the run would go with the page — and never offline, where the round trip cannot
+   * complete and would strand the owner on an error page instead of in a working tool. A tune or a
+   * drive not yet saved is asked about first; everything already saved is on this device and
+   * survives the trip.
+   *
+   * Nothing depends on this being pressed. A signed-out preview keeps working locally; only SYNC
+   * and the store's lists wait for it.
+   */
+  const reauthAllowed = isPreviewBuild && gate.state === 'expired' && online
+    && dmeLink.state === 'disconnected' && !reloading;
+  const unsavedWork = saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly';
+  const reauth = useCallback(() => {
+    // The rule is checked here as well as at every mount: a handler captured by a render in which it
+    // was allowed must not navigate away after a cable has been connected since.
+    if (!reauthAllowed) return;
+    if (unsavedWork && !confirm(dialogText().reauthUnsaved)) return;
+    location.assign(reauthHref());
+  }, [reauthAllowed, unsavedWork]);
+
+  /**
+   * Toggling the inspected cell, as ONE function.
+   *
+   * It was an arrow written inline at both call sites, so `MapEditor` — which is `React.memo` —
+   * got a new prop identity on every render and rebuilt all 480 cells anyway. LAMBDA and TUNED are
+   * the two tabs that carry it, and LAMBDA is the tab a drive lands on, where the page re-renders
+   * twice a second for the whole run.
+   */
+  const toggleCoverageCell = useCallback((row: number, col: number) => {
+    setCoverageCell(c => (c && c.row === row && c.col === col ? null : { row, col }));
+  }, []);
 
   const narrowPaneTabs = (
     <div className="flex min-[900px]:hidden space-x-6 h-full shrink-0">
@@ -3882,10 +4659,33 @@ export default function Home() {
                       && !writeCarriesSomething
                       ? 'Nothing armed — open WRITE on the hub and switch on what this flash should carry.'
                       : null;
+                    /**
+                     * The ring has gone stale, which is what a VE write does to it.
+                     *
+                     * Below the faults and above "nothing armed", because it is neither: it is a
+                     * derivation that is no longer true of these bytes, and the operator's next
+                     * move. Shown only in LLS mode — the three tables it rests on are not in the
+                     * bundled catalog, so asking anywhere else would force a 6 MB fetch on a
+                     * session that has no use for the answer.
+                     *
+                     * It disappears by itself. Writing the solve makes the next solve a no-op,
+                     * measured: 16 of 16 cells move on this car's image and 0 of 16 after.
+                     */
+                    const ringStale = logProcess === 'LLS' && llsRingDrift && !llsRingDrift.converged
+                      && llsRingDrift.staleCells > 0
+                      ? `KF_LLS_TV is not the solution to kf_rf_soll as it now stands — `
+                        + `${llsRingDrift.staleCells} cell(s) out, worst ${llsRingDrift.worstPct.toFixed(2)} %. `
+                        + `Re-solve on the LLS tab.`
+                      : null;
                     const notice = dmeLink.error
                       ?? idleSaveError
-                      ?? (idleTablesRefusal ? `IDLE UNAVAILABLE: ${idleTablesRefusal}` : null)
+                      // Only where it is the operator's next problem. In a VE session a refused
+                      // idle calibration is a fact about a tab this mode does not stand up, and it
+                      // was displacing cable warnings to say so.
+                      ?? (idleTablesRefusal && logProcess === 'IDLE'
+                        ? `IDLE UNAVAILABLE: ${idleTablesRefusal}` : null)
                       ?? warning
+                      ?? ringStale
                       ?? nothingArmed;
                     if (!notice) return null;
                     // Two levels now, not three. The third was the near-white `info` tone, which
@@ -4098,16 +4898,27 @@ export default function Home() {
                 <div className="flex-1" />
               </div>
 
-              {/* RESTORE, in the panel's own bottom-right corner — below the sub-actions rather
-                  than beside them, so it is not read as one of the hub's controls. Its own row
-                  because the row above is a reserved 46px budget that two-line content would
-                  overflow, and because "further down and to the right" is the point: this is a
-                  handful of uses a year, kept reachable and out of the way. */}
-              {restoreGroup && (
-                <div className="flex-none flex justify-end">
-                  <ManifestCorner group={restoreGroup} busy={dmeLink.state === 'writing'} />
-                </div>
-              )}
+              {/* THE PANEL'S BOTTOM CORNERS — MODE left, RESTORE right.
+                  ────────────────────────────────────────────────────────────────────────────────
+                  Below the sub-actions rather than beside them, so neither is read as one of the
+                  hub's controls, and on their own row because the row above is a reserved 46px
+                  budget that two-line content would overflow.
+
+                  A pair, and deliberately: these are the two things that QUALIFY what the dial
+                  between them is about to do. RESTORE says what the next WRITE puts back, MODE says
+                  what the next run records. Both are touched about once per session against the
+                  wings' every campaign, which is why both are corners rather than wings.
+
+                  `justify-between` with a spacer for the missing half. RESTORE needs a loaded image
+                  and MODE does not, so without the spacer the mode corner would slide across the
+                  panel the moment a binary loaded — the reflow the reserved slots elsewhere in this
+                  cluster exist to prevent. */}
+              <div className="flex-none flex items-center justify-between gap-4">
+                <ModeCorner mode={logProcess} modes={selectableModes} onChange={handleModeChange} lock={modeLock} />
+                {restoreGroup
+                  ? <ManifestCorner group={restoreGroup} busy={dmeLink.state === 'writing'} />
+                  : <span aria-hidden className="h-7" />}
+              </div>
     </>
   );
 
@@ -4116,27 +4927,21 @@ export default function Home() {
     <div className="flex-1 min-h-0">
       <ParamInfo
         graph={calData.catalog.graph}
-        node={calWs.selected ? calData.catalog.graph.byId.get(calWs.selected) ?? null : null}
-        def={calWs.selected ? calData.catalog.byId.get(calWs.selected) ?? null : null}
+        node={calWs.subject ? calData.catalog.graph.byId.get(calWs.subject) ?? null : null}
+        def={calWs.subject ? calData.catalog.byId.get(calWs.subject) ?? null : null}
         onSelect={calWs.select}
       />
     </div>
   ) : <div className="flex-1 min-h-0" />;
 
-  /**
-   * The third side of the same slot: WHICH parameters differ.
-   *
-   * A jump list, so its rows use `jump` rather than `select` — the tree's
-   * select leaves the diagram on the block you are reading, which is right
-   * there and wrong here.
-   */
+  /** The third side of the same slot: WHICH parameters differ. */
   const calListPanel = (
     <CalibrationDiffList
       entries={calDiffEntries}
       editedIds={calEditedIds}
-      selectedId={calWs.selected}
+      selectedId={calWs.subject}
       canCopyReference={calCompare.subject === 'tuned'}
-      onSelect={calWs.jump}
+      onSelect={calWs.select}
       onCopyRef={calCopyParam}
       onRevert={calEdits.revertParam}
     />
@@ -4150,7 +4955,8 @@ export default function Home() {
     // that is actually visible.
     <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
       {/* App Header - Ultra Minimal */}
-      <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 backdrop-blur-md z-10 shrink-0 h-[48px]">
+      {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
+      <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">
         {/* The ///M stripe as the header's bottom rule, replacing a slate-900 border-b. Absolutely
             positioned inside the 48px rather than added below it, so the pane split underneath keeps
             its measured 61.8/38.2 and nothing reflows. Hard color stops — a gradient would blend the
@@ -4178,8 +4984,18 @@ export default function Home() {
           {/* Capped on a narrow header. Dropping `shrink-0` let the ellipsis work, but flexbox still
               hands this the larger share — its content is ~300px against the identity strip's ~60 —
               so the strip was resolving to zero width and FLASH went with it. A ceiling, not a
-              hidden: the wordmark is how you know which tool has the cable. */}
-          <h1 className="min-w-0 max-w-[60%] min-[900px]:max-w-none text-sm font-bold tracking-widest text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
+              hidden: the wordmark is how you know which tool has the cable.
+
+              SMALLER AND TIGHTER BELOW 900px, so the whole name fits instead of "MSS54HP CSL
+              CONVE…". At 14px on 0.1em tracking the 29 characters want ~293px, against 327px of
+              content width on a 375px screen — before the dot, the gap and the version. 11px on
+              0.05em wants ~215px, which leaves room for all three. The desk keeps 14px: it has the
+              width, and the wordmark is the largest thing in that header for a reason.
+
+              The 60% ceiling goes with it. It existed to stop this taking the identity strip's
+              width, and that strip is `hidden` below 900px — so on a phone it was capping the one
+              thing the cap was protecting. */}
+          <h1 className="min-w-0 min-[900px]:max-w-none text-[11px] tracking-wider min-[900px]:text-sm min-[900px]:tracking-widest font-bold text-slate-200 uppercase whitespace-nowrap overflow-hidden text-ellipsis">
             {/* The ///M mark, not punctuation. It is the one place red can live permanently without
                 costing it any alarm value: a wordmark states no machine state, so it does not
                 compete with the error LED two elements to the left.
@@ -4205,7 +5021,9 @@ export default function Home() {
               after opening one, not before.
 
               Read from a meta tag injected by scripts/brand-preview.mjs rather than compiled in,
-              so the variant has exactly one definition and production's build is untouched. */}
+              so the name has exactly one definition and production's build is untouched. It is
+              `app-label` (the name, from scripts/brand-label.mjs), not `app-variant` (what the
+              build is): the owner build reads WORKS while it stays the variant `preview`. */}
           {/* ANY non-production build says so, not just the preview one.
               STAGING is the build that needed this most and had it least: it is main, unmodified,
               so it carries none of the code that would mark it — and it looks identical to
@@ -4231,8 +5049,8 @@ export default function Home() {
                 type="button"
                 onClick={() => setProductionScope(!productionScope)}
                 title={productionScope
-                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full preview.'
-                  : 'Click to read this preview as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
+                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full WORKS build.'
+                  : 'Click to read this WORKS build as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
                 className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer
                   ${productionScope
                     ? 'text-violet-300 bg-violet-500/15 hover:bg-violet-500/25'
@@ -4243,9 +5061,26 @@ export default function Home() {
             ) : (
               <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
                 text-violet-300 bg-violet-500/15`}>
-                {buildVariant.toUpperCase()}
+                {variantLabel}
               </span>
             )
+          )}
+          {/* SIGN IN — the preview's owner-gate session has ended. Beside the badge because it is a
+              fact about this BUILD's reach (its store), not about the car, and on a phone this is
+              the one part of the header that is always on screen. Rendered only when pressing it
+              is safe — see `reauth` — so a cable in the socket hides it rather than greying it:
+              there is nothing to do about it until the drive is over, and the SYNC panel already
+              says the store is waiting. Amber, the badge's own "this is not the release" hue:
+              it states no machine state. */}
+          {reauthAllowed && (
+            <button
+              type="button"
+              onClick={reauth}
+              title={dialogText().reauthTitle}
+              className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer text-amber-300 border border-amber-500/40 hover:bg-amber-500/15"
+            >
+              SIGN IN
+            </button>
           )}
           {/* Identity, and nothing else. It used to open CREDITS as well, on the argument that a
               version number is a label carrying no state and so costs nothing to make a control.
@@ -4253,7 +5088,18 @@ export default function Home() {
               900px, the menu sheet's own row below it — so this was a third, unlabelled way in, and
               a version number that swallows a tap is a version number that cannot be read on a
               phone without opening a dialog (operator, 2026-08-31). */}
-          <span className="shrink-0 text-[9px] font-mono text-slate-500 whitespace-nowrap">
+          {/* `ml-auto` below 900px, and that is where it belongs on a phone rather than trailing
+              the wordmark. The right-hand icon group is `hidden` there, so without it the version
+              sat wherever the title happened to end — mid-header, with the whole right side empty.
+
+              And it STANDS DOWN for the update. The reload control is the only thing that renders
+              in that right-hand group on a phone, and only when there is an update to take, so the
+              two would otherwise crowd the same corner. Hiding the version there lets UPDATE land
+              on the spot the version was occupying — the same corner, the same line, one thing at a
+              time. The desk shows both: it has the room, and the version sits with the identity it
+              belongs to. */}
+          <span className={`shrink-0 ml-auto min-[900px]:ml-0 text-[9px] font-mono text-slate-500 whitespace-nowrap
+            ${updateAvailable ? 'hidden min-[900px]:inline' : ''}`}>
             V2.2.0 β
           </span>
 
@@ -4468,7 +5314,7 @@ export default function Home() {
 
             {/* Log Stats & Filter */}
             <div className="h-full hidden min-[900px]:flex items-center ml-auto border-l border-slate-800 pl-4 ml-4 gap-4">
-              {processedLog && (
+              {processedLog && veSurfaces && (
                 /* ONE line: the rate and the two counts it governs. Nothing else.
                    This bar is 44px tall and it belongs to the TABS. What was here — the drop census
                    and the live rf_korr census, each on its own row, with a two-line advisory that
@@ -4503,7 +5349,8 @@ export default function Home() {
                     split={driveSplit} excludedSpan={splitExcludedSpan} onOpen={openSplitDetail} />
                 </div>
               )}
-              <div className="flex items-center gap-2">
+              {/* The three config panels, in VE modes only — see `veSurfaces`. */}
+              <div className={`items-center gap-2 ${veSurfaces ? 'flex' : 'hidden'}`}>
                 {/* The store's door is NOT here any more. It was a cloud among three chart controls,
                     in a bar whose subject is the log — findable only by hovering everything, and
                     about none of the things beside it. It now sits next to NEW SESSION on the
@@ -4526,7 +5373,7 @@ export default function Home() {
                     have to be reachable from both panes, which is what this cluster is. So they
                     take turns rather than sitting side by side: a fourth button would widen the
                     cluster on the width that has the least to spare. */}
-                {activeTab === 'lowload' ? (
+                {activeTab === 'shape' ? (
                   <ShapeControls shape={shape} onApply={applyShape} />
                 ) : (
                   <FieldVisibilityPanel
@@ -4815,8 +5662,7 @@ export default function Home() {
                       hitData={hitMap || undefined} {...coverageBands}
                       weightData={weightMap || undefined}
                       zoom={mapZoom.zoom}
-                      onCellSelect={(row, col) => setCoverageCell(
-                        c => (c && c.row === row && c.col === col ? null : { row, col }))}
+                      onCellSelect={toggleCoverageCell}
                       selected={coverageCell}
                       bottomInset={coverageInset}
                       // NO cellTint. The background band already says all three states — no fill
@@ -4877,7 +5723,7 @@ export default function Home() {
 
                       Here rather than only on the graph pane, because on a phone those are two
                       panes and the one you watch while driving to a cell is this one. Session #924
-                      spent forty minutes and put no samples at all into the band it was driven for:
+                      spent forty minutes and put no samples at all into the cells it was driven for:
                       nothing on screen said which cell the car was in or whether the pull had been
                       held long enough to count. See LiveDriveStrip.
 
@@ -4908,8 +5754,7 @@ export default function Home() {
                       hitData={hitMap || undefined} {...coverageBands}
                       weightData={weightMap || undefined}
                       zoom={mapZoom.zoom}
-                      onCellSelect={(row, col) => setCoverageCell(
-                        c => (c && c.row === row && c.col === col ? null : { row, col }))}
+                      onCellSelect={toggleCoverageCell}
                       selected={coverageCell}
                       bottomInset={coverageInset}
                     />
@@ -4943,7 +5788,7 @@ export default function Home() {
               )}
 
 
-              {activeTab === 'lowload' && (
+              {activeTab === 'shape' && (
                 <ShapeGrid shape={shape} zoom={mapZoom.zoom} />
               )}
 
@@ -4955,8 +5800,28 @@ export default function Home() {
                   startRun={dmeLink.startIdleRun}
                   stopRun={dmeLink.stopTuning}
                   tables={idleTables}
-                  onArm={binaryFileState.setTunedIdleQvs}
-                  armed={!!binaryFileState.tunedIdleQvs}
+                  /* The IDLE LOG tab and the visualisation pane, both filled from here rather
+                     than from the page — see the slots. */
+                  tableSlot={idleTableSlot}
+                  onRows={setIdleHasRows}
+                  sourceProven={idleSourceProven}
+                  /* The campaign's learned gain, or undefined for the prior. Passed rather than
+                     read inside, because the lineage it comes from is the page's to walk. */
+                  gain={idleGain}
+                  graphSlot={idleGraphSlot}
+                  gaugeSlot={idleGaugeSlot}
+                  onTrace={setIdleHasTrace}
+                  /* START and STOP, so the ring can drive the run the panel already points at. */
+                  controlsRef={idleControlsRef}
+                  /* A run recorded in an earlier sitting, and what it proposes. Null unless this
+                     session is an IDLE one that holds a log, so opening a VE session cannot put
+                     idle rows on screen. Derived up here — see restoredIdleResult. */
+                  restored={restoredIdle}
+                  restoredResult={restoredIdleResult}
+                  onArm={binaryFileState.setTunedIdleTv}
+                  onProposal={setIdleProposal}
+                  pooled={pooledIdle}
+                  pooledRuns={pooledRuns}
                   onSaveRun={(samples) => {
                     // BOTH failure paths below used to be silent, which is why a run that plainly
                     // happened could show no log and leave the driver nothing to act on. A save that
@@ -4998,6 +5863,26 @@ export default function Home() {
                   edits={calEdits}
                   ws={calWs}
                 />
+              )}
+
+              {/* Mounted conditionally, unlike IDLE. There is no ref holding a run in progress
+                  here — the samples are the ordinary log, which lives above this component — so
+                  unmounting on a tab change costs nothing and keeps a 130-cell grid out of the
+                  render path of every other tab. */}
+              {activeTab === 'lls' && (
+                <div className="h-full w-full overflow-y-auto p-3">
+                  <LlsPanel
+                    samples={llsSamples}
+                    tables={llsTables}
+                    summary={llsSummary}
+                    edits={llsEdits}
+                    running={dmeLink.state === 'tuning'}
+                    catalogLoading={calCatalogLoading}
+                    anchorMlKgH={llsAnchor}
+                    onAnchorChange={setLlsAnchor}
+                    idleReach={llsIdleReach}
+                  />
+                </div>
               )}
 
               {activeTab === 'inertia' && (
@@ -5049,7 +5934,32 @@ export default function Home() {
                 </div>
               )}
 
-              {(activeTab === 'log' && processedLog) && (
+              {/* IDLE LOG — the same tab, a different table, and it has to be a different table.
+                  An `IdleSample` and a `LogDataPoint` share three fields out of fifty: the idle run
+                  reads the governor's integrator, the valve duty and the air split, and the log
+                  table's row type has a column for none of them. `saveResearch` does project one
+                  onto the other for storage, and its own comment says why that projection must
+                  never be the only copy — it drops md_llri, the whole measurement. Rendering the
+                  projection here would put that same lie on screen.
+
+                  A SLOT rather than the rows themselves. The samples live in a ref inside
+                  IdleWorkflow and publish four times a second; page.tsx is the whole application,
+                  so they are portalled in exactly as the trace already is.
+
+                  Mounted whenever the mode is IDLE and hidden by class, not by `&&`: unmounting the
+                  slot on a tab change would tear down the portal mid-run and take the rows with
+                  it. */}
+              {logProcess === 'IDLE' && (
+                <div
+                  ref={setIdleTableSlot}
+                  className={`h-full w-full ${activeTab === 'log' ? '' : 'hidden'}`}
+                />
+              )}
+
+              {/* ...and the VE table stands down in that mode. An idle session that has been saved
+                  and reopened DOES have a `processedLog` — the stored projection — so this would
+                  otherwise render five near-empty columns on top of the pane above. */}
+              {(activeTab === 'log' && processedLog && logProcess !== 'IDLE') && (
                 <div className="h-full w-full pb-0">
                   {/* The same deferred window the chart reads — the one-window-two-views rule
                       survives the deferral because both defer TOGETHER. */}
@@ -5092,7 +6002,9 @@ export default function Home() {
                     beforeNew={syncSurfaces ? (
                       <div className="hidden min-[900px]:block">
                         <SessionStorePanel
-                          settings={sync.settings}
+                          account={gate}
+                          onReauth={reauthAllowed ? reauth : undefined}
+                          privacyUrl={privacyUrl}
                           onRestored={() => void sessionDb.refresh()}
                         />
                       </div>
@@ -5115,7 +6027,7 @@ export default function Home() {
                     loadedLogName={logFile?.name}
                     loadedLogPoints={processedLog?.validCount}
                     onClearLog={!isArchived ? handleClearLog : undefined}
-                    onUploadLog={canSync(uploadSettings) ? sync.syncSessionRow : undefined}
+                    onUploadLog={syncSurfaces ? sync.syncSessionRow : undefined}
                     uploadState={sync.uploadState}
                     onFinalize={handleFinalizeSession}
                     activeSessionId={currentSession?.id}
@@ -5214,7 +6126,15 @@ export default function Home() {
               {/* Live raw telemetry readout — floats over the visualization during logging so it shows
                   the latest DME sample (independent of the VE filters) WITHOUT shifting the inputs /
                   dashboard layout: the panel below is identical whether logging or stopped. */}
-              {dmeLink.state === 'tuning' && <LiveTelemetryStrip feed={liveRun.readout} />}
+              {/* The VE strip only. It reads `liveRun.readout`, which an idle run never feeds,
+                  so in IDLE mode it rendered seven dashes and a zero over the one picture that
+                  mattered. That mode has its own readout, inside IdleTrace, on the channels it
+                  actually has. */}
+              {/* LLS gets its own strip: the VE one reads lambda trim, which a micro-throttle run
+                  has no use for, and what this run needs instead is whether the car is on the
+                  reference operating point WHILE it can still be steered onto it. */}
+              {dmeLink.state === 'tuning' && logProcess === 'LLS' && <LlsLiveStrip feed={liveRun.readout} />}
+              {dmeLink.state === 'tuning' && logProcess !== 'IDLE' && logProcess !== 'LLS' && <LiveTelemetryStrip feed={liveRun.readout} />}
               {graphOnScreen && (activeTab === 'current' && deferredCharts.currentMap) && <MapVisualizer mapData={deferredCharts.currentMap} title="" zAxisLabel="RF %" />}
               {graphOnScreen && (activeTab === 'new' && deferredCharts.newMap) && <MapVisualizer mapData={deferredCharts.newMap} title="" zAxisLabel="RF %" />}
               {/* SHAPE shows the surface it would leave behind — the applied repair if there is one,
@@ -5266,6 +6186,10 @@ export default function Home() {
                   referenceDecoded={calReferenceDecoded}
                   editedMask={calEditedMask}
                   hasEdit={!!calSelectedEdit}
+                  canUndo={calEdits.canUndo && !isArchived}
+                  canRedo={calEdits.canRedo && !isArchived}
+                  onUndo={calEdits.undo}
+                  onRedo={calEdits.redo}
                   graphMode={calWs.graphMode}
                   onGraphMode={calWs.setGraphMode}
                   sectionAxis={calWs.sectionAxis}
@@ -5280,6 +6204,7 @@ export default function Home() {
                   diffCount={calDiffEntries?.length ?? null}
                   onShowList={() => setCalBottomTab('list')}
                   onEditCell={calEditCell}
+                  archived={isArchived}
                   onBulkOp={calBulkOp}
                   onCopyRef={calCopyRef}
                   onRevert={() => { if (calSelectedDef) calEdits.revertParam(calSelectedDef.id); }}
@@ -5288,10 +6213,45 @@ export default function Home() {
               {/* Two views in the slot the other tabs give to one: the tuned surface, or a cut
                   through it. This column was empty on SHAPE while the cut was wedged under the
                   grid in the other pane — see ShapeGraph. */}
-              {graphOnScreen && activeTab === 'lowload' && shape.ready && (
+              {graphOnScreen && activeTab === 'shape' && shape.ready && (
                 <ShapeGraph shape={shape} surface={deferredCharts.shapeSurface} />
               )}
-              {(activeTab === 'log' && processedLog) && (
+{/* THE IDLE MODE'S TWO PANES, and which question each answers.
+
+                  IDLE gets the GAUGE RACK: every threshold as a bar with the live reading's position
+                  on it. Standing in a car park holding a procedure, the question is not the shape of
+                  the last three minutes — it is how far this reading is from the limit, and 0.4 %
+                  against a 0.8 % gate looks identical to 0.05 % on a trace.
+
+                  IDLE LOG gets the TRACE, because a time series answers what happened, and what
+                  happened is the log's question. One portal each.
+
+                  Both are mounted whenever the mode is IDLE and hidden by class rather than by `&&`:
+                  unmounting on a tab change would tear the portal down mid-run and take the picture
+                  with it — the same rule the rows' slot follows in the pane opposite. */}
+              {logProcess === 'IDLE' && (
+                <div
+                  ref={setIdleGaugeSlot}
+                  className={`h-full w-full ${graphOnScreen && activeTab === 'idle' ? '' : 'hidden'}`}
+                />
+              )}
+              {logProcess === 'IDLE' && (
+                <div
+                  ref={setIdleGraphSlot}
+                  className={`h-full w-full ${graphOnScreen && activeTab === 'log' ? '' : 'hidden'}`}
+                />
+              )}
+
+              {/* ...and the VE chart stands down in that mode, for the reason its table does: a
+                  saved idle session HAS a processedLog — the stored projection — so this would
+                  otherwise draw five near-empty channels over the IDLE LOG tab.
+
+                  `graphOnScreen` for the same reason every MapVisualizer above carries it, and this
+                  was the one chart in the box that did not. Below 900px with the split query on — a
+                  head unit — this box is `display:none` unless GRAPH is the selected destination, so
+                  the LOG tab was building ten traces of up to 2,000 points each, on every flush,
+                  inside a hidden box. The invisible-pane bug, one chart late. */}
+              {(graphOnScreen && activeTab === 'log' && processedLog && logProcess !== 'IDLE') && (
                 <div className="h-full w-full pb-0 relative">
                   {/* Chart Container - Absolute fill; chart flexes, window-scrub slider docked below it
                       (moved off the tab bar so tab scrolling isn't squeezed by it). */}
@@ -5420,7 +6380,9 @@ export default function Home() {
 
           The record counts sit ABOVE the control row rather than below it: below is the screen
           edge, where Android's gesture bar is, and a 9px readout is not something to put there. */}
-      <div className="min-[900px]:hidden flex-none z-30 border-t border-slate-900 bg-slate-900/50 backdrop-blur-sm">
+      {/* No blur at all: this bar exists only below 900px, which is exactly where there is no GPU
+          to spend on one — see globals.css § backdrop-filter. */}
+      <div className="min-[900px]:hidden flex-none z-30 border-t border-slate-900 bg-slate-950/80">
         {/* The record counts used to sit here, above the control row, and they cost 52px of a
             phone's screen for a readout that never changes shape. They are in the header now, whose
             middle was empty below 900px — see the block beside the wordmark. The map got the 52px. */}
@@ -5460,7 +6422,9 @@ export default function Home() {
           </button>
           {/* `openUp` because these hang off the bottom edge here; the same three render `top-10`
               in the desktop tab row, which is the other instance of them. */}
-          <div className="ml-auto flex items-center gap-2">
+          {/* Same gate as the wide cluster — see `veSurfaces`. `ml-auto` stays on the box either
+              way, so hiding its contents cannot slide the MENU button off centre. */}
+          <div className={`ml-auto items-center gap-2 ${veSurfaces ? 'flex' : 'hidden'}`}>
             <InterpolationTableEditor
               config={interpolationTable}
               onSave={handleTableChange}
@@ -5473,7 +6437,7 @@ export default function Home() {
                 scope={activeTab === 'rfkorr' ? 'rfkorr' : 've'}
                 channels={logChannels} measuredHz={logRate?.hz} routeGap={routeGap} routeSamples={routeSamples} openUp />
             {/* Same swap as the wide cluster above — see the note there. */}
-            {activeTab === 'lowload' ? (
+            {activeTab === 'shape' ? (
               <ShapeControls shape={shape} onApply={applyShape} openUp />
             ) : (
               <FieldVisibilityPanel
@@ -5528,7 +6492,7 @@ export default function Home() {
         <MobileMenu
           onClose={() => setMenuOpen(false)}
           dragFrom={menuDrag}
-          onDragEnd={() => setMenuDrag(null)}
+          onDragEnd={clearMenuDrag}
           updateAvailable={updateAvailable}
           reloading={reloading}
           onReload={handleReload}
@@ -5574,7 +6538,9 @@ export default function Home() {
                   <span className="text-[10px] font-bold uppercase tracking-widest">{syncLook.label}</span>
                 </button>
               }
-              settings={sync.settings}
+              account={gate}
+              onReauth={reauthAllowed ? reauth : undefined}
+              privacyUrl={privacyUrl}
               onRestored={() => void sessionDb.refresh()}
             />
           ) : undefined}
@@ -5642,7 +6608,10 @@ export default function Home() {
         />
       )}
 
-      {disclaimer.open && <DisclaimerDialog onAccept={disclaimer.accept} />}
+      {disclaimer.open && (
+        <DisclaimerDialog onAccept={(dontShowAgain) => { disclaimer.accept(dontShowAgain); guide.offer(); }} />
+      )}
+      {guide.open && <GuideCarousel onClose={guide.close} />}
     </main >
   );
 }

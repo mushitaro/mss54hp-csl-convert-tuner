@@ -17,9 +17,18 @@
  * `M_gov` is the LFR governor, and it is reproduced **asymmetrically on purpose**. The real
  * calibration evaluates `KL_LFR_DQP_POS` only when the engine is BELOW target, and `KL_LFR_TZ_NEG`
  * is sixteen zeros, so there is no fast authority at all on the overshoot side — the only way down
- * is the I term at `K_LFR_TAU_IA1` = 5.12 s. Reproducing that is what makes an over-correction
- * rehearse as a slow hunt rather than as a symmetric error, and an over-correction is the failure
- * this whole feature is biased against.
+ * is the I term. Reproducing that asymmetry is what makes an over-correction rehearse as a slow
+ * hunt rather than as a symmetric error, and an over-correction is the failure this whole feature
+ * is biased against.
+ *
+ * **The RATE of that descent is not `K_LFR_TAU_IA1`**, which this comment used to claim and which
+ * several other files inherited. That constant is only read in `LFR_ZUSTAND` 8, and every path
+ * into that state first zeroes `LFR_MDI` (lfr_calc 0x026C90, 0x026D0C) — it filters zero toward
+ * zero and is never evaluated at idle. The idle integrator's rate is `KF_LFR_DQI` (master 0x9B84),
+ * a 2-D map on speed error and speed gradient in Nm/s, not a single time constant at all
+ * (xref-only: lfr_calc reads it, but no recovered statement names it). The 5.12 s figure survives
+ * here only as a settle-wait heuristic that happens to be the right order of magnitude, and it is
+ * labelled that way wherever it is still used.
  *
  * `lfra_adapt` is modelled too, and defaults ON. It is the confound the estimator has to survive:
  * it drains the I term into `MD_LLRA` at 1.0 Nm per 3.0 s, so a warm settled engine reads
@@ -56,6 +65,48 @@ export const MOCK_IDLE_GAIN_KGH_PER_NM = 0.52;
 /** Whether `lfra_adapt` runs. On by default — see the header. */
 export const MOCK_IDLE_ADAPT_ENABLED = true;
 
+/**
+ * The torque path's warm-idle air demand, kg/h — `ML_SOLL_LLS`, the y axis `KF_LLS_TV` is read on.
+ *
+ * Held constant, which is a simplification and a defensible one: the split
+ * `min(_ML_SOLL_DPR, ML_SOLL_MAX_LLS)` puts a warm idle far below the ceiling
+ * (`KL_LFR_SOLL_MAX_LLS` is 34 kg/h at 600 rpm), so the demand is set by the torque path rather
+ * than clipped, and at a settled idle it does not move. The governor's own effort enters the plant
+ * as torque, which is how this bench already models it.
+ */
+export const MOCK_IDLE_ML_REQUEST_KGH = 14.0;
+
+/** `KL_LFR_SOLL_MAX_LLS` at idle speed, kg/h — the ceiling the split clamps the request at. Far
+ *  above a warm idle, which is why the valve carries the whole demand and the throttle stays shut. */
+export const ML_SOLL_MAX_LLS_KGH = 34.0;
+
+/**
+ * THE VALVE ITSELF — how much air a given duty actually passes, kg/h.
+ *
+ * This is the piece that makes an iteration rehearsable, and it has to be a FIXED physical
+ * characteristic rather than a lookup in the map. The map is what the ECU believes; the valve is
+ * what the engine gets. Deriving it from the loaded table would move the plant every time the tool
+ * wrote to it, the equilibrium would move with it, and the measured error would sit at the same
+ * value for ever while the correction climbed — the exact failure `lossAnchorKgH` was written to
+ * fix, one level further out.
+ *
+ * The line comes from the vendored stock `KF_LLS_TV` at the idle columns: 14.0 % at 11 kg/h and
+ * 23.0 % at 15 kg/h, so 2.25 %/(kg/h) through (11, 14.0). Written down here as constants rather
+ * than read back, so it stays the valve while the map becomes whatever the campaign makes it.
+ *
+ * A stock map therefore delivers exactly what was requested — `airForDuty(dutyAt(request))` is the
+ * identity — and every kg/h of disagreement after that is `errorKgH`, which is the answer the
+ * estimator has to find.
+ */
+export const MOCK_VALVE_DUTY_AT_FLOOR_PCT = 14.0;
+export const MOCK_VALVE_FLOOR_KGH = 11.0;
+export const MOCK_VALVE_PCT_PER_KGH = 2.25;
+
+/** The valve's own characteristic, inverted: duty in, air out. */
+export function mockValveAirForDuty(dutyPct: number): number {
+    return MOCK_VALVE_FLOOR_KGH + (dutyPct - MOCK_VALVE_DUTY_AT_FLOOR_PCT) / MOCK_VALVE_PCT_PER_KGH;
+}
+
 /** Warm idle target, rpm. `KL_LFR_NSOLL_GRUND` at 80 degC. */
 const N_SOLL_WARM = 870;
 /** Coolant the bench holds. Sits on KF_LLR_QVS_GRUND's y[4] breakpoint, which is where a dwell has
@@ -90,10 +141,20 @@ const I_MIN_NM = -80;
 const I_MAX_NM = 120;
 
 export interface IdleBenchOptions {
-    /** The air the map asks for at this operating point, kg/h. Defaults to the stock warm cell so
-     *  the bench runs standalone; the mock link and the practice script pass the real lookup, which
-     *  is what makes the assertion "it converged on the value in THIS binary" mean something. */
-    qvsAt?: (rpm: number, tmot: number) => number;
+    /**
+     * THE DME's OWN CHAIN: what duty `KF_LLS_TV` commands for an air request at this speed.
+     *
+     * This replaced `qvsAt`, which returned the feedforward map's value — `KF_LLR_QVS_GRUND`, a map
+     * with no consumer in the car and no writer in this tool. Handing in the DUTY lookup rather
+     * than an air value is what lets the rig report the same chain it runs:
+     *
+     *     ML_SOLL_LLS (request) -> dutyAt -> LLS_TV -> the valve -> the air the engine gets
+     *
+     * so a practice write moves the engine AND the reported `LLS_TV` moves with it. The rig used to
+     * synthesise that channel from a hardcoded line instead, which is the defect this fixes — see
+     * the note on `llsTv` in `read`.
+     */
+    dutyAt?: (rpm: number, mlRequest: number) => number;
     /**
      * The map value the engine's PHYSICAL loss is anchored to, kg/h. Defaults to the current map,
      * which is right for a standalone bench and wrong for an iteration: an engine's friction does
@@ -184,7 +245,7 @@ export interface IdleBenchReading {
 }
 
 export class MockIdleBench {
-    private readonly qvsAt: (rpm: number, tmot: number) => number;
+    private readonly dutyAt: (rpm: number, mlRequest: number) => number;
     private readonly errorKgH: number;
     private readonly gain: number;
     private readonly adaptEnabled: boolean;
@@ -203,7 +264,7 @@ export class MockIdleBench {
     private lossAtIdle: number | null = null;
 
     constructor(opts: IdleBenchOptions = {}) {
-        this.qvsAt = opts.qvsAt ?? (() => 14.0);
+        this.dutyAt = opts.dutyAt ?? (() => 20.75);
         this.errorKgH = opts.errorKgH ?? MOCK_IDLE_QVS_ERROR_KGH;
         this.gain = opts.gainKgHPerNm ?? MOCK_IDLE_GAIN_KGH_PER_NM;
         this.adaptEnabled = opts.adaptEnabled ?? MOCK_IDLE_ADAPT_ENABLED;
@@ -225,7 +286,8 @@ export class MockIdleBench {
      *  I term at exactly its designed resting point, and mildly speed-dependent above that. */
     private loss(rpm: number): number {
         if (this.lossAtIdle === null) {
-            const anchor = this.lossAnchorKgH ?? this.qvsAt(N_SOLL_WARM, TMOT_WARM);
+            const anchor = this.lossAnchorKgH
+                ?? mockValveAirForDuty(this.dutyAt(N_SOLL_WARM, MOCK_IDLE_ML_REQUEST_KGH));
             const airNm = anchor / this.gain;
             this.lossAtIdle = airNm - ADAPT_OFFSET_NM;
         }
@@ -283,7 +345,13 @@ export class MockIdleBench {
             const p = governing && dn > 0 ? Math.min(P_MAX_NM, dn * P_PER_RPM) : 0;
             const tz = governing && dn >= 1 ? Math.min(TZ_MAX_NM, dn * TZ_PER_RPM) : 0;
 
-            const airKgH = this.qvsAt(this.rpm, TMOT_WARM) + this.errorKgH;
+            // The chain, in order: the request the torque path makes, the duty the MAP commands
+            // for it, and the air the VALVE actually passes at that duty. Only the middle term
+            // moves when the tool writes; the valve is a fixed physical characteristic, which is
+            // what makes a second pass measure a smaller error instead of the plant sliding along
+            // with the correction.
+            const airKgH = mockValveAirForDuty(this.dutyAt(this.rpm, MOCK_IDLE_ML_REQUEST_KGH))
+                + this.errorKgH;
             let mAir = airKgH / this.gain;
             // A rev is the driver's foot, not the governor's doing: extra torque straight into the
             // plant, and the LL bit drops out. Every gate that keys off idle has to see this leave.
@@ -314,7 +382,11 @@ export class MockIdleBench {
     read(t: number): IdleBenchReading {
         this.advanceTo(t);
         const seg = this.segmentAt(t);
-        const qvs = this.qvsAt(this.rpm, TMOT_WARM);
+        // What the DME asks the valve for, and what the map answers. Reported rather than
+        // re-invented: these two channels ARE the chain above, and the model gate compares the
+        // second against its own lookup of the same map.
+        const mlRequest = Math.min(MOCK_IDLE_ML_REQUEST_KGH, ML_SOLL_MAX_LLS_KGH);
+        const duty = Math.min(97, Math.max(14, this.dutyAt(this.rpm, mlRequest)));
         return {
             rpm: this.rpm,
             nSoll: N_SOLL_WARM,
@@ -323,10 +395,22 @@ export class MockIdleBench {
             mdLlri: this.mdi,
             mdLlra: this.mdLlra,
             mdLlraKo: this.mdLlraKo,
-            llrQvs: qvs,
-            // Straight off the actuator map's own shape near the operating point: ~2.35 %/(kg/h)
-            // through 14 kg/h -> ~21 %. Enough for the rail tests to have something to not hit.
-            llsTv: Math.min(97, Math.max(14, 21 + (qvs - 14) * 2.35)),
+            llrQvs: mlRequest,
+            /**
+             * THE MAP's OWN ANSWER, not a line through it.
+             *
+             * This was `21 + (qvs - 14) * 2.35` — a hardcoded characteristic that knew nothing
+             * about the table being written. It cost the campaign its third pass: the model gate
+             * compares RAM `LLS_TV` against `KF_LLS_TV` interpolated at the operating point, and
+             * with the map moving and this line standing still the two drifted apart by about
+             * 0.9 % per pass until they crossed `maxModelDeltaPct` and EVERY dwell was refused
+             * `model-disagrees`. Measured: passes 1 and 2 wrote, pass 3 accepted nothing.
+             *
+             * The rig models a healthy valve on a correctly decoded map, so the two agree exactly.
+             * That is the honest model — and it is also why PRACTICE can never tell you anything
+             * about whether the CAR agrees. Only the car answers that.
+             */
+            llsTv: duty,
             llsSt: 0x01,   // bit 0 only: lls_tv_init's value, no diagnosis latched
             ub: seg.kind === 'load' ? 13.0 : 14.1,
             engineState: seg.kind === 'rev' ? 8 : 4,
@@ -348,9 +432,13 @@ export class MockIdleBench {
             // ML_SOLL is the air demand in the DME's own currency; the bench works in kg/h, so this
             // is the same number. The ceiling comes from KL_LFR_SOLL_MAX_LLS, ~34 kg/h at 600 rpm —
             // far above idle demand, which is why the valve carries everything.
-            mlSoll: qvs,
-            mlSollLls: Math.min(qvs, 34),
-            mlSollMaxLls: 34,
+            // The DEMAND, which is what these channels are. They reported the air the valve
+            // DELIVERS, so as the campaign wrote duty the reported demand climbed with it — the
+            // dwell binned onto a drifting row, and the preflight's `ML_SOLL < ceiling` readout
+            // described a number the torque path never asked for.
+            mlSoll: mlRequest,
+            mlSollLls: mlRequest,
+            mlSollMaxLls: ML_SOLL_MAX_LLS_KGH,
 
             // MD_LLRI = (LFR_I_AFR >> 4) + (LFR_MDI >> 4). The bench has one integrator, so it is
             // all in LFR_MDI and LFR_I_AFR stays empty — which is itself a thing the panel can show

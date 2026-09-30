@@ -3,6 +3,7 @@ import { VECalculator, VeCalcOptions, type VeReject } from '@/lib/ve-calculator/
 import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } from '@/lib/ve-calculator/rfKorrTuner';
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { summariseChargeTemp, type ChargeTempInfo } from '@/lib/ve-calculator/chargeTemp';
+import { RfKorrLatch } from '@/lib/ve-calculator/egtTables';
 import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import { MAP_DIMENSIONS, APP_CONFIG } from '@/config/constants';
 import { timeScaleSeconds } from '@/lib/log-engine/filter';
@@ -17,7 +18,24 @@ export function useVeCalculation() {
    * nothing renders from it directly. Keyed on the map object so a different BASE cannot inherit a
    * grid built against the previous one.
    */
-  const liveRef = useRef<{ map: VEMap; grid: ReturnType<VECalculator['createGrid']>; consumed: number; annotated: LogDataPoint[] } | null>(null);
+  const liveRef = useRef<{
+    map: VEMap;
+    grid: ReturnType<VECalculator['createGrid']>;
+    consumed: number;
+    annotated: LogDataPoint[];
+    /**
+     * The rf_korr latch, and how far it has been walked along the RAW log.
+     *
+     * Held across flushes for the same reason the grid is: it is state the drive accumulates, and
+     * rebuilding it each flush would restart the DME's state machine from "reset" twice a second.
+     * It walks `rawData`, not `data`, because the car's latch advanced on samples the filters drop —
+     * and it must, or the live map and the STOP map would disagree by the 0.29 % of samples where a
+     * filtered walk gives a different verdict. `verify:incremental` pins that they do not.
+     */
+    latch: RfKorrLatch;
+    consumedRaw: number;
+    gateTrack: Map<number, { open: boolean; dwellSec: number }>;
+  } | null>(null);
   const [newMap, setNewMap] = useState<VEMap | null>(null);
   const [mapData, setMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
   const [hitMap, setHitMap] = useState<number[][] | null>(null);
@@ -98,7 +116,11 @@ export function useVeCalculation() {
     const calc = new VECalculator();
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
-    const annotated = calc.annotateRfKorr(map, processed.data, options.egt, options.rfKorrAir);
+    // `processed.rawData` as the latch source, not `processed.data`. The rf_korr latch is a DME
+    // state machine and it advanced on every sample the car took, including the ones the filters
+    // below removed — see ProcessedLog.rawData and RfKorrLatch.
+    const annotated = calc.annotateRfKorr(
+      map, processed.data, options.egt, options.rfKorrAir, processed.rawData);
     // Between the two: the tuner reads the annotated log and the VE calculation may go on to
     // consume the tuner's output, so this is the only order in which one pass can serve all three.
     //
@@ -108,7 +130,8 @@ export function useVeCalculation() {
     // the first real drive, 97 % of the gate-open samples. Annotated separately rather than by
     // re-filtering the annotated log, because `annotated` must stay index-aligned with
     // processed.data for the log table and chart.
-    const annotatedForRfKorr = calc.annotateRfKorr(map, processed.rfKorrData, options.egt, options.rfKorrAir);
+    const annotatedForRfKorr = calc.annotateRfKorr(
+      map, processed.rfKorrData, options.egt, options.rfKorrAir, processed.rawData);
     const rfKorr = options.egt
       ? tuneRfKorrTable(map, annotatedForRfKorr, options.egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
@@ -218,17 +241,40 @@ export function useVeCalculation() {
     // A new log, a new map, or a reprocess that shortened the valid set: start over. Cheap to
     // detect and the only way a stale grid could survive into a different drive.
     if (!st || st.map !== map || processed.data.length < st.consumed) {
-      liveRef.current = { map, grid: calc.createGrid(), consumed: 0, annotated: [] };
+      liveRef.current = {
+        map, grid: calc.createGrid(), consumed: 0, annotated: [],
+        latch: new RfKorrLatch(), consumedRaw: 0, gateTrack: new Map(),
+      };
     }
     const live = liveRef.current!;
     const plan = resolveRfKorr(options);
+    // Advance the latch over the raw samples that arrived, BEFORE annotating any of them: a sample
+    // the VE filter dropped still moved the DME's state machine, and one of the commonest drops —
+    // fuel cut — is exactly the condition that resets it.
+    if (options.egt) {
+      // The unit question is settled from the RAW log, once. Deciding it per flush would let a
+      // stalled first second read as a milliseconds log and divide every dwell by a thousand.
+      const perSecond = timeScaleSeconds(processed.rawData);
+      for (let i = live.consumedRaw; i < processed.rawData.length; i++) {
+        const p = processed.rawData[i];
+        live.gateTrack.set(p.time, calc.stepRfKorrLatch(
+          live.latch, map, p, options.egt, perSecond, options.rfKorrAir));
+      }
+      live.consumedRaw = processed.rawData.length;
+    }
     for (let i = live.consumed; i < processed.data.length; i++) {
-      const point = calc.annotateRfKorrPoint(map, processed.data[i], options.egt, options.rfKorrAir);
+      const src = processed.data[i];
+      const t = live.gateTrack.get(src.time);
+      const annotated = calc.annotateRfKorrPoint(
+        map, src, options.egt, options.rfKorrAir, t ? t.open : null);
+      const point = annotated.rfKorrGateOpen && t
+        ? { ...annotated, rfKorrDwellSec: t.dwellSec } : annotated;
       live.annotated.push(point);
       // `null`, not options.tunedRfKorr — see the note above about mixing two calibrations.
       // Same reference as the batch path, or a live flush and the STOP pass would build
       // different maps from one drive. verify:incremental asserts they agree.
-      calc.accumulatePoint(live.grid, point, plan, null, options.normaliseTo);
+      calc.accumulatePoint(
+        live.grid, point, plan, null, options.normaliseTo, options.rfKorrSettleSec);
     }
     live.consumed = processed.data.length;
 
@@ -264,7 +310,8 @@ export function useVeCalculation() {
     // counted. The same argument the inertia side already made for recomputing rather than
     // accumulating, and the same conclusion.
     if (options.egt) {
-      const annR = calc.annotateRfKorr(map, processed.rfKorrData, options.egt);
+      const annR = calc.annotateRfKorr(
+        map, processed.rfKorrData, options.egt, undefined, processed.rawData);
       setRfKorrLive(rfKorrCensus(annR, options.egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
         options.rfKorrThresholds ?? {}).report);

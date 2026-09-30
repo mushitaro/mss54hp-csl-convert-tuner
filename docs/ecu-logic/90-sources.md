@@ -12,7 +12,7 @@
 | `CSL_0401_Karter16_v3_6_publish.xdf` | TunerPro 定義。`XDFCONSTANT` 1782 / `XDFTABLE` 394 / **`XDFFUNCTION` 353**。アドレス・型・スケール・軸の一次情報 | karter16 の CSL 0401 逆アセンブルリポジトリ |
 | `Full 211323000401PD31_TERRA.bin` | 1 MB フル BIN。**このディレクトリの数値はすべてここから直接バイトを読んで算出** | 同上 |
 | `MSS54 Funktionsrahmen/Original (German)/*.pdf` | BMW/Bosch の機能仕様書 39 冊。ドイツ語原文が正、英訳版は OCR 由来の劣化がある | 同上 |
-| Ghidra 逆コンパイル出力 | `app/public/data/decomp/{master,slave}/<hex>.txt`。ファイル名 = 関数アドレス | 同上 |
+| Ghidra 逆コンパイル出力 | `app/public/data/decomp/{master,slave}/<hex>.txt`。ファイル名 = 関数アドレス。**全 1,705 関数**（2026-09-04 以前は名前の付いた 644 本のみ。エクスポータが `FUN_` で始まる名前を除外していた） | 同上 |
 | `graph.json` | XDF 全項目のデコード済み値 ＋ RAM シンボル ＋ 参照エッジ | 同上 |
 | `95-faster-logging.md` | DS2 ログ速度の調査と go/no-go（交換の内訳、FTDI レイテンシ、専用ブロック案の判定） | 本リポジトリ。一次データはセッション #903/#904 の per-exchange トレース |
 

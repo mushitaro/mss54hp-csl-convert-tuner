@@ -1,6 +1,7 @@
 import type { ProcessId } from '@/lib/log-engine/logProfile';
 import type { LogDataPoint, VEMap } from '@/lib/types';
 import type { InertiaSample, IdleSample } from '@/lib/dme-link/types';
+import type { LlsSample } from '@/lib/lls/fromLog';
 import { sampleRateHz } from '@/lib/log-engine/rate';
 import {
     openDb,
@@ -126,7 +127,16 @@ export interface SaveTuneInput {
     sessionId: string;
     binaryFileName: string;
     tunedBinaryBuffer: ArrayBuffer;
-    veMapSnapshot: VEMap;
+    /**
+     * The derived VE map, when there is one.
+     *
+     * Optional because a tune no longer has to come from a drive: editing
+     * calibration values produces bytes that differ from the BASE with no log
+     * behind them and therefore no map. Those are still a tune — they are what
+     * goes into the ECU — and a session that cannot store them has nowhere to
+     * keep the operator's work but the heap.
+     */
+    veMapSnapshot?: VEMap;
     tuneSettings: TuneSettings;
     log: LogDataPoint[] | null;
 }
@@ -161,7 +171,7 @@ export interface SaveTuneInput {
 export function nextLogRecord(
     sessionId: string,
     prior: SessionLogRecord | undefined,
-    incoming: { data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[] },
+    incoming: { data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[]; lls?: LlsSample[] },
 ): SessionLogRecord | null {
     const merged: SessionLogRecord = {
         ...prior,
@@ -170,8 +180,9 @@ export function nextLogRecord(
     };
     if (incoming.inertia?.length) merged.inertia = incoming.inertia;
     if (incoming.idle?.length) merged.idle = incoming.idle;
+    if (incoming.lls?.length) merged.lls = incoming.lls;
     const holdsNothing = merged.data.length === 0
-        && !merged.inertia?.length && !merged.idle?.length;
+        && !merged.inertia?.length && !merged.idle?.length && !merged.lls?.length;
     return holdsNothing ? null : merged;
 }
 
@@ -189,7 +200,11 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             binaryFileName: input.binaryFileName,
             tunedSize: input.tunedBinaryBuffer.byteLength,
             sha256,
-            veMapSnapshot: input.veMapSnapshot,
+            // Kept when this save has none. Assigning `undefined` unconditionally
+            // would erase a map an earlier save had derived — a calibration-only
+            // re-save of a session that HAD been driven would throw away the
+            // snapshot `useComparison` reads for its `db:` diff.
+            veMapSnapshot: input.veMapSnapshot ?? existing.veMapSnapshot,
             tuneSettings: input.tuneSettings,
             hasLog,
             logPointCount: input.log?.length ?? 0,
@@ -251,6 +266,9 @@ export async function saveResearchRun(input: {
     /** The unprojected samples, when this is an idle run. Same rule as `inertia`: the projection
      *  keeps time and engine speed and drops md_llri, which is the entire measurement. */
     idle?: IdleSample[];
+    /** The unprojected samples, when this is a micro-throttle run. Same rule again, plus road
+     *  speed: without it the stopped head and tail of the log cannot be dropped. */
+    lls?: LlsSample[];
 }): Promise<TuningSession> {
     return withDb(async db => {
         const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE], 'readwrite');
@@ -273,7 +291,7 @@ export async function saveResearchRun(input: {
         const logStore = tx.objectStore(SESSION_LOGS_STORE);
         const prior = await promisify<SessionLogRecord | undefined>(logStore.get(input.sessionId));
         const record = nextLogRecord(input.sessionId, prior, {
-            data: input.log, inertia: input.inertia, idle: input.idle,
+            data: input.log, inertia: input.inertia, idle: input.idle, lls: input.lls,
         });
         if (record) logStore.put(record);
         await txDone(tx);

@@ -13,6 +13,22 @@
   color-scheme: dark;
 }
 
+/* ── backdrop-filter: above 900px only ─────────────────────────────────
+   Every `backdrop-blur-*` in this app is written `min-[900px]:backdrop-blur-*`, and the sites that
+   exist ONLY below that line carry none at all.
+
+   A backdrop filter composites the whole area behind the element, every frame the content behind it
+   changes — and in this app the content behind it is a live telemetry strip, a 3D surface, a 480-cell
+   grid, or the app itself under a sheet. On the device this rule is for, a head unit whose GPU is
+   the weakest thing in the car, that cost is paid against the same budget the DS2 read loop needs.
+   Measured elsewhere in this codebase at ~1s of phone paint for a full-screen scrim.
+
+   What it buys back on black is close to nothing: every surface that carried one is already 80-95%
+   opaque over #000, so the blur was refining a picture nobody can see. Above 900px there is a
+   desktop GPU and a static background, so it stays — that is where it reads as glass rather than as
+   a cost. See tsunagi-m-mobile → performance.md §5.
+   ───────────────────────────────────────────────────────────────────── */
+
 /* No pull-to-refresh, and no rubber-band handing a gesture to the browser.
    The app never scrolls its own document — everything is sized to the viewport — so a downward
    swipe that starts on a pane, on the menu's scrim, or on a list already at its top had nothing
@@ -242,6 +258,23 @@ body {
 }
 
 .no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* The guide is written once and read two ways (GuideCarousel.tsx): as the carousel a first visitor
+   gets after agreeing to the disclaimer, and as plain text in the static export for a reader that
+   runs no script — a crawler, an LLM's fetch — which never sees a dialog. The text goes the moment
+   the page runs script: layout.tsx marks <html data-js> before the first paint, so nobody who can be
+   shown the carousel sees it. Keyed on an attribute set before paint, not on React state, so the
+   server HTML and the hydrating render are the same DOM and nothing flashes past first. */
+html[data-js] .no-js-only {
+  display: none;
+}
+
+/* Without script <html lang> stays the export's `en`, so the static copy shows its English half.
+   The Japanese half is in the HTML regardless, for the crawler that reads both. */
+html[lang="ja"] [data-guide-lang="en"],
+html:not([lang="ja"]) [data-guide-lang="ja"] {
   display: none;
 }
 

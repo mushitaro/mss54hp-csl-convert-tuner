@@ -3,6 +3,7 @@ import {
     AMBIENT_CHARGE_RAM_READ, AMBIENT_PRESSURE_AGREE_MBAR, AMBIENT_TEMP_RAM_READ,
     IDLE_VALVE_STATE_RAM_READ, KELVIN_OFFSET_C,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
+    LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     Mss54HpRamSignals, P_UMG_BYTE_OFFSET_MBAR, P_UMG_ED_SUBSTITUTING, TAN_OFFSET_C, decodeRamSignal,
     type RamSignal,
 } from './ramMap';
@@ -45,6 +46,18 @@ export type SlowLaneChannels = Pick<
 export type SlewChannels = Pick<
     LiveMeasurement,
     'mdDynSt' | 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta'
+>;
+
+/**
+ * The ring's four direct channels.
+ *
+ * Not in `SlowLaneChannels` and not carried, for the reason the slew channels are not: these are
+ * the signals that OSCILLATE. Holding one across the samples between reads would flatten the very
+ * 0.3 Hz the run exists to measure — the failure mode is not a gap, it is a plausible straight line.
+ */
+export type LlsRingChannels = Pick<
+    LiveMeasurement,
+    'frRegler' | 'llsTv' | 'mlSoll' | 'mlSollLls'
 >;
 
 /**
@@ -178,6 +191,28 @@ export function decodeAmbientTemp(
     };
 }
 
+/** `ML_SOLL` and `ML_SOLL_LLS`, six bytes — the split the throttle target made, both halves of it. */
+export function decodeLlsAir(bytes: Uint8Array, address: number): Partial<LlsRingChannels> {
+    const out: Partial<LlsRingChannels> = {};
+    const total = decodeRamSignal(Mss54HpRamSignals.ML_SOLL, bytes, address);
+    const toValve = decodeRamSignal(Mss54HpRamSignals.ML_SOLL_LLS, bytes, address);
+    if (total !== null) out.mlSoll = total;
+    if (toValve !== null) out.mlSollLls = toValve;
+    return out;
+}
+
+/** `FR_REGLER`, two bytes. 1.0 is neutral; this is the integrator the surge argument turns on. */
+export function decodeLlsIntegrator(bytes: Uint8Array, address: number): Partial<LlsRingChannels> {
+    const v = decodeRamSignal(Mss54HpRamSignals.FR_REGLER, bytes, address);
+    return v === null ? {} : { frRegler: v };
+}
+
+/** `LLS_TV`, two bytes — the duty as commanded, not as inferred back through two map inversions. */
+export function decodeLlsDuty(bytes: Uint8Array, address: number): Partial<LlsRingChannels> {
+    const v = decodeRamSignal(Mss54HpRamSignals.LLS_TV, bytes, address);
+    return v === null ? {} : { llsTv: v };
+}
+
 /** `T_UMG_ST` bit set by `can_rx_62f` on a timed-out or invalid frame. */
 export const T_UMG_ST_STALE = 0x80;
 
@@ -190,6 +225,9 @@ export const AMBIENT_TEMP_ADDRESS = AMBIENT_TEMP_RAM_READ.address;
 export const IDLE_VALVE_STATE_ADDRESS = IDLE_VALVE_STATE_RAM_READ.address;
 export const SLEW_STATE_ADDRESS = SLEW_STATE_RAM_READ.address;
 export const SLEW_TORQUE_ADDRESS = SLEW_TORQUE_RAM_READ.address;
+export const LLS_AIR_ADDRESS = LLS_AIR_RAM_READ.address;
+export const LLS_INTEGRATOR_ADDRESS = LLS_INTEGRATOR_RAM_READ.address;
+export const LLS_DUTY_ADDRESS = LLS_DUTY_RAM_READ.address;
 
 /**
  * `LLS_ST`, one byte, straight through — no scaling, because it is a bitfield.

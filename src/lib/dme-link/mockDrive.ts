@@ -1,7 +1,7 @@
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { APP_CONFIG } from '@/config/constants';
 import {
-    EgtTables, gateOpen, interpCurve, interpMap2d, rfKorrAt, readEgtTables, tabgModelAt,
+    EgtTables, interpCurve, interpMap2d, RfKorrLatch, rfKorrAt, readEgtTables, tabgModelAt,
 } from '@/lib/ve-calculator/egtTables';
 // `import type` for the interface: a harness that strips types rather than compiling them cannot
 // tell a type-only named import from a value one, and goes looking for a runtime export that was
@@ -178,11 +178,28 @@ export const MOCK_DENSITY_TRUTH = DENSITY_TRUTH;
 /** The Alpha-N axis a given throttle opening lands on, so a check can reproduce the binning. */
 export const mockAqRelRf = (rpm: number, rawLoad: number) => rawLoad / aqFactor(rpm);
 
+/**
+ * Road speed, km/h — the second half of the rf_korr gate, which the mock had no value for.
+ *
+ * A single ratio, roughly 4th gear on this car (30 km/h per 1000 rpm), except at the idle segment
+ * where the car is stationary. It is not calibration and does not need to be: the only thing that
+ * reads it is a 20 km/h floor, and what the drive has to contain is samples on BOTH sides of it.
+ * The idle segment supplies the below side, every pull the above side.
+ *
+ * Idle is detected the way the app's own idle filter detects it (`rawLoad <= 1.0 && rpm < 1000`),
+ * so the one segment the app already treats as stationary is the one that reads as stationary here.
+ */
+export const mockVehicleSpeed = (rpm: number, rawLoad: number): number =>
+    (rawLoad <= 1.0 && rpm < 1000) ? 0 : Math.round(rpm * 0.030);
+
 export class MockDrive {
     private egt: EgtTables | null = null;
     private veMap: VEMap | null = null;
     /** Exhaust temperature, °C, carried between polls. This lag IS the feature being rehearsed. */
     private tabg = 210;
+    /** The DME's rf_korr latch. Carried between polls for the same reason `tabg` is: it is state the
+     *  drive accumulates, and the hysteresis branch is only reachable if it survives the sample. */
+    private latch = new RfKorrLatch();
     private lastT = 0;
     /** The RF published last cycle. The DME feeds the previous cycle's RF to the temperature model,
      *  and so does this — otherwise RF and the model that consumes it are mutually defined. */
@@ -296,7 +313,13 @@ export class MockDrive {
         this.tabg += (model - this.tabg) * (1 - Math.exp(-dt / tau));
 
         const delta = Math.max(0, model - this.tabg);
-        const open = gateOpen(this.egt, rpm, rfSoll);
+        // All THREE branches of `rf_korr_calc`, because the DME runs all three. The mock called
+        // `gateOpen` alone (the load half), then `rfKorrActive` (both halves, entry only) — each
+        // time the same omission the app itself carried, so a rehearsal could never have caught
+        // either. `sample` is documented as call-in-increasing-t, which is exactly what a latch
+        // needs. See `RfKorrLatch`.
+        const speed = mockVehicleSpeed(rpm, rawLoad);
+        const open = this.latch.step(this.egt, rpm, rfSoll, speed);
         const kApplied = open ? rfKorrAt(this.egt, rpm, delta) : 1;
 
         const rf = rfSoll * kApplied;
@@ -334,6 +357,10 @@ export class MockDrive {
             // ratio is not calibration, it only has to keep part load reading as part load.
             wdk1: Math.min(100, aqRelRf * 0.9),
 
+            // `V`. The same number the gate above was evaluated against — one speed per sample, so
+            // a replay of this drive reaches the same verdict the drive itself used.
+            vehicleSpeed: speed,
+
             // --- The long-term stores and the valve byte: what a real VE run records now ---
             //
             // The same constants the idle pattern and the idle rig hold (0.96 / -120 / -114 /
@@ -341,11 +368,11 @@ export class MockDrive {
             // that kept the stores at unity and zero would rehearse the case where reading them
             // changes nothing.
             //
-            // Inert by design. `stft` above still carries the WHOLE recoverable answer, so the
-            // main-band recovery and the practice replay stay pinned to `mockVeError`. Physically
+            // Inert by design. `stft` above still carries the WHOLE recoverable answer, so the VE
+            // recovery and the practice replay stay pinned to `mockVeError`. Physically
             // a store the DME applies sits under the controller — with `laa_f` at 0.96 the
             // short-term pair would read total/0.96 — and the one consumer that already multiplies
-            // the product (the LOW LOAD correction, `stft x ltft x ...`) will see this constant
+            // the product (the kf_rf_soll correction, `stft x ltft x ...`) will see this constant
             // fold into what it recovers from the overrun cells. Moving that 4 % out of `stft`
             // is a change to the drive's published answer, not to its channel list, so it waits
             // for the arithmetic that folds the stores into the drive bands; today these are here

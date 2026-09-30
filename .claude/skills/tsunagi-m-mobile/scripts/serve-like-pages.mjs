@@ -21,6 +21,7 @@
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -56,7 +57,9 @@ export function serve(root, port = 8899) {
     });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not string concatenation: on Windows argv[1] is C:\… and the naive form never
+// matches, so running this file directly did nothing and exited 0 — a server that was never there.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     const root = process.argv[2];
     const port = Number(process.argv[3] ?? 8899);
     if (!root) { console.error('usage: serve-like-pages.mjs <dir> [port]'); process.exit(1); }

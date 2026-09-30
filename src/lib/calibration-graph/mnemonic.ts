@@ -80,7 +80,7 @@ const QUALIFIERS: Record<string, Term> = {
 /**
  * Suffixes this project's own namers put on Ghidra functions.
  *
- * Not factory vocabulary — these come from the humans who named the 644
+ * Not factory vocabulary — these come from the humans who named the 646
  * functions in the archive — so they read as what the code does rather than
  * as a German term, and they are the only tokens allowed to land last.
  */

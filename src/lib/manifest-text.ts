@@ -63,7 +63,17 @@ interface ManifestCopy {
     trimNoChannel: string;
     trimWindowOpen: (frozenUnread: boolean) => string;
 
-    idleSealed: string;
+    /** IDLE. `n` is cells the proposal moves. */
+    idleNothingDerived: string;
+    idleNeedsRun: string;
+    idleArmed: (n: number) => string;
+
+    /** LLS, the micro-throttle ring. `n` is cells the solve moves; `ceded` is cells it took
+     *  from IDLE, which is 0 on the shipped anchor and is stated only when it is not. */
+    llsNothingDerived: string;
+    llsNeedsRun: string;
+    llsArmed: (n: number) => string;
+    llsCeded: (ceded: number) => string;
     inertiaProposal: string;
 
     /** RESTORE. `n` is cells off the reference, out of 480. */
@@ -80,6 +90,7 @@ interface ManifestCopy {
 
     needBinary: string;
     tankVentNote: string;
+    rfGateNote: string;
 
     /** CALIBRATION tab edits riding the WRITE group. `owner` is the armed writer's row label. */
     calLockedByWriter: (owner: string) => string;
@@ -101,13 +112,15 @@ const EN: ManifestCopy = {
 
     derivedTablesLocked: 'Needs a tuned map first. Load a log and run the tune — this table is '
         + 'generated from the result, not measured on its own.',
-    alphaNEarnedNothing: 'A log was read, but no cell in either band met its evidence bar — the '
-        + 'LOW LOAD tab names the gate that refused each one.',
+    alphaNEarnedNothing: 'A log was read, but no cell met its evidence bar — tap a cell on the '
+        + 'TUNED MAP and the strip under it names the gate that refused it.',
     shapeNothingApplied: 'Chooses WHAT ALPHA-N writes: off, it writes the tuned map as measured; '
         + 'on, it writes the tuned map with the low-opening repair applied. Nothing is applied yet '
         + '— open the SHAPE tab, switch on a rule, and press APPLY.',
-    shapeNeedsAlphaN: 'Needs ALPHA-N armed. This is not a separate table — it chooses which shape '
-        + 'of the SAME grid goes into kf_rf_soll, and with ALPHA-N off nothing goes in at all.',
+    shapeNeedsAlphaN: 'Needs ALPHA-N armed — arming lets a result into the bytes, and the '
+        + 'download / flash that writes them is a separate action. This is not a separate table: '
+        + 'it chooses which shape of the SAME grid goes into kf_rf_soll, and with ALPHA-N off '
+        + 'nothing goes in at all.',
     shapeReady: 'Chooses WHAT ALPHA-N writes. Off, it writes the tuned map as measured. On, it '
         + 'writes the tuned map with the low-opening repair applied — the repaired cells are '
         + 'interpolated between measured ones, so they carry no measurement of their own.',
@@ -146,9 +159,23 @@ const EN: ManifestCopy = {
         + 'move during a run. Arm PATCH to freeze both stores before recording the log this map is '
         + 'derived from.',
 
-    idleSealed: 'Sealed. The target (KF_LLR_QVS_GRUND) has no consumer in this calibration — '
-        + 'cfg_m.egas = 0 routes lls_tv_calc from the torque path, and LLR_QSOLL has one absolute '
-        + 'reference in the whole image, its own write. Writing it changes nothing.',
+    idleNeedsRun: 'No idle run in this session yet. START IDLE on the hub records one; the '
+        + 'proposal comes out of it.',
+    idleNothingDerived: 'The run produced no writable cell. Its own panel says which gate refused '
+        + 'and what to change — usually a longer dwell, or the A/C cycling through it.',
+    idleArmed: (n: number) => `${n} cell(s) of KF_LLS_TV (0x9E10, 13x10, duty %). Distributed `
+        + 'across the cells the DME interpolates at the idle point, so the duty moves there by '
+        + 'exactly the damped step. Capped at 3.0 % per cell per pass.',
+    llsNeedsRun: 'No micro-throttle run in this session yet. START LLS on the hub records one — '
+        + 'roll at 8-11 km/h with your foot just resting on the pedal; the ring comes out of it.',
+    llsNothingDerived: 'The drive never reached the rows this solves. It needs the valve region: '
+        + 'throttle on the floor, rolling, 18 to 45 kg/h of air. Its own panel says where it went.',
+    llsArmed: (n: number) => `${n} cell(s) of KF_LLS_TV (0x9E10, 13x10, duty %). Rebuilt as the `
+        + 'inverse of KL_AQ_ABS_LLS, kl_aq_rel_rf_fakt and kf_rf_soll so filling tracks air demand '
+        + 'in proportion. Row 20 is held, so the idle point does not move.',
+    llsCeded: (ceded: number) => `${ceded} of those cell(s) were IDLE's. Its reach at the idle `
+        + 'point drops to 37 %, and a correction that large has failed to converge on this car '
+        + 'before. Anchor on row 20 to give them back.',
     inertiaProposal: 'The inertia run proposes constants and writes nothing — apply them by hand '
         + 'from its panel.',
 
@@ -164,7 +191,7 @@ const EN: ManifestCopy = {
         + 'session. The reference is the community partial this app ships, checked cell for cell.',
     restoreWarmupDrift: (n) => `${n} of 480 cells differ from the CSL 0401 reference. This is the `
         + 'CATALYST-WARMUP table, on its own axes (600-4600 rpm) — a different table from the one '
-        + 'above it, not a band of it.',
+        + 'above it, not a part of it.',
 
     wotNeedsBinary: 'Load a binary first — this compares the bytes against the community reference.',
     wotStock: 'KF_TI_N_RF_VL matches the community reference. Nothing to restore; arming this '
@@ -183,6 +210,16 @@ const EN: ManifestCopy = {
         + 'it — and that trim is the only input the VE correction has. TUNING ONLY: the canister '
         + 'saturates, and DTC 24 is the code for a valve that will not open. Turn PATCH off and '
         + 'write once more before driving the tune. The filename carries _TEVOFF while it is armed.',
+    rfGateNote: 'Drops the rf_korr filling floor to 0.400 at all six rpm points '
+        + '(kl_rf_korr_rf_min, master 0xE90C; stock 0.70/0.55/0.65/0.65/0.65/0.80). It exists to '
+        + 'earn the one thing KF_RF_KORR_DRREL cannot be derived without: a gate-open sample at '
+        + 'delta near zero. Over six drives none was reachable at the stock floor - 3,063 gate-open '
+        + 'samples, smallest delta 46 C - because the gate needs 55-80 % filling and the exhaust '
+        + 'cannot warm to the model there inside a road pull. Replaying the same drives at 0.400 '
+        + 'gives 319 anchors and 13 usable cells. TUNING ONLY: while it is in the car the DME '
+        + 'enriches across a far wider part of the map, RF rises with it, and ignition and the '
+        + 'torque model follow. Drive it once with ALPHA-N off, then write it back out. The '
+        + 'filename carries _RFGATE40 while it is armed.',
 
     calLockedByWriter: owner => `${owner} is armed on these same bytes and writes the whole run. `
         + 'Disarm it, or revert this edit — writing both into one flash is not a request with an answer.',
@@ -205,14 +242,15 @@ const JA: ManifestCopy = {
 
     derivedTablesLocked: 'チューン後のマップが必要です。ログを読み込んでチューンを実行してください — '
         + 'このテーブルはその結果から生成されるもので、単独で測定されるものではありません。',
-    alphaNEarnedNothing: 'ログは読めましたが、どちらの帯でも証拠のしきい値を満たしたセルがありません。'
-        + 'どのゲートが各セルを弾いたかは LOW LOAD タブが挙げています。',
+    alphaNEarnedNothing: 'ログは読めましたが、証拠のしきい値を満たしたセルが1つもありません。'
+        + 'TUNED MAP でセルをタップすると、そのセルを弾いたゲートが下に出ます。',
     shapeNothingApplied: 'ALPHA-N が何を書くかを選ぶスイッチです。OFF なら測定したままのチューン後マップ、'
         + 'ON なら低開度の補修を適用したチューン後マップを書きます。まだ何も適用されていません — '
         + 'SHAPE タブを開き、ルールを1つ有効にして APPLY を押してください。',
-    shapeNeedsAlphaN: 'ALPHA-N を arm する必要があります。これは別のテーブルではなく、'
-        + '同じグリッドのどちらの形を kf_rf_soll に入れるかを選ぶものです。ALPHA-N が OFF なら'
-        + 'そもそも何も入りません。',
+    shapeNeedsAlphaN: 'ALPHA-N を arm する必要があります。arm は結果をバイトに入れることを'
+        + '許可するだけで、実際に書き込むのは次のダウンロード / フラッシュという別の操作です。'
+        + 'これは別のテーブルではなく、同じグリッドのどちらの形を kf_rf_soll に入れるかを'
+        + '選ぶものです。ALPHA-N が OFF ならそもそも何も入りません。',
     shapeReady: 'ALPHA-N が何を書くかを選ぶスイッチです。OFF なら測定したままのチューン後マップ。'
         + 'ON なら低開度の補修を適用したチューン後マップ — 補修されたセルは測定済みのセルの間を'
         + '内挿した値なので、それ自体は測定を持ちません。',
@@ -251,9 +289,23 @@ const JA: ManifestCopy = {
         + 'つまり走行中に動きえます。このマップを導出するログを録る前に、PATCH を arm して'
         + '両方の補正を凍結してください。',
 
-    idleSealed: '封印されています。書き込み先（KF_LLR_QVS_GRUND）にはこのキャリブレーション内で'
-        + '読み手がいません — cfg_m.egas = 0 が lls_tv_calc をトルク経路から回し、LLR_QSOLL への'
-        + '絶対参照はイメージ全体で自身への書き込み1箇所だけです。書いても何も変わりません。',
+    idleNeedsRun: 'このセッションにはまだアイドル走行がありません。ハブの START IDLE で記録すると、'
+        + 'そこから提案が出ます。',
+    idleNothingDerived: '走行から書き込み可能なセルが出ませんでした。どのゲートが拒否したかは'
+        + 'IDLE パネルが言います —— 多くは dwell が短いか、A/C が途中で回ったかです。',
+    idleArmed: (n: number) => `KF_LLS_TV（0x9E10、13x10、デューティ %）を ${n} セル。`
+        + 'DME がアイドル点で補間する各セルへ分配するので、その動作点でのデューティは'
+        + '減衰後のステップぶん厳密に動きます。1 パスあたり 1 セル 3.0 % が上限。',
+    llsNeedsRun: 'このセッションにはまだ微開走行がありません。ハブの START LLS で記録します —— '
+        + '8〜11 km/h で、アクセルに足を乗せただけで転がしてください。そこからリングが出ます。',
+    llsNothingDerived: 'この走行は対象の行に届いていません。必要なのはバルブ領域です —— '
+        + 'スロットルは床、転がしたまま、空気量 18〜45 kg/h。どこを走ったかは LLS パネルが言います。',
+    llsArmed: (n: number) => `KF_LLS_TV（0x9E10、13x10、デューティ %）を ${n} セル。`
+        + 'KL_AQ_ABS_LLS・kl_aq_rel_rf_fakt・kf_rf_soll の逆関数として組み直すので、'
+        + '充填率が要求空気量に比例します。行 20 は据え置くため、アイドル点は動きません。',
+    llsCeded: (ceded: number) => `うち ${ceded} セルは IDLE のものでした。`
+        + 'アイドル点での IDLE の到達率が 37 % に落ちます。この車では、その大きさの補正が'
+        + '収束しなかった記録があります。行 20 をアンカーにすれば返ります。',
     inertiaProposal: 'イナーシャ計測は定数を提案するだけで、何も書き込みません。'
         + '専用パネルから手作業で反映してください。',
 
@@ -292,6 +344,16 @@ const JA: ManifestCopy = {
         + 'チューニング専用: キャニスターは飽和し、DTC 24 は「バルブが開かない」のコードです。'
         + 'チューンで走る前に PATCH を切ってもう一度書き込んでください。arm されている間、'
         + 'ファイル名に _TEVOFF が付きます。',
+    rfGateNote: 'rf_korr の作動下限を 6 点すべて 0.400 に下げます'
+        + '（kl_rf_korr_rf_min、master 0xE90C。純正は 0.70/0.55/0.65/0.65/0.65/0.80）。'
+        + 'KF_RF_KORR_DRREL の導出にどうしても要る「ゲート開かつ Δ≈0 のサンプル」を'
+        + '取りに行くための patch です。純正の下限では 6 走行 3,063 サンプルで最小 Δ が 46 °C、'
+        + '1 つも届きませんでした — ゲートは充填 55〜80 % を要求し、そこでは排気が'
+        + '公道の引きの間にモデル温度まで温まらないからです。同じ 6 走行を 0.400 で再生すると'
+        + 'アンカー 319 点、使えるセル 13 個になります。チューニング専用: 車に入っている間、'
+        + 'DME はマップのはるかに広い範囲で増量し、RF もそれに従って上がり、点火とトルクモデルが'
+        + 'それを読みます。ALPHA-N を切って 1 本走り、書き戻してください。'
+        + 'arm されている間、ファイル名に _RFGATE40 が付きます。',
 
     calLockedByWriter: owner => `${owner} が同じバイトに arm されていて、ラン全体を書きます。`
         + 'あちらを外すか、この編集を revert してください — 両方を1回のフラッシュに書く、という'

@@ -11,8 +11,9 @@
  */
 
 export type SyncPhase =
-    /** No token anywhere — production, or a preview built without one. Nothing to press. */
-    | 'unavailable'
+    /** The owner gate's session has ended. Nothing can land until the owner signs in again, which
+     *  the header's SIGN IN chip does; the local database keeps everything meanwhile. */
+    | 'signedOut'
     /** The interface is down. Reliable, unlike its opposite — see useOnline. */
     | 'offline'
     | 'busy'
@@ -203,11 +204,12 @@ const plural = (n: number) => (n === 1 ? '' : 's');
 
 export function describeSync({ phase, pending, error }: SyncStatus): SyncLook {
     switch (phase) {
-        case 'unavailable':
+        case 'signedOut':
             return {
-                label: 'Sync — not set up',
-                title: 'This build carries no sync token, so there is nowhere to send sessions. '
-                    + 'Production has no store at all; on a preview, enter a token in the session store.',
+                label: pending > 0 ? `Signed out — ${pending} waiting` : 'Signed out',
+                title: 'The WORKS build has signed this device out, so the store will not take anything until you sign '
+                    + 'in again — SIGN IN in the header, while no cable is connected. Nothing is lost meanwhile: '
+                    + 'the local database already has all of it.',
                 disabled: true,
                 tone: 'muted',
             };

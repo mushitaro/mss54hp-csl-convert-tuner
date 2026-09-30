@@ -90,8 +90,9 @@ function interp(xs: number[], ys: number[], x: number): number {
     return ys[ys.length - 1];
 }
 
-/** The y-axis position a sample sits at: `AQ_REL / kl_aq_rel_rf_fakt(N)`. Exported because the
- *  low-load and idle correctors have to bin by the same number the DME indexed with. */
+/** The y-axis position a sample sits at: `AQ_REL / kl_aq_rel_rf_fakt(N)`. Exported because
+ *  anything that bins samples onto `kf_rf_soll`'s own y axis has to use the number the DME indexed
+ *  with, not `rawLoad` — that mistake is the 15-20 % error the header describes. */
 export function aqRelRf(t: GateTables, rpm: number, rawLoad: number): number {
     const f = interp(t.faktRpm, t.faktValues, rpm);
     return f > 0 ? rawLoad / f : rawLoad;

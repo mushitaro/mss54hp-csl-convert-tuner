@@ -23,7 +23,8 @@ import type { FlashRecord, TuningSession } from './schema';
 export function isRoadState(flash: FlashRecord): boolean {
     return !flash.settings.applyPatch
         && !flash.settings.applyWotDisable
-        && !flash.settings.applyTankVentDisable;
+        && !flash.settings.applyTankVentDisable
+        && !flash.settings.applyRfKorrGateDrop;
 }
 
 /**
@@ -110,6 +111,7 @@ export interface ArmedPatches {
     applyPatch?: boolean;
     applyWotDisable?: boolean;
     applyTankVentDisable?: boolean;
+    applyRfKorrGateDrop?: boolean;
 }
 
 /**
@@ -129,9 +131,9 @@ export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): Arme
     for (let i = session.flashHistory.length - 1; i >= 0; i--) {
         const f = session.flashHistory[i];
         if (f.practice) continue;
-        const { applyPatch, applyWotDisable, applyTankVentDisable } = f.settings;
-        if (applyPatch || applyWotDisable || applyTankVentDisable) {
-            return { applyPatch, applyWotDisable, applyTankVentDisable };
+        const { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop } = f.settings;
+        if (applyPatch || applyWotDisable || applyTankVentDisable || applyRfKorrGateDrop) {
+            return { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop };
         }
     }
     return null;
@@ -171,5 +173,6 @@ export function armedPatchesFromHistory(
         applyPatch: last.settings.applyPatch,
         applyWotDisable: last.settings.applyWotDisable,
         applyTankVentDisable: last.settings.applyTankVentDisable,
+        applyRfKorrGateDrop: last.settings.applyRfKorrGateDrop,
     };
 }

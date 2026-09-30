@@ -4,12 +4,13 @@ import { LogDataPoint } from '@/lib/types';
 import { Layout, Config, Data } from 'plotly.js';
 import { FieldKey, LOG_FIELD_REGISTRY, isFieldPresent, DEFAULT_FIELD_VISIBILITY } from '@/lib/field-registry/registry';
 import type { PlotParams } from 'react-plotly.js';
+import { ChartLoading } from './ChartLoading';
 import type { PlotMouseEvent } from 'plotly.js';
 
 // Dynamically import Plotly to avoid SSR issues
 // Typed as react-plotly.js's own props: `dynamic()` widens the component to one with no props, so
 // a cast is unavoidable, but casting to the real type keeps every prop below checked.
-const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as React.ComponentType<PlotParams>;
+const Plot = dynamic(() => import('./PlotGl3d'), { ssr: false, loading: () => <ChartLoading /> }) as React.ComponentType<PlotParams>;
 
 /** Three scales on one time axis, so three y-axes: RPM left, Load and Lambda overlaid right.
  *
@@ -97,12 +98,13 @@ const BASE_LAYOUT: Partial<Layout> = {
  *  Awaiting the dynamic import inside the effect is what deferred the fix past the browser's paint
  *  and drew the frame twice — once at the stale range, once right. That is what tore.
  *
- *  'plotly.js/dist/plotly', not 'plotly.js': the bare specifier resolves to the source build, which
- *  reaches traces/image and its `require('buffer/')` Node polyfill and fails the Turbopack build.
- *  This is also the module react-plotly.js itself loads, so nothing is bundled twice. */
+ *  'plotly.js/dist/plotly-gl3d', not 'plotly.js': the bare specifier resolves to the source build,
+ *  which reaches traces/image and its `require('buffer/')` Node polyfill and fails the Turbopack
+ *  build. It must be the SAME specifier PlotGl3d.tsx builds the component from, or Plotly lands in
+ *  the bundle twice — see that file for why it is the gl3d partial and not the full one. */
 let plotlyModule: { relayout: (gd: HTMLElement, update: Record<string, unknown>) => Promise<unknown> } | null = null;
 if (typeof window !== 'undefined') {
-    void import('plotly.js/dist/plotly').then(m => { plotlyModule = m; });
+    void import('plotly.js/dist/plotly-gl3d').then(m => { plotlyModule = m; });
 }
 
 /** Also module scope, for the same reference-equality reason as BASE_LAYOUT. */

@@ -5,6 +5,7 @@ import {
 } from './types';
 import {
     RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange, SLEW_TORQUE_RAM_READ,
+    LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
 } from './ramMap';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
@@ -15,8 +16,10 @@ import { Mss54HpDataTuneLayout, Ds2EncodingChecksum, parseEncodingChecksum } fro
 import { correctDataChecksum, readStoredChecksums } from '@/lib/checksum/dmeDataChecksum';
 import { MockDrive } from './mockDrive';
 import { BinaryPatcher } from '@/lib/binary-engine/patcher';
-import { MockIdleBench } from '@/lib/idle/bench';
-import { readIdleTables, qvsAt } from '@/lib/idle/idleTables';
+import { MockIdleBench,
+    MOCK_IDLE_ML_REQUEST_KGH,
+} from '@/lib/idle/bench';
+import { readIdleTables, llsTvAt } from '@/lib/idle/idleTables';
 import { MockInertiaBench } from '@/lib/inertia/bench';
 import { type LogExchange, LOG_PROFILES, sampleMs , IDLE_SLOW_LANE_EVERY, IDLE_SURVEY_LANE_EVERY } from '@/lib/log-engine/logProfile';
 
@@ -491,11 +494,38 @@ export class MockDmeLink implements DmeLink {
     }
 
     /** The bench needs the binary, and the binary arrives on connect. */
+    /**
+     * The practice engine, wired through the map the campaign actually writes.
+     *
+     * It ran on `qvsAt` — `KF_LLR_QVS_GRUND` — until 2026-09-03, which made PRACTICE rehearse a
+     * loop driven by a map that nothing in the car reads and nothing in this tool writes. The
+     * measurement looked right and the ITERATION could not be rehearsed at all: writing the
+     * proposal into `KF_LLS_TV` and running again showed exactly the same error, for ever, because
+     * the plant had never heard of that map.
+     *
+     * Now the chain the car has:
+     *
+     *     ML_SOLL_LLS (constant at a warm idle) -> KF_LLS_TV(n, ml) -> duty -> the valve -> air
+     *
+     * The map end moves when the tool writes it. The VALVE end does not — it is a fixed physical
+     * characteristic in bench.ts — which is what lets a second pass show a smaller error instead of
+     * the plant sliding along with the correction.
+     *
+     * `lossAnchorKgH` is pinned to the request rather than left to default. Its own doc says why:
+     * an engine's friction does not change when its ECU is rewritten, and letting the anchor follow
+     * the map is how the error sat at 3.07 Nm for ever while the correction climbed.
+     */
     private idleBenchOrCreate(): MockIdleBench {
         if (!this.idleBench) {
             const tables = this.buffer ? readIdleTables(this.buffer) : null;
             this.idleBench = new MockIdleBench(
-                tables ? { qvsAt: (rpm, tmot) => qvsAt(tables, rpm, tmot) } : {},
+                tables ? {
+                    // The MAP's answer, handed in whole. The bench turns it into duty, air and the
+                    // reported LLS_TV from this one lookup, so every channel it emits describes the
+                    // same chain — which is what the model gate checks.
+                    dutyAt: (rpm, ml) => llsTvAt(tables, rpm, ml),
+                    lossAnchorKgH: MOCK_IDLE_ML_REQUEST_KGH,
+                } : {},
             );
         }
         return this.idleBench;
@@ -564,6 +594,25 @@ export class MockDmeLink implements DmeLink {
         // zero is not distinguishable from a measurement.
         if (address === SLEW_TORQUE_RAM_READ.address) {
             throw new DmeLinkError('PRACTICE does not simulate the slew limiter; run this on the car');
+        }
+        /*
+         * The ring is refused for the same reason, and it matters more here.
+         *
+         * The bench models crank torque and engine speed. It has no idle-valve loop at all, so
+         * `FR_REGLER`, `LLS_TV` and `ML_SOLL_LLS` would every one of them serve 0 — which reads as
+         * a dead integrator against a shut valve, and that is a conclusion about the car. The whole
+         * point of these channels is to stop inferring the loop; fabricating it would be worse than
+         * the inference they replaced.
+         *
+         * Refusing is not a dead end for a rehearsal: the link leaves the channels undefined,
+         * `summariseSession` reports `source: 'reconstructed'`, and the mode falls back to deriving
+         * duty from AQ_REL exactly as every log before these channels existed does. So LLS MODE is
+         * still walkable in PRACTICE — it just says, on the panel, that nothing was read.
+         */
+        if (address === LLS_AIR_RAM_READ.address
+            || address === LLS_INTEGRATOR_RAM_READ.address
+            || address === LLS_DUTY_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate the idle-valve ring; run this on the car');
         }
         await delay(20);
         const out = new Uint8Array(count);

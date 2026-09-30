@@ -1,42 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { TuningSession } from '@/lib/db/schema';
 import { markSessionSynced } from '@/lib/db/sessionRepository';
-import type { SyncSettings } from '@/lib/session-sync/client';
-import {
-    EMPTY_SETTINGS, canSync, loadSyncSettings, needsSync, sessionFingerprint, syncSession,
-} from '@/lib/session-sync/client';
+import { needsSync, sessionFingerprint, syncSession } from '@/lib/session-sync/client';
+import { flushDiagnostics } from '@/lib/session-sync/diagnostics';
 import type { SyncStatus } from '@/lib/session-sync/status';
 import type { UploadState } from '@/components/SessionList';
-
-/**
- * The device's sync settings, read once.
- *
- * A module-level snapshot rather than component state, because the settings are a property of the
- * DEVICE — one `localStorage` key, over the token this build shipped with — and the app renders the
- * store panel twice, once on the SESSIONS tab and once inside the menu sheet. Each mount used to
- * re-read `localStorage` and publish upwards, so the value the uploader actually used was whichever
- * instance mounted last.
- *
- * Nothing writes it any more. The store panel's destination fields are gone (the store is a
- * development facility and the token is baked into the preview export), so the only way the value
- * changes is somebody editing `localStorage` by hand and reloading — which is exactly the case
- * `subscribeNever` describes, the same shape `useIsPreviewBuild` uses for the build variant.
- *
- * `useSyncExternalStore` also settles the prerender question the old effect was working around:
- * `getServerSnapshot` answers with the empty settings, so the static export and the hydrating
- * render agree, and the real value arrives on the first client read without a setState-in-effect
- * cascade.
- */
-const subscribeNever = () => () => { };
-
-/** Cached, not re-read: `getSnapshot` must return the same reference every call or React re-renders
- *  forever, and `loadSyncSettings` builds a fresh object. Lazily, because it touches localStorage,
- *  which does not exist during the static prerender. */
-let cachedSettings: SyncSettings | null = null;
-const readSettings = (): SyncSettings => (cachedSettings ??= loadSyncSettings());
-const serverSettings = (): SyncSettings => EMPTY_SETTINGS;
 
 /**
  * Sending sessions to the deployment's store, and what the controls that do it say.
@@ -56,39 +26,18 @@ export function useSessionSync(input: {
     refresh: () => Promise<unknown> | unknown;
     /** Whether this build has an `/api` behind it at all. See `status` below. */
     isPreviewBuild: boolean;
+    /** The owner gate says this browser is signed out (useGateStatus). Nothing can land until the
+     *  owner signs in again, and the control should say that rather than fail at every press. */
+    signedOut: boolean;
     /** From `useOnline`. Reliable in the negative direction only, which is why it outranks the
      *  error but nothing outranks it. */
     online: boolean;
 }) {
-    const { sessions, refresh, isPreviewBuild, online } = input;
-
-    /**
-     * Read through the module snapshot, so every mount of the panel sees the same settings.
-     *
-     * Read here rather than only in the store panel: the panel lives on the SESSIONS tab, so
-     * waiting for it to mount would leave the menu's sync row reading "not set up" until somebody
-     * happened to open that tab — a control lying about the app's state because of where a
-     * different component is.
-     */
-    const settings = useSyncExternalStore(subscribeNever, readSettings, serverSettings);
+    const { sessions, refresh, isPreviewBuild, signedOut, online } = input;
 
     const [uploadState, setUploadState] = useState<Record<string, UploadState>>({});
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
-
-    /**
-     * Kept in a ref as well as in state, because the diagnostics uploader runs from inside async
-     * handlers created several renders ago and would otherwise close over an empty token — which is
-     * the failure that looks exactly like "the store is not configured".
-     *
-     * Written in an effect rather than during render. Assigning to a ref while rendering is what the
-     * page did, and it is a real hazard rather than a lint preference: React may render a component
-     * it then discards, so a value can land in the ref that never became the committed state. After
-     * commit is also early enough — nothing can read this before the user has had a chance to touch
-     * anything.
-     */
-    const settingsRef = useRef(settings);
-    useEffect(() => { settingsRef.current = settings; }, [settings]);
 
     /**
      * Sends a whole session to the store, and says on the row whether it landed.
@@ -104,9 +53,12 @@ export function useSessionSync(input: {
         const fingerprint = sessionFingerprint(session);
         setUploadState(prev => ({ ...prev, [session.id]: 'busy' }));
         try {
-            await syncSession(session, settingsRef.current);
+            await syncSession(session);
             await markSessionSynced(session.id, fingerprint);
             setUploadState(prev => ({ ...prev, [session.id]: 'done' }));
+            // The route is open right now, which is exactly when diagnostics kept from a garage
+            // with no signal should go.
+            void flushDiagnostics();
             return null;
         } catch (e) {
             // Kept on the row rather than raised in an alert: an alert has to be dismissed before
@@ -176,27 +128,25 @@ export function useSessionSync(input: {
      * greyed "Sync — not set up" row there would describe a feature that build does not contain,
      * and the honest rendering of a feature that does not exist is nothing at all.
      *
-     * Keyed on the preview marker rather than on having a token, because those come from the same
-     * build step and the marker is the one that means "this deployment has functions". A preview
-     * whose token failed to embed still shows the row, saying `unavailable` — which is exactly the
-     * case somebody needs to be told about rather than shielded from.
+     * Keyed on the preview marker, which is also what `canSync` reads: the marker is the one thing
+     * that means "this deployment has functions", and there is no token any more to disagree with
+     * it.
      */
     const status: SyncStatus | null = useMemo(() => !isPreviewBuild ? null : ({
-        phase: !canSync(settings) ? 'unavailable'
-            : busy ? 'busy'
-                // Offline outranks the error: "no network" is the actionable half of a failure that
-                // happened because there was no network, and it is the one that says what to do
-                // about it.
-                : !online ? 'offline'
+        phase: busy ? 'busy'
+            // Offline outranks the error: "no network" is the actionable half of a failure that
+            // happened because there was no network, and it is the one that says what to do
+            // about it. Signed out outranks it for the same reason.
+            : !online ? 'offline'
+                : signedOut ? 'signedOut'
                     : error ? 'error'
                         : pending.length > 0 ? 'ready'
                             : 'clean',
         pending: pending.length,
         error: error ?? undefined,
-    }), [isPreviewBuild, settings, busy, online, error, pending.length]);
+    }), [isPreviewBuild, signedOut, busy, online, error, pending.length]);
 
     return {
-        settings, settingsRef,
         uploadState, pending, status,
         syncOne, syncSessionRow, syncAll,
     };

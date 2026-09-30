@@ -4,6 +4,8 @@
 import type { LogDataPoint } from '@/lib/types';
 import type { TuningSession, SessionBinariesRecord, SessionLogRecord } from '@/lib/db/schema';
 import { getSessionLogRecord, getSessionBinaries, putSessionRaw } from '@/lib/db/sessionRepository';
+import { api, isPreviewBuild } from './owner-sync';
+import { previewNoticeAcknowledged } from './preview-notice';
 
 /**
  * Syncing a session to the deployment's store, and back.
@@ -34,72 +36,93 @@ import { getSessionLogRecord, getSessionBinaries, putSessionRaw } from '@/lib/db
  * rather than a background task that quietly gave up. Nothing here deletes anything locally.
  */
 
-/** Where the settings live. Local to the device: the token is a secret and never leaves it. */
-const STORAGE_KEY = 'mss54hp.sessionSync.v1';
-
-export interface SyncSettings {
-    /** Origin of the deployment, no trailing slash. Empty means "same origin as this page", which
-     *  is what the deployed app wants; a value is only needed on a local bench rig where the app
-     *  and the functions are on different ports. */
-    baseUrl: string;
-    token: string;
-}
-
-export const EMPTY_SETTINGS: SyncSettings = { baseUrl: '', token: '' };
+/**
+ * Whether this build talks to a store at all — a fact about the build, not a setting.
+ *
+ * True on the preview and nowhere else. Production is local-complete (its privacy policy says so,
+ * and `sessionSync` is `preview-only` in the registry for that reason); staging is main unmodified
+ * and has no `/api`; the dev server has no backend. So every network function below returns early
+ * on anything but the preview, and those builds make no sync request of any kind.
+ *
+ * There is no token and nothing to configure. The preview sits behind the owner gate, which put a
+ * session cookie on this origin when the owner arrived from m3; every request here is same-origin
+ * and carries it (owner-sync.ts). The shared token that used to be baked into the preview HTML, and
+ * the `localStorage` override a bench rig wrote by hand, are gone — the first was readable by
+ * anyone who could load the page, and the second pointed a device at a store by hand-typed secret.
+ */
+export const canSync = (): boolean => isPreviewBuild();
 
 /**
- * The token the build shipped with, if it shipped with one.
+ * Why a store request did not land, in the words the SYNC controls show.
  *
- * `scripts/embed-sync-token.mjs` writes this tag into the preview export; see that file for what
- * putting a token in a public bundle does and does not buy. Production has no tag, no functions and
- * no `/api`, so this is undefined there and the store simply stays unconfigured.
- *
- * Read from the DOM rather than compiled in for the same reason as `app-variant`: both deployments
- * come out of one `next build`, so anything baked at compile time would need a second definition to
- * keep in step.
+ * A kind as well as a message, because the kinds want different responses: `expired` is fixed by
+ * signing in again, `tooLarge` by nothing short of a shorter drive, `offline`/`failed` by trying
+ * again — which is what the controls offer — and `notice` by confirming the first-run dialog, which
+ * is modal, so no control should ever show it.
  */
-function bakedToken(): string {
-    if (typeof document === 'undefined') return '';
-    return document.querySelector('meta[name="sync-token"]')?.getAttribute('content')?.trim() ?? '';
-}
-
-/**
- * The effective settings: what this device was told, over what the build shipped.
- *
- * The build's token is the ordinary path and nothing types anything — the store is a development
- * facility, not a feature offered to drivers, so the panel that used to ask for a base URL and a
- * token no longer does. The `localStorage` key remains READ, and is now the whole of the override:
- * a bench rig pointing at another origin writes it by hand from the console. That direction is the
- * one worth keeping and the write path is the one worth losing — storing the baked token as if it
- * had been typed would pin the device to that value, so rotating the secret and redeploying would
- * leave every phone still sending the dead one, and the failure would look like a broken server
- * rather than a stale copy of a string.
- */
-export function loadSyncSettings(): SyncSettings {
-    const baked = bakedToken();
-    if (typeof localStorage === 'undefined') return { baseUrl: '', token: baked };
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) as Partial<SyncSettings> : {};
-        return {
-            baseUrl: (parsed.baseUrl ?? '').replace(/\/+$/, ''),
-            token: (parsed.token ?? '').trim() || baked,
-        };
-    } catch {
-        return { baseUrl: '', token: baked };
+export class SyncError extends Error {
+    // Declared and assigned rather than a `readonly kind` parameter property: `verify:session-wire`
+    // loads this module through Node's type stripping, which cannot erase that syntax.
+    readonly kind: 'expired' | 'tooLarge' | 'conflict' | 'offline' | 'failed' | 'notice';
+    constructor(kind: SyncError['kind'], message: string) {
+        super(message);
+        this.kind = kind;
     }
 }
 
 /**
- * Configured enough to try.
+ * Why nothing may go to the store from this page yet, or null when it may.
  *
- * A fact about the build, not a setting: the token comes from the export (or, on a bench rig, from
- * a hand-written `localStorage` key), so `false` here means this deployment has no store — which is
- * what the panel says, rather than asking for a value nobody has.
- *
- * The base URL may legitimately be empty (same origin); the token not.
+ * Two answers. A build with no store; and, on the preview, a notice not yet confirmed — the first-run
+ * dialog says what is sent and why, and until it has been pressed nothing is (preview-notice.ts).
+ * Asked before every request below, so no path in this file reaches the network first.
  */
-export const canSync = (s: SyncSettings) => s.token.trim().length > 0;
+function refusal(): SyncError | null {
+    if (!canSync()) return new SyncError('failed', 'This build has no store.');
+    if (!previewNoticeAcknowledged()) {
+        return new SyncError('notice', 'Nothing is sent until the notice in the first-run dialog is confirmed. Nothing here was lost.');
+    }
+    return null;
+}
+
+/**
+ * One same-origin call to this deployment's API. Resolves with the data or throws a SyncError.
+ *
+ * Built on owner-sync's `api()`, which never throws; this is the half that turns its result into
+ * the sentence a control can show. The server's own message is kept where it has one — it is the
+ * useful half of a per-part 413, which knows which part was too big.
+ */
+export async function call<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+    const refused = refusal();
+    if (refused) throw refused;
+    const r = await api<T & { error?: string }>(path, init);
+    if (r.ok) return r.data as T;
+    // Told apart from a status, not from `data`: a 204 and a proxy's HTML both come back null.
+    const detail = typeof r.data?.error === 'string' ? r.data.error : null;
+    if (r.expired) {
+        markGateExpired();
+        throw new SyncError('expired', 'Signed out of the WORKS build — sign in again to sync. Nothing here was lost.');
+    }
+    if (r.tooLarge) {
+        throw new SyncError('tooLarge', detail && detail !== 'too_large' ? detail : 'Too large to send — the store takes rows up to 1.9 MB.');
+    }
+    if (r.status === 409) throw new SyncError('conflict', 'That id belongs to another account’s record and cannot be replaced.');
+    if (r.status === 0) throw new SyncError('offline', 'No connection to the store.');
+    throw new SyncError('failed', detail ?? `Request failed (HTTP ${r.status}).`);
+}
+
+/**
+ * Listeners for "the gate said this browser is signed out", so the re-auth chip appears the moment
+ * a request finds out rather than on the next status poll. See useGateStatus.
+ */
+const expiredListeners = new Set<() => void>();
+export function onGateExpired(listener: () => void): () => void {
+    expiredListeners.add(listener);
+    return () => { expiredListeners.delete(listener); };
+}
+export function markGateExpired(): void {
+    for (const listener of expiredListeners) listener();
+}
 
 // --- What is outstanding -------------------------------------------------------------------------
 
@@ -141,7 +164,7 @@ export const needsSync = (s: TuningSession): boolean =>
 // that crosses a cellular link once would be the wrong trade in both directions.
 
 // Exported, not copied, for the diagnostics uploader next door. There is exactly one right way to
-// get bytes over this API — gzip, base64 in 0x8000-byte slices, bearer token — and two
+// get bytes over this API — gzip, then base64 in 0x8000-byte slices — and two
 // implementations of it would be two chances to get the base64 chunking wrong on the payload that
 // is big enough to matter.
 export async function gzipJson(value: unknown): Promise<Uint8Array> {
@@ -239,20 +262,6 @@ export async function buildIdentity(): Promise<string | undefined> {
     return id ?? cache;
 }
 
-export async function call(settings: SyncSettings, path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await fetch(`${settings.baseUrl}${path}`, {
-        ...init,
-        headers: { ...init.headers, authorization: `Bearer ${settings.token}` },
-    });
-    if (!response.ok) {
-        // The API's own message where there is one — it is the useful half of a 413, which knows
-        // both which part was too big and what to do about it.
-        const detail = await response.json().catch(() => null) as { error?: string } | null;
-        throw new Error(detail?.error ?? `Request failed (HTTP ${response.status}).`);
-    }
-    return response;
-}
-
 // --- Push -------------------------------------------------------------------------------------
 
 export interface SyncResult {
@@ -267,9 +276,12 @@ export interface SyncResult {
  * session's id in the same database, and a caller that passed a mismatched pair would produce a
  * stored session that is internally inconsistent with nothing to detect it.
  */
-export async function syncSession(session: TuningSession, settings: SyncSettings): Promise<SyncResult> {
-    if (!canSync(settings)) throw new Error('No sync token configured.');
-
+export async function syncSession(session: TuningSession): Promise<SyncResult> {
+    // Refused before anything is read to be sent, not only at the request: before the notice, no
+    // part of a session is even gathered for the store. It stays outstanding in the local database,
+    // which is where an unsent session has always waited.
+    const refused = refusal();
+    if (refused) throw refused;
     // The whole record, not `getSessionLog`'s projection: `inertia` has no representation in
     // `LogDataPoint`, so sending the projection would upload a run the estimator cannot re-read,
     // and restoring it would then overwrite the local copy that still had them.
@@ -297,10 +309,9 @@ export async function syncSession(session: TuningSession, settings: SyncSettings
         wireBinaries ? gzipJson(wireBinaries) : Promise.resolve(null),
     ]);
 
-    const response = await call(settings, '/api/sessions', {
+    return await call<SyncResult>('/api/sessions', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: {
             id: session.id,
             label: session.label,
             createdAt: session.createdAt,
@@ -316,10 +327,8 @@ export async function syncSession(session: TuningSession, settings: SyncSettings
             sessionGz: toBase64(sessionGz),
             logGz: logGz ? toBase64(logGz) : null,
             binariesGz: binariesGz ? toBase64(binariesGz) : null,
-        }),
+        },
     });
-
-    return await response.json() as SyncResult;
 }
 
 // --- Pull -------------------------------------------------------------------------------------
@@ -341,11 +350,8 @@ export interface StoredSession {
     binaries_bytes: number | null;
 }
 
-export async function listStoredSessions(settings: SyncSettings): Promise<StoredSession[]> {
-    if (!canSync(settings)) throw new Error('No sync token configured.');
-    const response = await call(settings, '/api/sessions');
-    const body = await response.json() as { sessions: StoredSession[] };
-    return body.sessions;
+export async function listStoredSessions(): Promise<StoredSession[]> {
+    return (await call<{ sessions: StoredSession[] }>('/api/sessions')).sessions;
 }
 
 /**
@@ -356,13 +362,10 @@ export async function listStoredSessions(settings: SyncSettings): Promise<Stored
  *
  * Overwrites the local session of the same id. The caller confirms first.
  */
-export async function restoreSession(id: string, settings: SyncSettings): Promise<TuningSession> {
-    if (!canSync(settings)) throw new Error('No sync token configured.');
-
-    const response = await call(settings, `/api/sessions/${encodeURIComponent(id)}`);
-    const body = await response.json() as {
+export async function restoreSession(id: string): Promise<TuningSession> {
+    const body = await call<{
         sessionGz: string; logGz: string | null; binariesGz: string | null;
-    };
+    }>(`/api/sessions/${encodeURIComponent(id)}`);
 
     const session = await gunzipJson<TuningSession>(fromBase64(body.sessionGz));
     // Either wire shape — see WireLog. Sessions stored before the record travelled whole are bare
@@ -389,7 +392,7 @@ export async function restoreSession(id: string, settings: SyncSettings): Promis
     return session;
 }
 
-export async function deleteStoredSession(id: string, settings: SyncSettings): Promise<void> {
-    if (!canSync(settings)) throw new Error('No sync token configured.');
-    await call(settings, `/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+/** Removes the store's copy only. The session on this device is untouched. */
+export async function deleteStoredSession(id: string): Promise<void> {
+    await call(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

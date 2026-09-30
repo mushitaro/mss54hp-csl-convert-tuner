@@ -1,6 +1,5 @@
 import { useCallback, useState } from 'react';
 import type { Indexed } from '@/lib/calibration-graph/graph';
-import { owningBlock } from '@/lib/calibration-graph/block-tree';
 import type { CalVariant } from '@/lib/calibration/types';
 
 /**
@@ -13,14 +12,31 @@ import type { CalVariant } from '@/lib/calibration/types';
 export type CalGraphMode = 'map' | '2d' | '3d' | 'heat';
 
 /**
- * Selection and view state for the calibration workbench — the notes viewer's
- * model, ported: only a BLOCK moves the picture; a parameter lights up inside
- * it (or, with nothing rooted yet, roots its owning block). The trail is what
- * makes following a chain reversible.
+ * Selection and view state for the calibration workbench.
+ *
+ * ## One subject
+ *
+ * There is exactly one selection — the SUBJECT — and it is whatever the reader
+ * last picked: a parameter, a signal, or a block. Every view answers a
+ * different question about that same thing, and none of them may quietly
+ * answer about something else.
+ *
+ * It was two: `root` (what the picture was drawn around) and `selected` (what
+ * was lit inside it), with a rule that a parameter set the second and left the
+ * first alone. The rule reads well and is wrong in use. Picking `kf_rf_soll`
+ * rooted the picture on ONE of the two blocks that read it — `owningBlock`
+ * ranks the candidates and takes the best — so the map you selected was not the
+ * subject of anything on screen, the other block that reads it was nowhere, and
+ * the listing, ordered from the picture's upstream edge, opened on a block six
+ * columns away. 383 of the 2,236 referenced parameters have more than one user,
+ * so that was not a corner.
+ *
+ * The substitution is gone. `select` sets the subject and nothing else; where
+ * the picture goes is the picture's business, and it is told to go to the thing
+ * that was picked. The trail is what makes following a chain reversible.
  */
 export function useCalibrationWorkspace(graph: Indexed | null) {
-    const [selected, setSelected] = useState<string | null>(null);
-    const [root, setRoot] = useState<string | null>(null);
+    const [subject, setSubject] = useState<string | null>(null);
     const [trail, setTrail] = useState<string[]>([]);
     const [graphMode, setGraphMode] = useState<CalGraphMode>('map');
     /** Which axis runs along the bottom of the 2-D section: `x` draws the row
@@ -32,52 +48,26 @@ export function useCalibrationWorkspace(graph: Indexed | null) {
     // Stable callbacks — the tree hands `select` to ~700 memoised rows, and a fresh
     // identity per render would undo exactly the memoisation it exists to enable.
     const select = useCallback((id: string) => {
-        if (!graph) return;
-        const picked = graph.byId.get(id);
+        if (!graph?.byId.has(id)) return;
         setTrail(prev => {
             const seen = prev.indexOf(id);
             return seen >= 0 ? prev.slice(0, seen + 1) : [...prev, id];
         });
-        setSelected(id);
-        // Only a block moves the picture. A parameter is found inside it.
-        if (picked?.t === 'func') setRoot(id);
-        else if (picked) setRoot(prev => prev ?? (owningBlock(graph, picked)?.id ?? null));
+        setSubject(id);
     }, [graph]);
 
-    /**
-     * Go to a parameter, wherever it lives.
-     *
-     * `select` deliberately leaves the picture where it is — inside the tree
-     * you are reading one block, and a parameter is something found IN it, so
-     * moving the diagram on every row would take the block away from you.
-     *
-     * A jump list is the opposite case. It names parameters you did not know
-     * about, in blocks you are not looking at, and a row that changed the
-     * numbers without moving the picture reads as a row that did nothing. So
-     * this one re-roots: the block that owns the parameter becomes the picture.
-     */
-    const jump = useCallback((id: string) => {
-        if (!graph) return;
-        select(id);
-        const picked = graph.byId.get(id);
-        if (!picked || picked.t === 'func') return;
-        const owner = owningBlock(graph, picked)?.id;
-        if (owner) setRoot(owner);
-    }, [graph, select]);
-
+    /** Step back to something already on the trail; the trail truncates there. */
     const back = useCallback((id: string) => {
-        if (!graph) return;
-        const picked = graph.byId.get(id);
+        if (!graph?.byId.has(id)) return;
         setTrail(prev => {
             const seen = prev.indexOf(id);
             return seen >= 0 ? prev.slice(0, seen + 1) : prev;
         });
-        setSelected(id);
-        if (picked?.t === 'func') setRoot(id);
+        setSubject(id);
     }, [graph]);
 
     return {
-        selected, root, trail, select, jump, back,
+        subject, trail, select, back,
         graphMode, setGraphMode,
         sectionAxis, setSectionAxis,
         treeCollapsed, setTreeCollapsed,

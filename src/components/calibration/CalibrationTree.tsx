@@ -92,6 +92,14 @@ const NodeRow = React.memo(function NodeRow({
             )}
             <span className={`text-[9px] ${node.t === 'param' ? 'text-blue-500/70' : 'text-slate-600'}`}>{mark}</span>
             <span className="font-mono text-[10px] truncate">{displayName(node.name, node.t)}</span>
+            {/* Which processor. 128 function names and 340 RAM names exist on
+                BOTH banks — `dpr_sync` among them — so without this the list
+                offers two identical rows that open two different things. */}
+            {node.bank && (
+                <span className="shrink-0 text-[8px] font-bold tracking-widest text-slate-600">
+                    {node.bank === 'master' ? 'M' : 'S'}
+                </span>
+            )}
             {edited && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" />}
         </button>
     );
@@ -187,13 +195,14 @@ export function CalibrationTree({
 
     if (collapsed) {
         return (
-            <div className="w-[28px] flex-none border-r border-slate-900 flex flex-col items-center pt-1">
+            <div className="w-[28px] flex-none border-l border-slate-900 flex flex-col items-center pt-1">
                 <button
                     onClick={onToggleCollapse}
                     className="p-1 text-slate-500 hover:text-slate-300 transition"
                     title="TREE"
                 >
-                    <ChevronsRight className="w-3.5 h-3.5" />
+                    {/* The rail is at the right edge, so it opens leftwards. */}
+                    <ChevronsLeft className="w-3.5 h-3.5" />
                 </button>
                 <span className="mt-2 text-[9px] font-bold tracking-widest text-slate-600 [writing-mode:vertical-rl]">
                     TREE
@@ -226,21 +235,23 @@ export function CalibrationTree({
     // the min-width is a promise about a COLUMN, and on a phone this is not a
     // column.
     return (
-        <div className="w-full min-[900px]:w-[38.2%] min-[900px]:min-w-[240px] min-[900px]:max-w-[320px] flex-none border-r border-slate-900 flex flex-col min-h-0">
+        <div className="w-full min-[900px]:w-[38.2%] min-[900px]:min-w-[240px] min-[900px]:max-w-[320px] flex-none border-l border-slate-900 flex flex-col min-h-0">
             <div className="h-[34px] flex-none flex items-center gap-1 px-2 border-b border-slate-900">
+                {/* The control sits on the edge that moves — the one facing the
+                    picture — and points the way the panel will go. */}
+                <button
+                    onClick={onToggleCollapse}
+                    className="p-1 text-slate-500 hover:text-slate-300 transition shrink-0"
+                    title="TREE"
+                >
+                    <ChevronsRight className="w-3.5 h-3.5" />
+                </button>
                 <input
                     value={query}
                     onChange={e => setQuery(e.target.value)}
                     placeholder={t(lang, 'search')}
                     className="flex-1 min-w-0 bg-slate-800 rounded px-2 h-[22px] text-[10px] font-mono text-slate-200 placeholder:text-slate-600 outline-none focus:ring-1 focus:ring-blue-500"
                 />
-                <button
-                    onClick={onToggleCollapse}
-                    className="p-1 text-slate-500 hover:text-slate-300 transition shrink-0"
-                    title="TREE"
-                >
-                    <ChevronsLeft className="w-3.5 h-3.5" />
-                </button>
             </div>
 
             <div className="h-[26px] flex-none flex items-center gap-4 px-2 border-b border-slate-900">

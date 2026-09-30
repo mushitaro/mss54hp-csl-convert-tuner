@@ -159,15 +159,6 @@ export const processLogData = (
     // Same prerequisites as validData, but WITHOUT the transient test. See ProcessedLog.rfKorrData
     // for why the rf_korr table needs its own sample set, and rfKorrTuner for what it does with it.
     const rfKorrData: LogDataPoint[] = resume?.rfKorrData ?? [];
-    /**
-     * validData UNION the samples the idle gate dropped.
-     *
-     * A third set rather than a relaxed gate, using the same mechanism `rfKorrData` already
-     * established: one filter pass, several audiences. The VE map genuinely needs the idle rows
-     * gone -- at the lowest filling KF_TI_N_RF enriches by 15-30 %% and the trim falls to cancel
-     * it -- so relaxing the gate would corrupt the map. Keeping them in a separate set is what
-     * lets the low-load corrector divide that enrichment out instead of inheriting the problem.
-     */
     let droppedCount = resume?.droppedCount ?? 0;
     /**
      * Not just how many samples were dropped, but why.
@@ -297,16 +288,6 @@ export const processLogData = (
         // 2. Idle Filter
         // Exclude if TPS <= 1.0 (approx 0%) and RPM < IdleThreshold
         // rawLoad is 'relative opening' (0-100)
-        //
-        // It no longer `continue`s. The sample is still dropped from validData and rfKorrData and
-        // still counted in the census exactly as before — but it keeps walking, because the LOW
-        // LOAD corrector wants precisely these rows and there is no other way to get them: turning
-        // the gate off would corrupt the VE map, which genuinely needs them gone.
-        //
-        // Every later rejection therefore goes through `reject` rather than `drop`, so a sample
-        // that was already counted as `idle` cannot be counted a second time as something else.
-        // The invariant this preserves is checked in verify-low-load-filter.mjs: validData,
-        // rfKorrData, droppedCount and every census bucket come out byte-identical to before.
 
         // 2b. Cat-protection / open-loop filter.
         // The VE correction reads `stft` = la_f_regler, the DME's own lambda INTEGRATOR. Once the
@@ -508,9 +489,8 @@ export const processLogData = (
             }
         }
 
-        // ONE dataset. Both correctors read it and each takes its own band of kf_rf_soll —
-        // the VE calculator refuses everything at or below LOW_LOAD_TOP_ROW, the low-opening
-        // corrector refuses everything above it. There is nothing left for a second array to hold.
+        // ONE dataset. `kf_rf_soll` has a single derivation and it reads every sample that gets
+        // this far, over the whole table. There is nothing left for a second array to hold.
         validData.push(point);
     }
 
@@ -518,6 +498,9 @@ export const processLogData = (
     return {
         fileName,
         data: validData,
+        // The input, handed straight back. A reference, not a copy — see the field's own note for
+        // why anything reproducing a DME state machine needs the samples this function DROPPED.
+        rawData,
         validCount: validData.length,
         droppedCount,
         dropCensus: census,

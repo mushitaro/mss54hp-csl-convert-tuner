@@ -89,6 +89,9 @@ const JA = {
     clearLog: 'このデータログ(CSV)を破棄しますか？',
     // 更新はリロードなので、接続中・記録中は失うものがある。何を失うかを具体的に述べてから聞く。
     reloadBusy: 'アプリを再読み込みします。\n\nDMEとの接続は切断され、記録中のデータログと保存していないチューンは失われます。\n\n続行しますか？',
+    // プレビュー版のサインインし直し。同じタブで m3 を往復するので、ページは置き換わる。
+    reauthUnsaved: 'サインインし直すため、このページを m3 経由で開き直します。\n\nまだ保存していないチューンやデータログは失われます。保存済みのものはこの端末に残ります。\n\n続行しますか？',
+    reauthTitle: 'ワークス版のサインインが切れています。押すと m3 を経由してこの画面に戻ります。SYNC はそれまで待機し、この端末のデータはそのまま残ります。',
     discardLog: '今記録したデータログを破棄して、最初からやり直しますか？',
     deleteSession: (label: string) => `「${label}」を削除しますか？この操作は取り消せません。`,
     noStoredBinary: 'このセッションにはBINが保存されていません。',
@@ -107,6 +110,18 @@ const JA = {
         + '\n\n先に WRITE PATCH-ON を当ててから走るのが本来の順序です。'
         + '\nこのまま走ることもできますが、そのログが何を測っているかは保証されません。',
     btnRunAnyway: 'このまま走る',
+    titleIdleSource: 'MD_LLRI の出どころが確認できません',
+    idleSourceUnproven: (detail: string) =>
+        'このランの測定は MD_LLRI ただ 1 つです。RAM の 0xFFD8F0 がその値だという根拠は'
+        + '逆アセンブルであって、この ECU がそう答えるかは別の話なので、走行前に'
+        + 'ブロック 19 の同じ量と突き合わせています。\n\n'
+        + `結果: ${detail}\n\n`
+        + 'アドレスが違っていた場合、出てくるのは「エラー」ではなく、もっともらしい数値で'
+        + '埋まった 3 分間です。それを元に KF_LLS_TV を書き換えると、間違いは車に入ります。\n\n'
+        + '考えられる原因: エンジンが回っていない（両方 0 で一致しない）、'
+        + 'DME が RAM 読みを断っている、この系統のキャリブレーションでアドレスが違う。\n\n'
+        + 'まずエンジンを暖機アイドルで回した状態でもう一度試すことを勧めます。',
+    btnIdleRunAnyway: '確認せずに記録する',
     noBinaryOfKind: (which: string) => `このセッションには ${which.toUpperCase()} のBINがありません。`,
     notReconstructed: '保存されたデータログからこのセッションを再構築できませんでした。書き込みは無効です。',
     setBaseFirst: '先にBASEを設定してください(BINを読み込むか、DMEから読み出してください)。',
@@ -147,7 +162,7 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; rfGateDropped: boolean; route: RouteId }) =>
         'DMEへ書き込みます。\n\n' +
         ROUTE_TEXT.ja[a.route] +
         `書き込む内容: ${a.tuned
@@ -176,6 +191,14 @@ const JA = {
             + '  キャニスタがパージされなくなり、飽和すれば燃料臭や DTC 24（タンク換気バルブ）の原因になります。\n'
             + '  ログを取り終えたら TANK VENT を OEM に戻してもう一度書き込んでください。\n'
             + '  ファイル名に _TEVOFF が付き、セッションにも記録されます。\n'
+            : '') +
+        (a.rfGateDropped
+            ? `\n⚠ RF GATE: 0.400 — rf_korr の作動下限を下げたまま書き込みます。\n`
+            + '  目的は KF_RF_KORR_DRREL のアンカー（ゲート開 かつ Δ≈0）を 1 本の走行で取ることです。\n'
+            + '  この BIN では DME が純正よりはるかに広い負荷域で増量します（Δ=200〜300 行、+5〜28 %）。\n'
+            + '  RF もそのぶん上がるので、点火とトルクモデルがそれを読みます。走り続ける BIN ではありません。\n'
+            + '  測定が済んだら RF GATE を OEM に戻してもう一度書き込んでください。\n'
+            + '  ファイル名に _RFGATE40 が付き、セッションにも記録されます。\n'
             : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
@@ -331,6 +354,8 @@ type NativeDialogText = typeof JA;
 const EN: NativeDialogText = {
     clearLog: 'Discard this data log (CSV)?',
     reloadBusy: 'Reload the app.\n\nThe DME link will drop, and any log being recorded or tune not yet saved will be lost.\n\nContinue?',
+    reauthUnsaved: 'Signing in again reopens this page by way of m3.\n\nA tune or a log not yet saved will be lost. Everything saved stays on this device.\n\nContinue?',
+    reauthTitle: 'The WORKS build has signed this device out. This goes through m3 and comes straight back here. SYNC waits until then, and everything on this device stays.',
     discardLog: 'Discard the log just recorded and start over?',
     deleteSession: (label: string) => `Delete "${label}"? This cannot be undone.`,
     noStoredBinary: 'This session has no stored binary.',
@@ -349,6 +374,18 @@ const EN: NativeDialogText = {
         + '\n\nThe intended order is WRITE PATCH-ON first, then drive.'
         + '\nRunning anyway is allowed; what the log measures is then not guaranteed.',
     btnRunAnyway: 'Run anyway',
+    titleIdleSource: 'MD_LLRI could not be confirmed',
+    idleSourceUnproven: (detail: string) =>
+        'This run measures exactly one thing, MD_LLRI. That RAM address is right in a disassembly; '
+        + 'whether it is right in THIS ECU is a question only this ECU can answer, so it is checked '
+        + 'against the same quantity in block 19 before the run starts.\n\n'
+        + `Result: ${detail}\n\n`
+        + 'If the address is wrong, what comes back is not an error — it is three minutes of '
+        + 'plausible numbers. Writing KF_LLS_TV from those puts the mistake in the car.\n\n'
+        + 'Likely causes: the engine is not running (both read zero and cannot agree), the DME is '
+        + 'refusing RAM reads, or this calibration puts the channel elsewhere.\n\n'
+        + 'Try again with the engine running at a warm idle before overriding this.',
+    btnIdleRunAnyway: 'Record without the check',
     noBinaryOfKind: (which: string) => `This session has no ${which.toUpperCase()} binary.`,
     notReconstructed: 'This session could not be reconstructed from its stored log — flashing is disabled.',
     setBaseFirst: 'Set a BASE first (upload a BIN or read it from the DME).',
@@ -386,7 +423,7 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; route: RouteId }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; rfGateDropped: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +
         ROUTE_TEXT.en[a.route] +
         `What will be written: ${a.tuned
@@ -415,6 +452,15 @@ const EN: NativeDialogText = {
             + '  and DTC 24 (tank-venting valve) is the code for a valve that will not open.\n'
             + '  When the logging is done, set TANK VENT back to OEM and write once more.\n'
             + '  The filename carries _TEVOFF, and the session records it.\n'
+            : '') +
+        (a.rfGateDropped
+            ? `\n⚠ RF GATE: 0.400 — writing with the rf_korr filling floor dropped.\n`
+            + '  This is to earn a KF_RF_KORR_DRREL anchor — gate open with delta near zero — which\n'
+            + '  no drive at the stock floor has ever reached. It is not a BIN to keep driving.\n'
+            + '  The DME enriches across a far wider part of the map than BMW allowed (the delta\n'
+            + '  200-300 rows, +5 to 28 %), RF rises with it, and ignition and the torque model\n'
+            + '  follow. When the measuring run is done, set RF GATE back to OEM and write once more.\n'
+            + '  The filename carries _RFGATE40, and the session records it.\n'
             : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +

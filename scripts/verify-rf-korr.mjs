@@ -141,12 +141,12 @@ const processed = processLogData(rawLog, session.baseFileName ?? 'replay.csv', c
 const calc = new VECalculator();
 const veAxes = { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD };
 
-const annotatedVe = calc.annotateRfKorr(veMap, processed.data, egt, air);
+const annotatedVe = calc.annotateRfKorr(veMap, processed.data, egt, air, processed.rawData);
 // Falls back so this script can be pointed at an older revision to compare the VE checksum against.
 // Before the split there was one sample set and the tuner shared the VE one.
 if (!processed.rfKorrData) console.log('note: this build predates ProcessedLog.rfKorrData — tuner is reading the VE set');
 const tunerSamples = processed.rfKorrData ?? processed.data;
-const annotatedTuner = calc.annotateRfKorr(veMap, tunerSamples, egt, air);
+const annotatedTuner = calc.annotateRfKorr(veMap, tunerSamples, egt, air, processed.rawData);
 
 console.log(`\nfilter  : ${rawLog.length} raw -> ${processed.data.length} for VE, ${annotatedTuner.length} for rf_korr`);
 

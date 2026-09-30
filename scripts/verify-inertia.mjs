@@ -32,7 +32,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { estimateInertia } from '../src/lib/inertia/estimator.ts';
-import { proposeCorrections, quantise, effectiveRatio } from '../src/lib/inertia/corrections.ts';
+import { proposeCorrections, quantise, effectiveRatio, STOCK_K_MD_J_MOTOR, STOCK_K_N_TAU_DN } from '../src/lib/inertia/corrections.ts';
 import { INERTIA_ITEMS } from '../src/lib/ecu-items/catalog/inertia.ts';
 import { findEcuItem } from '../src/lib/ecu-items/catalog/index.ts';
 import { validateCatalog } from '../src/lib/ecu-items/codec.ts';
@@ -492,10 +492,10 @@ check('decoded values match what the disassembly says they are', () => {
 
     // XDF-undefined, recovered from the disassembly. First gear held down hardest is the shape
     // that independently confirms "larger means more direct".
-    const lsGear = read('KF_MD_LS_GANG_FAKTOR').values;
+    const lsGear = read('KL_MD_LS_W_GANG').values;
     near(lsGear[1], 0.75, 0.01, 'tip-in gear factor, 1st');
     near(lsGear[2], 0.80, 0.01, 'tip-in gear factor, 2nd');
-    const dpGear = read('KF_MD_DASHPOT_GANG_FAKTOR').values;
+    const dpGear = read('KL_MD_W_GANG_DASHPOT').values;
     near(dpGear[1], 0.60, 0.01, 'dashpot gear factor, 1st');
 });
 
@@ -543,6 +543,9 @@ check('effective ratio collapses toward 1 as the gear gets taller', () => {
         'r_eff in first must be far from the raw inertia ratio — that gap is the finding');
 });
 
+/** A real estimate at a chosen J, so the correction checks exercise the same path a run does. */
+const acceptableEstimate = (j) => estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j }));
+
 check('a plan is produced, and every proposal is writable', () => {
     const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 }));
     const plan = proposeCorrections(est, buffer);
@@ -584,24 +587,48 @@ check('F1 is absent when the image already holds the factory value', () => {
         'nothing to revert when the value is already stock');
 });
 
-check('the xref-only pair is alone in its own flash', () => {
+check('the two-sided control law is alone in its own flash', () => {
+    // Renamed from 'the xref-only pair'. Both halves ARE code-confirmed — lfr_calc 0x026A4C/0x026A6A
+    // gates MD_LLR_TZ on MD_RES_LRW_ST bit1, and md_res_calc 0x017CAE-C8 does the KL_MD_RES_LRW
+    // lookup on |LWS_LRW|. `q.py consumers` still reports xref-only because the decompiler never
+    // named the statement, which is the stmts=0 trap the skill warns about.
+    //
+    // The reason to keep the group alone survives the regrade, but it changed: writing the gate
+    // switches on a TWO-SIDED law, and KL_LFR_TZ_POS arrives already calibrated at up to 15 Nm
+    // while KL_LFR_TZ_NEG arrives as whatever ramp is written here.
     const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 }));
     const plan = proposeCorrections(est, buffer);
     const f3 = plan.proposals.filter(p => p.group === 'F3');
     assert.ok(f3.length > 0, 'the down-authority pair should be proposed on stock 0401');
     const symbols = new Set(f3.map(p => p.symbol));
     assert.deepEqual([...symbols].sort(), ['KL_LFR_TZ_NEG', 'KL_MD_RES_LRW']);
-    assert.ok(f3.every(p => p.evidence === 'xref-only'),
-        'F3 exists precisely because its evidence is xref-only');
-    // The gate and the ramp must never be separable.
+    assert.ok(f3.every(p => p.evidence === 'code-confirmed'),
+        'both halves are code-confirmed; an xref-only grade here was the stmts=0 trap');
+    // The gate and the ramp must never be separable IN THIS GROUP — the gate may be written alone
+    // as a deliberate first step, but the ramp must never ship without it.
     assert.ok(symbols.has('KL_MD_RES_LRW'), 'the gate is missing — the ramp alone does nothing');
+});
+
+check('the two idle time constants are withdrawn, and say why', () => {
+    // Proposed until their mechanisms were traced. K_LFR_TAU_IA1 filters zero toward zero (every
+    // path into LFR_ZUSTAND 8 first zeroes LFR_MDI) and cannot be scaled by r anyway (50 %
+    // quantisation at raw 1); K_LFR_TAU_IA2_KKS is already at the fastest writable value, so the
+    // proposed 0.256 s moved it the wrong way. Withdrawn to `blocked`, not deleted — a row that
+    // vanishes reads as "nothing needed here".
+    const plan = proposeCorrections(acceptableEstimate(0.205), buffer);
+    for (const sym of ['K_LFR_TAU_IA1', 'K_LFR_TAU_IA2_KKS']) {
+        assert.ok(!plan.proposals.some(p => p.symbol === sym), `${sym} is still being proposed`);
+        const b = plan.blocked.find(x => x.symbol === sym);
+        assert.ok(b, `${sym} vanished instead of being reported as withdrawn`);
+        assert.ok(/withdrawn/i.test(b.why), `${sym} does not say it was withdrawn`);
+    }
 });
 
 check('gear factors are held back and say so rather than being silently absent', () => {
     const est = estimateInertia(runBench(STANDARD_BENCH_SWEEPS, { j: 0.21 }));
     const plan = proposeCorrections(est, buffer);
     assert.equal(plan.proposals.filter(p => p.group === 'F4').length, 0);
-    assert.ok(plan.blocked.some(b => b.symbol.includes('GANG_FAKTOR')),
+    assert.ok(plan.blocked.some(b => b.symbol.includes('KL_MD_LS_W_GANG')),
         'a held-back item must appear in `blocked`, not just vanish');
 });
 
@@ -616,6 +643,101 @@ check('class B uses the per-gear ratio, not the raw one', () => {
             `${p.symbol} ${p.at}: shrank by ${shrink.toFixed(4)}, which is at or below the raw ratio `
             + `${plan.r.toFixed(4)} — the whole point is that in gear the correction is far milder`);
         assert.ok(shrink <= 1.0, `${p.symbol} ${p.at}: correction should not increase the allowance`);
+    }
+});
+
+check('the proposal does not ratchet: the same J proposes the same value twice', () => {
+    // The bug this replaced: jNewMdUnits was r * (whatever the image held), so a car whose
+    // K_MD_J_MOTOR had already been lowered once got it lowered again from there, and again on the
+    // pass after that. Measured J = 0.205 proposed 0.2203 against a stock image and 0.2019 against
+    // an image at 0.2463 — same evidence, different answer, compounding.
+    const stockPlan = proposeCorrections(acceptableEstimate(0.205), buffer);
+    const first = stockPlan.proposals.find(p => p.symbol === 'K_MD_J_MOTOR');
+    assert.ok(first, 'K_MD_J_MOTOR was not proposed at all');
+
+    // Apply it, then ask again with the SAME measurement.
+    const applied = new Uint8Array(buffer.slice(0));
+    const view = new DataView(applied.buffer);
+    view.setUint16(0x9554, Math.round(first.proposed * 268), false);
+    const secondPlan = proposeCorrections(acceptableEstimate(0.205), applied.buffer);
+    const second = secondPlan.proposals.find(p => p.symbol === 'K_MD_J_MOTOR');
+
+    assert.ok(Math.abs(second.target - first.target) < 1e-9,
+        `target moved on a re-run with identical evidence: ${first.target.toFixed(4)} -> ${second.target.toFixed(4)}`);
+    assert.equal(second.current.toFixed(4), first.proposed.toFixed(4),
+        'the fixture did not actually write the first proposal back');
+});
+
+check('K_MD_J_MOTOR is scaled from the FACTORY value, not from the image', () => {
+    const plan = proposeCorrections(acceptableEstimate(0.205), buffer);
+    const p = plan.proposals.find(x => x.symbol === 'K_MD_J_MOTOR');
+    assert.ok(Math.abs(p.target - plan.r * STOCK_K_MD_J_MOTOR) < 1e-9,
+        `target ${p.target.toPrecision(10)} is not r x ${STOCK_K_MD_J_MOTOR} = ${(plan.r * STOCK_K_MD_J_MOTOR).toPrecision(10)}`);
+});
+
+check('r_eff is computed against stock on both sides', () => {
+    const plan = proposeCorrections(acceptableEstimate(0.205), buffer);
+    const first = plan.rEff.find(g => g.gear === 1);
+    const expected = (plan.r * STOCK_K_MD_J_MOTOR + first.jFz) / (STOCK_K_MD_J_MOTOR + first.jFz);
+    assert.ok(Math.abs(first.rEff - expected) < 1e-9,
+        `1st gear r_eff ${first.rEff.toPrecision(10)} != ${expected.toPrecision(10)}`);
+});
+
+check('K_N_TAU_DN does not ratchet either, and is filed as class D', () => {
+    // The third instance of the same bug. Also: it is a filter time constant, and no lag in the
+    // loop it sits in scales with J — so class A was the wrong shelf, and the wrong shelf is what
+    // produced `current * r` in the first place.
+    const first = proposeCorrections(acceptableEstimate(0.205), buffer)
+        .proposals.find(p => p.symbol === 'K_N_TAU_DN');
+    assert.ok(first, 'K_N_TAU_DN was not proposed');
+    assert.equal(first.klass, 'D', 'a time constant is not an engine-alone inertia correction');
+
+    const applied = new Uint8Array(buffer.slice(0));
+    // reciprocal 2.56/x, so raw = round(2.56 / seconds)
+    applied[0xC419] = Math.round(2.56 / first.proposed);
+    const second = proposeCorrections(acceptableEstimate(0.205), applied.buffer)
+        .proposals.find(p => p.symbol === 'K_N_TAU_DN');
+    if (second) {
+        assert.ok(Math.abs(second.target - first.target) < 1e-9,
+            `target moved on a re-run: ${first.target.toPrecision(10)} -> ${second.target.toPrecision(10)}`);
+    }
+    assert.ok(Math.abs(first.target - STOCK_K_N_TAU_DN * proposeCorrections(acceptableEstimate(0.205), buffer).r) < 1e-9,
+        'target is not r x the factory value');
+});
+
+check('the gear factors name the fuel-cut cliff they would cross', () => {
+    // KL_MD_LS_W_GANG (0x926C.y = 0x927C) has a SECOND consumer nobody modelled: Torque_Limitation
+    // latches it to RAM 0xFFD8FA every 10 ms (0x0160F6) and FUN_00017400 multiplies it into the
+    // overrun fuel-cut ramps (0x1746C, 0x174C6) with a truncating >>10. Against
+    // K_MD_DELTA_SA_SOFT = raw 5, factor 1024 gives 5 counts and 1015 gives 4 — so a nominal
+    // -0.4 % write is a -20 % change to lift-off torque withdrawal in 4th, 5th and 6th.
+    //
+    // Verified in the image: exactly two 32-bit refs to 0x0008927C, three to 0x00FFD8FA.
+    const plan = proposeCorrections(acceptableEstimate(0.205), buffer, { includeGearFactors: true });
+    const f4 = plan.proposals.filter(p => p.group === 'F4');
+    assert.ok(f4.length > 0, 'no gear factors proposed with includeGearFactors on');
+
+    const crossing = f4.filter(p => Math.floor(5 * Math.round(p.current * 1024) / 1024)
+                                 !== Math.floor(5 * Math.round(p.proposed * 1024) / 1024));
+    assert.ok(crossing.length > 0,
+        'expected the 1.0 entries to cross the cliff — if they no longer do, re-derive this check');
+    for (const p of crossing) {
+        assert.ok(/DO NOT WRITE AS-IS/.test(p.risk),
+            `${p.symbol} ${p.at} crosses the fuel-cut cliff and the risk text does not say so`);
+        assert.ok(/SIDE EFFECT/.test(p.reason), `${p.symbol} ${p.at} does not explain the side effect`);
+    }
+    for (const p of f4.filter(p => !crossing.includes(p))) {
+        assert.ok(!/DO NOT WRITE AS-IS/.test(p.risk),
+            `${p.symbol} ${p.at} does not cross the cliff but is flagged as if it does`);
+    }
+});
+
+check('the gear factors are no longer described as XDF-undefined', () => {
+    // They are KL_MD_LS_W_GANG (0x926C) and KL_MD_W_GANG_DASHPOT (0x928E). Calling them undefined
+    // is what kept them behind includeGearFactors with a "check the address twice" warning.
+    const plan = proposeCorrections(acceptableEstimate(0.205), buffer, { includeGearFactors: true });
+    for (const p of plan.proposals.filter(p => p.group === 'F4')) {
+        assert.ok(!/XDF-undefined/.test(p.risk), `${p.symbol} still claims to be XDF-undefined`);
     }
 });
 

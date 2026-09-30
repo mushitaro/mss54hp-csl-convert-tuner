@@ -19,7 +19,7 @@ import type { useLiveRun } from '@/hooks/useLiveRun';
 export function LiveTelemetryStrip({ feed }: { feed: ReturnType<typeof useLiveRun>['readout'] }) {
     const { sample, count, hz } = useLiveReadout(feed);
     return (
-        <div className="absolute top-2 left-2 right-2 z-20 px-2 py-1.5 rounded bg-slate-950/85 border border-slate-800 backdrop-blur-sm grid grid-cols-7 gap-x-2 font-mono pointer-events-none">
+        <div className="absolute top-2 left-2 right-2 z-20 px-2 py-1.5 rounded bg-slate-950/85 border border-slate-800 min-[900px]:backdrop-blur-sm grid grid-cols-7 gap-x-2 font-mono pointer-events-none">
             {([
                 { label: 'RPM', value: sample ? sample.rpm.toFixed(0) : '—', color: 'text-slate-200' },
                 { label: 'RO %', value: sample ? sample.rawLoad.toFixed(1) : '—', color: 'text-blue-400' },

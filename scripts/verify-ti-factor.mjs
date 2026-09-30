@@ -14,7 +14,7 @@
  *     air model shows a trim of 1.000 whatever TI_F_STAT is, and multiplying by it INVENTS a
  *     correction that the car never asked for.
  *
- * Reading A is what `lowLoadTuner` shipped. It is wrong, and the car says so twice.
+ * Reading A is what the derivation shipped. It is wrong, and the car says so twice.
  *
  * THE FIXTURE: session #920, a 52-minute road drive. 1,479 warm closed-loop samples at 1000-2400
  * rpm with RF between 8 and 30 %, which straddles the `KF_TI_N_RF` y = 0.15 breakpoint where the
@@ -123,10 +123,20 @@ console.log('\n# The conclusion, stated as the rule the derivation must follow\n
 
 // This is the assertion that guards the code: no correction anywhere may carry TI_F_STAT. If a
 // future change puts it back, this line is what says the car already answered.
-const tunerSrc = fs.readFileSync(here('../src/lib/ve-calculator/lowLoadTuner.ts'), 'utf8');
-const applied = /^\s*(?!\/\/|\s*\*)[^\n]*\btiFactor\b\s*[*/]|[*/]\s*tiFactor\b/m.test(tunerSrc);
+//
+// It used to read the low-opening tuner, because that was the module reading A shipped in. There is
+// one derivation now, so it reads that one — `calculator.ts`, which does not import alphaNTable at
+// all. Both names are matched: `tiFactor`, the local the old code applied, and `tiLoadFactorAt`,
+// the lookup that survives for the panel's sample census and must stay a report rather than a term.
+const derivationSrc = fs.readFileSync(here('../src/lib/ve-calculator/calculator.ts'), 'utf8');
+const NAMES = '(?:tiFactor|tiLoadFactorAt)';
+const CODE_LINE = '^[^\\S\\n]*(?!//|\\*)';   // a line that is not a comment
+const applied = new RegExp(
+    `${CODE_LINE}[^\\n]*\\b${NAMES}\\b(?:\\([^\\n]*\\))?[^\\S\\n]*[*/]`
+    + `|${CODE_LINE}[^\\n]*[*/][^\\S\\n]*${NAMES}\\b`, 'm')
+    .test(derivationSrc);
 check('no derivation multiplies or divides by TI_F_STAT', !applied,
-    'lowLoadTuner still applies tiFactor to a correction');
+    'calculator.ts applies the TI load factor to a correction');
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURE(S)`);
 process.exit(fails === 0 ? 0 : 1);

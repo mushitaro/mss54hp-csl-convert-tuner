@@ -170,12 +170,25 @@ export interface LiveMeasurement {
      * (`lls_diag`, master 0x026142) and cleared at 0x026196 — so at a healthy idle it is low, and
      * the 0.859 curve is what runs when the DME has decided the valve is faulty.
      *
-     * That branch decides the divisor the LOW LOAD correction is built on. Slowest lane: a bit a
-     * diagnosis latches does not move on a timescale a sample could catch.
+     * That branch decides the divisor the `kf_rf_soll` correction is built on. Slowest lane: a
+     * bit a diagnosis latches does not move on a timescale a sample could catch.
      */
     llsSt?: number;
     /** `MD_DYN_ST`. Bitfield: bit 6 = the tip-in limiter clipped this cycle, bits 4/5 = the
      *  dashpot did. Read on the slow lane with the four torque words below. */
+    /**
+     * THE RING, read rather than reconstructed. All four are per-sample — they oscillate, so a
+     * carried-forward reading would smear the 0.3 Hz the whole investigation is about.
+     *
+     * `frRegler` is the integrator, 1.0 neutral. `llsTv` is the commanded duty %, which was
+     * previously recovered from AQ_REL through KL_AQ_ABS_LLS inverted. `mlSoll` is the total air
+     * request and `mlSollLls` the part routed to the valve; the gap between them is where
+     * egas_compute_throttle_target split it, which no other channel shows.
+     */
+    frRegler?: number;
+    llsTv?: number;
+    mlSoll?: number;
+    mlSollLls?: number;
     mdDynSt?: number;
     /** `MD_FW` — the driver's torque request BEFORE the slew limiter. */
     mdFw?: number;

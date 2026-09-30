@@ -121,9 +121,21 @@ console.log('\n[the default view is the columns a tune is read from, and no more
         // offset. Read on its own it says the mixture is fine at exactly the operating point where
         // that is least likely to be true, and the low-opening correction multiplies the two.
         'ltft1', 'ltft2',
+        /*
+         * THE RING, added 2026-09-22 with the LLS mode, and this list stopped being one tune's
+         * columns at that moment. These four are what an LLS tune is read from, exactly as the
+         * eight above are what a VE tune is read from.
+         *
+         * Turning them on globally costs a VE run nothing: only the LLS profile lists them in a
+         * `provides`, so a VE log has no such columns and the switch has nothing to show. The
+         * alternative — a per-mode default map — would be a second place for "which columns
+         * matter" to be stated, and the modes already disagree about that in `MODE_TABS` and
+         * `MODE_WRITES` without needing a third.
+         */
+        'frRegler', 'llsTv', 'mlSoll', 'mlSollLls',
     ].sort();
     const actualOn = TOGGLEABLE_FIELDS.filter(k => DEFAULT_FIELD_VISIBILITY[k]).sort();
-    check('the default set is exactly the ten columns above',
+    check('the default set is exactly the columns named above',
         actualOn.join(',') === EXPECTED_ON.join(','),
         `on: ${actualOn.join(', ')}`);
     check('fewer than half the toggleable channels are on by default',

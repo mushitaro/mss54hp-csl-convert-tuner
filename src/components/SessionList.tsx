@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react';
+import { ModeBadge } from './ModeCorner';
 import { Trash2, Database, Plus, Upload, Cable, GitBranch, AlertTriangle, Check, Pencil, Play, Eye, Download, UploadCloud, Info } from 'lucide-react';
 import { TuningSession, FlashRecord } from '@/lib/db/schema';
 import { flashCounts, isRoadState, isTuneOnTheRoad, armedPatchesFromHistory, patchOnFlash, wroteTune } from '@/lib/db/flashState';
@@ -6,6 +7,7 @@ import { DropZone, ACCEPT_CSV } from '@/components/DropZone';
 import type { LogicPatches } from '@/lib/binary-engine/patcher';
 import { dialogText } from '@/lib/dialog-text';
 import { useDialogLang } from '@/hooks/useDialogLang';
+import { GuideStatic } from '@/components/GuideCarousel';
 
 /**
  * The ACTIONS sheet's explanations, in the reader's language.
@@ -40,7 +42,7 @@ export type NewFromWhich = 'tuned' | 'base';
 /** Any of the three logic patches on. The three are one state everywhere they are read — a BIN
  *  with only TANK VENT shut is not stock either. */
 const anyPatch = (p: Partial<LogicPatches>): boolean =>
-    !!(p.applyPatch || p.applyWotDisable || p.applyTankVentDisable);
+    !!(p.applyPatch || p.applyWotDisable || p.applyTankVentDisable || p.applyRfKorrGateDrop);
 
 interface Props {
     sessions: TuningSession[];
@@ -230,6 +232,7 @@ function describeFlashHistory(history: FlashRecord[]): string {
             f.settings.applyPatch ? 'PATCH ON' : 'PATCH OFF',
             f.settings.applyWotDisable ? 'WOT TH ON' : null,
             f.settings.applyTankVentDisable ? 'TANK VENT SHUT' : null,
+            f.settings.applyRfKorrGateDrop ? 'RF GATE 0.400' : null,
         ].filter(Boolean).join(' · ');
         // PRACTICE first and in full caps, because it changes what every other word on the line
         // means: none of these bytes reached an ECU. `undefined` is not `false` here — a record
@@ -395,7 +398,8 @@ const Contents: React.FC<{ session: TuningSession }> = ({ session }) => {
     // saved, the session's own last real flash otherwise: the two places that know, in the order
     // flashState already trusts them.
     const patches = session.tuneSettings ?? armedPatchesFromHistory(session) ?? {};
-    const patched = !!(patches.applyPatch || patches.applyWotDisable || patches.applyTankVentDisable);
+    const patched = !!(patches.applyPatch || patches.applyWotDisable || patches.applyTankVentDisable
+        || patches.applyRfKorrGateDrop);
     const { practice } = flashCounts(session);
     return (
         <span className="inline-flex items-center gap-1.5 text-[9px] font-mono leading-none whitespace-nowrap">
@@ -509,9 +513,16 @@ export const SessionList: React.FC<Props> = ({
     );
 
     if (loading) {
+        // The static export is this state, so this is where the guide's plain-text copy lives: the
+        // one place a reader that runs no script — a crawler — finds what the tool is. Everybody
+        // else is shown the carousel instead, and GuideStatic is hidden from them before the first
+        // paint (see GuideCarousel), which leaves this looking exactly as it did.
         return (
-            <div className="h-full flex items-center justify-center text-slate-700">
-                <p className="text-xs font-mono opacity-50">LOADING SESSIONS...</p>
+            <div className="h-full overflow-y-auto text-slate-700">
+                <div className="min-h-full flex flex-col items-center justify-center gap-10 px-6 py-10">
+                    <GuideStatic />
+                    <p className="text-xs font-mono opacity-50">LOADING SESSIONS...</p>
+                </div>
             </div>
         );
     }
@@ -644,6 +655,19 @@ export const SessionList: React.FC<Props> = ({
                                                 <span className={`text-[9px] font-mono font-bold shrink-0 ${isOpen ? 'text-blue-400' : 'text-slate-600'}`} title="Session number">
                                                     #{session.seq ?? '?'}
                                                 </span>
+                                                {/* MODE, against the number rather than among the
+                                                    badges beside it. OPEN / DRAFT / FINAL say what
+                                                    a session IS; this says what it MEASURES, and it
+                                                    is read by scanning a column rather than by
+                                                    reading one row — which only works if it is
+                                                    always in the same place, one step in from the
+                                                    tree guides.
+                                                    VE is drawn muted and the other two in the
+                                                    accent. Almost every session is VE, so an accent
+                                                    on it would mean "a session exists"; what the
+                                                    eye is looking for down this column is the
+                                                    stationary run among the drives. */}
+                                                <ModeBadge process={session.process} />
                                                 {/* Shares the badge slot with DRAFT and FINAL, and
                                                     can legitimately sit beside either: those say
                                                     what the session IS, this says where the app is
@@ -1085,6 +1109,7 @@ export const SessionList: React.FC<Props> = ({
                                                                         wrotePatchOn.applyPatch ? 'PATCH' : null,
                                                                         wrotePatchOn.applyWotDisable ? 'WOT TH' : null,
                                                                         wrotePatchOn.applyTankVentDisable ? 'TEV' : null,
+                                                                        wrotePatchOn.applyRfKorrGateDrop ? 'RFGATE' : null,
                                                                     ].filter(Boolean).join(' · ')}
                                                                 </span>
                                                             </button>

@@ -72,15 +72,57 @@ export function signedHeat(v: number, maxAbs: number): string {
  * screen. `raw` stays dim because it genuinely is the aside: the count in the
  * binary, for checking the scaling against.
  */
-export function ScalarReadout({ value, raw, units }: { value: number | null; raw: number; units?: string }) {
-    return (
-        <div className="flex items-baseline gap-2 p-3">
+/**
+ * A single value, and — when it can be changed — a way in.
+ *
+ * A constant has one cell, so there is nothing to pick and the pane never set
+ * a selection for it. That is why it could be read and not edited: every edit
+ * control in this pane hangs off a selected cell, and a scalar never had one.
+ * Pressing the number selects that single cell, which is the same act as
+ * clicking a cell in a map and reaches the same editor.
+ */
+export function ScalarReadout({
+    value,
+    raw,
+    units,
+    editable,
+    selected,
+    onSelect,
+    hint,
+}: {
+    value: number | null;
+    raw: number;
+    units?: string;
+    /** False while looking at a difference or a reference, as for a grid cell. */
+    editable?: boolean;
+    selected?: boolean;
+    onSelect?: () => void;
+    hint?: string;
+}) {
+    const body = (
+        <>
             <span className="text-2xl font-mono text-blue-400">{fmtValue(value)}</span>
             {units && units !== '-' && (
                 <span className="text-sm font-mono text-slate-300">{units}</span>
             )}
             <span className="text-[9px] font-mono text-slate-500">raw {raw}</span>
-        </div>
+        </>
+    );
+    if (!editable) return <div className="flex items-baseline gap-2 p-3">{body}</div>;
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
+            title={hint}
+            /* An underline rather than a box: the number is the readout first
+               and a field second, and a border around it at this size reads as
+               a text input that has lost its label. */
+            className={`flex items-baseline gap-2 p-3 text-left transition border-b-2 ${
+                selected ? 'border-blue-500' : 'border-transparent hover:border-slate-700'
+            }`}
+        >
+            {body}
+        </button>
     );
 }
 

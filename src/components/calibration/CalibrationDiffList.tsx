@@ -12,9 +12,9 @@ import { useDialogLang } from '@/hooks/useDialogLang';
  * The balance on the compare bar answers "how does THIS one differ" by
  * redrawing the visual; this answers "which ones do", which is the other half
  * and the only way to reach a parameter you did not already know about.
- * Clicking a row jumps to it — see `jump` in useCalibrationWorkspace, which
- * re-roots the diagram rather than lighting a parameter inside a block that is
- * still the one you were reading.
+ * Clicking a row makes that parameter the subject, which moves every view to
+ * it — the point of a list naming things you did not know about is that
+ * picking one takes you there.
  *
  * It was a popover hanging off the balance, and it had to move for two
  * reasons. Its trigger mounted as a flex sibling of the balance, so pressing

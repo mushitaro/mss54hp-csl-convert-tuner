@@ -53,7 +53,7 @@ interface FrameProps {
 export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, onClose, autoHeight, children }) => (
     <>
         <div
-            className="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm"
+            className="fixed inset-0 z-[100] bg-slate-950/70 min-[900px]:backdrop-blur-sm"
             onClick={onClose}
         />
         <div className={`fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-2rem))] ${autoHeight ? 'max-h-[min(84dvh,560px)]' : 'h-[min(84dvh,560px)]'} flex flex-col bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-[110] p-4 animate-in fade-in zoom-in-95 duration-200`}>

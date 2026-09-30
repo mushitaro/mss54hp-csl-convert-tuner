@@ -15,9 +15,9 @@
  *
  * `git rev-list --count HEAD` is monotonic on a linear history, which this repo has, so a larger
  * number is a later build and the phone can be compared against the desk by eye. The short sha is
- * what turns the number back into a diff. A `+` suffix marks a build made with uncommitted changes —
- * which is most of them during development, and is exactly the thing you want to know before
- * trusting a number that looks like a commit.
+ * what turns the number back into a diff. A `+` suffix marks a build made with uncommitted changes
+ * to tracked files — exactly the thing you want to know before trusting a number that looks like a
+ * commit, and the thing the preview deploy now refuses.
  *
  * ## The comparison holds within a branch, and NOT across them
  *
@@ -39,6 +39,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { dirtyPaths } from './git-dirty.mjs';
 
 const OUT = 'out';
 
@@ -50,9 +51,9 @@ function buildId() {
     try {
         const count = git(['rev-list', '--count', 'HEAD']);
         const sha = git(['rev-parse', '--short', 'HEAD']);
-        // `--porcelain` is empty exactly when the tree is clean. Untracked files count: a build can
-        // depend on a file that was never added, and a number that hid that would be lying.
-        const dirty = git(['status', '--porcelain']).length > 0 ? '+' : '';
+        // The same definition the preview deploy refuses on — see git-dirty.mjs, including why
+        // untracked files and the agent notes no longer count.
+        const dirty = dirtyPaths().length > 0 ? '+' : '';
         return `${count}.${sha}${dirty}`;
     } catch {
         return 'dev';
@@ -90,7 +91,7 @@ for (const path of walk(OUT)) {
 }
 
 // Deliberately after the documents exist and BEFORE gen-sw.mjs runs — the same ordering rule as
-// brand-preview.mjs and embed-sync-token.mjs. gen-sw hashes the bytes it is about to cache, so a
+// brand-preview.mjs. gen-sw hashes the bytes it is about to cache, so a
 // stamp written after it would ship under the previous build's cache name and the device would keep
 // serving the older HTML from disk.
 console.log(`[build-id] ${id} (${at}) -> ${patched} document(s)`);

@@ -13,11 +13,14 @@ import { LABEL, type ShapeWorkspace } from './shapeWorkspace';
  *
  * ## The SHAPE of the whole `kf_rf_soll` surface, and what this tune did to it
  *
- * This tab used to be LOW LOAD, and it showed three views of the low-opening band: the values, the
- * change, and the slope. Two of those are now said better elsewhere — TUNED MAP renders the
- * composed grid both derivations write, and its detail strip carries the per-cell evidence and the
- * reason for every refusal, over the whole table rather than thirteen rows of it. Keeping a second
- * place to read the same numbers is how two screens come to disagree.
+ * This tab was called LOW LOAD until 2026-09-09, and it was named after something it never showed:
+ * rows 0-12 of `kf_rf_soll` were once derived by a tuner of their own, and the name stuck to the
+ * tab that happened to draw those rows. What it showed was three views of them — the values, the
+ * change, and the slope. Two of those are now said better elsewhere: TUNED MAP renders the grid
+ * the tune writes, and its detail strip carries the per-cell evidence and the reason for every
+ * refusal, over the whole table rather than thirteen rows of it. Keeping a second place to read
+ * the same numbers is how two screens come to disagree. (The module this tab renders keeps the
+ * old name, `lowLoadShape.ts`. It is a different thing: a geometric repair that reads no log.)
  *
  * What has no other home is the GRADIENT. A cell's value can be right on its own and wrong next to
  * its neighbour: `kf_rf_soll` is interpolated, so what the engine actually sees between two
@@ -220,7 +223,7 @@ export const ShapeGrid: React.FC<{ shape: ShapeWorkspace; zoom?: number }> = ({ 
                  */}
                 {cell && (
                     <div ref={measureReadout} className="absolute inset-x-0 bottom-0 z-20 pointer-events-none
-                                    border-t border-slate-700 bg-slate-900/95 backdrop-blur-[2px]
+                                    border-t border-slate-700 bg-slate-900/95 min-[900px]:backdrop-blur-[2px]
                                     px-2 py-1.5 text-[10px] leading-tight">
                         <div className="font-mono text-slate-400">
                             <span className="text-slate-500">

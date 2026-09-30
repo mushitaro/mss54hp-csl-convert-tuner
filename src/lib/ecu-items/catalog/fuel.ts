@@ -77,7 +77,7 @@ export const FUEL_ITEMS: EcuItemDef[] = [
         },
     },
 
-    // --- the injection factor that makes a low-load lambda trim mean something else --------------
+    // --- the injection factor that makes a trim at the lowest filling mean something else -------
     //
     // This table is the reason the VE filter throws idle samples away, and reading it is what lets
     // them be kept instead.
@@ -154,12 +154,12 @@ export const FUEL_ITEMS: EcuItemDef[] = [
         bits: 16, signed: false, units: 'ms', scaling: divideBy(1000),
         description: {
             en: 'Injection time below which the DME opens the lambda loop (FR 5.01, and 30-idle-'
-                + 'control.md §7 condition 5). Stock 1.05 ms. It bites precisely in the low-load '
-                + 'region a low-opening correction is derived from, and it is free to check: ti1..ti6 '
+                + 'control.md §7 condition 5). Stock 1.05 ms. It bites precisely in the low-opening '
+                + 'rows the correction is derived from, and it is free to check: ti1..ti6 '
                 + 'are already inside the 90-byte block 19 response.',
             ja: 'いずれかの気筒の噴射時間がこれを下回ると DME は λ ループを開く'
                 + '（FR 5.01 / 30-idle-control.md §7 条件 5）。純正 1.05 ms。'
-                + '低開度補正を導出する領域でまさに効き、しかも ti1..ti6 は既に取得している'
+                + '補正を導出する低開度行でまさに効き、しかも ti1..ti6 は既に取得している'
                 + 'block 19 の 90 バイトの中にあるので測定コストはゼロ。',
         },
     },

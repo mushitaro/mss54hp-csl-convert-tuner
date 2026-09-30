@@ -1,5 +1,5 @@
 /**
- * The tables a low-load correction cannot be derived without.
+ * `KF_TI_N_RF` and `kf_rf_soll`'s own axes, read straight out of the binary.
  *
  * Same all-or-nothing contract as `egtTables.ts`, and the same rule about `null`: it means fall
  * back, never "use a stock table". Here that rule carries more weight than anywhere else in the
@@ -33,7 +33,7 @@
  * invented up to +15 % of correction in the cells an ordinary drive covers best.
  * `verify:ti-factor` holds the measurement and fails if any derivation puts the factor back.
  *
- * **The correction, in both bands, is `trim x rf_korr` with `trim = STFT x LTFT`.** See
+ * **The correction is `trim x rf_korr` with `trim = STFT x LTFT`, in every cell of the table.** See
  * `calculator.ts` accumulatePoint for why `rf_korr` IS a term (measured at the seam of the DME
  * gate) and `docs/ecu-logic/60-tuning-logic.md` section 6.3.1 for the numbers.
  *
@@ -73,7 +73,7 @@ export interface AlphaNTables {
     tiMinMs: number;
     /** `kf_rf_soll`'s own axes, read from the binary rather than taken from APP_CONFIG.
      *  The constants round 1.391602 to 1.40 and 1.611328 to 1.60 — a 0.6-0.7 % error sitting
-     *  directly on top of the gain hump a low-load repair exists to flatten. */
+     *  directly on top of the gain hump the SHAPE repair exists to flatten. */
     sollRpm: number[];
     sollOpening: number[];
 }
@@ -88,8 +88,8 @@ function ascending(a: number[]): boolean {
  * Every row at rf >= 0.15 is EXACTLY 1.000 in this calibration — that is not a coincidence of the
  * numbers, it is the shape of the design: BMW enriched one row and left the rest alone. A binary
  * where those rows are not flat is either a different calibration or the wrong bytes, and in both
- * cases the premise the whole low-load derivation rests on has stopped being true. Refusing is the
- * only honest answer; assuming 1.0 would derive a correction from a table nobody read.
+ * cases this module is not reading the table it names. Refusing is the only honest answer;
+ * assuming 1.0 would report a factor nobody read.
  */
 function tiLoadIsPlausible(m: AlphaNMap): boolean {
     if (!ascending(m.x) || !ascending(m.y)) return false;
@@ -173,7 +173,8 @@ function interp2d(m: AlphaNMap, x: number, y: number): number {
 }
 
 /**
- * `TI_F_STAT` at this operating point — the term the low-load correction MULTIPLIES by.
+ * `TI_F_STAT` at this operating point — reported, never multiplied into the correction. See the
+ * header for the measurement that took it out.
  *
  * Looked up at the LOGGED `rf`, per sample, never at an assumed one. The y axis is relative
  * filling, not throttle opening, which is what makes this a smooth function rather than a step: a
@@ -203,7 +204,7 @@ export function tiIdleFactorAt(t: AlphaNTables, rpm: number): number {
  * `ti_load_factor` picked. Where they disagree — which is the whole idle region, 1.148 against
  * 0.859 — nothing may be derived until the branch is settled on the car. This is the function that
  * lets the tuner be precise about which samples the open question actually costs it, instead of
- * refusing the whole band.
+ * refusing every sample taken near idle.
  */
 export function tiBranchAmbiguous(t: AlphaNTables, rpm: number, rfFraction: number, tol = 0.01): boolean {
     // Outside the idle curve's OWN x axis the idle branch is not a candidate at all: BMW ended it

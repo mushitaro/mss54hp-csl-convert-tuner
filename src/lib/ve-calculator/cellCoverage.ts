@@ -1,11 +1,10 @@
 /**
- * One verdict per cell of `kf_rf_soll`, from whichever derivation owns it.
+ * One verdict per cell of `kf_rf_soll`, in the vocabulary a reader can act on.
  *
- * The table has two derivations over two bands. They now compute the same expression, but they
- * apply different evidence bars — a stationary idle can park on a cell for minutes while a sweep
- * crosses it in a second — and they report their refusals in different vocabularies. A reader
- * looking at the map does not care which module refused a cell; they care what to do about it.
- * This is the translation layer that lets one map speak for both.
+ * The derivation refuses a cell in its own terms — `thin-count`, `shared-evidence`,
+ * `not-significant`. A reader looking at the map does not care which gate said no; they care what
+ * to do about it, and whether "do something" is even the right answer. This is the layer that
+ * turns the one into the other.
  *
  * ## The four states, and why "never visited" is not a refusal
  *
@@ -21,8 +20,6 @@
  */
 
 import type { VeReject } from './calculator';
-import type { LowLoadReject, LowLoadResult } from './lowLoadTuner';
-import { LOW_LOAD_TOP_ROW } from './lowLoadTuner';
 
 export type CoverageState =
     /** The cell was rewritten from this log. */
@@ -38,18 +35,14 @@ export interface CellCoverage {
     row: number;
     col: number;
     state: CoverageState;
-    /** Which derivation owns this cell — the reader does not need it, the detail strip does. */
-    band: 've' | 'low';
     /** Samples binned into this cell, whatever the verdict. */
     samples: number;
-    /** Sum of bilinear corner weights. Absent for the low band, which does not weight. */
+    /** Sum of bilinear corner weights. */
     weight?: number;
-    /** Separate occasions, low band only — the statistic its bar is built on. */
-    visits?: number;
     /** The correction that was applied, or 1 where none was. */
     correction: number;
     /** The raw verdict, for the detail strip. */
-    reason: VeReject | LowLoadReject | null;
+    reason: VeReject | null;
     /**
      * This cell sits BELOW the lowest opening the drive ever reached — so "no sample" here is not
      * "you did not drive it", it is "the engine does not go there".
@@ -106,11 +99,9 @@ export const COVERAGE_TONE: Record<CoverageState, string> = {
 /** What the reader should DO. One line, naming an action, never restating the reason. */
 const REMEDY: Record<string, { en: string; ja: string }> = {
     'no-evidence': { en: 'drive this state', ja: 'この状態を走る' },
-    'out-of-band': { en: 'the other derivation owns this cell', ja: 'このセルは別の導出が持っている' },
     'thin-count': { en: 'hold this state longer', ja: 'この状態をもっと保持する' },
     'thin-weight': { en: 'drive nearer the middle of this cell, not across its edge', ja: 'セルの端ではなく中心寄りを走る' },
     'shared-evidence': { en: 'drive nearer the middle of this cell, not across its edge', ja: 'セルの端ではなく中心寄りを走る' },
-    'few-visits': { en: 'leave this state and come back to it', ja: '一度離れて、また戻る' },
     scatter: { en: 'the samples here are not one condition — split the run', ja: '同じ条件のサンプルになっていない' },
     spread: { en: 'the samples here are not one condition — split the run', ja: '同じ条件のサンプルになっていない' },
     imprecise: { en: 'hold this state longer — the mean is not pinned yet', ja: 'この状態をもっと保持する —— 平均がまだ定まっていない' },
@@ -128,7 +119,6 @@ const REMEDY: Record<string, { en: string; ja: string }> = {
     'trim-rigid': { en: 'the lambda loop was not correcting — check it was closed', ja: 'λ ループが閉じていたか確認する' },
     'no-ti-factor': { en: 'KF_TI_N_RF could not be read from this binary', ja: 'この BIN から KF_TI_N_RF を読めなかった' },
     'ti-branch-unproven': { en: 'log LLS_ST to settle which branch runs', ja: 'LLS_ST をログに入れて分岐を確定する' },
-    'no-change-needed': { en: 'nothing — this is the answer', ja: '何もしない —— これが答え' },
 };
 
 export function coverageRemedy(reason: string | null, lang: 'en' | 'ja'): string | undefined {
@@ -141,7 +131,6 @@ export interface CoverageInputs {
     weightMap: number[][] | null;
     correctionMap: number[][] | null;
     rejectMap: (VeReject | null)[][] | null;
-    lowLoad: LowLoadResult | null;
     rows: number;
     cols: number;
 }
@@ -153,13 +142,11 @@ export interface CoverageInputs {
  * strip reads one — and a function called 480 times per render that re-derives the same arrays is
  * the shape of the performance bug this component already fixed once for `coverageBands`.
  *
- * The low band's verdict wins below the seam even when the low-opening derivation is not
- * `acceptable`: an unacceptable result still knows, per cell, which bar refused it, and that is
- * exactly what the reader needs in order to make it acceptable. What `acceptable` gates is the
- * WRITE, and the manifest says so there.
+ * One verdict per cell and one set of bars behind it, so there is no branch here: every cell is
+ * read out of the same `rejectMap` and judged by the same rules.
  */
 export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
-    const { hitMap, weightMap, correctionMap, rejectMap, lowLoad, rows, cols } = input;
+    const { hitMap, weightMap, correctionMap, rejectMap, rows, cols } = input;
     const out: CellCoverage[][] = [];
 
     // The lowest opening row that took a sample anywhere across its rpm range. Everything under it
@@ -168,9 +155,7 @@ export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
     let floorRow = Infinity;
     for (let r = 0; r < rows && floorRow === Infinity; r++) {
         for (let c = 0; c < cols; c++) {
-            const n = r <= LOW_LOAD_TOP_ROW && lowLoad
-                ? lowLoad.cells[r]?.[c]?.samples ?? 0
-                : hitMap?.[r]?.[c] ?? 0;
+            const n = hitMap?.[r]?.[c] ?? 0;
             if (n > 0) { floorRow = r; break; }
         }
     }
@@ -178,34 +163,17 @@ export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
     for (let r = 0; r < rows; r++) {
         const row: CellCoverage[] = [];
         for (let c = 0; c < cols; c++) {
-            if (r <= LOW_LOAD_TOP_ROW && lowLoad) {
-                const cell = lowLoad.cells[r]?.[c];
-                const samples = cell?.samples ?? 0;
-                const reason = cell?.rejected ?? null;
-                row.push({
-                    row: r, col: c, band: 'low', samples,
-                    visits: cell?.visits,
-                    correction: cell?.correction ?? 1,
-                    reason,
-                    belowReach: samples === 0 && r < floorRow,
-                    state: lowLoad.owned[r]?.[c] ? 'written'
-                        : reason === 'no-change-needed' ? 'settled'
-                            : samples === 0 ? 'unvisited' : 'refused',
-                });
-                continue;
-            }
             const samples = hitMap?.[r]?.[c] ?? 0;
             const reason = rejectMap?.[r]?.[c] ?? null;
             const correction = correctionMap?.[r]?.[c] ?? 1;
             row.push({
-                row: r, col: c, band: 've', samples,
+                row: r, col: c, samples,
                 weight: weightMap?.[r]?.[c],
                 correction, reason,
                 belowReach: samples === 0 && r < floorRow,
-                // A written VE cell whose correction came out 1.000 IS the "nothing to change"
+                // A written cell whose correction came out 1.000 IS the "nothing to change"
                 // answer, and saying so is worth more than colouring it as a change of zero. The
-                // low band has a gate for this (`no-change-needed`); VE writes the cell either way,
-                // so the distinction has to be read off the number.
+                // cell is written either way, so the distinction has to be read off the number.
                 state: reason === null
                     ? (correction === 1 ? 'settled' : 'written')
                     : samples === 0 ? 'unvisited' : 'refused',

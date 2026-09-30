@@ -4,7 +4,7 @@ import type { Lang } from "./calib-i18n";
  * Reading a guard as a sentence instead of as a mask test.
  *
  * A guard is the condition a formula runs under, and it is the half of a block
- * a tuner most needs and least often gets. There are 6,066 of them, and the
+ * a tuner most needs and least often gets. There are 16,533 of them, and the
  * regex this replaces could phrase exactly one shape — a bit test naming German
  * engine states — which covers about 330. The other 5,700 were drawn as C.
  *

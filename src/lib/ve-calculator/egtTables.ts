@@ -22,9 +22,10 @@ export interface EgtTables {
     rfKorrMin: { rpm: number[]; values: number[] };
     /** k_rf_korr_hys — how far rf_soll must fall BELOW the floor before the correction lets go. */
     hys: number;
-    /** k_rf_korr_v_min — road-speed floor, km/h. Recorded for completeness; road speed is not in
-     *  DS2 selection 3, so nothing here can evaluate it. See the note in rfKorrTuner.ts on why
-     *  that turns out not to matter once Δ comes from the sensor. */
+    /** k_rf_korr_v_min — road-speed floor, km/h. It used to be "recorded for completeness, nothing
+     *  here can evaluate it"; `V` has been on the RAM read since 2026-08-30 and `rfKorrActive`
+     *  evaluates it. Measured on six drives: of the eight samples that drove one cell up 11.5 %,
+     *  five were taken at 13-15 km/h. It was never the harmless half. */
     vMin: number;
 }
 
@@ -119,6 +120,153 @@ export function tabgModelAt(t: EgtTables, rpm: number, rfFraction: number): numb
  */
 export function gateOpen(t: EgtTables, rpm: number, rfSoll: number, margin = 0): boolean {
     return rfSoll > interpCurve(t.rfKorrMin.rpm, t.rfKorrMin.values, rpm) + margin;
+}
+
+/**
+ * Was the DME reading KF_RF_KORR_DRREL at this sample — BOTH halves of `rf_korr_calc`'s condition.
+ *
+ * `rf_korr_calc` (master 0x021A70, quoted in docs/ecu-logic/20-egt-correction.md §1) is one `if`
+ * with two operands:
+ *
+ *     if (rf_korr_rf_min < rf_soll && k_rf_korr_v_min < V)  rf_korr = KF_RF_KORR_DRREL(N, delta);
+ *     else if (rf_korr_rf_min - k_rf_korr_hys <= rf_soll && k_rf_korr_v_min <= V)  return;  // hold
+ *     else                                                  rf_korr = 0x400;               // 1.000
+ *
+ * `gateOpen` above is the FIRST operand only. For six months that was the whole of this app's
+ * reproduction, because road speed was not on any block it read — and the field comment said so.
+ * `V` arrived on the RAM read on 2026-08-30 and nothing was changed to use it.
+ *
+ * ## What that cost, measured
+ *
+ * Session #941, cell 2400 rpm / 7.5 % opening. Eight samples reached the calculation. Five were
+ * taken at **13-15 km/h** — under the 20 km/h floor, so `rf_korr_calc` fell through both branches
+ * to `rf_korr = 0x400` and the correction was exactly 1.000 in the car. The other three sat in the
+ * hysteresis band with nothing latched, which is also 1.000. The app credited a median of **1.161**
+ * on all eight and multiplied the cell by `trim x rf_korr` = 0.957 x 1.161 = **+11.3 %**; the bytes
+ * moved +11.5 %. Its own second route, `rfKorrFromEgt` — which already reproduced the load half —
+ * said 1.000 on all eight. Two routes, one gated and one not, and the map was built from the
+ * ungated one.
+ *
+ * Repeated over six drives that cell climbed 0.637 to 0.851 (+32 %, 12 % above CSL stock) while the
+ * lambda controller went the other way: 0 samples near its rich clamp on #941, 96 on #946, one of
+ * them 1.4 % off the 0.700 floor with a continuous 12.3 s stretch below 0.800.
+ *
+ * ## Why this is the ENTRY condition and not the hold
+ *
+ * The hold branch keeps a PREVIOUSLY latched value, so answering it needs the sample history. Over
+ * the same six drives 519 samples sat in the hysteresis band with a latch that a faithful replay
+ * says was still holding — those now take 1.000 here and lose a real correction, which pushes their
+ * cells very slightly lean. That is 0.8 % of the samples carrying an rf_korr, and the fallback is
+ * the lambda trim, which is a measurement of the mixture that actually burned. Trading a rare small
+ * lean bias for never again crediting a correction the DME provably did not apply is the right way
+ * round, and it keeps this a pure function of one sample — no ordering, and no chance of the two
+ * annotate passes (`data` and `rfKorrData` are different subsets of one drive) disagreeing about
+ * the same instant.
+ *
+ * `vehicleSpeed` absent means the log predates the channel. Refuse rather than assume: a missing V
+ * cannot be shown to clear a 20 km/h floor, and assuming it did is exactly the assumption that
+ * produced the paragraph above.
+ */
+export function rfKorrActive(
+    t: EgtTables, rpm: number, rfSoll: number, vehicleSpeed: number | undefined,
+): boolean {
+    if (vehicleSpeed === undefined) return false;
+    return vehicleSpeed > t.vMin && gateOpen(t, rpm, rfSoll);
+}
+
+/**
+ * `rf_korr_calc`'s THIRD branch — the one `rfKorrActive` cannot express, because it needs history.
+ *
+ * The decompiled function has three outcomes, not two:
+ *
+ *     if (floor < rf_soll && vMin < V)               rf_korr = KF_RF_KORR_DRREL(N, delta);  // enter
+ *     else if (floor - hys <= rf_soll && vMin <= V)  return;                                // HOLD
+ *     else                                          rf_korr = 0x400;                        // reset
+ *
+ * The middle branch keeps whatever was latched. So a sample sitting in the hysteresis band is
+ * enriched or not depending entirely on how the car ARRIVED there, which no per-sample test can
+ * answer. `rfKorrActive` implements the entry condition alone and therefore calls every held sample
+ * shut.
+ *
+ * ## Why that is not an acceptable approximation
+ *
+ * It shipped as one for a day, with a comment estimating the cost at 519 samples going "slightly
+ * lean". Measured over #941-#946 it is **930 samples — 28.4 % of the truly enriched population** —
+ * and on those the app writes a correction of **-8.25 %** where the correct factor is -0.53 %. It
+ * was pushing the hysteresis-band cells down by eight percent.
+ *
+ * The latch is real, and it separates cleanly out of sample. Among samples the entry-only test calls
+ * shut while sitting at 0.95-0.98 of the floor — one narrow load band, one label:
+ *
+ *     latch says OPEN   n=213   median RF/rf_soll 1.1286   84 % above 1.05
+ *     latch says SHUT   n=207   median RF/rf_soll 0.9977    5 % above 1.05
+ *
+ * Two populations, indistinguishable by load, separated by nothing but arrival history, and the raw
+ * ratio agrees with the latch on both.
+ *
+ * ## Walk it over the RAW log
+ *
+ * The DME advanced this state machine on every sample it took, including the ones the app's filters
+ * later dropped. Walking a filtered subset instead disagrees with the raw-log answer on 0.29 % of
+ * samples — which sounds small and is 6 % of the enriched population, and it errs in one direction:
+ * a dropped fuel-cut sample would have RESET the latch, so a subset keeps the correction alive
+ * longer than the car did, which is the direction that raises the map. Hence `annotateRfKorr` takes
+ * a `latchSource` and the hook hands it `processed.rawData`.
+ *
+ * Not a pure function, and it cannot be. `step` must see every sample once, in time order.
+ */
+export class RfKorrLatch {
+    private latched = false;
+    private openedAt: number | undefined;
+
+    /**
+     * Advance, and also report how long the correction has been engaged.
+     *
+     * The clock lives here rather than in the callers because it IS latch state — it restarts on
+     * every reset, and there are two callers (the batch walk and the live run) that must not be
+     * able to disagree about when a correction started.
+     *
+     * Why anything needs it: the DME steps the fuel by k the instant it engages, and the lambda
+     * loop cannot see that for a second or so — transport delay, sensor, and a two-point controller
+     * running at 1-2 Hz. Read the trim inside that window and it has not responded yet, so
+     * `trim x k` is inflated by nearly the whole of k. Measured over #941-#946, by dwell:
+     *
+     *     0-0.5 s  +9.93 %   |  1-1.5 s  +7.44 %  |  2-3 s  +1.69 %  |  5+ s  -4.94 %
+     *
+     * against a control (gate-shut cells at load >= 5) of -0.11 %. The same cells, the same
+     * enrichment, and the answer flips sign with nothing but the clock.
+     *
+     * `perSecond` converts the log's own timestamps — 1 for a seconds log, 0.001 for the
+     * milliseconds a Testo CSV carries. See `timeScaleSeconds`.
+     */
+    stepTimed(
+        t: EgtTables, rpm: number, rfSoll: number | undefined, vehicleSpeed: number | undefined,
+        time: number, perSecond: number,
+    ): { open: boolean; dwellSec: number } {
+        const open = this.step(t, rpm, rfSoll, vehicleSpeed);
+        if (!open) this.openedAt = undefined;
+        else if (this.openedAt === undefined) this.openedAt = time;
+        return { open, dwellSec: open ? (time - this.openedAt!) * perSecond : 0 };
+    }
+
+    /** Advance one sample and return whether the DME was applying a correction at it. */
+    step(
+        t: EgtTables, rpm: number, rfSoll: number | undefined, vehicleSpeed: number | undefined,
+    ): boolean {
+        // No rf_soll, or a log from before `V` existed: nothing can be shown to hold, and a state
+        // machine fed an unknown is a state machine telling you what it assumed. Reset and say shut.
+        if (rfSoll === undefined || vehicleSpeed === undefined) {
+            this.latched = false;
+            return false;
+        }
+        const floor = interpCurve(t.rfKorrMin.rpm, t.rfKorrMin.values, rpm);
+        if (rfSoll > floor && vehicleSpeed > t.vMin) this.latched = true;
+        // Strictly `>` to enter and `>=` to hold, exactly as the decompiled comparisons read. The
+        // difference decides one sample per crossing, which is worth getting right in a state
+        // machine that then carries its answer forward.
+        else if (!(rfSoll >= floor - t.hys && vehicleSpeed >= t.vMin)) this.latched = false;
+        return this.latched;
+    }
 }
 
 /**

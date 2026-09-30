@@ -2,6 +2,7 @@ import type { EcuNumericDef } from '@/lib/ecu-items/types';
 import { overlapsChecksumSlot, PARTIAL_BIN_LENGTH } from '@/lib/ecu-items/codec';
 import type { Graph, GraphNode, Axis } from '@/lib/calibration-graph/types';
 import { index, type Indexed } from '@/lib/calibration-graph/graph';
+import type { DecompCorpus } from '@/lib/calibration-graph/decomp';
 import { buildScaling, rawDomain } from './xdfMath';
 import type { CalAxisDef, CalParamDef, EditLock } from './types';
 import { managedSpans, SEALED_CAL_SYMBOLS } from './edits';
@@ -233,6 +234,7 @@ export function buildCatalog(raw: Graph): IndexedCatalog {
 }
 
 let catalogPromise: Promise<IndexedCatalog> | null = null;
+let decompPromise: Promise<DecompCorpus> | null = null;
 
 /** Lazy singleton. First CALIBRATION activation pays the fetch+parse once. */
 export function loadCalCatalog(): Promise<IndexedCatalog> {
@@ -250,4 +252,32 @@ export function loadCalCatalog(): Promise<IndexedCatalog> {
             });
     }
     return catalogPromise;
+}
+
+/**
+ * The decompiler's C — now for all 1,705 functions, not the 644 that were
+ * named.
+ *
+ * Its own artifact and its own fetch: 1.95 MB against the catalog's 6.13, and
+ * needed only once a reader is inside a function whose statements were never
+ * parsed. Folded into the catalog it would be on the critical path of every
+ * CALIBRATION open — a fifth again of the wait, for every reader, to serve the
+ * ones who walk in that far.
+ *
+ * Started after the catalog resolves rather than when CODE is first opened, so
+ * the switch into CODE never shows "nothing here" and then fills in.
+ */
+export function loadDecompCorpus(): Promise<DecompCorpus> {
+    if (!decompPromise) {
+        decompPromise = fetch('/data/calibration-decomp.json')
+            .then(res => {
+                if (!res.ok) throw new Error(`calibration-decomp.json: HTTP ${res.status}`);
+                return res.json() as Promise<DecompCorpus>;
+            })
+            .catch(err => {
+                decompPromise = null;
+                throw err;
+            });
+    }
+    return decompPromise;
 }

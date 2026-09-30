@@ -66,3 +66,8 @@ archive/
 # esbuild scratch bundles written by the analyze:* scripts
 scripts/.*-bundle.mjs
 scripts/.*-entry.ts
+# Every dot-prefixed file under scripts/ is a build artefact or a scratch measurement, whatever it
+# is called. The two patterns above name the two conventions that existed; a one-off bundle called
+# scripts/.w.mjs slipped past both and into a commit.
+scripts/.*.mjs
+scripts/.*.ts

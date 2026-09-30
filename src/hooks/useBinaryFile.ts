@@ -2,12 +2,15 @@ import { useState } from 'react';
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { BinaryPatcher } from '@/lib/binary-engine/patcher';
 import { IDLE_WRITE_SEALED } from '@/lib/idle/seal';
-import { writtenVeGrid, type LowLoadArm, type ShapeArm } from '@/lib/ve-calculator/composeVeGrid';
+import { readIdleTables } from '@/lib/idle/idleTables';
+import { composeLlsTv } from '@/lib/lls/composeLlsTv';
+import type { LlsTvEdit } from '@/lib/lls/ringGain';
+import { writtenVeGrid, type ShapeArm } from '@/lib/ve-calculator/composeVeGrid';
 import { applyCalibrationEdits } from '@/lib/calibration/apply';
 import type { CalEdit, RunSpan } from '@/lib/calibration/edits';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
-import { VEMap } from '@/lib/types';
+import type { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
 import { dialogText } from '@/lib/dialog-text';
 import { downloadBlob, MIME_BIN } from '@/lib/download';
@@ -28,6 +31,7 @@ export type ToggleOverrides = {
   applyPatch?: boolean;
   applyWotDisable?: boolean;
   applyTankVentDisable?: boolean;
+  applyRfKorrGateDrop?: boolean;
   writeWarmup?: boolean;
   /** @deprecated Retired with generateWOTMap. Read nowhere; see restoreWotFuel. */
   writeWot?: boolean;
@@ -38,29 +42,61 @@ export type ToggleOverrides = {
   restoreWarmup?: boolean;
   writeRfKorr?: boolean;
   writeVe?: boolean;
-  writeLowLoad?: boolean;
   writeShape?: boolean;
 };
 
 /** Tables that are not derived from the VE map and so cannot be rebuilt from it. */
+/**
+ * Whether a write carries a DERIVED TABLE rather than only configuration.
+ *
+ * ONE expression, because there were four and they disagreed. The filename prefix, the hub's label,
+ * the confirmation dialog and the flash record each asked this question separately, and each one
+ * had been written when the answer was "is there a VE map". Every mode added since produces a tune
+ * with no VE map behind it, and each addition had to remember four places:
+ *
+ *   - `tunedRfKorr` and `tunedShape` were remembered;
+ *   - `calibrationEdits` was remembered, and the write handler's own comment says the record must
+ *     read the extras rather than the absence of a map;
+ *   - `tunedIdleTv` was NOT, so an idle tune downloaded as `Base_...` and flashed as `tuned: false`;
+ *   - `tunedLlsTv` was NOT, so the hub offered WRITE PATCH-OFF over a tuned KF_LLS_TV.
+ *
+ * `ラベルは約束` — a button that says PATCH-OFF while sending a derived table, and a file called
+ * Base_ that contains one, are the same defect said twice. Asking once is what stops the next mode
+ * having to find all four.
+ */
+export function writeClaimsTune(
+  newMap: VEMap | null,
+  writeVe: boolean,
+  extras?: PatchExtras,
+): boolean {
+  return (writeVe && !!newMap)
+    || !!extras?.tunedRfKorr
+    || !!extras?.tunedShape
+    || !!extras?.tunedIdleTv
+    || !!extras?.tunedLlsTv?.length
+    || (extras?.calibrationEdits?.edits.length ?? 0) > 0;
+}
+
 export type PatchExtras = {
   /** The back-calculated KF_RF_KORR_DRREL, 6 x 12 physical values. Null writes nothing. */
   tunedRfKorr?: number[][] | null;
-  /** The idle feedforward proposal. SEALED — see lib/idle/seal.ts; it is carried so the panel
-   *  can show what it derived, and it never reaches a byte. */
-  tunedIdleQvs?: number[][] | null;
+  /** The idle valve duty proposal, `KF_LLS_TV` as 13 x 10 physical per cent. Null writes nothing.
+   *  Reaches a byte since 2026-09-03 — see lib/idle/seal.ts for what opened it. */
+  tunedIdleTv?: number[][] | null;
   /**
-   * The low-opening block of kf_rf_soll, armed for writing: the whole BASE-seeded 24 x 20 grid
-   * plus the cells this workflow actually owns. Composed with the VE map by `composeVeGrid` —
-   * kf_rf_soll has exactly ONE writer, and the ownership rule lives there, not in call order.
-   * Null when the WRITE LOW LOAD toggle is off or nothing derived.
+   * The micro-throttle ring solve, as an edit list rather than a grid.
+   *
+   * An edit list and not a table because it has to be COMPOSED with `tunedIdleTv` — the two
+   * derivations share `KF_LLS_TV`, and a second full grid here would mean whichever ran last won,
+   * which is the defect `composeVeGrid` exists to stop happening on `kf_rf_soll`. Carrying the
+   * cells it claims lets `composeLlsTv` give every cell exactly one owner.
    */
-  tunedLowLoad?: LowLoadArm | null;
+  tunedLlsTv?: readonly LlsTvEdit[] | null;
   /**
    * The SHAPE repair's grid and the cells it owns.
    *
    * Applied AFTER `composeVeGrid`, and that order is the point: a repair is defined as moving only
-   * cells no derivation measured, so by construction it cannot land on a cell either of them owns.
+   * cells no derivation measured, so by construction it cannot land on a cell the derivation owns.
    * Composing first and overwriting after makes that ordering explicit rather than relying on the
    * repair's own bookkeeping to have been right.
    */
@@ -85,22 +121,29 @@ export type PatchExtras = {
 const RF_KORR_WRITE_BOUNDS = { min: 1.0, max: 1.40 };
 
 /**
- * What the idle air request is allowed to hold, as written.
+ * What the idle valve duty is allowed to hold, as written.
  *
- * The floor is the load-bearing one and it is deliberately not a round number: KF_LLS_TV's first
- * y breakpoint is 11.0 kg/h and its whole row sits at K_LLS_TV_MIN, so below it the request has no
- * authority at all and the engine's idle air becomes whatever the throttle plate leaks. The tuner
- * derives that floor from the loaded binary rather than trusting this constant — a different
- * calibration puts it somewhere else. This is the LAST-RESORT rail at the byte boundary, for the
+ * DUTY PER CENT, because the write target is `KF_LLS_TV`. It used to be kg/h — 11.0 to 40.0 — from
+ * when the target was `KF_LLR_QVS_GRUND`, and those numbers were the second reason that map was
+ * sealed: they would have clamped sixteen untouched cold cells on the way past.
+ *
+ * These are the valve's own rails, `K_LLS_TV_MIN` and `K_LLS_TV_MAX` as this lineage holds them.
+ * The tuner re-derives both from the LOADED binary rather than trusting these — a different
+ * calibration puts them elsewhere — so this is the last-resort rail at the byte boundary, for the
  * same reason RF_KORR_WRITE_BOUNDS is: so no future caller can route around the tuner's own clamp.
+ *
+ * Measured against the stock table before this was allowed to write anything: all 130 cells sit
+ * inside 14..97, so applying these bounds to the whole table moves no cell the tuner did not.
+ * `verify:idle` asserts that, so a re-vendored binary cannot quietly break it.
  */
-const IDLE_QVS_WRITE_BOUNDS = { min: 11.0, max: 40.0 };
+const IDLE_TV_WRITE_BOUNDS = { min: 14.0, max: 97.0 };
 
 export function useBinaryFile() {
   const [binaryFile, setBinaryFile] = useState<File | null>(null);
-  /** The idle proposal. Held so the panel can show what it derived and so a reload clears it;
-   *  it never reaches a byte, because IDLE_WRITE_SEALED is true. */
-  const [tunedIdleQvs, setTunedIdleQvs] = useState<number[][] | null>(null);
+  /** The idle proposal: `KF_LLS_TV` in duty per cent, 13x10. Held here so the panel can show what
+   *  it derived and so a reload clears it, and armed into the next write by the block above. */
+  const [tunedIdleTv, setTunedIdleTv] = useState<number[][] | null>(null);
+  const [tunedLlsTv, setTunedLlsTv] = useState<readonly LlsTvEdit[] | null>(null);
   const [binaryBuffer, setBinaryBuffer] = useState<ArrayBuffer | null>(null);
   const [currentMap, setCurrentMap] = useState<VEMap | null>(null);
   const [initialMapData, setInitialMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
@@ -108,7 +151,7 @@ export function useBinaryFile() {
   // What the LOADED BYTES say, as opposed to what the toggles are asking for. Keeping wotDisabled
   // here — it used to be computed in uploadBinary and thrown away after seeding the toggle — is what
   // lets the hub compare the two and offer a write when they disagree.
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean } | null>(null);
+  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; rfKorrGateDropped: boolean } | null>(null);
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
   // [EXPERIMENTAL] UI Controls
@@ -116,6 +159,10 @@ export function useBinaryFile() {
   /** Tank ventilation held shut. Default OFF — this is an emissions device, and the only reason to
    *  touch it is a tuning run that has to be put back afterwards. */
   const [applyTankVentDisable, setApplyTankVentDisable] = useState<boolean>(false);
+  /** `kl_rf_korr_rf_min` dropped to 0.400, so the rf_korr gate opens at 40 % filling instead of
+   *  55-80 %. Default OFF — it is a measurement patch that widens where the DME enriches, and it
+   *  comes back out after the drive. See BinaryPatcher.setRfKorrGateFloor. */
+  const [applyRfKorrGateDrop, setApplyRfKorrGateDrop] = useState<boolean>(false);
   const [writeWarmup, setWriteWarmup] = useState<boolean>(false); // Default OFF
   /** Put `KF_TI_N_RF_VL` back to the community reference. Default OFF like every other write —
    *  but unlike the others this one only ever RESTORES, so arming it cannot invent a calibration. */
@@ -161,9 +208,6 @@ export function useBinaryFile() {
    * under the arming it was built with, not under today's default.
    */
   const [writeVe, setWriteVe] = useState<boolean>(true);
-  // Default OFF. Same table as writeVe (the low-opening rows of kf_rf_soll), same rule; the
-  // ownership between the two is composed per cell in composeVeGrid, never by call order.
-  const [writeLowLoad, setWriteLowLoad] = useState<boolean>(false);
   /** Whether the SHAPE repair's cells go into the next write. Off by default and reset with
    *  every load, like every other derived artefact: these cells carry no direct measurement,
    *  so writing them is a decision the operator takes each time rather than one that persists
@@ -191,12 +235,18 @@ export function useBinaryFile() {
       // Detectable in the bytes, exactly like the WOT threshold — so a BIN that came off the car
       // with purge already disabled says so on the hub instead of quietly looking stock.
       const isTankVentDisabled = parser.getTankVentDisabled();
+      // Detectable the same way, and it has to be: this curve is an INPUT to every later
+      // derivation (readEgtTables -> EgtTables.rfKorrMin -> gateOpen / RfKorrLatch / rfKorrCensus),
+      // so a BASE that arrives with the floor already dropped must say so rather than let the app
+      // interpret its own drives through a gate the car was not running.
+      const isRfKorrGateDropped = parser.getRfKorrGateFloorDropped();
 
       setPatchStatus({
         mapOff: isMapOff, // True if OFF
         tempLimit: isTempHigh,
         wotDisabled: isWotDisabled,
         tankVentDisabled: isTankVentDisabled,
+        rfKorrGateDropped: isRfKorrGateDropped,
       });
 
       // Detection off the bytes is right when a BASE arrives fresh (upload / DME read), but wrong
@@ -205,6 +255,7 @@ export function useBinaryFile() {
       setApplyPatch(overrides?.applyPatch ?? (isMapOff && isTempHigh));
       setApplyWotDisable(overrides?.applyWotDisable ?? isWotDisabled);
       setApplyTankVentDisable(overrides?.applyTankVentDisable ?? isTankVentDisabled);
+      setApplyRfKorrGateDrop(overrides?.applyRfKorrGateDrop ?? isRfKorrGateDropped);
       // These two leave no detectable trace in the bytes, so there is nothing to fall back on:
       // default them OFF on every load. Otherwise they persist from the previous session and
       // silently inject derived warmup/WOT tables into an unrelated binary.
@@ -213,14 +264,15 @@ export function useBinaryFile() {
       setRestoreVe(overrides?.restoreVe ?? false);
       setRestoreWarmup(overrides?.restoreWarmup ?? false);
       setWriteRfKorr(overrides?.writeRfKorr ?? false);
-      // LOW LOAD keeps the "no trace in the bytes" rule of the three above: OFF on every load.
+      // SHAPE keeps the "no trace in the bytes" rule of the three above: OFF on every load.
       // VE starts ARMED — see its declaration. Loading a BASE cannot write anything by itself, and
       // the row is disabled until there is a derivation to arm, so this is where the operator's
       // one sensible answer is already filled in rather than asked for.
       setWriteVe(overrides?.writeVe ?? true);
-      setWriteLowLoad(overrides?.writeLowLoad ?? false);
       setWriteShape(overrides?.writeShape ?? false);
-      setTunedIdleQvs(null);
+      setTunedIdleTv(null);
+    setTunedLlsTv(null);
+      setTunedLlsTv(null);
 
       return map;
     } catch (e) {
@@ -246,6 +298,7 @@ export function useBinaryFile() {
     const usePatch = settings?.applyPatch ?? applyPatch;
     const useWotDisable = settings?.applyWotDisable ?? applyWotDisable;
     const useTankVentDisable = settings?.applyTankVentDisable ?? applyTankVentDisable;
+    const useRfKorrGateDrop = settings?.applyRfKorrGateDrop ?? applyRfKorrGateDrop;
     const useWarmup = settings?.writeWarmup ?? writeWarmup;
     const useRestoreWot = settings?.restoreWotFuel ?? restoreWotFuel;
     const useRestoreVe = settings?.restoreVe ?? restoreVe;
@@ -254,14 +307,14 @@ export function useBinaryFile() {
 
     const patcher = new BinaryPatcher(binaryBuffer);
 
-    // kf_rf_soll has exactly ONE writer. Three workflows own cells in it — VE, LOW LOAD, and
-    // eventually IDLE — and before composeVeGrid existed each wrote the whole grid itself, with
-    // call order as the only arbitration. The order ran opposite to the comment describing it, so
-    // arming LOW LOAD beside a VE tune reverted every VE-corrected cell to BASE (65-workflows.md,
-    // defect 1). Now every contribution passes through one composition, gated by its own toggle:
-    // an OFF toggle contributes null, and null + null means the table is not touched at all.
+    // kf_rf_soll has exactly ONE writer, and everything that wants to change it passes through one
+    // composition gated by its own toggle: an OFF toggle contributes null, and nothing contributing
+    // means the table is not touched at all. Before composeVeGrid existed each workflow wrote the
+    // whole grid itself with call order as the only arbitration, and the order ran opposite to the
+    // comment describing it — so arming a second one reverted every corrected cell to BASE
+    // (65-workflows.md, defect 1).
     /**
-     * The grid that reaches `kf_rf_soll` — composition plus the SHAPE mode, in one call.
+     * The grid that reaches `kf_rf_soll` — the derivation plus the SHAPE mode, in one call.
      *
      * `writtenVeGrid` rather than the composition and the overlay written out here, because the
      * WARMUP tab needs the same answer and computing it twice is how a screen and its bytes come
@@ -269,7 +322,6 @@ export function useBinaryFile() {
      */
     const written = writtenVeGrid(
       useWriteVe ? newMap?.data ?? null : null,
-      extras?.tunedLowLoad ?? null,
       extras?.tunedShape ?? null,
     );
     if (written) patcher.setVETableData(written);
@@ -278,12 +330,12 @@ export function useBinaryFile() {
      * WARMUP derives from THE GRID THAT IS BEING WRITTEN, not from the tuned map beside it.
      *
      * It used to take `newMap` unconditionally, and that quietly dropped the SHAPE repair: `newMap`
-     * is the composed VE + LOW LOAD grid, and the shaped cells were overlaid onto a local copy of
+     * is the tuned grid before the overlay, and the shaped cells were overlaid onto a local copy of
      * it a few lines above and nowhere else. So a flash could carry a repaired `kf_rf_soll` and a
      * `kf_rf_soll_kath` interpolated from the UNREPAIRED one.
      *
      * That is not a rounding difference. `CSL_STOCK_WARMUP_LOAD` starts at 0.10 % and its first
-     * fourteen rows sit at or below 3.20 % — the entire band SHAPE exists to repair — and
+     * fourteen rows sit at or below 3.20 % — exactly the openings SHAPE exists to repair — and
      * `generateWarmupMap` reads the main table by interpolation at exactly those openings. A
      * falling column that SHAPE just removed from the warm table would be interpolated straight
      * back into the cold one.
@@ -337,6 +389,12 @@ export function useBinaryFile() {
     // deliver it. Before applyChecksumCorrection, with everything else.
     patcher.setTankVentDisable(useTankVentDisable);
 
+    // The rf_korr gate floor. Both directions like the two above, and for a reason this one owns:
+    // the app READS this curve back to decide which of a drive's samples the DME was correcting, so
+    // leaving a stale drop in place would silently re-interpret every later log. Off restores the
+    // six the binary was loaded with.
+    patcher.setRfKorrGateFloor(useRfKorrGateDrop);
+
     // The back-calculated EGT correction. Threaded in explicitly rather than read off hook state
     // for the same reason `settings` is: a caller that rebuilds inside one handler would otherwise
     // hash a value the render has not caught up with.
@@ -352,14 +410,41 @@ export function useBinaryFile() {
       }
     }
 
-    // SEALED — see lib/idle/seal.ts. The map this would write has no consumer in this calibration
-    // (cfg_m.egas = 0 routes lls_tv_calc from the torque path), and IDLE_QVS_WRITE_BOUNDS would
-    // clamp 16 untouched cold cells on the way past. The guard sits at the byte boundary rather
-    // than only in the UI, so no caller can route around it.
-    if (!IDLE_WRITE_SEALED && extras?.tunedIdleQvs) {
-      const def = findEcuItem('KF_LLR_QVS_GRUND');
-      if (def?.kind === 'map') {
-        patcher.setEcuMapValues(def, extras.tunedIdleQvs, IDLE_QVS_WRITE_BOUNDS);
+    /**
+     * The idle valve duty — `KF_LLS_TV`, and the symbol here has to be the one the TUNER quantised
+     * against or the bytes are rounded to a grid they are not stored on.
+     *
+     * It said `KF_LLR_QVS_GRUND` until 2026-09-03, months after the estimator had moved. Nothing
+     * came of it only because the seal was shut and because a 13x10 proposal handed to a 5x6 writer
+     * throws rather than corrupts. Both halves now name `KF_LLS_TV`; `verify:idle` asserts they
+     * still agree, because "two places name the target" is exactly the shape that drifted.
+     *
+     * The guard sits at the byte boundary rather than only in the UI, so no caller can route
+     * around it — see lib/idle/seal.ts for what opened it and what stays shut.
+     */
+    if (!IDLE_WRITE_SEALED && (extras?.tunedIdleTv || extras?.tunedLlsTv?.length)) {
+      const def = findEcuItem('KF_LLS_TV');
+      // The LOADED image, not the patcher clone: the composer needs the stock table to tell which
+      // cells IDLE actually moved, and nothing earlier in this function touches KF_LLS_TV.
+      const tables = readIdleTables(binaryBuffer);
+      if (def?.kind === 'map' && tables) {
+        /*
+         * ONE writer, two derivations. IDLE moves the rows warm idle evidence reaches; the
+         * micro-throttle solve rebuilds the rows its drive reached. Both land here, so the
+         * arbitration is stated in `composeLlsTv` rather than decided by which branch ran last.
+         *
+         * `composeLlsTv` returns null when neither contributes anything, and then nothing is
+         * written at all — which matters more here than on kf_rf_soll, because setEcuMapValues
+         * clamps every one of the 130 cells it touches. A write of "no change" is still a write.
+         */
+        const composed = composeLlsTv(
+          tables.llsTv.values,
+          { idle: extras.tunedIdleTv ?? null, lls: extras.tunedLlsTv ?? null },
+          { rpm: tables.llsTv.x, mlKgH: tables.llsTv.y },
+        );
+        if (composed) {
+          patcher.setEcuMapValues(def, composed.values, IDLE_TV_WRITE_BOUNDS);
+        }
       }
     }
 
@@ -400,16 +485,19 @@ export function useBinaryFile() {
     // switched off. A file that gets emailed around, or found on a disk a year later, should say so
     // in the one piece of metadata that always travels with it.
     const tevSuffix = applyTankVentDisable ? '_TEVOFF' : '';
+    // Its own marker too, and for the sharper version of the same argument: a BIN carrying this is
+    // one the DME enriches on across a far wider part of the map than BMW allowed. A file that
+    // turns up later with no way to tell is a file that gets flashed for a normal drive.
+    const gateSuffix = applyRfKorrGateDrop ? '_RFGATE40' : '';
     // `Tune_` iff a derived table actually went into the bytes — which is the manifest's answer,
     // not the derivation's. A map that exists but whose WRITE VE toggle is off contributes nothing
-    // and must not name the file; a LOW LOAD or RF KORR grid alone contributes plenty and used to
+    // and must not name the file; an RF KORR or SHAPE grid alone contributes plenty and used to
     // ship as `Base_` — the same lie in the other direction. Without any of them the artifact is
     // the BASE with the logic toggles applied: real (it is the PATCH-ON BIN you flash for a log
     // run), but not a tune.
-    const claimsTune = (writeVe && !!newMap) || !!extras?.tunedLowLoad || !!extras?.tunedRfKorr
-      || !!extras?.tunedShape || (extras?.calibrationEdits?.edits.length ?? 0) > 0;
+    const claimsTune = writeClaimsTune(newMap, writeVe, extras);
     const prefix = claimsTune ? 'Tune' : 'Base';
-    return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}.bin`;
+    return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}${gateSuffix}.bin`;
   };
 
   const downloadBin = (newMap: VEMap | null, extras?: PatchExtras) => {
@@ -443,20 +531,20 @@ export function useBinaryFile() {
     setApplyWotDisable(false);
     setWriteWarmup(false);
     setRestoreWotFuel(false);
-    // The three that were missing. Every toggle uploadBinary sets on load must be reset here for
+    // The ones that were missing. Every toggle uploadBinary sets on load must be reset here for
     // the same reason: the next BASE this session loads inherits whatever survives this list, and
-    // what survived was the tank-vent disable, the rf_korr arming and the low-load grid — the
-    // exact "next BASE is built with the previous session's patches" failure the two lists exist
-    // to prevent. One omission here already shipped once (`_TEVOFF` on an unrelated binary).
+    // what survived was the tank-vent disable and the rf_korr arming — the exact "next BASE is
+    // built with the previous session's patches" failure the two lists exist to prevent. One
+    // omission here already shipped once (`_TEVOFF` on an unrelated binary).
     setApplyTankVentDisable(false);
+    setApplyRfKorrGateDrop(false);
     setWriteRfKorr(false);
     // Back to the DEFAULT, not to false — this list exists so the next BASE starts where a fresh
     // load would, and a fresh load arms VE. Resetting it to false here would make the second
     // binary of a session behave differently from the first, which is the class of bug this list
     // was written to end rather than to join.
     setWriteVe(true);
-    setWriteLowLoad(false);
-    setTunedIdleQvs(null);
+    setTunedIdleTv(null);
   };
 
   return {
@@ -470,6 +558,8 @@ export function useBinaryFile() {
     applyWotDisable,
     applyTankVentDisable,
     setApplyTankVentDisable,
+    applyRfKorrGateDrop,
+    setApplyRfKorrGateDrop,
     setApplyWotDisable,
     writeWarmup,
     setWriteWarmup,
@@ -483,11 +573,11 @@ export function useBinaryFile() {
     setWriteRfKorr,
     writeVe,
     setWriteVe,
-    writeLowLoad,
     writeShape, setWriteShape,
-    setWriteLowLoad,
-    tunedIdleQvs,
-    setTunedIdleQvs,
+    tunedIdleTv,
+    setTunedIdleTv,
+    tunedLlsTv,
+    setTunedLlsTv,
     uploadBinary,
     loadFromBuffer,
     clear,

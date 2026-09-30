@@ -146,7 +146,7 @@ export function LiveDriveStrip({
     // click through TO. The button below keeps its own handler and needs no `pointer-events-auto`.
     return (
         <div className="relative z-20 m-2 mb-0 px-3 py-2 rounded
-                        bg-slate-950/90 border border-slate-800 backdrop-blur-sm
+                        bg-slate-950/90 border border-slate-800 min-[900px]:backdrop-blur-sm
                         flex items-stretch gap-3 font-mono tabular-nums">
             <Cell label="AQ %" value={aq === null ? '—' : aq.toFixed(1)} tone="text-blue-400" />
             <Cell

@@ -51,6 +51,70 @@ export function clipCells(text: string, limit: number): string {
   return out + "…";
 }
 
+/**
+ * Clip to `limit`, but never cut away `keep`.
+ *
+ * A formula is clipped from the right, which is fine until the thing the
+ * reader selected is what falls off the end. Selecting `KL_V_MAX_GANG` and
+ * opening `md_limiter_calc` drew the row that uses it as
+ *
+ *     MD_IND_VMAX = MD_IND_VMAX + (((K_MD_I_VMAX × ({…
+ *
+ * — the one row on the picture that was about the selection, ending one
+ * character before the name. The row was there and said nothing.
+ *
+ * When the plain clip would lose it, the window slides instead: an ellipsis,
+ * the stretch containing `keep` with a little context after it, and another
+ * ellipsis if there is more. The row keeps its place in source order — only
+ * which part of it is shown changes.
+ */
+export function clipAround(text: string, limit: number, keep?: string): string {
+  if (cells(text) <= limit) return text;
+  const plain = clipCells(text, limit);
+  if (!keep) return plain;
+  const at = text.toLowerCase().indexOf(keep.toLowerCase());
+  if (at < 0 || plain.toLowerCase().includes(keep.toLowerCase())) return plain;
+
+  const chars = [...text];
+  // Character index, not code-unit index: `cells` and the renderer both count
+  // characters, and a surrogate pair would put the window half a glyph out.
+  let start = 0;
+  for (let i = 0, n = 0; i < chars.length; i += 1) {
+    if (n >= at) { start = i; break; }
+    n += chars[i].length;
+  }
+  const keepLen = [...keep].length;
+  /** A little of what follows, so the name is not left hanging at the edge. */
+  const TRAIL = 12;
+  let end = Math.min(chars.length, start + keepLen + TRAIL);
+
+  // Two ellipses to pay for, one at each end; the trailing one only if the
+  // window really stops short of the end.
+  const budget = limit - (end < chars.length ? 2 : 1);
+  let width = 0;
+  let from = end;
+  while (from > 0) {
+    const w = cells(chars[from - 1]);
+    if (width + w > budget) break;
+    width += w;
+    from -= 1;
+  }
+  // The name itself must survive even when it alone exceeds the budget: cut
+  // the trailing context back rather than the name.
+  if (from > start) {
+    from = start;
+    width = 0;
+    end = start;
+    while (end < chars.length) {
+      const w = cells(chars[end]);
+      if (width + w > budget) break;
+      width += w;
+      end += 1;
+    }
+  }
+  return (from > 0 ? "…" : "") + chars.slice(from, end).join("") + (end < chars.length ? "…" : "");
+}
+
 export function textWidth(text: string, charW = CHAR_W): number {
   return cells(text) * charW;
 }

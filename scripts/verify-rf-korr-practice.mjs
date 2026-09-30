@@ -104,7 +104,8 @@ const cfg = {
 };
 const processed = processLogData(points, 'practice.csv', cfg, APP_CONFIG.MSS54HP.INTERPOLATION_TABLE);
 const calc = new VECalculator();
-const annotated = calc.annotateRfKorr(veMap, processed.rfKorrData, egt, { curves });
+const annotated = calc.annotateRfKorr(
+    veMap, processed.rfKorrData, egt, { curves }, processed.rawData);
 const tuned = tuneRfKorrTable(veMap, annotated, egt,
     { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD });
 

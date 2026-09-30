@@ -61,10 +61,11 @@ function syntheticLog(n = 900) {
             time: t,
             // A SWEEP, and then a DWELL.
             //
-            // The pulls have to land ABOVE the LOW LOAD seam (row 12, 3.2 %), or the VE
-            // calculator refuses every one of them and there is no map to compare. Idle stays
-            // at 0.8, which is LOW LOAD's band: a log carrying both is exactly what the split
-            // is for.
+            // The pulls sit at 8.2 % opening and idle at 0.8 %, so the log covers both ends
+            // of the table. That spread used to be mandatory rather than useful: everything
+            // below 3.20 % (opening row 12) belonged to a second derivation and this
+            // calculator refused those rows outright, so pulls placed low earned no map to
+            // compare. One derivation now, and the whole table is on the same bar.
             //
             // The last third holds 2700 rpm at 7.5 % — an axis crossing — because a sweep
             // earns nothing under the evidence gate and never did: rpm moving continuously
@@ -108,10 +109,11 @@ function jitteryLog(n = 900) {
             time: t,
             // A SWEEP, and then a DWELL.
             //
-            // The pulls have to land ABOVE the LOW LOAD seam (row 12, 3.2 %), or the VE
-            // calculator refuses every one of them and there is no map to compare. Idle stays
-            // at 0.8, which is LOW LOAD's band: a log carrying both is exactly what the split
-            // is for.
+            // The pulls sit at 8.2 % opening and idle at 0.8 %, so the log covers both ends
+            // of the table. That spread used to be mandatory rather than useful: everything
+            // below 3.20 % (opening row 12) belonged to a second derivation and this
+            // calculator refused those rows outright, so pulls placed low earned no map to
+            // compare. One derivation now, and the whole table is on the same bar.
             //
             // The last third holds 2700 rpm at 7.5 % — an axis crossing — because a sweep
             // earns nothing under the evidence gate and never did: rpm moving continuously

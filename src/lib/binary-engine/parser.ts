@@ -1,4 +1,4 @@
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, LAMBDA_SHUTDOWN, COMMUNITY_WOT_FUEL_RAW,
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, RF_KORR_GATE_FLOOR, LAMBDA_SHUTDOWN, COMMUNITY_WOT_FUEL_RAW,
     CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP } from '@/config/constants';
 import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import type { LtftLearnWindow } from '@/lib/log-engine/trimNeutrality';
@@ -34,6 +34,21 @@ export class BinaryParser {
      */
     public getTankVentDisabled(): boolean {
         return this.getUint8(TANK_VENT_GAIN.ADDRESS) === TANK_VENT_GAIN.DISABLED_RAW;
+    }
+
+    /**
+     * Whether this binary has the rf_korr filling floor dropped to the measurement value.
+     *
+     * ALL six points, not the first one. The curve is per-rpm and BMW's own points differ by 0.25
+     * between 1600 and 4000 rpm, so a single-point test would call a binary patched because its
+     * 1600 rpm entry is 0.55 — which is stock. `RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW` sits below
+     * every stock point for the same reason `getWOTThresholdStatus` tests above every stock cell.
+     */
+    public getRfKorrGateFloorDropped(): boolean {
+        const addr = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
+        return Array.from({ length: RF_KORR_GATE_FLOOR.POINTS },
+            (_, i) => this.getUint16(addr + i * 2))
+            .every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
     }
 
     /**

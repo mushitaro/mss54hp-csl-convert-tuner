@@ -6,7 +6,14 @@
  *   1. REPRODUCE. A session that has been flashed carries the bytes that went into the ECU
  *      (`binaries.tuned`, sha pinned by `flashHistory`). Rebuilding from `binaries.base` plus the
  *      log and comparing sha256 says whether this offline path is the same path the app took. If
- *      the two disagree, nothing else this script prints means anything.
+ *      the two disagree, nothing else this script prints means anything —
+ *
+ *      **unless the DERIVATION has changed since the flash, which is job 2's whole point.** Any
+ *      session flashed before 2026-09-09 mismatches for a legitimate reason: `kf_rf_soll` was
+ *      derived by two workflows then, and the single derivation now writes rows the upper one was
+ *      not allowed to own. #946 differs in 105 bytes for exactly that reason. So read a mismatch
+ *      against the commits between the flash and now before treating it as a defect. Reproduce is
+ *      a check on THIS path against THAT build, not a proof of correctness in either.
  *   2. REBUILD. With the derivation changed — a fixed gate, a different method — the same call
  *      produces the artifact that SHOULD have gone in, and the diff against the flashed file is
  *      exactly what a re-flash would change.
@@ -40,8 +47,6 @@ fs.writeFileSync(entry, [
     "export { VECalculator } from '@/lib/ve-calculator/calculator';",
     "export { readEgtTables } from '@/lib/ve-calculator/egtTables';",
     "export { readRfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';",
-    "export { readAlphaNTables } from '@/lib/ve-calculator/alphaNTable';",
-    "export { tuneLowLoad } from '@/lib/ve-calculator/lowLoadTuner';",
     "export { writtenVeGrid } from '@/lib/ve-calculator/composeVeGrid';",
     "export { BinaryPatcher } from '@/lib/binary-engine/patcher';",
     "export { APP_CONFIG } from '@/config/constants';",
@@ -71,7 +76,7 @@ console.log('REBUILD — ' + session.label + '   ' + new Date(session.createdAt)
 console.log(RULE);
 console.log('  base        ' + session.baseFileName);
 console.log('  base sha    ' + sha(base) + (sha(base) === session.baseSha256 ? '  (matches the record)' : '  MISMATCH'));
-console.log('  settings    writeVe=' + set.writeVe + '  writeLowLoad=' + set.writeLowLoad
+console.log('  settings    writeVe=' + set.writeVe
     + '  writeWarmup=' + set.writeWarmup + '  writeRfKorr=' + set.writeRfKorr);
 console.log('              applyPatch=' + set.applyPatch + '  applyWotDisable=' + set.applyWotDisable
     + '  applyTankVentDisable=' + set.applyTankVentDisable);
@@ -95,12 +100,11 @@ console.log('              veMethod=' + (cfg.veMethod ?? '(default)'));
 const veMap = new M.BinaryPatcher(ab).getVETable();
 const egt = M.readEgtTables(ab);
 const curves = M.readRfPtKorrCurves(ab);
-const alphaN = M.readAlphaNTables(ab);
 
 const processed = M.processLogData(rawLog, session.baseFileName, cfg, set.interpolationTable);
 const calc = new M.VECalculator();
 const annotated = calc.annotateRfKorr(veMap, processed.data, egt,
-    { curves, assumedPressureMbar: cfg.assumedAmbientPressure });
+    { curves, assumedPressureMbar: cfg.assumedAmbientPressure }, processed.rawData);
 
 // The same option object `veCalcOptionsFor` builds, with the session's own thresholds.
 const res = calc.calculateNewVEMap(veMap, annotated, {
@@ -116,14 +120,10 @@ const res = calc.calculateNewVEMap(veMap, annotated, {
 });
 const newMap = res.newMap;
 
-const lowLoad = alphaN && processed.data.length ? M.tuneLowLoad(processed.data, alphaN, veMap) : null;
-const lowLoadWrite = set.writeLowLoad && lowLoad?.acceptable
-    ? { grid: lowLoad.tuned, owned: lowLoad.owned } : null;
-
 // ---------------------------------------------------------------- the artifact
 // buildPatchedBuffer's order, and only the writers this session armed.
 const patcher = new M.BinaryPatcher(ab);
-const written = M.writtenVeGrid(set.writeVe ? newMap?.data ?? null : null, lowLoadWrite, null);
+const written = M.writtenVeGrid(set.writeVe ? newMap?.data ?? null : null, null);
 if (written) patcher.setVETableData(written);
 if (newMap && set.writeWarmup) {
     const source = written ? { ...newMap, data: written } : newMap;
@@ -141,8 +141,7 @@ const out = Buffer.from(patcher.getBuffer());
 // ---------------------------------------------------------------- what it says
 const flashed = binaries.tuned ? Buffer.from(binaries.tuned, 'base64') : null;
 console.log(NL + '  cells written   VE ' + (res.acceptedMap.flat().filter(Boolean).length)
-    + '   LOW LOAD ' + (lowLoadWrite ? lowLoad.report.cellsMeasured : 0)
-    + (lowLoadWrite ? '' : ' (not armed or not acceptable)'));
+    + (set.writeVe ? '' : ' (not armed)'));
 console.log('  rebuilt sha     ' + sha(out));
 
 if (flashed) {

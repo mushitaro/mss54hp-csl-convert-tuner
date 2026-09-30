@@ -1,23 +1,26 @@
-import React, { useMemo } from 'react';
-import { AlertTriangle, CheckCircle2, CircleSlash, Wind } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Info, Wind } from 'lucide-react';
 import type { IdleSample } from '@/lib/dme-link/types';
 import type { IdleTables } from '@/lib/idle/idleTables';
 import type { IdleTuneResult, IdleRejectReason } from '@/lib/idle/types';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { IDLE_WRITE_SEALED } from '@/lib/idle/seal';
-import { IdlePreflight } from './IdlePreflight';
+import { isWritableCell, STRUCTURAL_EXCLUSIONS } from '@/lib/idle/tuner';
+import { findEcuItem } from '@/lib/ecu-items/catalog';
+import { Stat, SectionLabel, emph } from './IdleNote';
+import { MapEditor } from './MapEditor';
+import { IDLE_TUNE_DEFAULTS } from '@/lib/idle/types';
 
 /**
- * The idle panel.
+ * The idle panel: THE TABLE THAT WILL BE WRITTEN, and whether the run earned it. Nothing else.
  *
- * The trace is the panel. Everything else on this screen is a number the driver could get another
- * way; the one thing they cannot get another way is a picture of `md_llri` sitting away from where
- * the governor is designed to leave it, with the accepted windows marked and the target and the
- * rails drawn in. That single view answers "is the feedforward wrong, and by how much" — which is
- * the whole question.
+ * Everything that is an indicator now lives on the visualization pane as a bar against its own
+ * threshold (`IdleGauges`), and everything that is an explanation is behind the ⓘ. What is left in
+ * this pane is the two things a driver came here to read: what changes, and what the run kept.
  *
- * Instrument shorthand stays English in both languages, per the rule in lib/dialog-text.ts. Prose
- * switches.
+ * The panel used to open with a paragraph about the correction, carry a five-card precondition
+ * block in the middle, and close with two more cards of standing reference — including a note about
+ * what an earlier version of this feature got wrong, which is a code comment wearing a card.
  */
 
 const REASON_TEXT: Record<IdleRejectReason, { en: string; ja: string }> = {
@@ -33,9 +36,6 @@ const REASON_TEXT: Record<IdleRejectReason, { en: string; ja: string }> = {
     'thin-count': { en: 'too few samples', ja: 'サンプル数不足' },
     unsteady: { en: 'the two robust statistics disagreed — an event, not a steady state', ja: '2 つのロバスト統計が不一致 ＝ 定常ではなくイベント' },
     'integrator-drifting': { en: 'the measured quantity was still moving', ja: '測定量がまだ動いていた' },
-    // The two the retarget to KF_LLS_TV brought with it. `model-disagrees` is the one worth reading
-    // first on a first capture: it is not a thin-evidence rejection, it is the map saying it is not
-    // the map. See valveModel.ts.
     'no-air-request': {
         en: 'ML_SOLL_LLS never arrived, so there is no air row to bin this onto',
         ja: 'ML_SOLL_LLS が届いておらず、割り当てる空気量の行が決まらない',
@@ -54,121 +54,74 @@ const REASON_TEXT: Record<IdleRejectReason, { en: string; ja: string }> = {
     'limp-branch': { en: 'the idle valve was in limp-home — the maps are not being consulted', ja: 'アイドル弁が非常運転 ＝ マップが参照されていない' },
     'no-evidence': { en: 'no dwell landed here', ja: 'この点に dwell が無い' },
     'single-dwell': { en: 'one dwell is one observation repeated, not two', ja: 'dwell 1 本は反復であって独立な 2 観測ではない' },
-    'off-breakpoint': { en: 'the evidence sat too far from this breakpoint', ja: '証拠がこのブレークポイントから離れすぎ' },
     'stall-column': { en: 'the 500 rpm column is the stall catch — warm evidence says nothing about it', ja: '500 rpm 列は失速キャッチ。暖機時の証拠では判断できない' },
     'cold-row': { en: 'not written from warm evidence', ja: '暖機時の証拠から冷間行は書かない' },
+    'authority-floor-row': { en: 'the 11 kg/h row is the authority floor, not a calibration', ja: '11 kg/h 行は権限の床であって較正値ではない' },
     'below-authority-floor': { en: 'the request would fall below where the valve responds at all', ja: 'アイドル弁が応答しなくなる領域まで下げる要求だった' },
     'sub-quantum': { en: 'converged — the map cannot express a smaller change', ja: '収束 ——これ以上細かい変更をマップが表現できない' },
 };
 
+/** Reserved lines for the reject list, so the grid under it cannot move. */
+const REJECT_ROWS = 3;
+
 const TEXT = {
     ja: {
-        title: 'アイドル空気フィードフォワード',
-        lede: 'アイドル調速器の I 項 MD_LLRI が「設計上そこに座るはずの値」からどれだけ外れているかを測ります。'
-            + '**書き込みは封印中です** ——焼き込む先として選んだマップが、この較正では読まれていないため。'
-            + '測定・採否・トレース・セッション保存は動きます。',
-        sealed: '書き込み封印中 —— 書き込み先に読み手がいない',
-        sealedBody1: 'この機能が書こうとしていた KF_LLR_QVS_GRUND は、この較正では誰にも読まれていません。'
-            + 'lls_tv_calc (master 0x025D0A) の呼び出し元は 2 つあり、cfg_m.egas (XDF 0x8012) で排他選択されます。'
-            + '実機 BIN でそのバイトは 0x00、XDF 自身の TXTEQ は 0 = Momentenmanager。'
-            + 'つまり生きているのは llr_qsoll_calc ではなく egas_compute_throttle_target の側で、'
-            + 'KF_LLS_TV は LLR_QSOLL ではなく ML_SOLL_LLS（トルク経路）で引かれます。',
-        sealedBody2: '独立した傍証: LLR_QSOLL (0xFFEF1A) は 1 MB 中に絶対参照が 1 箇所しかなく、それは自分への書き込みです。'
-            + 'なお、この機能が防御として掲げていた model gate では検出できません ——'
-            + 'あれは LLR_QVS がマップから計算されていることを示すだけで、その先を誰かが読んでいることは示しません。'
-            + '何を測って何に書くべきかは、逆アセンブルから決め直します。',
-        procedure: '手順',
-        procedureBody: '停車・ニュートラル・サイドブレーキ・水温 80 °C 以上。A/C OFF、ヘッドライトとブロワも OFF。'
-            + 'ハンドルに触れないこと。**60 秒間そのまま静止**。これを 3 回、間に 2000 rpm を 30 秒挟む。',
-        recording: '記録中 —— 停めるのはハブの STOP',
-        useHub: 'ハブの START IDLE で記録を開始します',
-        target: '目標',
-        targetNote: 'ゼロではありません。K_LFR_MDADAPT_OFFSET の符号反転で、自車 BIN から読んだ値です。',
-        noBin: 'BIN が読み込まれていません。',
-        noTables: 'この BIN からアイドル系のテーブルを読めませんでした。'
-            + 'K_LLR_Q_MCS または K_LLR_QSOLL_MIN が 0 でないか、KF_LLS_TV の第 1 行が下限レールに無い場合、'
-            + 'このツールが前提としている構成と違うため実行しません。',
+        title: 'IDLE VALVE DUTY',
         census: '採否',
-        dwells: 'dwell',
-        accepted: '採用',
-        error: '誤差',
-        cells: 'セル',
-        updated: '更新',
-        converged: '収束',
-        proposal: '提案',
-        stock: '現在',
-        tuned: '提案値',
-        writeArm: 'この提案を書き込みに載せる',
-        writeArmed: '書き込みに載せました',
-        risk: 'リスク',
-        riskBody: 'これはアイドルでエンジンに入る空気量を変えます。'
-            + '**多すぎると**アイドルが高く張り付いてハンチングします ——この較正には下げる手段がほとんどありません'
-            + '（KL_LFR_TZ_NEG は全ゼロ、P 項は回転が低い側でしか働かず、戻り道は 5.12 s の積分だけ）。'
-            + '**少なすぎると**アイドルをアイドル弁ではなくスロットルが保持することになり、応答が遅くなって、'
-            + '次のコンプレッサ投入や据切りで失速しえます。書き込むのは 80 °C 行だけです。',
-        precondition: '前提（ツールからは確認できません）',
-        preconditionBody: 'K_FR_T_ADAPT の系統。Terra プログラムの DME では充填レギュレータ適応が 384 秒ごとになり、'
-            + 'まさにこの運転領域に定常誤差が残ります。0xE002 には触らないこと。fr_regler をログして可視化しています。',
-        limp: 'アイドル弁が非常運転に入っていました。この run からは何も導出しません。',
+        table: 'KF_LLS_TV',
+        tableNote: '実線は、この run の暖機データが実際に載った行です。'
+            + '500 rpm 列は失速キャッチ、11 kg/h 行は権限の床なので、どちらも書きません。'
+            + '残りの行は「冷間だから」ではなく「この run が測っていないから」暗く出ます。',
+        noWrite: '変更なし',
+        pooled: (n: number) => `同一 BASE の過去 ${n} 本を含む`,
+        atHub: (n: number) => `書き込みはハブの WRITE メニューの IDLE 行で —— ${n} セル`,
+        notYet: '書き込める提案はまだありません',
+        sealed: '書き込み封印中 —— 書き込み先に読み手がいない',
+        noTables: 'この BIN からアイドル系のテーブルを読めませんでした。KF_LLS_TV の構成が想定と違います。',
+        limp: 'アイドル弁が非常運転でした。この run からは何も導出しません。',
         railed: '積分器がクランプに張り付いていました。権限を使い切った状態は測定値ではありません。',
-        fallbackNote: 'このセッションは fallback プロファイルで走っています。zustand_motor と kkos_st が無いため、'
-            + 'A/C の除外は自動ゲートではなく手順（A/C を切ること）に依存します。',
+        info: 'アイドル調速器の I 項 MD_LLRI が「設計上そこに座るはずの値」からどれだけ外れているかを測り、'
+            + 'その差を **KF_LLS_TV**（アイドル弁デューティ、0x9E10）に書きます。'
+            + '車が実際にアイドルする回転数は軸のブレークポイントの間にあるので、補正は DME が補間する'
+            + '各セルへ重み付きで分配されます。1 パスあたり 1 セル 3.0 % が上限。'
+            + '目標がゼロでないのは K_LFR_MDADAPT_OFFSET の符号反転だからで、自車 BIN から読んでいます。\n\n'
+            + '**リスク。** これはアイドルでエンジンに入る空気量を変えます。多すぎるとアイドルが高く張り付いて'
+            + 'ハンチングします —— この較正には下げる手段がほとんどありません（KL_LFR_TZ_NEG は全ゼロ、'
+            + 'P 項は回転が低い側でしか働かず、戻り道は 5.12 s の積分だけ）。少なすぎるとアイドルを'
+            + 'スロットルが保持することになり、応答が遅くなって次のコンプレッサ投入で失速しえます。\n\n'
+            + '書き換えるのは、この run の暖機 dwell が実際に載った行だけです。'
+            + '500 rpm 列（失速キャッチ）と 11 kg/h 行（権限の床）は書きません。'
+            + '縦軸は水温ではなく空気要求量なので、行番号で冷間かどうかを決めることはしません。',
     },
     en: {
-        title: 'IDLE AIR FEEDFORWARD',
-        lede: 'Measures how far the idle governor’s I term MD_LLRI sits from where it is designed to '
-            + 'rest. **Writing is sealed** — the map it was going to bake that gap into is not read in '
-            + 'this calibration. Measurement, census, trace and the session store still run.',
-        sealed: 'WRITE SEALED — the target has no consumer',
-        sealedBody1: 'KF_LLR_QVS_GRUND, the map this was going to write, is read by nothing in this '
-            + 'calibration. lls_tv_calc (master 0x025D0A) has two call sites, mutually exclusive on '
-            + 'cfg_m.egas (XDF 0x8012). That byte is 0x00 in this image and the XDF’s own TXTEQ gives '
-            + '0 = Momentenmanager, so the live caller is egas_compute_throttle_target rather than '
-            + 'llr_qsoll_calc, and KF_LLS_TV is indexed on ML_SOLL_LLS — the torque path — not on '
-            + 'LLR_QSOLL.',
-        sealedBody2: 'Independent corroboration: LLR_QSOLL (0xFFEF1A) has exactly one absolute reference '
-            + 'in the whole 1 MB image, and it is its own write site. The model gate this feature named '
-            + 'as its defence would not have caught it — that gate shows LLR_QVS is computed from the '
-            + 'map, never that anything downstream reads the result. What to measure and what to write '
-            + 'are being re-derived from the disassembly.',
-        procedure: 'Procedure',
-        procedureBody: 'Stationary, neutral, handbrake on, coolant above 80 °C. A/C off, headlights and '
-            + 'blower off, hands off the wheel. **Sit still for 60 s.** Three times, with 30 s at '
-            + '~2000 rpm between.',
-        recording: 'RECORDING — stop it at the hub',
-        useHub: 'START IDLE at the hub begins a run',
-        target: 'Target',
-        targetNote: 'Not zero. Minus K_LFR_MDADAPT_OFFSET, read from your own BIN.',
-        noBin: 'No BIN loaded.',
-        noTables: 'The idle tables could not be read from this BIN. If K_LLR_Q_MCS or K_LLR_QSOLL_MIN is '
-            + 'non-zero, or KF_LLS_TV’s first row is not at the lower rail, this is not the '
-            + 'configuration this tool describes and it will not run.',
+        title: 'IDLE VALVE DUTY',
         census: 'Census',
-        dwells: 'dwells',
-        accepted: 'accepted',
-        error: 'error',
-        cells: 'cells',
-        updated: 'updated',
-        converged: 'converged',
-        proposal: 'Proposal',
-        stock: 'current',
-        tuned: 'proposed',
-        writeArm: 'Arm this proposal for writing',
-        writeArmed: 'Armed for writing',
-        risk: 'Risk',
-        riskBody: 'This changes how much air the engine gets at idle. **Too much** and idle sits high and '
-            + 'hunts — this calibration has almost no way down (KL_LFR_TZ_NEG is all zeros, the P term '
-            + 'only acts below target, and the only path back is a 5.12 s integrator). **Too little** '
-            + 'and idle is held by the throttle instead of the valve, which is slower, and the next '
-            + 'compressor engagement can stall it. Only the 80 °C row is written.',
-        precondition: 'Precondition (this tool cannot check it)',
-        preconditionBody: 'The K_FR_T_ADAPT lineage. On a Terra-program DME the filling regulator adapts '
-            + 'every 384 s instead of 1.5, leaving a standing error in exactly this operating region. Do '
-            + 'not touch 0xE002. fr_regler is logged so a drifting regulator is at least visible.',
+        table: 'KF_LLS_TV',
+        tableNote: 'Solid rows are the ones this run’s own warm dwells landed on. The 500 rpm column '
+            + 'is the stall catch and the 11 kg/h row is the authority floor, so neither is ever written. '
+            + 'The rest are dim because this run did not measure them, not because they are cold.',
+        noWrite: 'nothing moves',
+        pooled: (n: number) => `+${n} earlier runs on this BASE`,
+        atHub: (n: number) => `The WRITE menu's IDLE row carries this — ${n} cells`,
+        notYet: 'No proposal to write yet',
+        sealed: 'WRITE SEALED — the target has no consumer',
+        noTables: 'The idle tables could not be read from this BIN — KF_LLS_TV is not the configuration '
+            + 'this tool describes.',
         limp: 'The idle valve was in limp-home. Nothing is derived from this run.',
         railed: 'The integrator was parked on a clamp. Out of authority is not a measurement.',
-        fallbackNote: 'This session is on the fallback profile. Without zustand_motor and kkos_st, A/C '
-            + 'exclusion is a procedure you follow rather than a gate this tool enforces.',
+        info: 'Measures how far the idle governor’s I term MD_LLRI sits from where it is designed to '
+            + 'rest, and writes that gap into **KF_LLS_TV** — the idle valve duty map, 0x9E10. The idle '
+            + 'this car holds sits between breakpoints, so the correction is shared across the cells '
+            + 'the DME interpolates, weighted. Capped at 3.0 % per cell per pass. The target is not '
+            + 'zero because it is minus K_LFR_MDADAPT_OFFSET, read from your own BIN.\n\n'
+            + '**Risk.** This changes how much air the engine gets at idle. Too much and idle sits high '
+            + 'and hunts — this calibration has almost no way down (KL_LFR_TZ_NEG is all zeros, the P '
+            + 'term only acts below target, and the only path back is a 5.12 s integrator). Too little '
+            + 'and idle is held by the throttle instead of the valve, and the next compressor '
+            + 'engagement can stall it.\n\n'
+            + 'Only the rows this run’s own warm dwells landed on are written. The 500 rpm column is '
+            + 'the stall catch and the 11 kg/h row is the authority floor, so neither ever is. The axis is '
+            + 'air demand, not coolant, so nothing decides cold-versus-warm by row number.',
     },
 };
 
@@ -177,197 +130,240 @@ interface Props {
     tables: IdleTables | null;
     result: IdleTuneResult | null;
     running: boolean;
-    /** Arms the proposal for the next WRITE / download. Null disarms. */
-    onArm?: (values: number[][] | null) => void;
-    armed: boolean;
+    /** Drawn on the gauge rack now, not here. Kept on the props so the page has one place to pass it. */
+    sourceProven?: boolean | null;
+    /**
+     * GONE from this panel, and named here so the absence is deliberate.
+     *
+     * Arming happens on the hub's WRITE row, which is where "what will the flash change" is
+     * answered. `IdleWorkflow` still holds `onArm` — it disarms on START, so a new run cannot leave
+     * the previous run's bytes armed — it just no longer hands a button to this pane.
+     */
+    onArm?: never;
+    /** How many EARLIER runs on this same BASE are underneath the census and the proposal. */
+    pooledRuns?: number;
 }
 
-/**
- * The money view: MD_LLRI and the sum against time, with the target and the accepted windows drawn
- * in. Inline SVG rather than Plotly — this is one trace against one horizontal line, and the whole
- * point is that it renders instantly on a phone in a car park.
- *
- * Exported, and rendered by IdleWorkflow into the VISUALIZATION pane rather than inline here. It is
- * the picture this screen is for, and the app already has one place where the picture goes; leaving
- * it buried in the middle of a column of prose put it below the fold on the layout it matters most
- * on. `h-full` rather than a fixed height for the same reason — that pane sizes it now.
- */
-export const IdleTrace: React.FC<{ samples: IdleSample[]; result: IdleTuneResult | null; target: number }> =
-    ({ samples, result, target }) => {
-        const pts = useMemo(() => samples.filter(s => s.mdLlri !== null), [samples]);
-        if (pts.length < 2) return null;
-
-        const W = 640;
-        const H = 150;
-        const t0 = pts[0].time;
-        const t1 = pts[pts.length - 1].time || 1;
-        const vals = pts.flatMap(s => [s.mdLlri as number, (s.mdLlri as number) + (s.mdLlra ?? 0)]);
-        const lo = Math.min(target - 2, ...vals);
-        const hi = Math.max(target + 2, ...vals);
-        const x = (t: number) => ((t - t0) / Math.max(1e-6, t1 - t0)) * W;
-        const y = (v: number) => H - ((v - lo) / Math.max(1e-6, hi - lo)) * H;
-
-        const path = (get: (s: IdleSample) => number) =>
-            pts.map((s, i) => `${i ? 'L' : 'M'}${x(s.time).toFixed(1)},${y(get(s)).toFixed(1)}`).join('');
-
-        return (
-            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-full">
-                {/* Accepted windows first, so the traces sit on top of them. */}
-                {result?.dwells.filter(d => !d.rejected).map((d, i) => (
-                    <rect key={i} x={x(samples[d.startIndex]?.time ?? t0)} y={0}
-                        width={Math.max(1, x(samples[d.endIndex]?.time ?? t0) - x(samples[d.startIndex]?.time ?? t0))}
-                        height={H} fill="#4ade80" opacity={0.12} />
-                ))}
-                {/* The target. The single most important line on the screen. */}
-                <line x1={0} x2={W} y1={y(target)} y2={y(target)} stroke="#60a5fa" strokeWidth={1} strokeDasharray="4 3" />
-                <text x={4} y={y(target) - 3} fill="#60a5fa" fontSize={9} fontFamily="monospace">
-                    target {target.toFixed(1)} Nm
-                </text>
-                <path d={path(s => (s.mdLlri as number) + (s.mdLlra ?? 0))} fill="none" stroke="#f59e0b" strokeWidth={1.5} />
-                <path d={path(s => s.mdLlri as number)} fill="none" stroke="#e5e7eb" strokeWidth={1} opacity={0.7} />
-            </svg>
-        );
-    };
-
-export const IdlePanel: React.FC<Props> = ({ samples, tables, result, running, onArm, armed }) => {
+export const IdlePanel: React.FC<Props> = ({ samples, tables, result, pooledRuns = 0 }) => {
     const lang = useDialogLang();
     const t = TEXT[lang === 'ja' ? 'ja' : 'en'];
+    const [info, setInfo] = useState(false);
     const rep = result?.report;
     const target = tables?.idleTargetNm ?? 0;
 
+    /**
+     * The reasons a driver can act on, biggest first.
+     *
+     * The structural exclusions are filtered out. They fire on the same cells every run — 99
+     * cold-row, 13 stall-column, 9 authority-floor-row on this binary — so sorted by count they took
+     * three of the four slots and pushed the one actionable line (`throttle-open x 58`) to the
+     * bottom. The map above says which cells they are by drawing them dim; this list is for the run.
+     */
     const topRejects = useMemo(() => {
         if (!rep) return [];
         return (Object.entries(rep.rejects) as [IdleRejectReason, number][])
-            .filter(([, n]) => n > 0)
+            .filter(([r, n]) => n > 0 && !STRUCTURAL_EXCLUSIONS.has(r))
             .sort((a, b) => b[1] - a[1])
-            .slice(0, 4);
+            .slice(0, REJECT_ROWS);
     }, [rep]);
 
-    const warmRow = result ? result.cells[result.cells.length - 1] : null;
-    const onFallback = samples.length > 0 && samples.every(s => s.engineState === null);
+    /**
+     * WHAT THE GRID IS DRAWN FROM.
+     *
+     * `MapEditor` rather than a table written here — it is the component the VE map, the diff, the
+     * lambda grid and KF_RF_KORR_DRREL are all drawn with, and it has been generic over its axes and
+     * labels since the rf_korr work. A second grid built beside it is a second grid that drifts:
+     * this one already had different borders, a different header treatment and no coverage tint.
+     *
+     * `hits` is per-cell dwell samples, so the same ice-blue coverage fill that says "you have
+     * driven this VE cell enough" says "the evidence landed here". `muted` dims the cells the writer
+     * refuses. `tint` and `note` mark what moved.
+     */
+    /**
+     * THE AXES AND THEIR UNITS, taken from the definition rather than typed here.
+     *
+     * The three carry three DIFFERENT units and the labels said only one of them: rows were
+     * `ML_LL`, columns `RPM`, cells `LLS_TV %`, so the legend line read `ML_LL · RPM · LLS_TV %`
+     * and the only unit on it was the one at the end. Read left to right that says all three are
+     * per cent, and the rows are not — they are the air the engine is asking for, in kg/h. The
+     * catalog has always been unambiguous (`y.units 'kg/h'`, `values.units '%'`); the screen was not.
+     */
+    const axes = useMemo(() => {
+        const def = findEcuItem('KF_LLS_TV');
+        if (!def || def.kind !== 'map') return null;
+        return {
+            row: `${def.y.label ?? 'ML_LL'} ${def.y.units}`,
+            col: def.x.label ?? 'RPM',
+            value: `LLS_TV ${def.values.units}`,
+            /** The whole shape in one line, so the units are readable without opening the ⓘ. */
+            summary: `0x${def.values.address.toString(16).toUpperCase()}`
+                + ` · ${def.y.units} × ${def.x.units} → ${def.values.units}`,
+        };
+    }, []);
+
+    const grid = useMemo(() => {
+        if (!tables) return null;
+        const y = tables.llsTv.y;
+        const x = tables.llsTv.x;
+        const cell = (r: number, c: number) => result?.cells[r]?.[c];
+        return {
+            map: {
+                xAxis: x,
+                yAxis: y,
+                data: y.map((_, r) => x.map((__, c) => cell(r, c)?.tuned ?? tables.llsTv.values[r][c])),
+            },
+            hits: y.map((_, r) => x.map((__, c) => cell(r, c)?.samples ?? 0)),
+            muted: y.map((_, r) => x.map((__, c) => !isWritableCell(r, c))),
+            tint: (r: number, c: number) => {
+                const k = cell(r, c);
+                return k && k.tuned !== k.stock ? 'text-emerald-400' : undefined;
+            },
+            note: (r: number, c: number) => {
+                const k = cell(r, c);
+                if (!k || k.tuned === k.stock) return undefined;
+                return `${k.stock.toFixed(2)} -> ${k.tuned.toFixed(2)} `
+                    + `(${k.tuned > k.stock ? '+' : ''}${(k.tuned - k.stock).toFixed(2)})`;
+            },
+        };
+    }, [tables, result]);
+
+    /** The one line under the grid: which cells move and by how much. Always rendered. */
+    const moved = useMemo(
+        () => (result?.cells.flat() ?? []).filter(c => c.tuned !== c.stock),
+        [result]);
+    const movedCount = moved.length;
 
     return (
-        <div className="space-y-4 text-sm">
-            <div className="flex items-center gap-2">
-                <Wind className="w-4 h-4 text-sky-400" />
-                <h2 className="font-mono tracking-wide">{t.title}</h2>
-            </div>
-            <p className="text-white/70 leading-relaxed">{t.lede}</p>
-
-            {!tables && (
-                <p className="flex gap-2 text-amber-300"><AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{t.noTables}</p>
-            )}
-
-            <div className="rounded border border-white/10 p-3 space-y-1">
-                <div className="font-mono text-xs text-white/50">{t.procedure}</div>
-                <p className="text-white/80 leading-relaxed">{t.procedureBody}</p>
-            </div>
-
-            {/* No START button here. The hub is the one place that answers "what do I do next", and
-                a second control for the same action is the confusion the DOWNLOAD BIN pair already
-                taught this codebase. This says where the control is instead. */}
-            <div className="flex items-center gap-3 font-mono text-xs">
-                <span className={running ? 'text-amber-400' : 'text-white/50'}>
-                    {running ? t.recording : t.useHub}
-                </span>
-                <span className="text-white/50">
+        /**
+         * NOTHING HERE APPEARS OR DISAPPEARS WITH A RUN.
+         *
+         * Pressing START used to grow the census block and the ARM button and push the grid down the
+         * page; stopping grew the moved-cell list on top of that. The reader's eye had to find the
+         * table again after every transition. Every section below is rendered at every moment, with
+         * a dash where there is no reading yet — which is also the honest thing to draw, because
+         * "0 dwells accepted" before a run and "0 dwells accepted" after one are different facts and
+         * a dash says the first one.
+         *
+         * The only thing that changes height is the info button, which the reader pressed.
+         */
+        <div className="space-y-3 text-slate-300">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-300">
+                    <Wind className="h-3 w-3" />{t.title}
+                </h3>
+                <span className="ml-auto font-mono text-[10px] text-slate-500">
                     {samples.length} samples
-                    {tables && <> · {t.target} <span className="text-sky-300">{target.toFixed(1)} Nm</span></>}
+                    {tables && <> · <span className="text-blue-400">{target.toFixed(1)} Nm</span></>}
                 </span>
+                <button type="button" onClick={() => setInfo(v => !v)} aria-expanded={info}
+                    aria-label={t.title}
+                    className={`-mr-1 rounded p-1 ${info ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}>
+                    <Info className="h-3 w-3" />
+                </button>
             </div>
-            {tables && <p className="text-xs text-white/40">{t.targetNote}</p>}
 
-            {/* Above the census on purpose. This is not a quality score on the run — it is whether
-                the run is a measurement at all, and reading it after the numbers would be reading it
-                too late. */}
-            <IdlePreflight samples={samples} tables={tables} />
-
-            {onFallback && (
-                <p className="flex gap-2 text-amber-300 text-xs">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />{t.fallbackNote}
+            {info && (
+                <p className="whitespace-pre-line text-[10px] leading-relaxed text-slate-500">
+                    {emph(t.info)}
                 </p>
             )}
 
-            {rep && (
-                <div className="font-mono text-xs space-y-1">
-                    <div className={rep.dwellsAccepted === 0 ? 'text-red-400' : 'text-white/80'}>
-                        {t.census}: {rep.dwellsFound} {t.dwells} · {rep.dwellsAccepted} {t.accepted}
-                        {' · '}{t.error} {rep.worstErrorNm.toFixed(2)} Nm
-                        {' · '}{t.cells} {rep.cellsUpdated} {t.updated} / {rep.cellsConverged} {t.converged}
-                        {' · gain '}{rep.gainUsed.toFixed(3)}{rep.gainLearned ? ' (learned)' : ''}
-                    </div>
-                    {topRejects.length > 0 && (
-                        <ul className="text-white/50 space-y-0.5">
-                            {topRejects.map(([r, n]) => (
-                                <li key={r}>{r} × {n} — {REASON_TEXT[r][lang === 'ja' ? 'ja' : 'en']}</li>
-                            ))}
-                        </ul>
+            {/* A RESERVED line for the three facts that invalidate everything under them. Empty
+                rather than absent, so a run that goes wrong does not reflow the panel. */}
+            <p className="h-[13px] truncate font-mono text-[10px] leading-none text-red-400">
+                {!tables ? t.noTables : rep?.limpSeen ? t.limp : rep?.integratorRailed ? t.railed : ''}
+            </p>
+
+            <div className="space-y-2">
+                {/* The pool is NAMED. A write standing on three drives while the screen says one
+                    is a number the reader cannot check, and this session recorded only one of them. */}
+                <SectionLabel trailing={rep
+                    ? `${pooledRuns ? t.pooled(pooledRuns) + ' · ' : ''}gain ${rep.gainUsed.toFixed(3)}${rep.gainLearned ? ' learned' : ''}`
+                    : 'gain —'}>
+                    {t.census}
+                </SectionLabel>
+                <div className="grid grid-cols-5 gap-x-2">
+                    <Stat label="DWELLS" value={rep?.dwellsFound ?? '—'} tone="text-slate-400" />
+                    <Stat label="ACCEPTED" value={rep?.dwellsAccepted ?? '—'}
+                        tone={!rep ? 'text-slate-600' : rep.dwellsAccepted === 0 ? 'text-red-400' : 'text-emerald-400'} />
+                    <Stat label="ERROR" value={rep ? rep.worstErrorNm.toFixed(2) : '—'} tone="text-blue-400" />
+                    <Stat label="UPDATED" value={rep?.cellsUpdated ?? '—'} tone="text-slate-200" />
+                    <Stat label="CONVERGED" value={rep?.cellsConverged ?? '—'} tone="text-slate-400" />
+                </div>
+                {/* Exactly REJECT_ROWS lines, blank ones included. The list was 0 to 4 long and the
+                    grid below it moved every time a reason appeared. */}
+                <ul className="font-mono text-[10px] leading-[13px] text-slate-500">
+                    {Array.from({ length: REJECT_ROWS }, (_, i) => {
+                        const r = topRejects[i];
+                        return (
+                            <li key={i} className="flex h-[13px] gap-1.5">
+                                {r && <>
+                                    <span className="shrink-0 text-slate-400">{r[0]} × {r[1]}</span>
+                                    <span className="min-w-0 truncate">
+                                        — {REASON_TEXT[r[0]][lang === 'ja' ? 'ja' : 'en']}
+                                    </span>
+                                </>}
+                            </li>
+                        );
+                    })}
+                </ul>
+            </div>
+
+            <div className="space-y-1.5">
+                {/* The units are IN the header, not behind the ⓘ. A unit is part of the number, not
+                    an explanation of it — and rows, columns and cells carry three different ones. */}
+                <SectionLabel trailing={axes
+                    ? `${tables ? `${tables.llsTv.y.length}x${tables.llsTv.x.length} · ` : ''}${axes.summary}`
+                    : undefined}>
+                    {t.table}
+                </SectionLabel>
+                {/* THE SAME GRID THE VE MAP IS, at the VE map's own scale.
+                    `!h-auto` beats MapEditor's own `h-full`, so the grid is exactly its thirteen
+                    rows and never scrolls vertically. It had a 300 px box, which cut four rows off
+                    and put a scrollbar inside a pane measured at 806 px wide with the table only
+                    485 of them — a scroll invented by the container, not needed by the content.
+
+                    No box around it either: the grid draws its own borders on every cell, and a
+                    frame outside them is a second device on the same edge. */}
+                <div>
+                    {grid && (
+                        <MapEditor
+                            className="!h-auto"
+                            mapData={grid.map}
+                            hitData={grid.hits}
+                            mutedCells={grid.muted}
+                            cellTint={grid.tint}
+                            cellNote={grid.note}
+                            rowLabel={axes?.row}
+                            colLabel={axes?.col}
+                            valueLabel={axes?.value}
+                            rowFormat={(v: number) => v.toFixed(0)}
+                            valueFormat={(v: number) => v.toFixed(2)}
+                            coverageThin={IDLE_TUNE_DEFAULTS.minCellSamples / 2}
+                            coverageOk={IDLE_TUNE_DEFAULTS.minCellSamples}
+                        />
                     )}
-                    {rep.limpSeen && <div className="text-red-400">{t.limp}</div>}
-                    {rep.integratorRailed && <div className="text-red-400">{t.railed}</div>}
                 </div>
-            )}
-
-            {warmRow && (
-                <div className="space-y-2">
-                    <div className="font-mono text-xs text-white/50">{t.proposal} — {result!.tmotAxis[result!.tmotAxis.length - 1]} °C</div>
-                    <table className="w-full font-mono text-xs">
-                        <thead className="text-white/40">
-                            <tr><th className="text-left">RPM</th><th className="text-right">{t.stock}</th>
-                                <th className="text-right">{t.tuned}</th><th className="text-right">Nm</th>
-                                <th className="text-left pl-3">—</th></tr>
-                        </thead>
-                        <tbody>
-                            {warmRow.map(c => (
-                                <tr key={c.col} className={c.tuned !== c.stock ? 'text-emerald-300' : 'text-white/50'}>
-                                    <td>{c.rpm}</td>
-                                    <td className="text-right">{c.stock.toFixed(1)}</td>
-                                    <td className="text-right">{c.tuned.toFixed(1)}</td>
-                                    <td className="text-right">{c.errorNm ? c.errorNm.toFixed(2) : '—'}</td>
-                                    <td className="pl-3 text-white/40">
-                                        {c.rejected
-                                            ? <span className="flex items-center gap-1">
-                                                {c.converged ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <CircleSlash className="w-3 h-3" />}
-                                                {REASON_TEXT[c.rejected][lang === 'ja' ? 'ja' : 'en']}
-                                            </span>
-                                            : `${c.dwells} dwells · ${c.samples} samples`}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-
-            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-3 space-y-1">
-                <div className="font-mono text-xs text-amber-300">{t.risk}</div>
-                <p className="text-white/80 leading-relaxed text-xs">{t.riskBody}</p>
+                {/* One reserved line: what moves, and by how much. `title` has no hover on a phone,
+                    so the delta has to be on the screen rather than only in the cell's tooltip. */}
+                <p className="h-[13px] truncate font-mono text-[10px] leading-none text-slate-500">
+                    {moved.length === 0 ? t.noWrite : moved.map(c =>
+                        `${c.rpm} ${c.tuned > c.stock ? '+' : ''}${(c.tuned - c.stock).toFixed(2)}`).join('  ·  ')}
+                </p>
+                <p className="text-[9px] leading-relaxed text-slate-600">{t.tableNote}</p>
             </div>
 
-            {/* No ARM button while the write is sealed. The proposal above is still computed and
-                still worth reading — the arithmetic is not what is in doubt — but it cannot reach a
-                byte, and a button that armed something the patcher refuses would be a lie about what
-                happens next. See lib/idle/seal.ts for the disassembly. */}
-            {IDLE_WRITE_SEALED ? (
-                <div className="rounded border border-red-500/40 bg-red-500/5 p-3 space-y-2">
-                    <div className="font-mono text-xs text-red-300">{t.sealed}</div>
-                    <p className="text-white/80 leading-relaxed text-xs">{t.sealedBody1}</p>
-                    <p className="text-white/70 leading-relaxed text-xs">{t.sealedBody2}</p>
-                </div>
-            ) : result?.acceptable && onArm && (
-                <button
-                    onClick={() => onArm(armed ? null : result.tuned)}
-                    className={`px-4 py-2 rounded font-mono text-xs tracking-wider
-                        ${armed ? 'bg-emerald-600/80' : 'bg-white/10 hover:bg-white/20'}`}
-                >
-                    {armed ? t.writeArmed : t.writeArm}
-                </button>
-            )}
-
-            <div className="rounded border border-white/10 p-3 space-y-1">
-                <div className="font-mono text-xs text-white/50">{t.precondition}</div>
-                <p className="text-white/60 leading-relaxed text-xs">{t.preconditionBody}</p>
-            </div>
+            {/* NO ARM BUTTON. The hub's WRITE menu is the one place this app answers "what will
+                the flash change", and a second control for the same decision is the confusion the
+                DOWNLOAD BIN pair already taught this codebase — the same reason there is no START
+                button on this panel either. What is left is one reserved line saying where the
+                control is and what it would carry, which is the rule every hint here follows. */}
+            <p className="h-[13px] truncate font-mono text-[10px] leading-none text-slate-500">
+                {IDLE_WRITE_SEALED ? t.sealed
+                    : result?.acceptable ? t.atHub(movedCount)
+                        : t.notYet}
+            </p>
         </div>
     );
+
 };

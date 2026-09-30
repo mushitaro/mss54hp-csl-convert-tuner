@@ -9,8 +9,8 @@
  *
  * The five, in the order the calculator tests them:
  *
- *   thin-count       rawCount   >= minCellSamples (10)     were you here at all
- *   thin-weight      weightSum  >= minCellWeight (5.0)     were you here LONG enough, and CENTRED
+ *   thin-count       rawCount   >= minCellSamples (3)      were you here at all
+ *   thin-weight      weightSum  >= minCellWeight (2.5)    were you here LONG enough, and CENTRED
  *   shared-evidence  selfShare  >= 0.30                    is the evidence about THIS cell
  *   scatter          sd         <= 0.08                    is it one condition or two averaged
  *   imprecise        stdErr     <= 0.005                   is the MEAN pinned finely enough
@@ -18,7 +18,8 @@
  * The one that surprises people is `thin-weight`, because it is not a second sample count. A
  * sample is spread over the FOUR cells bracketing it by bilinear weight, so a cell only collects
  * the whole of a sample that lands exactly on its own axis crossing. Ten samples sitting near a
- * corner between four cells contribute about 0.25 each — weightSum 2.5 against a bar of 5.0 —
+ * corner between four cells contribute about 0.25 each — weightSum 2.5, which is exactly the
+ * 2.5 bar and therefore the thinnest evidence that can clear it —
  * while ten samples parked dead centre contribute 1.0 each. Same count, four times the weight.
  *
  *     node scripts/analyze-cell-gates.mjs <session-dir>
@@ -42,7 +43,7 @@ fs.writeFileSync(entry, [
     "export { VECalculator, MIN_SELF_SHARE } from '@/lib/ve-calculator/calculator';",
     "export { readEgtTables } from '@/lib/ve-calculator/egtTables';",
     "export { readRfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';",
-    "export { MAX_SAMPLE_SD, MAX_STD_ERR, LOW_LOAD_TOP_ROW } from '@/lib/ve-calculator/lowLoadTuner';",
+    "export { MAX_SAMPLE_SD, MAX_STD_ERR } from '@/lib/ve-calculator/veScatter';",
     "export { resolveRfKorr } from '@/lib/types';",
     "export { BinaryParser } from '@/lib/binary-engine/parser';",
     "export { APP_CONFIG } from '@/config/constants';",
@@ -69,16 +70,16 @@ const ab = base.buffer.slice(base.byteOffset, base.byteOffset + base.byteLength)
 // the current map derives a correction on top of a correction, while the log it is derived
 // from was recorded against the BASE that was actually in the ECU.
 //
-// On session #1 the two differ in 21 cells — VE's 15 plus LOW LOAD's 8, less the overlap — and
-// the error is not small: 85 % at 2100 rpm reads 0.687 in the binary against 0.579 in the
-// snapshot, so the correction came out -5.2 % where the truth is -16.6 %.
+// On session #1 the two differ in 21 cells, and the error is not small: 85 % at 2100 rpm reads
+// 0.687 in the binary against 0.579 in the snapshot, so the correction came out -5.2 % where the
+// truth is -16.6 %.
 const veMap = new M.BinaryParser(ab).getVETable();
 const egt = M.readEgtTables(ab);
 const air = { curves: M.readRfPtKorrCurves(ab) };
 
 const processed = M.processLogData(rawLog, session.baseFileName, cfg, session.tuneSettings.interpolationTable);
 const calc = new M.VECalculator();
-const ve = calc.annotateRfKorr(veMap, processed.data, egt, air);
+const ve = calc.annotateRfKorr(veMap, processed.data, egt, air, processed.rawData);
 
 // The same grid the write path builds, through the calculator's own methods.
 const plan = M.resolveRfKorr({
@@ -87,8 +88,11 @@ const plan = M.resolveRfKorr({
 const grid = calc.createGrid();
 for (const p of ve) calc.accumulatePoint(grid, p, plan, null, undefined);
 
-const MIN_SAMPLES = cfg.minVeCellSamples ?? 10;
-const MIN_WEIGHT = cfg.minVeCellWeight ?? 5.0;
+// The shipped defaults, so a session record that predates the fields is analysed under the bars
+// the app would actually apply rather than under a pair this script invented. They were 10 and
+// 5.0 here while the calculator's own were 3 and 2.5, so the report refused cells the app writes.
+const MIN_SAMPLES = cfg.minVeCellSamples ?? 3;
+const MIN_WEIGHT = cfg.minVeCellWeight ?? 2.5;
 const rpmAxis = veMap.xAxis ?? M.APP_CONFIG.MSS54HP.AXIS_RPM;
 const loadAxis = veMap.yAxis ?? M.APP_CONFIG.MSS54HP.AXIS_LOAD;
 
@@ -97,7 +101,6 @@ for (let i = 0; i < grid.length; i++) {
     for (let j = 0; j < grid[i].length; j++) {
         const c = grid[i][j];
         if (!c || c.rawCount === 0) continue;
-        const owns = i > M.LOW_LOAD_TOP_ROW;
         const selfShare = c.weightSum > 0 ? c.sumWeightSq / c.weightSum : 0;
         const wMean = c.weightSum > 0 ? c.sumStftWeighted / c.weightSum : 0;
         const wVar = c.weightSum > 0
@@ -105,12 +108,11 @@ for (let i = 0; i < grid.length; i++) {
         const sd = Math.sqrt(wVar);
         const nEff = selfShare > 0 ? c.weightSum / selfShare : 0;
         const stdErr = nEff > 0 ? sd / Math.sqrt(nEff) : Infinity;
-        const reject = !owns ? 'out-of-band'
-            : c.rawCount < MIN_SAMPLES ? 'thin-count'
-                : c.weightSum < MIN_WEIGHT ? 'thin-weight'
-                    : selfShare < M.MIN_SELF_SHARE ? 'shared-evidence'
-                        : sd > M.MAX_SAMPLE_SD ? 'scatter'
-                            : stdErr > M.MAX_STD_ERR ? 'imprecise' : null;
+        const reject = c.rawCount < MIN_SAMPLES ? 'thin-count'
+            : c.weightSum < MIN_WEIGHT ? 'thin-weight'
+                : selfShare < M.MIN_SELF_SHARE ? 'shared-evidence'
+                    : sd > M.MAX_SAMPLE_SD ? 'scatter'
+                        : stdErr > M.MAX_STD_ERR ? 'imprecise' : null;
         rows.push({
             i, j, load: loadAxis[i], rpm: rpmAxis[j],
             n: c.rawCount, w: c.weightSum, selfShare, sd, stdErr, nEff, reject,
@@ -126,13 +128,11 @@ console.log('  bounds:  count >= ' + MIN_SAMPLES + '   weight >= ' + MIN_WEIGHT.
     + '   selfShare >= ' + M.MIN_SELF_SHARE + '   sd <= ' + M.MAX_SAMPLE_SD
     + '   stdErr <= ' + M.MAX_STD_ERR);
 
-const owned = rows.filter(r => r.reject !== 'out-of-band');
-const written = owned.filter(r => r.reject === null);
-console.log('  cells with any sample: ' + rows.length
-    + '   VE owns: ' + owned.length + '   written: ' + written.length);
+const written = rows.filter(r => r.reject === null);
+console.log('  cells with any sample: ' + rows.length + '   written: ' + written.length);
 
 // THE QUESTION: cells that cleared the sample count and still did not get written.
-const passedCount = owned.filter(r => r.n >= MIN_SAMPLES);
+const passedCount = rows.filter(r => r.n >= MIN_SAMPLES);
 const blocked = passedCount.filter(r => r.reject !== null);
 console.log(NL + '  cells with ' + MIN_SAMPLES + '+ samples: ' + passedCount.length
     + '   of those, written: ' + (passedCount.length - blocked.length)
@@ -182,7 +182,7 @@ if (written.length) {
 
 // The weight-per-sample ratio is the whole of the thin-weight surprise, so state it directly.
 console.log(NL + '  weight per sample (1.00 = every sample landed dead centre on this cell):' + NL);
-const ratios = owned.filter(r => r.n >= 5).map(r => ({ ...r, ratio: r.w / r.n }));
+const ratios = rows.filter(r => r.n >= 5).map(r => ({ ...r, ratio: r.w / r.n }));
 ratios.sort((a, b) => a.ratio - b.ratio);
 const show = (r) => '  ' + String(r.load).padStart(8) + ' % ' + String(r.rpm).padStart(6)
     + '   ' + String(r.n).padStart(4) + ' samples -> weight ' + r.w.toFixed(2).padStart(7)

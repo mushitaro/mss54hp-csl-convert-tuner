@@ -15,10 +15,15 @@
  */
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findEcuItem } from '../src/lib/ecu-items/catalog/index.ts';
 import { validateCatalog } from '../src/lib/ecu-items/codec.ts';
 import { ECU_ITEMS } from '../src/lib/ecu-items/catalog/index.ts';
-import { readIdleTables, readIdleTablesResult, qvsAt, llsTvAt, isLimpDuty, railedRailFor } from '../src/lib/idle/idleTables.ts';
+import { readIdleTables, readIdleTablesResult, qvsAt, llsTvAt, isLimpDuty, railedRailFor,
+    interp2d } from '../src/lib/idle/idleTables.ts';
+import { llsTvSlopePctPerKgH } from '../src/lib/idle/valveModel.ts';
+import { BinaryPatcher } from '../src/lib/binary-engine/patcher.ts';
+import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
+import { IDLE_WRITE_SEALED, SEALED_CAL_SYMBOLS } from '../src/lib/idle/seal.ts';
+import { findEcuItem } from '../src/lib/ecu-items/catalog/index.ts';
 import { quantiseToward, quantise } from '../src/lib/ecu-items/quantise.ts';
 import { withDefaults, IDLE_TUNE_DEFAULTS, minDwellSamplesFor } from '../src/lib/idle/types.ts';
 import { tuneIdleFeedforward, idleCensus, rejectSample } from '../src/lib/idle/tuner.ts';
@@ -239,19 +244,21 @@ console.log('\n[the correction is on KF_LLS_TV, not on the sealed map]');
 }
 
 /**
- * THE CAR'S OWN IDLE DOES NOT SIT ON A BREAKPOINT, AND THAT BLOCKS THE WRITE.
+ * THE CAR'S OWN IDLE DOES NOT SIT ON A BREAKPOINT, AND THE WRITE IS DISTRIBUTED FOR IT.
  *
  * `KF_LLS_TV`'s rpm axis is 500 / 600 / 800 / 950, and sessions #924 and #925 both put warm idle at
- * 878-880 rpm. That is 80 rpm off the 800 breakpoint across a 150 rpm interval - 0.53 of the span,
- * against a `maxOffsetFrac` of 0.35 - so a dwell taken at the idle the car actually holds is
- * refused as `off-breakpoint` and nothing is written.
+ * 878-880 rpm - 0.53 of the way across the 800..950 interval. This block used to PIN the failure
+ * that produced: the tuner binned each dwell onto its nearest breakpoint and refused anything
+ * further than `maxOffsetFrac` from it, so a dwell at the only idle this car can hold was refused
+ * `off-breakpoint` and nothing was ever written.
  *
- * Pinned rather than worked around, because both ways out are decisions someone has to take:
- * distribute the correction across the two bracketing columns the way `kfu_wint` itself
- * interpolates between them, or move the idle target onto the breakpoint. Silently widening the
- * tolerance would smear one operating point across a 150 rpm span and call it evidence.
+ * The fix was not a looser tolerance. The DME reads a bilinear blend of four cells, so the
+ * correction is divided among the ones it actually reads - see `lookupNodes` and section 4 of
+ * docs/ecu-logic/70-idle-write.md. What these checks assert is the property that makes that right:
+ * the duty AT THE OPERATING POINT moves by exactly the step, which is the thing a nearest-cell
+ * write gets wrong by a factor of 1/w.
  */
-console.log('\n' + '[the car idles between breakpoints, and the tuner says so]');
+console.log('\n' + '[the car idles between breakpoints, and the correction is distributed]');
 {
     const air = 14;
     const rpm = 880;                       // #924 and #925 both measured 878-880
@@ -266,11 +273,161 @@ console.log('\n' + '[the car idles between breakpoints, and the tuner says so]')
     run.push({ ...mk(30), wdk1: 3 });
     for (let t = 60; t < 85; t += 1 / 3) run.push(mk(t));
     const res = tuneIdleFeedforward(run, tables);
-    check('a dwell at the real idle rpm is refused off-breakpoint',
-        res.report.rejects['off-breakpoint'] > 0, JSON.stringify(res.report.rejects));
-    check('...and nothing is written', res.cells.flat().every(c => c.rejected !== null));
-    check('...because 880 rpm is over a third of the way to the next breakpoint',
-        Math.abs(880 - 800) / (950 - 800) > 0.35, (80 / 150).toFixed(3));
+    const moved = res.cells.flat().filter(c => c.rejected === null);
+    check('a dwell at the real idle rpm IS written', moved.length > 0,
+        JSON.stringify(res.report.rejects));
+
+    // Exactly the bracketing cells the DME reads, minus the floor row. 880 rpm sits between x[2]
+    // and x[3]; 14 kg/h between y[0]=11 and y[1]=15, and y[0] is the K_LLS_TV_MIN floor row, which
+    // is never written. So: row 1, columns 2 and 3.
+    check('...into the cells the DME interpolates, and only those',
+        moved.length === 2 && moved.every(c => c.row === 1 && (c.col === 2 || c.col === 3)),
+        moved.map(c => `${c.row}:${c.col}`).join(' '));
+    check('...never into the K_LLS_TV_MIN floor row',
+        res.cells[0].every(c => c.rejected !== null));
+
+    // THE PROPERTY THE WHOLE DESIGN EXISTS FOR. A nearest-cell write would move the operating
+    // point by its weight (0.400 here) instead of by the step, so this is what separates the two.
+    const before = llsTvAt(tables, rpm, air);
+    const after = interp2d({ x: tables.llsTv.x, y: tables.llsTv.y, values: res.tuned }, rpm, air);
+    // The damped step the evidence asked for: slope * g_air * error * stepFraction.
+    const slope = llsTvSlopePctPerKgH(tables.llsTv, rpm, air);
+    const wantStep = slope * 0.40 * (rpm / 780) * moved[0].errorNm * 0.5;
+    check('...so the duty AT THE OPERATING POINT moves by the step, not by a fraction of it',
+        Math.abs((after - before) - wantStep) < 0.05,
+        `moved ${(after - before).toFixed(3)} %, wanted ${wantStep.toFixed(3)} %`);
+    check('...and MORE duty, because the governor was holding the engine up',
+        after > before, `${before.toFixed(2)} -> ${after.toFixed(2)}`);
+
+    // Excluding the floor row raises each surviving node above the operating point's own step.
+    // Stated so the amplification is a measured, bounded fact rather than a surprise.
+    const perCell = moved.map(c => c.tuned - c.stock);
+    check('...with the floor-row exclusion amplifying each cell, inside maxStepPct',
+        perCell.every(d => d > (after - before) && d <= 3.0),
+        perCell.map(d => d.toFixed(3)).join(' '));
+}
+
+/**
+ * THE WHOLE-TABLE WRITE IS BYTE-NEUTRAL OUTSIDE THE CELLS THE TUNER MOVED.
+ *
+ * `setEcuMapValues` writes all 130 cells and clamps every one of them to the caller's bounds. That
+ * was the SECOND reason the old target was sealed - sixteen of its thirty stock cells were outside
+ * the bound, so arming any proposal would have rewritten the cold-start cells on the way past.
+ *
+ * Asserted here rather than argued in a comment, because it is a property of the vendored binary
+ * and a re-vendor could change it silently.
+ */
+console.log('\n[every stock cell is inside the rails the write clamps to]');
+{
+    const flat = tables.llsTv.values.flat();
+    check('130 cells', flat.length === 130, flat.length);
+    check('none below K_LLS_TV_MIN', flat.every(v => v >= tables.tvMin),
+        flat.filter(v => v < tables.tvMin).join(' '));
+    check('none above K_LLS_TV_MAX', flat.every(v => v <= tables.tvMax),
+        flat.filter(v => v > tables.tvMax).join(' '));
+}
+
+/**
+ * THE TUNER AND THE WRITER NAME THE SAME MAP.
+ *
+ * They did not, for months. The estimator moved to `KF_LLS_TV` and the quantiser in tuner.ts and
+ * the writer in useBinaryFile.ts both still said `KF_LLR_QVS_GRUND`, so every proposal was rounded
+ * to an 8-bit x/2 kg/h grid while holding 16-bit x/50 duty per cent. It could not reach a byte
+ * only because the seal was shut. Two places naming one target is exactly the shape that drifts.
+ */
+/**
+ * WHICH BYTES A FLASH WOULD ACTUALLY CHANGE.
+ *
+ * Everything above tests the PROPOSAL. This runs it through the real writer against the real
+ * binary and diffs the result, which is the only check that can catch the class of defect that
+ * kept this feature sealed: a proposal that is arithmetically perfect and lands on the wrong bytes,
+ * in the wrong units, or takes untouched cells with it.
+ *
+ * The old design would have failed every line of this. It quantised against KF_LLR_QVS_GRUND's
+ * 8-bit x/2 kg/h grid and wrote through the same def, so a 13x10 duty proposal either threw on the
+ * dimension check or landed 0x80000 of table away in the wrong quantity.
+ */
+console.log('\n[the bytes a flash would change, and only those]');
+{
+    const air = 14;
+    const rpm = 880;
+    const duty = llsTvAt(tables, rpm, air);
+    const mk = (t) => ({
+        time: t, rpm, coolantTemp: 85, wdk1: 0.4, rf: null, nSoll: 880, ub: 14.1,
+        mdLlri: -4, mdLlra: 0, mdLlraKo: 0, llsTv: duty, llrQvs: 14, llrQsoll: 14,
+        mlSoll: 14, mlSollLls: air, mlSollMaxLls: 40, engineState: 4, kkosSt: 0,
+    });
+    const run = [];
+    for (let t = 0; t < 25; t += 1 / 3) run.push(mk(t));
+    run.push({ ...mk(30), wdk1: 3 });
+    for (let t = 60; t < 85; t += 1 / 3) run.push(mk(t));
+    const res = tuneIdleFeedforward(run, tables);
+
+    const def = findEcuItem('KF_LLS_TV');
+    const before = new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    const patcher = new BinaryPatcher(before.buffer.slice(0));
+    // The SAME bounds useBinaryFile applies. Stated here as literals on purpose: if that constant
+    // is ever changed to something the stock table does not fit inside, this diff grows and says so.
+    patcher.setEcuMapValues(def, res.tuned, { min: 14.0, max: 97.0 });
+    const after = new Uint8Array(patcher.getPatchedBuffer());
+
+    const changed = [];
+    for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) changed.push(i);
+
+    const base = def.values.address;
+    const span = def.values.rows * def.values.cols * (def.values.bits / 8);
+    check('every changed byte is inside KF_LLS_TV',
+        changed.every(a => a >= base && a < base + span),
+        changed.filter(a => a < base || a >= base + span).map(a => '0x' + a.toString(16)).join(' '));
+
+    // Two cells, 16-bit, so at most four bytes -- and only the cells the tuner reported moving.
+    const movedCells = res.cells.flat().filter(c => c.rejected === null);
+    const wantAddrs = new Set(movedCells.flatMap(c => {
+        const at = base + (c.row * def.values.cols + c.col) * 2;
+        return [at, at + 1];
+    }));
+    check('...and belongs to a cell the tuner reported moving',
+        changed.every(a => wantAddrs.has(a)),
+        changed.filter(a => !wantAddrs.has(a)).map(a => '0x' + a.toString(16)).join(' '));
+    check('...so the 128 cells it did not move are byte-identical',
+        changed.length <= movedCells.length * 2,
+        `${changed.length} bytes for ${movedCells.length} cells`);
+    check('...at the addresses the catalog names',
+        changed.length > 0 && changed[0] >= 0x09E10, '0x' + (changed[0] ?? 0).toString(16));
+
+    // And the value that landed is the value that was proposed, read back through the same
+    // scaling. A rounding done against the WRONG map's grid is exactly what this catches.
+    const parser = new BinaryParser(after.buffer.slice(0));
+    const back = readIdleTables(after.buffer.slice(0));
+    const c0 = movedCells[0];
+    check('the byte round-trips to the proposed duty',
+        Math.abs(back.llsTv.values[c0.row][c0.col] - c0.tuned) <= tables.llsTvStepPct / 2 + 1e-9,
+        `${back.llsTv.values[c0.row][c0.col]} vs ${c0.tuned}`);
+    check('...and the untouched floor row is still a flat K_LLS_TV_MIN',
+        back.llsTv.values[0].every(v => Math.abs(v - tables.tvMin) < 1e-9),
+        back.llsTv.values[0].join(' '));
+    void parser;
+}
+
+console.log('\n[the write target is one map, named the same in both places]');
+{
+    const def = findEcuItem('KF_LLS_TV');
+    check('KF_LLS_TV is in the catalog', !!def && def.kind === 'map');
+    check('...and is the shape the tuner proposes',
+        def.values.rows === tables.llsTv.y.length && def.values.cols === tables.llsTv.x.length,
+        `${def.values.rows}x${def.values.cols}`);
+    check('...in duty per cent', def.values.units === '%', def.values.units);
+    // The proposal handed to setEcuMapValues must match the def it is written through, or the
+    // writer throws. This is that check, made before a flash rather than during one.
+    const res = tuneIdleFeedforward([], tables);
+    check('...and the proposal is that shape too',
+        res.tuned.length === def.values.rows && res.tuned.every(r => r.length === def.values.cols),
+        `${res.tuned.length}x${res.tuned[0]?.length}`);
+
+    check('KF_LLR_QVS_GRUND stays sealed whatever the flag says',
+        SEALED_CAL_SYMBOLS.has('KF_LLR_QVS_GRUND'));
+    check('...and the live map is NOT sealed', !SEALED_CAL_SYMBOLS.has('KF_LLS_TV'));
+    check('the idle write is open', IDLE_WRITE_SEALED === false, IDLE_WRITE_SEALED);
 }
 
 console.log('\n[the model gate refuses a duty the map cannot explain]');
@@ -300,26 +457,80 @@ console.log('\n[the model gate refuses a duty the map cannot explain]');
         res2.report.rejects['no-air-request'] > 0, JSON.stringify(res2.report.rejects));
 }
 
+/**
+ * The learner's own arithmetic. Its UNIT moved with the write target: the pairs are duty per cent
+ * now, not kg/h, because that is what KF_LLS_TV holds. The prior and rails these are given are
+ * therefore the CONVERTED ones -- see learnIdleGain, which is where the air constants become map
+ * constants, and verify:idle-gain, which pins that conversion.
+ */
 console.log('\n[gain learning]');
-const gOpts = { gainMin: 0.15, gainMax: 1.20, gainRefRpm: 780 };
-const noPairs = learnGain([], 0.40, gOpts);
-check('no pairs -> the prior, and says it did not learn', noPairs.gain === 0.40 && !noPairs.learned);
-// Truth 0.52: adding 1.56 kg/h should remove 3.0 Nm of error.
+// 2.25 %/(kg/h) times the air prior and rails: the numbers learnIdleGain hands down.
+const gOpts = { gainMin: 0.34, gainMax: 2.70, gainRefRpm: 780 };
+const PRIOR = 0.90;
+const noPairs = learnGain([], PRIOR, gOpts);
+check('no pairs -> the prior, and says it did not learn', noPairs.gain === PRIOR && !noPairs.learned);
+// Truth 1.0 %/Nm: 3.0 % of duty should remove 3.0 Nm of standing effort.
 const truePairs = [
-    { deltaQKgH: 1.56, deltaErrorNm: -3.0, rpm: 780 },
-    { deltaQKgH: 1.04, deltaErrorNm: -2.0, rpm: 780 },
+    { deltaDutyPct: 3.0, deltaErrorNm: -3.0, rpm: 780 },
+    { deltaDutyPct: 2.0, deltaErrorNm: -2.0, rpm: 780 },
 ];
-const learned = learnGain(truePairs, 0.40, gOpts);
-check('two consistent pairs pull the gain toward 0.52', learned.learned && learned.gain > 0.45 && learned.gain <= 0.53, learned.gain);
-const inverted = learnGain([{ deltaQKgH: 1.5, deltaErrorNm: +3.0, rpm: 780 }], 0.40, gOpts);
+const learned = learnGain(truePairs, PRIOR, gOpts);
+check('two consistent pairs pull the gain toward 1.0',
+    learned.learned && learned.gain > 0.93 && learned.gain <= 1.01, learned.gain);
+const inverted = learnGain([{ deltaDutyPct: 3.0, deltaErrorNm: +3.0, rpm: 780 }], PRIOR, gOpts);
 check('a sign-inverted pair is rejected, not averaged', !inverted.learned
     && inverted.rejected[0].why === 'sign-inverted', JSON.stringify(inverted.rejected));
-const tiny = learnGain([{ deltaQKgH: 1.5, deltaErrorNm: -0.4, rpm: 780 }], 0.40, gOpts);
+const tiny = learnGain([{ deltaDutyPct: 3.0, deltaErrorNm: -0.4, rpm: 780 }], PRIOR, gOpts);
 check('a pass that barely moved the error is delta-too-small', tiny.rejected[0].why === 'delta-too-small');
-const nothingWritten = learnGain([{ deltaQKgH: 0.1, deltaErrorNm: -3.0, rpm: 780 }], 0.40, gOpts);
+const nothingWritten = learnGain([{ deltaDutyPct: 0.1, deltaErrorNm: -3.0, rpm: 780 }], PRIOR, gOpts);
 check('a pass that barely wrote anything is step-too-small', nothingWritten.rejected[0].why === 'step-too-small');
 check('the default rescales with rpm', near(defaultGainKgHPerNm(390, IDLE_TUNE_DEFAULTS), 0.20, 1e-9),
     defaultGainKgHPerNm(390, IDLE_TUNE_DEFAULTS));
+
+/**
+ * THE LIVE READOUT AND THE FINAL ONE NAME THE SAME NUMBER.
+ *
+ * They did not. Both said `gainUsed: o.gainKgHPerNm` -- 0.400, the AIR gain, from when this wrote
+ * kg/h into a different map -- and the tune was fixed first, which left the WRONG number on the
+ * readout a driver watches while the car is running and the right one on the panel they read
+ * afterwards. Two reports of one quantity is the shape that drifts; this pins them together.
+ */
+console.log('\n[the census and the tune report one gain]');
+{
+    const air = 14, rpm = 880;
+    const duty = llsTvAt(tables, rpm, air);
+    const mk = (t) => ({
+        time: t, rpm, coolantTemp: 85, wdk1: 0.4, rf: null, nSoll: rpm, ub: 14.1,
+        mdLlri: -4, mdLlra: 0, mdLlraKo: 0, llsTv: duty, llrQvs: air, llrQsoll: air,
+        mlSoll: air, mlSollLls: air, mlSollMaxLls: 40, engineState: 4, kkosSt: 0,
+    });
+    const run = [];
+    for (let t = 0; t < 25; t += 1 / 3) run.push(mk(t));
+    run.push({ ...mk(30), wdk1: 3 });
+    for (let t = 60; t < 85; t += 1 / 3) run.push(mk(t));
+
+    const live = idleCensus(run, tables);
+    const final = tuneIdleFeedforward(run, tables).report;
+    check('the live census and the final tune agree',
+        Math.abs(live.gainUsed - final.gainUsed) < 1e-9, `${live.gainUsed} vs ${final.gainUsed}`);
+    check('...in %/Nm, not the raw air constant',
+        Math.abs(live.gainUsed - IDLE_TUNE_DEFAULTS.gainKgHPerNm) > 0.3, live.gainUsed);
+    // slope 2.25 x g_air 0.40 x (880/780) = 1.015
+    check('...which is slope x g_air at the operating point',
+        Math.abs(live.gainUsed - 1.015) < 0.05, live.gainUsed.toFixed(3));
+
+    // A learned gain must win in BOTH, or the readout changes meaning when STOP is pressed.
+    const g = { gain: 1.40, learned: true };
+    check('a learned gain is reported live', idleCensus(run, tables, undefined, g).gainUsed === 1.40);
+    check('...and marked as learned', idleCensus(run, tables, undefined, g).gainLearned === true);
+    check('...and the tune says the same',
+        tuneIdleFeedforward(run, tables, undefined, g).report.gainUsed === 1.40);
+
+    // Nothing accepted -> no operating point -> the raw constant is the only honest answer.
+    const empty = idleCensus([], tables);
+    check('with nothing measured it falls back to the constant rather than inventing a slope',
+        empty.gainUsed === IDLE_TUNE_DEFAULTS.gainKgHPerNm, empty.gainUsed);
+}
 
 console.log('\n[the truth gate]');
 const rails = tables.mdLlriRange;
@@ -491,9 +702,27 @@ console.log('\n[the preflight verdict fires when it should, and blocks when it m
         statusOf(run({ mlSoll: 40 }), 'ML_SOLL < ML_SOLL_MAX_LLS') === 'fail');
     check('demand below the authority floor fails its own test',
         statusOf(run({ mlSoll: 5 }), 'ML_SOLL vs authority floor') === 'fail');
-    check('a duty above the inferred ceiling fails, and is flagged as an inference',
-        statusOf(run({ llsTv: 40 }), 'LLS_TV') === 'fail'
-        && run({}).tests.find(x => x.id === 'LLS_TV')?.thresholdIsInference === true);
+    /**
+     * The `LLS_TV <= 25 %` test is GONE, and this asserts its absence rather than its behaviour.
+     *
+     * It was the one threshold on this surface not read from the binary — an inference, and flagged
+     * as one. Sessions #935 and #936 refuted it: this car runs 36-38 % warm and 41-58 % warming up,
+     * so it failed on every sample of every run. A check that is always red trains the reader to
+     * stop reading red.
+     *
+     * Kept as a test because an inference the car has answered must not quietly come back, and
+     * because the QUESTION it asked — is the Alpha-N load model on its bottom row at idle — is still
+     * open and needs a threshold from the binary before it returns.
+     */
+    check('the refuted 25 % duty inference is not back',
+        run({}).tests.every(x => x.id !== 'LLS_TV'),
+        run({}).tests.map(x => x.id).join(', '));
+    check('...and no test on this surface claims an unread threshold any more',
+        run({}).tests.every(x => !x.thresholdIsInference)
+        // ...except the authority floor, which says so only when the binary's own first row is not
+        // railed — that flag is derived from the image, not written down.
+        || run({}).tests.filter(x => x.thresholdIsInference).every(x => x.id === 'ML_SOLL vs authority floor'),
+        run({}).tests.filter(x => x.thresholdIsInference).map(x => x.id).join(', '));
 
     // The torque reserve. The document's central structural claim — that at warm idle the governor
     // drives ONE 74.9 ms air actuator and has no fast path — is exactly `lfr_calc` 0x026A4C finding
@@ -573,9 +802,11 @@ console.log('\n[LLS_ST bit 7 — which table TI_F_STAT comes from]');
     // 0x80 and stores it, and clears it again at 0x026196 — so at a healthy idle it is low and
     // KF_TI_N_RF is the branch that runs.
     //
-    // That is the entire content of `requireTiBranchProven`, which today refuses every idle cell of
-    // the LOW LOAD corrector. The disassembly says which branch runs; this channel is how the CAR
-    // says it, and the default does not come off until the car has.
+    // That was the entire content of `requireTiBranchProven`, a gate that refused every idle cell
+    // of the kf_rf_soll correction until it was measured away: TI_F_STAT is not a term in that
+    // correction at all (verify:ti-factor, session #920), so neither branch can move a written
+    // byte. The gate is gone with the tuner that carried it. The disassembly says which branch
+    // runs; this channel is how the CAR says it, which is why it is still worth a read.
     const sig = Mss54HpRamSignals.LLS_ST;
     check('LLS_ST is mapped, one byte at 0xFF823B',
         !!sig && sig.address === 0x00FF823B && sig.size === 1,

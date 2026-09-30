@@ -6,7 +6,9 @@ import {
 import {
     AMBIENT_CHARGE_ADDRESS, AMBIENT_TEMP_ADDRESS, IDLE_VALVE_STATE_ADDRESS,
     SLEW_STATE_ADDRESS, SLEW_TORQUE_ADDRESS,
+    LLS_AIR_ADDRESS, LLS_INTEGRATOR_ADDRESS, LLS_DUTY_ADDRESS,
     decodeAmbientCharge, decodeAmbientTemp, decodeIdleValveState, decodeSlewState, decodeSlewTorque,
+    decodeLlsAir, decodeLlsIntegrator, decodeLlsDuty, type LlsRingChannels,
     mergeSlowLane, type SlowLaneChannels, type SlewChannels,
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
@@ -2601,6 +2603,10 @@ export class WebSerialDmeLink implements DmeLink {
         // NOT carried between samples — see SlewChannels for why an event must not be held.
         let slewState: Partial<SlewChannels> | null = null;
         let slewTorque: Partial<SlewChannels> | null = null;
+        // Three exchanges, merged rather than assigned, for the reason the two slow-lane clusters
+        // are: they run on the same lane and a single variable would let whichever decoded last
+        // erase the other two. NOT carried between samples — see LlsRingChannels.
+        let llsRing: Partial<LlsRingChannels> | null = null;
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
@@ -2631,6 +2637,18 @@ export class WebSerialDmeLink implements DmeLink {
                     }
                     if (exchange.address === SLEW_TORQUE_ADDRESS) {
                         slewTorque = decodeSlewTorque(bytes, exchange.address);
+                        continue;
+                    }
+                    if (exchange.address === LLS_AIR_ADDRESS) {
+                        llsRing = { ...(llsRing ?? {}), ...decodeLlsAir(bytes, exchange.address) };
+                        continue;
+                    }
+                    if (exchange.address === LLS_INTEGRATOR_ADDRESS) {
+                        llsRing = { ...(llsRing ?? {}), ...decodeLlsIntegrator(bytes, exchange.address) };
+                        continue;
+                    }
+                    if (exchange.address === LLS_DUTY_ADDRESS) {
+                        llsRing = { ...(llsRing ?? {}), ...decodeLlsDuty(bytes, exchange.address) };
                         continue;
                     }
                     if (exchange.address === AMBIENT_TEMP_ADDRESS) {
@@ -2734,6 +2752,7 @@ export class WebSerialDmeLink implements DmeLink {
             // every other, so a count of them is a count of reads. See SlewChannels.
             ...slewState,
             ...slewTorque,
+            ...llsRing,
         };
     }
 

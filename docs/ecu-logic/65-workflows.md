@@ -1,6 +1,6 @@
 # 65 — ワークフロー一覧：何を測り、何を導き、どのバイトを書くか
 
-**このアプリには 7 本のワークフローがある。** タブは 12 あるので 1 対 1 ではなく、それが
+**このアプリには 6 本のワークフローがある。** タブは 12 あるので 1 対 1 ではなく、それが
 「今どれを走らせているのか」が読みにくい第一の原因になっている。
 
 この文書は各ワークフローについて **測定 → 証拠 → 導出 → 書き込み先** を 1 行で確定させる。
@@ -17,13 +17,12 @@
 |---|---|---|---|---|---|---|---|
 | 1 | **VE** | `VE` | 7 | `PATCH` | `kf_rf_soll` 24×20 | `setVETable` | **5** |
 | 2 | **RF KORR** | `EGT` | 1 | `PATCH` `TANK_VENT` | `KF_RF_KORR_DRREL` 6×12 | `setEcuMapValues` | 1 |
-| 3 | **LOW LOAD** | （VE のログを読む） | — | — | **`kf_rf_soll` 24×20** | `setVETableData` | 1 |
-| 4 | **WARMUP** | （VE の結果から導出） | — | — | 暖機表 | `setWarmupTable` | 1 |
-| 5 | **INERTIA** | `INERTIA` | 2 | なし | **書かない**（提案のみ） | — | 1 |
-| 6 | **IDLE** | `IDLE` | 15 | なし | **封印** | — | 1 |
-| 7 | **CALIBRATION** | — | — | — | 読むだけ | — | 1 |
+| 3 | **WARMUP** | （VE の結果から導出） | — | — | 暖機表 | `setWarmupTable` | 1 |
+| 4 | **INERTIA** | `INERTIA` | 2 | なし | **書かない**（提案のみ） | — | 1 |
+| 5 | **IDLE** | `IDLE` | 15 | なし | **封印** | — | 1 |
+| 6 | **CALIBRATION** | — | — | — | 読むだけ | — | 1 |
 
-**1・3・4 は同じ表か、その派生を触る。** かつてはここが二重 writer の事故現場だった
+**1 と 3 は同じ表か、その派生を触る。** かつてはここが二重 writer の事故現場だった
 （「既知の欠陥」1 番 — 修正済み。現在は `composeVeGrid` が唯一の合流点）。
 
 ---
@@ -33,7 +32,7 @@
 | | |
 |---|---|
 | **測定** | `LOG_PROFILES.VE`（7 交換）。block 3・block 19 の遅レーン・λ トリムの RAM 読み・外気の遅レーン |
-| **証拠** | `la_f_regler`（DME 自身の λ 積分器）。**トリムの無いサンプルは証拠にならない**（`calculator.ts:292` — `if (!banks.length) return;`） |
+| **証拠** | `la_f_regler`（DME 自身の λ 積分器）。**トリムの無いサンプルは証拠にならない**（`calculator.ts:292` — `if (!banks.length) return;`）。補正は `トリム（stft × ltft）× rf_korr` で、`KF_TI_N_RF` は掛けも割りもしない —— #920 で y = 0.15 の段差を跨いでもトリムは +0.1 % しか動かず、掛けると逆に −9.6 % ずれる（`verify:ti-factor`） |
 | **導出** | `newMap`（`kf_rf_soll` 24×20）と、その途中経過 `correctionMap` / `hitMap` / `weightMap` / `acceptedMap` |
 | **書き込み** | `composeVeGrid` 経由で `kf_rf_soll` へ（トグル `writeVe`、既定 OFF） |
 | **タブ** | CURRENT MAP / LAMBDA FEEDBACK / TUNED MAP / DIFFERENCE % / CORRECTED LOG |
@@ -50,25 +49,12 @@ CORRECTED LOG は使われたサンプル。
 | **証拠** | 同一セル内の冷排気／温排気の `rf` 比 |
 | **導出** | `tunedRfKorr` 6×12 |
 | **書き込み** | `setEcuMapValues(KF_RF_KORR_DRREL, …, {min: 1.0, max: 1.40})`。下限 1.0 は**薄くする方向を禁じる**ため |
-| **前提** | `PATCH` と `TANK_VENT` の両方。7 本のうちここだけ 2 つ要る |
+| **前提** | `PATCH` と `TANK_VENT` の両方。6 本のうちここだけ 2 つ要る |
 
 **注意（コードから）**: `rf_korr` は `k_rf_korr_v_min`（純正 20 km/h）を超えていないと
 DME 側で 1.000 に固定される。停車中に測っても補正は動いていない。
 
-## 3. LOW LOAD — 低開度行
-
-| | |
-|---|---|
-| **測定** | **自前の profile を持たない。** VE のログを読み直す |
-| **証拠** | 低開度セルの λ トリム（`stft × ltft`）× `rf_korr`。**VE 本体と同じ式**で、`KF_TI_N_RF` は掛けも割りもしない —— #920 で y = 0.15 の段差を跨いでもトリムは +0.1 % しか動かず、掛けると逆に −9.6 % ずれる（`verify:ti-factor`） |
-| **導出** | `lowLoadResult.tuned` — **BASE のグリッドを丸ごとコピーし、低開度行だけ書き換えた 24×20**（`lowLoadTuner.ts:193,233,278`） |
-| **書き込み** | `composeVeGrid` 経由で **VE と同じ `kf_rf_soll`** へ（トグル `writeLowLoad`、owned セルのみ） |
-| **ゲート** | `maxOpeningRow: 12`（= 3.198 %）、`minCellSamples: 30` / `minVisits: 2` / `maxSampleSd: 0.08` / `maxStdErr: 0.005` / `noChangeBand: 0.01`。`requireTiBranchProven` は**既定 OFF**（`lowLoadTuner.ts:185`）—— `TI_F_STAT` が補正式に入らない以上、分岐が決まってもバイトは変わらない |
-
-**VE と同じ表に寄与する 2 本目の証拠源** — writer は `composeVeGrid` の 1 つで、
-所有権はセル単位（`LowLoadResult.owned`）。欠陥 1 の修正記録を参照。
-
-## 4. WARMUP — 暖機表
+## 3. WARMUP — 暖機表
 
 | | |
 |---|---|
@@ -77,7 +63,7 @@ DME 側で 1.000 に固定される。停車中に測っても補正は動いて
 
 **VE の派生物であって独立したワークフローではない。** VE を録り直せば必ず変わる。
 
-## 5. INERTIA — フライホイール
+## 4. INERTIA — フライホイール
 
 | | |
 |---|---|
@@ -86,7 +72,7 @@ DME 側で 1.000 に固定される。停車中に測っても補正は動いて
 | **導出** | `K_MD_J_MOTOR` ほかへの提案 |
 | **書き込み** | **しない。** 提案を表示するだけで、適用は手動 |
 
-## 6. IDLE — アイドル
+## 5. IDLE — アイドル
 
 | | |
 |---|---|
@@ -112,22 +98,24 @@ RF_SOLL      = kf_rf_soll(N, aq_rel_rf) × RF_PT_KORR
 **アイドル中の `aq_rel_rf` はアイドル弁の断面積そのもの**。
 
 つまり **IDLE の実効的な書き込み先も `kf_rf_soll` の最低開度行**であり、
-VE・LOW LOAD と合わせて **同じ表に向かう 3 本目**になる。
+VE と合わせて **同じ表に向かう 2 本目**になる。
 
-## 7. CALIBRATION — 読むだけ
+## 6. CALIBRATION — 読むだけ
 
 `EcuItemList` を BIN に対して開く。導出も書き込みもしない。
-他の 6 本が使う閾値を、そのバイトと突き合わせて確認するための窓。
+他の 5 本が使う閾値を、そのバイトと突き合わせて確認するための窓。
 
 ---
 
 ## 表の所有権 —— いま誰が `kf_rf_soll` を握っているか
 
 ```
-VE        accepted セル             composeVeGrid の種          （writeVe トグル）
-LOW LOAD  owned セル（低開度行）    composeVeGrid が上書き      （writeLowLoad トグル）
-IDLE      最低開度行（封印中）      将来ここに合流する          —
+VE      accepted セル             composeVeGrid の種          （ALPHA-N トグル）
+SHAPE   導出が触らなかったセル    合成のあとに重ねる          （SHAPE トグル、ALPHA-N が要る）
+IDLE    最低開度行（封印中）      将来ここに合流する          —
 ```
+
+VE の証拠ゲートは 24 行すべてに同じように掛かる。行で担当を分ける門は無い。
 
 **writer は `setVETableData(composed.grid)` の 1 呼び出しだけ。** 調停は呼ぶ順番ではなく
 `composeVeGrid` のセル単位の所有権になった（2026-08-23、欠陥 1 の修正）。
@@ -136,23 +124,23 @@ IDLE      最低開度行（封印中）      将来ここに合流する       
 
 ## 既知の欠陥
 
-### 1. LOW LOAD を武装すると VE の補正が消える — 修正済み ✅
+### 1. 2 本目の導出を武装すると VE の補正が消える — 修正済み ✅
 
 **修正 (2026-08-23)**: `kf_rf_soll` の writer は 1 つになった。すべての寄与は
 `src/lib/ve-calculator/composeVeGrid.ts` を通り、所有権はセル単位で決まる:
 
-- **LOW LOAD は自分が測定/修復したセル（`LowLoadResult.owned`）で勝つ** —
-  勝つ理由は式ではなく担当行である。式は VE と同一（トリム × `rf_korr`）で、VE 側は
-  `veOwnsRow = r > LOW_LOAD_TOP_ROW`（`calculator.ts:616`）により行 12 以下を `out-of-band` で落とす
 - VE は accepted セルで勝つ
+- SHAPE は導出が触らなかったセルにだけ重なる（`repairShape` が測定のあるセルを固定する）
 - どちらも触っていないセルは BASE のまま。**両方 OFF ならテーブルに 1 バイトも触れない**
 
 合成は BASE も acceptedMap も見ない。両入力が未接触セルに BASE をそのまま運ぶ、という
 2 つの不変量に乗っている（composeVeGrid の doc 参照）。`verify:compose` がその不変量を
 **実物の tuner に対して**毎回検査する。
 
-元の欠陥の記録: `setVETable`（VE、480 セル）の後に `setVETableData`（LOW LOAD、BASE 種の
-480 セル）が走り、低開度行より上の VE 補正が全部 BASE に戻っていた。コメントは逆順を主張していた。
+元の欠陥の記録: 当時この表には writer が 2 つあった。`setVETable`（VE、480 セル）の後に
+`setVETableData`（低開度行を導出していた 2 本目、BASE 種の 480 セル）が走り、低開度行より
+上の VE 補正が全部 BASE に戻っていた。コメントは逆順を主張していた。
+**原因は調停が呼び出し順だったこと**なので、導出が 1 本になった今も合流点は 1 つに保つ。
 
 ### 2. profile 名とタブ名が一致していない
 
@@ -161,7 +149,7 @@ IDLE      最低開度行（封印中）      将来ここに合流する       
 
 ### 3. タブがワークフロー単位になっていない
 
-12 タブ / 7 ワークフロー。VE が 5 タブを占める。
+12 タブ / 6 ワークフロー。VE が 5 タブを占める。
 
 ### 4. 前提パッチの要求が不揃い
 
@@ -174,10 +162,10 @@ IDLE      最低開度行（封印中）      将来ここに合流する       
 同じセッションで 2 種類の run を録ると `data[]` は後勝ちになる
 （生の `inertia[]` / `idle[]` は残る）。
 
-### 6. WARMUP と LOW LOAD は独立したワークフローではない
+### 6. WARMUP と SHAPE は独立したワークフローではない
 
-WARMUP は VE の結果の派生、LOW LOAD は VE のログの読み直し。
-タブ列では INERTIA や IDLE と同格に並んでいる。
+WARMUP は VE の結果の派生、SHAPE はログを読まない幾何的な修復（ALPHA-N の書き込みモード）。
+どちらもタブ列では INERTIA や IDLE と同格に並んでいる。
 
 ---
 
@@ -188,7 +176,7 @@ WARMUP は VE の結果の派生、LOW LOAD は VE のログの読み直し。
 
 ```
 WRITE      次の書き込み・ダウンロードに載るもの
-  VE / WARMUP / RF KORR / LOW LOAD   … トグル + セル数 or ロック理由
+  ALPHA-N / SHAPE / WARMUP / RF KORR  … トグル + セル数 or ロック理由
   IDLE                                … 封印表示（seal.ts の理由をツールチップに）
   INERTIA                             … 提案のみ（書き込み対象ではない）
 RESTORE    参照値へ戻すもの
@@ -196,9 +184,9 @@ RESTORE    参照値へ戻すもの
 ```
 
 - **VE の書き込みもトグル**（既定 OFF、毎ロード解除）。「導出されたら無条件に書く」は廃止
-- LOW LOAD の ARM ボタンは撤去。書き込みの入口はマニフェストだけ
+- 導出パネル側の ARM ボタンは撤去。書き込みの入口はマニフェストだけ
 - `Tune_` / `Base_` はマニフェストに従う: トグル OFF の VE マップはファイル名を作らず、
-  LOW LOAD / RF KORR 単独は `Tune_` を名乗る
+  SHAPE / RF KORR / CALIBRATION の編集は単独でも `Tune_` を名乗る
 - **RESTORE セクションは行の追加だけで育つ**。将来: VE / IDLE / INERTIA のリストア、
   最終的に全パラメータリストアのメニュー（予定）
 
@@ -210,8 +198,9 @@ RESTORE    参照値へ戻すもの
 | feature | stage | 昇格予定 |
 |---|---|---|
 | ve（WARMUP 含む） | stable | — |
+| shape | stable | —（タブのラベルは `SHAPE (EXP.)` のまま） |
 | rfKorr | experimental | **1 番手** |
-| lowLoad / idle | experimental | 2 番手（同じ kf_rf_soll 行の 2 証拠源なので同時） |
+| idle | experimental | 2 番手（実効的な書き込み先は同じ `kf_rf_soll` の最低開度行） |
 | inertia | experimental | 3 番手 |
 | calibration | experimental | 適宜 |
 | sessionSync | **preview-only** | **昇格しない**（本番はローカル完結。verify:features が固定） |

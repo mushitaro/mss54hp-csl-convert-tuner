@@ -5,7 +5,6 @@ import type { RefObject } from 'react';
 import type { DmeLinkSnapshot } from '@/hooks/useDmeLink';
 import type { TransferTimingReport } from '@/lib/dme-link/transferTiming';
 import type { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
-import type { SyncSettings } from '@/lib/session-sync/client';
 import { buildIdentity } from '@/lib/session-sync/client';
 import type { DiagnosticRecord } from '@/lib/session-sync/diagnostics';
 import { uploadDiagnostic } from '@/lib/session-sync/diagnostics';
@@ -51,10 +50,8 @@ export function useDiagnosticsPublisher(input: {
     lastEventLogRef: RefObject<LinkEventLogSnapshot | null>;
     /** The session the operation ran under, at the moment it ended. */
     sessionIdRef: RefObject<string | null>;
-    /** The device's sync settings, from `useSessionSync` — same reason it is a ref there. */
-    settingsRef: RefObject<SyncSettings>;
 }) {
-    const { readLinkState, lastTransferTimingRef, lastEventLogRef, sessionIdRef, settingsRef } = input;
+    const { readLinkState, lastTransferTimingRef, lastEventLogRef, sessionIdRef } = input;
 
     /** Which build this is, for the menu and for every uploaded record. Resolved after mount: the
      *  meta tag exists in the export but `document` does not during the static prerender. */
@@ -125,13 +122,13 @@ export function useDiagnosticsPublisher(input: {
             const record = buildRecord(kind);
             if (!record) { setDiagUpload({ state: 'none' }); return; }
             setDiagUpload({ state: 'sending' });
-            void uploadDiagnostic(record, settingsRef.current).then(r => {
+            void uploadDiagnostic(record).then(r => {
                 setDiagUpload(r.ok ? { state: 'stored', bytes: r.bytes } : { state: 'failed', reason: r.reason });
             });
         } catch (e) {
             setDiagUpload({ state: 'failed', reason: `could not build the record: ${e instanceof Error ? e.message : String(e)}` });
         }
-    }, [buildRecord, settingsRef]);
+    }, [buildRecord]);
 
     return { buildLabel, diagUpload, buildRecord, publish };
 }

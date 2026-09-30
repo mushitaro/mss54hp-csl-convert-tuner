@@ -95,7 +95,7 @@ export const LOW_SLOT_WARNING_THRESHOLD = 5;
  *
  * What happened: on a real vehicle the slave service block looked "erased" to the old guard, so the
  * reset refused. That was read as evidence the slave address was wrong and the feature was switched
- * off. A read-only dump of both blocks then settled it (2026-07-28, VIN WBSBL92000PP86271):
+ * off. A read-only dump of both blocks then settled it (2026-07-28, on a real car — its VIN is not reproduced here):
  *
  *  - `AIF 0x001D50 -> lies in: master`, and real VIN/software numbers parsed out of the master image,
  *    so the master read lands correctly.

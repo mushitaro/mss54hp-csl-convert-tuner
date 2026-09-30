@@ -206,8 +206,19 @@ MD_DP_DELTA = KF_MD_DASHPOT( MD_FW_FILTER , N ) / 1024
 ## 4. 燃料カット復帰 — `KF_MD_WE`
 
 `FUN_00017400`（master `0x017400`, 306 B、これも `stmts=0` から回収）。
-`SA_WE_ST` bit1/bit3 と `DYN_ST` bit1 で分岐し `KF_MD_WE(MD_WUNSCH_REL, N)` を引く。
+**2 つのビット群は別の仕事をしており、その区別が二段しゃくりの正体である。**
+
+- `SA_WE_ST` bit1 または bit3（`0x17420`–`0x1742A`）が**向き**を選ぶ。
+  カット中なら目標は 0 でレートは `K_MD_DELTA_SA_SOFT`/`_HARD`、
+  カットしていなければ目標は `MD_IND_MIN_GES` でレートは `KF_MD_WE(MD_WUNSCH_REL, N)`。
+- `DYN_ST` bit1（`0x1744C`）は**下り方向の SOFT / HARD 選択だけ**を行う。
+  `KF_MD_WE` 側には一切影響しない。
+  そして **`K_DYN_CONTROL`（master 0xB3B0）= 0 で `DYN_ST` は恒久ゼロ**なので、
+  `K_MD_DELTA_SA_HARD`（3.0 Nm/10ms）は死んでおり、**通常のリフトオフは必ず SOFT**（0.5）を通る。
+
+∴ 抜けは 50 Nm/s、戻りは最大 300 Nm/s の **6:1 の非対称**になる。これが二段しゃくりの機構。
 出力 `MD_SAWE_FILTER` は §1 のとおり `MD_IND_WUNSCH` に**加算**される。
+（`FUN_00017400` は `stmts=0` だが逆アセンブルで回収済みなので、`KF_MD_WE` は **code-confirmed**。）
 
 `KF_MD_WE`（master `0x9492`, z `0x94AA`）、**z = Nm/10ms**:
 

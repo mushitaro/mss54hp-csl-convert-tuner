@@ -74,21 +74,22 @@ interface Props {
     /**
      * Override the text colour of one cell, as a Tailwind class.
      *
-     * For grids whose signal is not coverage and not a diff. LOW LOAD's slope view is the case:
-     * what matters there is a gain that has gone NEGATIVE (filling falling as the throttle opens)
-     * or that steps by more than 1.6x against the interval below, and neither is a magnitude this
-     * component could infer from the numbers it was handed. The background is left to the usual
-     * rules, so a caller that passes no `hitData` and no `diffData` gets plain cells with its own
-     * text colour on them — which is exactly what the slope table looked like before it moved here.
+     * For grids whose signal is not coverage and not a diff. The SHAPE tab's gain grid is the
+     * case: what matters there is a gain that has gone NEGATIVE (filling falling as the throttle
+     * opens) or that steps by more than 1.6x against the interval below, and neither is a
+     * magnitude this component could infer from the numbers it was handed. The background is left
+     * to the usual rules, so a caller that passes no `hitData` and no `diffData` gets plain cells
+     * with its own text colour on them — which is exactly what the slope table looked like before
+     * it moved here.
      */
     cellTint?: (row: number, col: number) => string | undefined;
     /**
      * Show only rows `[first, last]` INCLUSIVE, indexed into `mapData.yAxis`.
      *
-     * For showing one band of a table that is one table — LOW LOAD is rows 1-12 of `kf_rf_soll`,
-     * not a grid of its own. Row indices passed to `cellNote`, `onCellSelect` and every data array
-     * stay indices into the FULL map, so a caller never has to translate between two coordinate
-     * spaces. Out-of-range or inverted bounds are clamped rather than throwing.
+     * For drawing a slice of a table without making it a grid of its own. Row indices passed to
+     * `cellNote`, `onCellSelect` and every data array stay indices into the FULL map, so a caller
+     * never has to translate between two coordinate spaces. Out-of-range or inverted bounds are
+     * clamped rather than throwing.
      */
     rowRange?: [number, number];
 }
@@ -277,7 +278,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
         return { bands: [], footer: lg.plain };
     }, [diffData, hitData, acceptedData, coverageThin, coverageOk, lg]);
 
-    // The rows to draw, as indices into the full map. Clamped rather than validated: a band that
+    // The rows to draw, as indices into the full map. Clamped rather than validated: a range that
     // runs off the end of a shorter table should show what there is, not throw in a render.
     const lastRow = mapData.yAxis.length - 1;
     const firstShown = rowRange ? Math.max(0, Math.min(rowRange[0], lastRow)) : 0;

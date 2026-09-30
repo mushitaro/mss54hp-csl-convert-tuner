@@ -1,6 +1,6 @@
 /**
- * Turning Nm of governor torque into kg/h of idle air, without ever needing to know the conversion
- * up front.
+ * Turning Nm of governor torque into a valve correction, without ever needing to know the
+ * conversion up front.
  *
  * There is no constant in the binary that relates them, and there cannot be a good static estimate
  * either: the true gain is not just thermodynamics, it also absorbs the Momentenmanager's own
@@ -34,9 +34,16 @@ export function defaultGainKgHPerNm(rpm: number, opts: Pick<IdleTuneOptions, 'ga
 
 /** One pass's contribution: what was actually written, and what the error did in response. */
 export interface GainPair {
-    /** kg/h, interpolated at the dwell's own operating point from the two BINARIES — not the
-     *  breakpoint change, and not the value that was requested. What the DME actually got. */
-    deltaQKgH: number;
+    /**
+     * DUTY PER CENT, interpolated at the dwell's own operating point from the two BINARIES — not
+     * the breakpoint change, and not the value that was requested. What the DME actually got.
+     *
+     * It was kg/h until the correction moved to `KF_LLS_TV` (see seal.ts). Interpolating at the
+     * operating point rather than reading the cell is the part that matters and is unchanged by the
+     * retarget: this car idles between breakpoints, so the change at the point is a weighted blend
+     * of up to four cells and the cell delta would overstate it.
+     */
+    deltaDutyPct: number;
     /** Nm. `error(this pass) - error(previous pass)`. */
     deltaErrorNm: number;
     /** The rpm the dwell sat at, so the pooled gain can be normalised back to the reference. */
@@ -67,8 +74,14 @@ export const GAIN_LEARN_DEFAULTS = {
      * distinguishable from dwell-to-dwell scatter, which a settled idle keeps well under 0.1 Nm.
      */
     minLearnableDeltaNm: 1.0,
-    /** Below one LSB of the map, nothing was really written. */
-    minStepKgH: 0.5,
+    /**
+     * Below this, nothing was really written.
+     *
+     * 0.30 % of duty, and it is NOT one LSB — `KF_LLS_TV` stores x/50, so an LSB is 0.02 %, and a
+     * threshold there would admit pairs whose numerator is pure rounding. It is a tenth of the
+     * per-pass cap (`maxStepPct` 3.0), i.e. the smallest deliberate step a campaign takes.
+     */
+    minStepPct: 0.30,
     /** One pair's worth of weight on the prior, so a single noisy pass cannot swing the gain to a
      *  rail while two consistent passes can move it most of the way. */
     priorWeight: 1,
@@ -98,12 +111,14 @@ export function learnGain(
         if (Math.abs(p.deltaErrorNm) < GAIN_LEARN_DEFAULTS.minLearnableDeltaNm) {
             rejected.push({ pair: p, why: 'delta-too-small' }); continue;
         }
-        if (Math.abs(p.deltaQKgH) < GAIN_LEARN_DEFAULTS.minStepKgH) {
+        if (Math.abs(p.deltaDutyPct) < GAIN_LEARN_DEFAULTS.minStepPct) {
             rejected.push({ pair: p, why: 'step-too-small' }); continue;
         }
-        // Adding air should REDUCE the error (the governor stops having to make up the shortfall),
-        // so the ratio is negated. A positive ratio here is the inverted case.
-        const g = -p.deltaQKgH / p.deltaErrorNm;
+        // Adding DUTY should REDUCE the error (more valve, so the governor stops having to make up
+        // the shortfall), so the ratio is negated. A positive ratio here is the inverted case, and
+        // the direction is the same one the tuner writes in — see the sign argument in
+        // docs/ecu-logic/70-idle-write.md.
+        const g = -p.deltaDutyPct / p.deltaErrorNm;
         if (g <= 0) { rejected.push({ pair: p, why: 'sign-inverted' }); continue; }
         // Normalise to the reference rpm before pooling: g scales with w.
         const gRef = g * (opts.gainRefRpm / Math.max(1, p.rpm));
@@ -114,7 +129,7 @@ export function learnGain(
         // slope than one that moved it a long way, and least-squares through the origin already
         // encodes that if the regression is done on the products rather than on the ratios.
         const e = p.deltaErrorNm * (Math.max(1, p.rpm) / opts.gainRefRpm);
-        num += -p.deltaQKgH * e;
+        num += -p.deltaDutyPct * e;
         den += e * e;
         used++;
     }

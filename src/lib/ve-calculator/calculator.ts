@@ -2,12 +2,14 @@ import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, reso
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD } from '@/config/constants';
 import { chargeTempFactor, rfPtKorrFor, type RfPtKorrCurves } from './chargeTemp';
 import {
-    type EgtTables, EGT_INVERSION_DEFAULTS, gateOpen, interpMap2d, invertRfKorrProfile, rfKorrAt,
+    type EgtTables, EGT_INVERSION_DEFAULTS, interpMap2d, invertRfKorrProfile, RfKorrLatch,
+    rfKorrActive, rfKorrAt,
     rfKorrProfileAt, tabgModelAt,
 } from './egtTables';
 import type { RfKorrTuneResult, RfKorrTuneOptions } from './rfKorrTuner';
-import { LOW_LOAD_TOP_ROW, MAX_SAMPLE_SD } from './lowLoadTuner';
+import { MAX_SAMPLE_SD } from './veScatter';
 import { axisBracket } from '@/lib/log-engine/axisBracket';
+import { timeScaleSeconds } from '@/lib/log-engine/filter';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -237,6 +239,58 @@ export const VE_METHOD_DEFAULT: VeMethod = 'direct';
 export const DIRECT_AUTHORITY_DEFAULT = 1.0;
 
 /**
+ * Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is evidence.
+ *
+ * ## The mechanism
+ *
+ * The DME steps the fuel by `rf_korr` the instant its latch closes. The lambda loop cannot see that
+ * for about a second — exhaust transport delay, sensor response, and a two-point controller running
+ * at 1-2 Hz. Inside that window the trim still reads the mixture from BEFORE the step, so
+ * `trim x rf_korr` credits the cell with the whole of rf_korr and nothing has actually been measured.
+ *
+ * The response is visible directly. Over #941-#946, mean written factor by seconds since the latch
+ * closed, against a control of gate-shut cells at load >= 5 which sits at -0.11 %:
+ *
+ *     0-0.5 s +9.93 %   0.5-1 s +9.15 %   1-1.5 s +7.44 %   1.5-2 s +4.78 %
+ *     2-3 s   +1.69 %   3-5 s   -2.06 %   5+ s    -4.94 %   pooled  +2.18 %
+ *
+ * The enrichment is about +10.4 % (k = 1.11), so those numbers read as the fraction of it the loop
+ * has taken back: nothing at 0.25 s, ~30 % at 1.25 s, ~85 % at 2.5 s, complete by 5. A first-order
+ * lag of roughly 1.5 s.
+ *
+ * ## Why 1.0 and not the zero crossing
+ *
+ * The raw curve crosses zero at 2.5-3 s, and that is the wrong number to take. Below the threshold
+ * the sample is written with `trim` alone — which is right only while the loop has NOT responded.
+ * By 1.5-3 s it has responded 30-85 %, so forcing k = 1 there over-corrects. Measured, replacing
+ * everything under N with trim alone:
+ *
+ *     N      pooled factor on enriched samples     (control: -0.11 %)
+ *     0                        +2.18 %   <- today
+ *     1.0                      -0.76 %   <- lands on the control
+ *     1.5                      -1.94 %
+ *     2.0                      -2.95 %
+ *     3.0                      -4.66 %
+ *     5.0                      -6.49 %
+ *
+ * At 1.0 s the enriched cells stop having a standing bias relative to comparable unenriched ones,
+ * which is the whole objective. Past it the loop starts pulling them lean instead.
+ *
+ * ## What it does NOT do
+ *
+ * Drop anything. The enriched population is 3,169 samples over six drives and it lives entirely in
+ * the high-load cells — 96.8 % of samples at the 25 % opening row carry an enrichment, 99.4 % at
+ * 30 %, and 22 cells are at 100 %. A settle filter that REMOVED them would delete the region it
+ * exists to fix, which is the objection that has (correctly) killed two previous filter proposals
+ * on this path. This changes what an unsettled sample says, not whether it speaks.
+ *
+ * Nor is it `transientSettleSec`, which is 0 by deliberate operator choice and gates on the
+ * THROTTLE. This clock starts when the DME's own correction engages, which is a different event —
+ * measured, the two coincide on very little.
+ */
+export const RF_KORR_SETTLE_SEC_DEFAULT = 1.0;
+
+/**
  * Samples a cell needs before DIRECT will write it.
  *
  * Three, the fewest that can carry a mean and a scatter at all. It is NOT a precision bar —
@@ -359,16 +413,13 @@ const CORRECTION_MAX = 2.0;
 /**
  * Why a cell was not written — one reason per gate, in the order they are tested.
  *
- * This path used to refuse cells silently: `acceptedMap` said no and nothing said why. The
- * low-opening tuner has named its refusals since it was written, and the difference showed the
- * moment anyone asked why an ordinary drive earned so little — the low band could answer per cell
- * and this one could only shrug. A refusal a reader cannot act on is indistinguishable from a bug.
+ * This path used to refuse cells silently: `acceptedMap` said no and nothing said why, so the
+ * first question an ordinary drive raises — why did it earn so little? — could only be answered by
+ * re-reading the gate. A refusal a reader cannot act on is indistinguishable from a bug.
  *
  * `null` means the cell was written.
  */
 export type VeReject =
-    /** Below the seam: the low-opening derivation owns this cell, and reports its own verdict. */
-    | 'out-of-band'
     /** No sample landed here at all. The remedy is to drive this state, not to drive it better. */
     | 'no-evidence'
     /** Samples, but not enough of them. */
@@ -499,6 +550,10 @@ export interface VeCalcOptions {
     directAuthority?: number;
     minCellSamples?: number;
     minCellWeight?: number;
+    /** Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is evidence.
+     *  Absent means `RF_KORR_SETTLE_SEC_DEFAULT`. See it for the measurement that chose the number
+     *  and for why this changes what an unsettled sample SAYS rather than dropping it. */
+    rfKorrSettleSec?: number;
 
     /**
      * Overrides for the rf_korr tuner's own grid thresholds, forwarded untouched.
@@ -584,7 +639,8 @@ export class VECalculator {
         const grid = this.createGrid();
 
         // 1. Binning / Aggregation (Weighted)
-        for (const point of logData) this.accumulatePoint(grid, point, plan, tuned, options.normaliseTo);
+        for (const point of logData) this.accumulatePoint(
+            grid, point, plan, tuned, options.normaliseTo, options.rfKorrSettleSec);
 
         return this.finalizeGrid(currentMap, grid, options);
     }
@@ -636,6 +692,10 @@ export class VECalculator {
          *  read from a field so the live and batch paths cannot disagree about it — see
          *  `verify:incremental`. */
         normaliseTo?: RfPtKorrCurves | null,
+        /** Seconds an enrichment must have been engaged before `trim x rf_korr` means anything.
+         *  Absent means `RF_KORR_SETTLE_SEC_DEFAULT`. Threaded in for the same reason
+         *  `normaliseTo` is: a live flush and the STOP pass must not use different numbers. */
+        settleSec?: number,
     ): void {
         {
             // Use Corrected Load if available, else Raw Load
@@ -659,8 +719,7 @@ export class VECalculator {
             // On a log recorded against a PATCHED image it IS 1.000: the PATCH sets
             // `K_LAA_TMOT_MIN` to 100 degC against a MAX of 100 degC, which empties the window
             // `laa_st_calc` needs to enable either learner. So this term changes no number on a
-            // neutral log — it is what makes the expression CORRECT on a log that is not, and
-            // what makes this formula literally the same one the low-opening path uses.
+            // neutral log — it is what makes the expression CORRECT on a log that is not.
             //
             // WHAT THE APP ACTUALLY HOLDS, because this comment used to claim more:
             // `trimNeutrality` holds the write on the `learned` verdict ALONE — the channel
@@ -726,7 +785,24 @@ export class VECalculator {
             // What it costs: on 16 cells written by both modes the two tables sit a median 2.8 %
             // apart, p95 12.2 %, worst 30.3 % (session #917, 100 % opening at 2200 rpm, where the
             // exhaust was coldest). The multiply is not a rounding detail at high load.
-            const measured = (plan.apply && rfKorr !== undefined) ? trim * rfKorr : trim;
+            /*
+             * THE SETTLE RULE. An enrichment the loop has not answered yet is not evidence.
+             *
+             * `rfKorrDwellSec` is seconds since the DME's correction engaged. Inside the first
+             * second the trim still reads the mixture from before the step, so `trim x rf_korr`
+             * credits the cell with the whole of rf_korr and nothing has been measured. Below the
+             * threshold the sample is written with `trim` alone — which is exactly the pre-step
+             * trim, i.e. that cell's own standing error, which IS evidence.
+             *
+             * NO SAMPLE IS DROPPED. That is the point: the enriched population is 3,169 samples
+             * across six drives and lives entirely in the high-load cells, so a filter that removed
+             * them would delete the region it is trying to fix. See RF_KORR_SETTLE_SEC_DEFAULT for
+             * why the threshold is where it is, and what each candidate cost.
+             */
+            const wait = settleSec ?? RF_KORR_SETTLE_SEC_DEFAULT;
+            const settled = !point.rfKorrGateOpen
+                || (point.rfKorrDwellSec !== undefined && point.rfKorrDwellSec >= wait);
+            const measured = (plan.apply && rfKorr !== undefined && settled) ? trim * rfKorr : trim;
 
             // Stated at the air the table is defined for, per sample, before it is binned.
             //
@@ -766,8 +842,12 @@ export class VECalculator {
             // dividing gives `STFT ÷ k_new`, which is neither documented derivation and is lean by
             // the whole size of the correction. Half of a two-term identity is not a compromise
             // between them.
+            // `settled` here too. The tuned form divides `trim x rf_korr` by k_new; on an
+            // unsettled sample the numerator is `trim` alone, so dividing would leave `trim / k_new`
+            // — lean by the whole correction, which is the failure `tunedRfKorrAt`'s own header
+            // describes arriving by another door.
             let tunedCorrection: number | undefined;
-            if (tuned && plan.apply && rfKorr !== undefined) {
+            if (tuned && plan.apply && rfKorr !== undefined && settled) {
                 const kNew = this.tunedRfKorrAt(tuned, point);
                 if (kNew !== undefined && kNew > 0) tunedCorrection = correction / kNew;
             }
@@ -916,51 +996,28 @@ export class VECalculator {
                 // The evidence gate. Both conditions — see VeCalcOptions.minCellSamples for why,
                 // and for what this replaced.
                 //
-                // Below the seam it does not get as far as the gate. `kf_rf_soll` is ONE table and
-                // its bottom thirteen rows belong to LOW LOAD, for three reasons in order of
-                // weight:
+                // ONE table, one derivation, one set of bars: every cell of `kf_rf_soll` is judged
+                // here, on the same evidence, wherever it sits on the opening axis.
                 //
-                //   1. THE MEASURAND DEGENERATES. The correction is `Old x trim x rf_korr`
-                //      with `trim = stft x ltft`, and it assumes the whole fuel-path error shows
-                //      in that product. In this band it need not: at a stationary idle the DME
-                //      ADDITIVE store (`LAA_OFFSET`, learner slave 0x019F80) absorbs the error,
-                //      and neither `stft` nor `ltft` — which is the MULTIPLICATIVE store — carries
-                //      it. The correction then returns "no change" precisely where the map is most
-                //      wrong. The PATCH is what stops it, by emptying the learn window
-                //      (`K_LAA_TMOT_MIN` = `K_LAA_TMOT_MAX` = 100 degC).
+                // WHAT A LOW-OPENING CELL RESTS ON THAT NONE OF THESE GATES TESTS. The correction
+                // is `Old x trim x rf_korr` with `trim = stft x ltft`, and it assumes the whole
+                // fuel-path error shows in that product. At a stationary idle it need not: the DME
+                // ADDITIVE store (`LAA_OFFSET`, learner slave 0x019F80) absorbs the error, and
+                // neither `stft` nor `ltft` — which is the MULTIPLICATIVE store — carries it, so
+                // the correction returns "no change" precisely where the map is most wrong. The
+                // PATCH is what stops it, by emptying the learn window (`K_LAA_TMOT_MIN` =
+                // `K_LAA_TMOT_MAX` = 100 degC), and `trimNeutrality` is what reports it — holding
+                // the write on the `learned` verdict alone, while a log with no `ltft` reads
+                // `unknown` and is not held.
                 //
-                //      `trimNeutrality` REPORTS the store; it holds the write on `learned` only.
-                //      A log with no `ltft` reads `unknown` and is not held. So THIS refusal — the
-                //      band boundary below — is what keeps the degenerate measurand out of the
-                //      correction, and it is not a second line of defence behind that one.
-                //
-                //      NOTE: the seam is NOT a formula boundary. LOW LOAD uses this same
-                //      expression — `lowLoadTuner.ts` forms `q = trim x rf_korr` from the same two
-                //      trims. What differs is reasons 2 and 3 below.
-                //   2. THE EVIDENCE BAR IS SHAPED FOR SWEEPS. Ten samples is 2.2 s at 4.5 Hz; an
-                //      idle parks on ONE cell for minutes and would pass instantly with samples
-                //      that are the same limit cycle re-read. LOW LOAD's bar (30 samples across
-                //      >=2 separate visits) is shaped for a dwell.
-                //   3. OWNERSHIP MUST BE EXCLUSIVE. It used to be settled only at composition, in
-                //      `composeVeGrid`, and that left a hole: where LOW LOAD refused a cell for
-                //      thin evidence, `owned` came out false and VE's value — derived from the
-                //      degenerate measurand above — was what reached the binary. Refusing here
-                //      closes it, because a cell VE never accepts keeps the BASE value instead.
-                //
-                // The samples are still accumulated, so the coverage heat still shows the band was
-                // driven; they are simply not evidence VE may act on. Counted out of the coverage
-                // totals below for the same reason — "8 of 480" would be measuring VE against 260
-                // cells it is not allowed to write.
-                //
-                //   4. THE EVIDENCE MUST BE ABOUT THIS CELL. A sample lands on four cells at
+                //   1. THE EVIDENCE MUST BE ABOUT THIS CELL. A sample lands on four cells at
                 //      once, so `weightSum` alone can be cleared by evidence that was mostly
                 //      about the neighbours — and since a refused neighbour keeps BASE, that
                 //      neighbour's error gets written here. See MIN_SELF_SHARE.
-                const veOwnsRow = r > LOW_LOAD_TOP_ROW;
-                if (cell.rawCount > 0 && veOwnsRow) cellsWithSomeData++;
+                if (cell.rawCount > 0) cellsWithSomeData++;
                 const selfShare = cell.weightSum > 0 ? cell.sumWeightSq / cell.weightSum : 0;
 
-                //   5. THE MEAN MUST BE PINNED, AND THE SAMPLES MUST BE ONE CONDITION.
+                //   2. THE MEAN MUST BE PINNED, AND THE SAMPLES MUST BE ONE CONDITION.
                 //
                 // `la_f_regler` is a two-point controller, so every cell's samples span its limit
                 // cycle whatever the mixture is doing — measured sd 0.034 on session #920. Two
@@ -969,8 +1026,9 @@ export class VECalculator {
                 //   scatter  is this cell one condition, or two populations averaged together?
                 //   precision is the MEAN determined finely enough to be worth writing?
                 //
-                // Both bounds are the low-opening path's, imported rather than copied: they are
-                // facts about this car's trim and this table's quantisation, not about a band.
+                // Both bounds live in `veScatter.ts` rather than here, because that is what they
+                // are: facts about `la_f_regler` on this car and about this table's quantisation,
+                // not about any one region of the map.
                 // See MAX_SAMPLE_SD / MAX_STD_ERR. The effective sample count for the standard
                 // error is Kish's `(Sum w)^2 / Sum w^2` — which is `weightSum / selfShare`, so the
                 // statistic the previous gate already needed pays for this one too. A cell fed by
@@ -981,7 +1039,7 @@ export class VECalculator {
                 const wSd = Math.sqrt(wVar);
                 const nEff = selfShare > 0 ? cell.weightSum / selfShare : 0;
 
-                //   6. THE SAMPLES ARE NOT INDEPENDENT, AND EVERY COUNT ABOVE ASSUMED THEY WERE.
+                //   3. THE SAMPLES ARE NOT INDEPENDENT, AND EVERY COUNT ABOVE ASSUMED THEY WERE.
                 //
                 // `la_f_regler` is a two-point controller oscillating at 1-2 Hz against a 4-5 Hz
                 // log, so consecutive samples are points on ONE swing. Kish's `nEff` corrects for
@@ -1000,14 +1058,14 @@ export class VECalculator {
                 // Cell first, then its ROW, then the constant.
                 //
                 // rho is not uniform across the table and the constant cannot be right for all of
-                // it: measured over six drives the low band (5-15 % opening) sits at 0.756 and the
-                // high band (45-100 %) at 0.923. The direction is the opposite of what a fallback
-                // was first justified by — a cell traversed quickly was assumed LESS correlated,
-                // and a sustained pull is in fact MORE, because it parks in the cell for longer.
+                // it: measured over six drives, cells at 5-15 % opening sit at 0.756 and cells at
+                // 45-100 % at 0.923. The direction is the opposite of what a fallback was first
+                // justified by — a cell traversed quickly was assumed LESS correlated, and a
+                // sustained pull is in fact MORE, because it parks in the cell for longer.
                 //
                 // The row is the pooling unit because that is the axis rho actually varies along:
-                // it tracks dwell, and dwell tracks opening. Pooling by row needs no arbitrary band
-                // boundary and degrades to the constant only where a whole row is thin.
+                // it tracks dwell, and dwell tracks opening. Pooling by row needs no arbitrary cut
+                // in the opening axis and degrades to the constant only where a whole row is thin.
                 const rho = Math.min(AUTOCORR_RHO_MAX, Math.max(0,
                     rhoOf(cell) ?? rowRho ?? AUTOCORR_FALLBACK));
 
@@ -1042,7 +1100,7 @@ export class VECalculator {
                     nIndep > 0 ? wSd / Math.sqrt(nIndep) : Infinity,
                 );
 
-                //   7. IS THE CORRECTION BIGGER THAN OUR UNCERTAINTY ABOUT IT?
+                //   4. IS THE CORRECTION BIGGER THAN OUR UNCERTAINTY ABOUT IT?
                 //
                 // Writing a cell removes |c - 1| of bias and injects `sigma` of noise, so the
                 // question is a RATIO, not an absolute bound. That is a t statistic, and using the
@@ -1063,14 +1121,14 @@ export class VECalculator {
                 // TWO TIERS, and which tier a refusal sits in is the whole of the method switch.
                 //
                 // STRUCTURAL refusals are about whether there is anything to compute at all. They
-                // are not statistics and they run under both methods: a cell in the low-opening
-                // band is not this path's to write, and a cell nothing landed in has nothing to say.
+                // are not statistics and they run under both methods: a cell nothing landed in has
+                // nothing to say, and a cell holding a graze or two has no mean worth taking.
                 //
                 // STATISTICAL refusals are about whether ONE drive can carry the cell alone. They
                 // run only under the statistical method, because under DIRECT that question is
                 // answered by the next drive rather than by refusing this one. See VeMethod.
-                const structural: VeReject | null = !veOwnsRow ? 'out-of-band'
-                    : cell.rawCount === 0 ? 'no-evidence'
+                const structural: VeReject | null =
+                    cell.rawCount === 0 ? 'no-evidence'
                         // SAMPLES COUNTS SAMPLES THAT WERE IN THE CELL, not ones that grazed it.
                         //
                         // `rawCount` is incremented by `distributeWeight` for every corner it
@@ -1312,14 +1370,13 @@ export class VECalculator {
             /** How many cells cleared the evidence gate, out of how many the log touched at all and
              *  how many exist. The three numbers together are what makes a threshold adjustable:
              *  raising it is only a decision you can make if you can see what it costs. */
-            // `total` is VE's OWN band, not the whole table — the rows above the LOW LOAD seam.
-            // The line this feeds reads "N of TOTAL cells met the evidence gate", and measuring
-            // that against 480 would count 260 cells VE is not allowed to write as cells it failed
-            // to earn. LOW LOAD reports its own band in its own census.
+            // The WHOLE table, 480 cells. One derivation and one set of bars means one
+            // denominator: a cell nothing landed in reads as a cell this drive did not earn,
+            // wherever it sits.
             coverage: {
                 withEvidence: cellsWithEvidence,
                 withAnyData: cellsWithSomeData,
-                total: Math.max(0, rows - (LOW_LOAD_TOP_ROW + 1)) * cols,
+                total: rows * cols,
             }
         };
     }
@@ -1365,11 +1422,17 @@ export class VECalculator {
      * a divisor above 1 (median 1.023, p99 1.208, max 1.242), each pushing its cell 2-20 % lean.
      * `TUNED_VS_NOMINAL_MAX` bounded a whole cell to 15 %, which is a backstop and not a defence.
      *
-     * Every other consumer of rf_korr in this file already reproduces the gate — the measured route
-     * gets it for free (`rf` really does equal `rf_soll` when the correction is off) and the
-     * table-delta route codes it explicitly in `annotateRfKorrPoint`. So did the tuner's own input
-     * pass, which drops gate-shut samples with a comment about the lean direction. This was the one
-     * place that did not.
+     * Every other consumer of rf_korr in this file already reproduces the gate — the table-delta
+     * route codes it explicitly in `annotateRfKorrPoint`, and so does the tuner's own input pass,
+     * which drops gate-shut samples with a comment about the lean direction. This was the one place
+     * that did not.
+     *
+     * **The line that used to stand here said the measured route "gets it for free — `rf` really
+     * does equal `rf_soll` when the correction is off". That was an assumption, and it was false.**
+     * Measured over six drives, 586 gate-shut samples read above 1.10, because the ratio also
+     * carries the rf_soll filter's lag and the load-axis reconstruction. `annotateRfKorrPoint` now
+     * gates the measured route explicitly, on both halves of the DME's condition. See the block
+     * comment there for what the assumption cost on the car.
      *
      * Returns undefined when the sample has no Δ — nothing can be said about it, and the cell just
      * carries less evidence for the tuned path.
@@ -1387,19 +1450,97 @@ export class VECalculator {
         return interpMap2d(tuned.rpm, tuned.delta, tuned.tuned, point.rpm, point.tabgDelta);
     }
 
-    public annotateRfKorr(
-        currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
-        air?: RfKorrAirInput,
-    ): LogDataPoint[] {
-        return logData.map(point => this.annotateRfKorrPoint(currentMap, point, egt, air));
+    /**
+     * The DME's rf_soll for this sample — the Alpha-N lookup times RF_PT_KORR — or undefined.
+     *
+     * Extracted so the latch walk below can have it without running the whole annotation over the
+     * raw log a second time. Undefined means the same three things it means at the call site: no
+     * RF channel, an operating point outside the table, or no air data to divide the density out.
+     */
+    private rfSollFor(
+        currentMap: VEMap, point: LogDataPoint, air?: RfKorrAirInput,
+    ): number | undefined {
+        if (point.rf === undefined) return undefined;
+        const rfSollTable = this.interpolateMap(
+            currentMap, point.rpm, point.correctedLoad ?? point.rawLoad);
+        if (!(rfSollTable > 0)) return undefined;
+        const ptKorr = rfPtKorrFor(point, air?.curves ?? null, air?.assumedPressureMbar);
+        if (ptKorr === undefined) return undefined;
+        return rfSollTable * ptKorr;
     }
 
-    /** One sample's worth of the above. Split out so a live run can annotate the samples that
-     *  arrived rather than the whole drive again; the batch call is this in a `.map`, so the two
-     *  cannot produce different numbers. */
+    /**
+     * Advance a caller-held latch by one raw sample. The live path's half of `annotateRfKorr`.
+     *
+     * Exists so the live run can walk the latch itself — it has to, because it sees the drive in
+     * increments and the latch is state the drive accumulates — without reimplementing `rfSollFor`.
+     * One definition of rf_soll, two callers, which is the same rule `tabgDelta` follows.
+     */
+    public stepRfKorrLatch(
+        latch: RfKorrLatch, currentMap: VEMap, point: LogDataPoint, egt: EgtTables,
+        perSecond: number, air?: RfKorrAirInput,
+    ): { open: boolean; dwellSec: number } {
+        return latch.stepTimed(
+            egt, point.rpm, this.rfSollFor(currentMap, point, air), point.vehicleSpeed,
+            point.time, perSecond);
+    }
+
+    /**
+     * Annotate a log, reproducing the DME's rf_korr latch across it.
+     *
+     * `latchSource` is the sequence the LATCH walks, and it should be the raw log — every sample the
+     * DME saw, before this app's filters removed any. `logData` is what gets annotated and may be
+     * any subset of it. When the two differ the verdicts are matched by timestamp.
+     *
+     * Omitting `latchSource` walks `logData` itself. Measured over #941-#946 that disagrees with the
+     * raw-log answer on 0.29 % of samples — 6 % of the enriched population — and it errs one way: a
+     * dropped fuel-cut sample would have reset the latch, so a subset keeps the correction alive
+     * longer than the car did, which raises the map. Pass the raw log.
+     */
+    public annotateRfKorr(
+        currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
+        air?: RfKorrAirInput, latchSource?: LogDataPoint[],
+    ): LogDataPoint[] {
+        if (!egt) return logData.map(p => this.annotateRfKorrPoint(currentMap, p, egt, air, null));
+
+        // One walk, in time order, over what the DME saw — the latch AND the clock that starts when
+        // it engages. Both come from the same pass for the reason tabgDelta does: two places
+        // needing one answer must not be able to reach different ones.
+        const source = latchSource ?? logData;
+        const perSecond = timeScaleSeconds(source);
+        const latch = new RfKorrLatch();
+        const track = new Map<number, { open: boolean; dwellSec: number }>();
+        for (const p of source) {
+            track.set(p.time, latch.stepTimed(
+                egt, p.rpm, this.rfSollFor(currentMap, p, air), p.vehicleSpeed, p.time, perSecond));
+        }
+        // A sample whose timestamp is not in the track came from outside the latch source, and
+        // there is no history for it. `null` says so rather than substituting a guess.
+        return logData.map(p => {
+            const t = track.get(p.time);
+            const out = this.annotateRfKorrPoint(currentMap, p, egt, air, t ? t.open : null);
+            // Only where the correction is running. A shut sample has no step to wait for, and
+            // saying "0 seconds since it engaged" there would read as the least settled thing in
+            // the log.
+            return out.rfKorrGateOpen && t ? { ...out, rfKorrDwellSec: t.dwellSec } : out;
+        });
+    }
+
+    /**
+     * One sample's worth of the above. Split out so a live run can annotate the samples that arrived
+     * rather than the whole drive again; the batch call is this in a `.map`, so the two cannot
+     * produce different numbers.
+     *
+     * `gateOpen` is REQUIRED, and nullable rather than optional, because there is no safe default.
+     * Passing `null` falls back to `rfKorrActive` — the entry condition alone, which calls every
+     * hysteresis-band sample shut. That is not the conservative choice: measured over six drives it
+     * mislabels 930 samples and writes -8.25 % on them against a correct -0.53 %. Crediting an
+     * enrichment the DME did not apply raises the map; refusing one it DID apply lowers it. Both
+     * directions cost, so the caller has to decide rather than inherit a default.
+     */
     public annotateRfKorrPoint(
-        currentMap: VEMap, point: LogDataPoint, egt?: EgtTables | null,
-        air?: RfKorrAirInput,
+        currentMap: VEMap, point: LogDataPoint, egt: EgtTables | null | undefined,
+        air: RfKorrAirInput | undefined, gateOpenVerdict: boolean | null,
     ): LogDataPoint {
         {
             if (point.rf === undefined) return point;
@@ -1429,9 +1570,9 @@ export class VECalculator {
             // 0.9952 once divided by RF_PT_KORR. Inverting the pressure curve on those samples
             // recovers the logged barometer to within 1 %.
             //
-            // Multiplied into rfSoll rather than divided out of the ratio, because `gateOpen` below
-            // reproduces `rf_korr_calc`'s `kl_rf_korr_rf_min < rf_soll` test and the DME compares
-            // against ITS rf_soll. Both were wrong by the same factor; one line fixes both.
+            // Multiplied into rfSoll rather than divided out of the ratio, because `rfKorrActive`
+            // below reproduces `rf_korr_calc`'s `kl_rf_korr_rf_min < rf_soll` test and the DME
+            // compares against ITS rf_soll. Both were wrong by the same factor; one line fixes both.
             const ptKorr = rfPtKorrFor(point, air?.curves ?? null, air?.assumedPressureMbar);
             // No air data, no rf_korr. Returning the contaminated ratio is what caused this, and
             // substituting 1.0 would be the same thing under a different name. Without it the
@@ -1443,9 +1584,43 @@ export class VECalculator {
 
             // `+ RF_TRUNCATION_MEAN_PERCENT`: the DME threw away two remainders on the way to
             // this number, and the ratio is against the exact arithmetic. See the constant.
-            const rfKorr = ((point.rf + RF_TRUNCATION_MEAN_PERCENT) / 100) / rfSoll;
-            const out: LogDataPoint = { ...point, rfKorr, rfSoll };
-            if (!egt) return out;
+            //
+            // UNGATED, and that word is the whole of the fix below. This is `RF / rf_soll` and
+            // nothing else — every reason RF can differ from the table lands in it, not only
+            // rf_korr.
+            const rfKorrUngated = ((point.rf + RF_TRUNCATION_MEAN_PERCENT) / 100) / rfSoll;
+
+            /*
+             * THE GATE, applied to the number that moves the map.
+             *
+             * `rf_korr_calc` reads KF_RF_KORR_DRREL only when `rf_soll > kl_rf_korr_rf_min(N)` AND
+             * `V > k_rf_korr_v_min`; otherwise it writes 0x400 = 1.000. So outside those conditions
+             * the correction IS 1.000, whatever `RF / rf_soll` happens to read — and what it reads
+             * there is the rf_soll filter's lag, the load-axis reconstruction and the DME's own
+             * truncation, none of which is an enrichment to be divided back out.
+             *
+             * This app measured the ratio and credited all of it. The correction it writes is
+             * `trim x rf_korr`, so every point of that residual raised the cell. Measured on six
+             * drives (#941-#946): 586 of the 65,331 gate-shut samples were credited above 1.10, and
+             * they were not spread out — they piled onto 2400 rpm / 7.5 % opening, where the map
+             * climbed 0.637 to 0.851 across six passes while the lambda controller moved the other
+             * way, from no samples near its rich clamp to 96 of them, one 1.4 % off the floor.
+             *
+             * On the eight #941 samples that started it, five were taken at 13-15 km/h. The speed
+             * half was never evaluated anywhere in this app — `EgtTables.vMin` said so in its own
+             * comment — and the load half was evaluated only for the diagnostic column below, which
+             * said 1.000 on all eight while the map was built from this line saying 1.161.
+             *
+             * `egtFromRfKorr` keeps the ungated ratio: it exists to be compared against the TABG
+             * sensor, and clamping its input would make the comparison agree by construction.
+             */
+            if (!egt) return { ...point, rfKorrUngated, rfSoll };
+            // The latch's verdict when the caller walked one, the entry condition when it could not.
+            const open = gateOpenVerdict ?? rfKorrActive(egt, point.rpm, rfSoll, point.vehicleSpeed);
+            const rfKorr = open ? rfKorrUngated : 1;
+            const out: LogDataPoint = {
+                ...point, rfKorr, rfKorrUngated, rfSoll, rfKorrGateOpen: open,
+            };
 
             // The nominal exhaust temperature BMW measured for this operating point. Both derived
             // columns hang off it, and the DME's own Y axis for this table is the final RF — which
@@ -1462,24 +1637,20 @@ export class VECalculator {
                 ? undefined : Math.max(0, model - point.exhaustTemp);
             if (hint !== undefined) out.tabgDelta = hint;
             const deltaInv = invertRfKorrProfile(
-                rfKorrProfileAt(egt, point.rpm), egt.rfKorr.delta, rfKorr,
+                rfKorrProfileAt(egt, point.rpm), egt.rfKorr.delta, rfKorrUngated,
                 { ...EGT_INVERSION_DEFAULTS, hint },
             );
             if (deltaInv !== undefined) out.egtFromRfKorr = model - deltaInv;
 
-            // (b) EGT -> rf_korr. Reproduces the gate rather than ignoring it: below the filling
-            //     floor the DME applies 1.000 regardless of how cold the exhaust is, so 1.000 is
+            // (b) EGT -> rf_korr. Reproduces the gate rather than ignoring it: outside the DME's
+            //     conditions it applies 1.000 regardless of how cold the exhaust is, so 1.000 is
             //     the right answer there and matching `rfKorr` is a clean pass on both offsets.
             //
-            // The verdict is kept on the sample as well as consumed here. `tunedRfKorrAt` needs it
-            // and cannot recover it from the number: 1.000 means "shut" or "open with Δ ≤ 30", and
-            // those two want opposite treatment. Evaluated once, in the one place that already
-            // knows this sample's rf_soll — the same rule tabgDelta follows two lines up.
-            if (hint !== undefined) {
-                const open = gateOpen(egt, point.rpm, rfSoll);
-                out.rfKorrGateOpen = open;
-                out.rfKorrFromEgt = open ? rfKorrAt(egt, point.rpm, hint) : 1.0;
-            }
+            // This branch was the ONLY gated one in the file until 2026-09-09, which is how the two
+            // routes came to disagree on the samples that mattered without either being wrong on
+            // its own terms. `open` is now decided once, above, and both use it — the same rule
+            // tabgDelta follows, for the same reason.
+            if (hint !== undefined) out.rfKorrFromEgt = open ? rfKorrAt(egt, point.rpm, hint) : 1.0;
 
             return out;
         }

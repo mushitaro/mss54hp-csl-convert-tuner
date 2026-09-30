@@ -77,6 +77,23 @@ export interface IdleTables {
      *  freezes `FR_REG_I` at whatever multiplicative correction it had, up to +/-20 %. */
     frEdkDiffPct: number;
 
+    /**
+     * `K_LFR_TMOT_ADAPT` — the coolant above which `lfra_adapt` runs, degC. 70 on this image.
+     *
+     * THE WARM GATE, and it belongs to the binary rather than to this tool. The admission threshold
+     * was 80, taken from `KF_LLR_QVS_GRUND`'s y[4] COOLANT breakpoint so a dwell binned onto the row
+     * it would be written to. That map is dead and its successor has no coolant axis at all —
+     * `KF_LLS_TV`'s y is air demand, and a cooler engine asks for more air, so it lands on a higher
+     * row by itself. The 80 was a leftover, and it cost a whole 448 s run: session #937 never rose
+     * above 77 degC and every one of its 1080 samples was refused `not-warm`.
+     *
+     * 70 is the calibration's own number for the thing the measurement actually depends on — that
+     * adaptation is running, so `md_llri` and `md_llra` trade and their sum is the invariant. Cat
+     * heating, the other reason to want a warm engine, is caught independently by the model gate
+     * (session #935: it opened to -6.5 % while heating and closed to +0.01 % when it finished).
+     */
+    adaptTmotC: number;
+
     /** `K_EVAN1_SOLL_MAX` — the intake cam target's upper clamp, degKW, and the angle warm idle
      *  actually commands. This is what a healthy `EVAN1_IST` reads. */
     evanSollMaxDegKw: number;
@@ -239,6 +256,7 @@ export function readIdleTablesResult(buffer: ArrayBuffer):
     const qSollMin = readConst(parser, 'K_LLR_QSOLL_MIN');
     const egasAbwPct = readConst(parser, 'K_LFR_EGAS_ABW');
     const frEdkDiffPct = readConst(parser, 'K_FR_EDK_DIFF');
+    const adaptTmotC = readConst(parser, 'K_LFR_TMOT_ADAPT');
     const evanSollMax = readConst(parser, 'K_EVAN1_SOLL_MAX');
     const evanDruck = readConst(parser, 'K_EVAN1_DRUCK');
     const evanDruckHys = readConst(parser, 'K_EVAN1_DRUCK_HYS');
@@ -252,6 +270,7 @@ export function readIdleTablesResult(buffer: ArrayBuffer):
         ['K_LLS_TV_NOTLAUF_MIN', tvNotlaufMin], ['K_LLS_TV_NOTLAUF_MAX', tvNotlaufMax],
         ['K_LFR_MDADAPT_OFFSET', adaptOffset], ['K_LLR_Q_MCS', qMcs], ['K_LLR_QSOLL_MIN', qSollMin],
         ['K_LFR_EGAS_ABW', egasAbwPct], ['K_FR_EDK_DIFF', frEdkDiffPct],
+        ['K_LFR_TMOT_ADAPT', adaptTmotC],
         ['K_EVAN1_SOLL_MAX', evanSollMax], ['K_EVAN1_DRUCK', evanDruck],
         ['K_EVAN1_DRUCK_HYS', evanDruckHys],
         ...rails.map((v, i) => [['K_LFR_MD_REG_MIN', 'K_LFR_MD_REG_MAX', 'K_LFR_MDREG_MIN',
@@ -281,6 +300,7 @@ export function readIdleTablesResult(buffer: ArrayBuffer):
         qSollMin: qSollMin as number,
         egasAbwPct: egasAbwPct as number,
         frEdkDiffPct: frEdkDiffPct as number,
+        adaptTmotC: adaptTmotC as number,
         evanSollMaxDegKw: evanSollMax as number,
         evanDruckDegKw: evanDruck as number,
         evanLatchThresholdDegKw: (evanDruck as number) + (evanDruckHys as number),

@@ -49,8 +49,11 @@
 
 import { interp2d, type IdleMap2d } from './idleTables';
 
-/** Bracket `v` in an ascending axis, for the slope below. The LOOKUP is `interp2d`'s — this is only
- *  used to find which interval the operating point sits in, which the lookup does not report. */
+/** Bracket `v` in an ascending axis. The LOOKUP is `interp2d`'s — this finds which interval the
+ *  operating point sits in, which the lookup does not report. Read by the slope below AND by
+ *  `lookupNodes`, which is the whole reason it has to agree with `interp2d` exactly: the weights it
+ *  produces are the ones a correction is divided by, so a different bracketing rule here would
+ *  distribute a write across cells the DME does not read. */
 function bracket(axis: readonly number[], v: number): { i: number; j: number; f: number } {
     if (!axis.length) return { i: 0, j: 0, f: 0 };
     if (v <= axis[0]) return { i: 0, j: 0, f: 0 };
@@ -75,6 +78,41 @@ export function llsTvAt(map: IdleMap2d, rpm: number, ml: number): number {
  * the DME's behaviour. At the top row it falls back to the last real interval, since a request
  * above the last breakpoint is clamped and has no slope of its own.
  */
+/** One corner of the bilinear lookup: which cell, and how much of the answer it is. */
+export interface LookupNode { row: number; col: number; weight: number }
+
+/**
+ * The four cells `llsTvAt` actually reads at this operating point, with their weights.
+ *
+ * The whole reason the write is distributed rather than binned. This car idles at 880 rpm and the
+ * axis has breakpoints at 800 and 950, so no single cell is "the" cell: the DME reads a weighted
+ * blend, and writing a correction into the nearest one moves the operating point by only its
+ * weight — 0.40 here — while dragging that breakpoint 2.5x further than the physics asked for.
+ *
+ * Duplicate corners are merged rather than emitted twice. On an exact breakpoint `bracket` returns
+ * `lo === hi`, and two entries for one cell would let a caller square its weight or write it twice.
+ * Weights sum to 1 by construction; the merge preserves that.
+ */
+export function lookupNodes(map: IdleMap2d, rpm: number, ml: number): LookupNode[] {
+    const c = bracket(map.x, rpm);
+    const r = bracket(map.y, ml);
+    const raw: LookupNode[] = [
+        { row: r.i, col: c.i, weight: (1 - r.f) * (1 - c.f) },
+        { row: r.i, col: c.j, weight: (1 - r.f) * c.f },
+        { row: r.j, col: c.i, weight: r.f * (1 - c.f) },
+        { row: r.j, col: c.j, weight: r.f * c.f },
+    ];
+    const merged = new Map<string, LookupNode>();
+    for (const n of raw) {
+        if (n.weight <= 0) continue;
+        const key = `${n.row}:${n.col}`;
+        const seen = merged.get(key);
+        if (seen) seen.weight += n.weight;
+        else merged.set(key, { ...n });
+    }
+    return [...merged.values()];
+}
+
 export function llsTvSlopePctPerKgH(map: IdleMap2d, rpm: number, ml: number): number | null {
     if (map.y.length < 2) return null;
     const cy = bracket(map.y, ml);

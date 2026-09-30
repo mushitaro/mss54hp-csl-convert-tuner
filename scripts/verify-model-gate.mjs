@@ -24,7 +24,6 @@ import {
     evaluateModelGate, predictRf, aqRelRf, GATE_MAX_WDK_PCT, GATE_PASS,
 } from '../src/lib/ve-calculator/modelGate.ts';
 import { findEcuItem } from '../src/lib/ecu-items/catalog/index.ts';
-import { LOW_LOAD_TUNE_DEFAULTS } from '../src/lib/ve-calculator/lowLoadTuner.ts';
 import { readAlphaNTables, tiBranchAmbiguous } from '../src/lib/ve-calculator/alphaNTable.ts';
 
 let fails = 0;
@@ -233,7 +232,7 @@ console.log('\n[the AIR side: does the idle valve map reproduce the logged AQ_RE
     // The gate above proves the binary MEASURES the air correctly. This proves it PRODUCES it —
     // KF_LLS_TV -> duty -> KL_AQ_ABS_LLS -> mm2, plus the throttle's own area, against the same
     // drive's rawLoad. It matters because KF_LLS_TV decides which kf_rf_soll row idle sits in, so
-    // LOW LOAD's evidence is only about the row this map puts the engine on.
+    // an idle log's evidence is only about the row this map puts the engine on.
     const dv = new DataView(ab);
     const u16 = (a) => dv.getUint16(a, false);
     const line = (xs, ys, x) => {
@@ -293,27 +292,25 @@ console.log('\n[the AIR side: does the idle valve map reproduce the logged AQ_RE
         lrwDeg[0] > 400, lrwDeg.map(v => v.toFixed(0)).join('/') + ' deg');
 }
 
-console.log('\n[LOW LOAD cannot write an idle cell in this build]');
+console.log('\n[the two TI_F_STAT branches still disagree at every idle point]');
 {
-    // The single most consequential fact for the procedure, and it is a property of the app rather
-    // than of the car: page.tsx calls tuneLowLoad with no options, so requireTiBranchProven is true,
-    // and tiBranchAmbiguous is true at every idle operating point because KF_TI_N_RF (1.000 above
-    // rf 0.15) and KL_TI_N_ZWD_LL (0.859 at idle rpm) disagree by 0.141. Every idle-band cell is
-    // therefore rejected as `ti-branch-unproven` before any correction is even computed.
+    // This used to be the single most consequential fact for the procedure, and it was a property
+    // of the app rather than of the car: the idle rows were derived by a separate tuner called with
+    // `requireTiBranchProven` on, and tiBranchAmbiguous is true at every idle operating point
+    // because KF_TI_N_RF (1.000 above rf 0.15) and KL_TI_N_ZWD_LL (0.859 at idle rpm) disagree by
+    // 0.141. Every idle cell was therefore rejected as `ti-branch-unproven` before any correction
+    // was even computed.
+    //
+    // Neither the gate nor that tuner exists now, and TI_F_STAT is not a term in the correction at
+    // all — verify:ti-factor measured that on #920 — so which branch runs cannot move a written
+    // byte. The DISAGREEMENT is still real, and it is pinned here because it is what makes the
+    // question worth asking of the car: `ti_load_factor` (slave 0x01C6CA) reads the 0.859 curve
+    // KL_TI_N_ZWD_LL only while LLS_ST bit 7 is set, and that bit is set by the idle-valve
+    // diagnosis, so a healthy valve leaves KF_TI_N_RF running.
     const tables = readAlphaNTables(ab);
-    // The gate is OFF now. `ti_load_factor` (slave 0x01C6CA) reads the 0.859 curve KL_TI_N_ZWD_LL
-    // only while LLS_ST bit 7 is set, and that bit is set by the idle-valve diagnosis — a healthy
-    // valve leaves KF_TI_N_RF running. The ambiguity the gate was protecting against is still real
-    // as a property of the two tables; what changed is that the CODE says which one runs.
-    check('the branch gate is off by default', LOW_LOAD_TUNE_DEFAULTS.requireTiBranchProven === false);
-    check('...but the two tables really do still disagree, so the gate has something to guard',
-        !!tables && tiBranchAmbiguous(tables, 870, 0.20) && tiBranchAmbiguous(tables, 870, 0.10));
     check('the Alpha-N side tables decode', !!tables);
-    // 1 %, against a quantisation step of 0.5 % at the idle cell — kf_rf_soll stores raw/1000, so
-    // one bit is 0.001 on a cell holding 0.200. Two steps. It was four while the correction was
-    // built from the short-term trim alone and therefore understated the error.
-    check('noChangeBand is two quantisation steps of the idle cell, not four',
-        Math.abs(LOW_LOAD_TUNE_DEFAULTS.noChangeBand - 0.01) < 1e-9, LOW_LOAD_TUNE_DEFAULTS.noChangeBand);
+    check('the two tables really do disagree across the whole idle region',
+        !!tables && tiBranchAmbiguous(tables, 870, 0.20) && tiBranchAmbiguous(tables, 870, 0.10));
 }
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURE(S)`);

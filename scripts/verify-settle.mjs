@@ -178,9 +178,9 @@ console.log('\n[the settle does not double-count or starve the other outputs]');
     check('validData pays the transient test and nothing else',
         out.data.filter(r => r.rf >= 55).length === 47,
         String(out.data.filter(r => r.rf >= 55).length));
-    // There is no idle gate any more — the VE calculator refuses the low band at the derivation
-    // instead, so the filter keeps those rows and this settle is free to judge them on its own
-    // terms. What used to be "not counted twice" is now "counted once, by whichever gate applies".
+    // There is no idle gate any more, so the filter keeps a low-opening sample like any other and
+    // this settle is free to judge it on its own terms. What used to be "not counted twice" is now
+    // "counted once, by whichever gate applies".
     const idleRows = drive([[10, 30]]).map(r => ({ ...r, rawLoad: 0.5, rpm: 800, rf: 80 }));
     const idleOut = run(idleRows);
     check('a low-opening sample is no longer dropped as idle', (idleOut.dropCensus.idle ?? 0) === 0,

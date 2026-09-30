@@ -35,7 +35,8 @@ export type FieldKey =
     | 'llsSt'
     // The tip-in / dashpot slew limiter, on the same lane. Diagnostics for the drivability tables,
     // never an input to the VE derivation — see their entries.
-    | 'mdDynSt' | 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta';
+    | 'mdDynSt' | 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta'
+    | 'frRegler' | 'llsTv' | 'mlSoll' | 'mlSollLls';
 
 /** Where a number came from: a DS2 block and byte offset, or this app's own arithmetic. */
 export type FieldSource = { selection: number; offset: number } | 'derived';
@@ -405,11 +406,11 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
      * low and the 0.859 curve is the DME's substitute for a valve it has stopped believing.
      *
      * Which of those two runs decides `TI_F_STAT`, which the DME multiplies injection time by. It
-     * is NOT a term in the LOW LOAD correction — session #920 measured that the lambda trim does
-     * not move with the factor — so `requireTiBranchProven`, which once refused every idle cell
-     * over this, is now OFF and neither branch changes a written byte. `TI_F_STAT` itself is slave
-     * RAM (0xFFE70E) and unreachable from a DS2 session with the master; this byte is the entire
-     * discriminator and it is master RAM.
+     * is NOT a term in the `trim x rf_korr` correction — session #920 measured that the lambda
+     * trim does not move with the factor — so `requireTiBranchProven`, which once refused every
+     * idle cell over this, is now OFF and neither branch changes a written byte. `TI_F_STAT` itself
+     * is slave RAM (0xFFE70E) and unreachable from a DS2 session with the master; this byte is the
+     * entire discriminator and it is master RAM.
      *
      * Formatted as HEX. It is a bitfield: `0x01` is what `lls_tv_init` leaves, `0x81` means the
      * diagnosis has latched, and rendering either as a decimal count would invite reading it as a
@@ -450,6 +451,37 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         key: 'mdFwFilter', symbol: 'MD_FW_FILTER', name: 'Torque request, after the slew limiter',
         source: 'derived', unit: 'Nm', format: v => v.toFixed(1),
         relevance: 'debug', color: '#9B84E8',
+    },
+    /**
+     * THE RING, read directly — the four channels the micro-throttle mode exists to measure.
+     *
+     * `tuning` and not `debug`, on the category's own test: the LLS derivation reads them. They
+     * replace two assumed map inversions (AQ_REL through KL_AQ_ABS_LLS, then KF_LLS_TV) and, in
+     * FR_REGLER's case, a quantity that could not be inferred from a log at all.
+     *
+     * Only the LLS profile provides them, so a VE run never carries the columns.
+     */
+    frRegler: {
+        key: 'frRegler', symbol: 'FR_REGLER', name: 'Idle filling controller, 1.0 neutral',
+        source: 'derived', unit: '', format: v => v.toFixed(4),
+        relevance: 'tuning', chartAxis: 'y2', color: '#0A9BDB', // M-blue 500 — the loop's output
+    },
+    llsTv: {
+        key: 'llsTv', symbol: 'LLS_TV', name: 'Idle valve duty, as commanded',
+        source: 'derived', unit: '%', format: v => v.toFixed(2),
+        relevance: 'tuning', chartAxis: 'y3', color: '#B9A6EE', // M-violet 300 — measured feedback
+    },
+    mlSoll: {
+        key: 'mlSoll', symbol: 'ML_SOLL', name: 'Air request, total',
+        source: 'derived', unit: 'kg/h', format: v => v.toFixed(2),
+        relevance: 'tuning', chartAxis: 'y3', color: '#9B84E8', // M-violet 400
+    },
+    /** The half routed to the valve. Below ML_SOLL_MAX_LLS the two are equal and the throttle is
+     *  shut; where they diverge is the boundary 9.10 describes, and no other channel shows it. */
+    mlSollLls: {
+        key: 'mlSollLls', symbol: 'ML_SOLL_LLS', name: 'Air request routed to the idle valve',
+        source: 'derived', unit: 'kg/h', format: v => v.toFixed(2),
+        relevance: 'tuning', chartAxis: 'y3', color: '#CBBCF2', // lighter = second of the pair
     },
     /** The allowance each path had, 0.1 Nm per 10 ms. Written by the DME and read by nothing —
      *  observation-only values, which is why they are here rather than in a gate. */
@@ -576,6 +608,9 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     // seat. On the same slowest lane as LLS_ST, so switching a column on is how you find out the
     // data was already recorded.
     mdDynSt: false, mdFw: false, mdFwFilter: false, mdLsDelta: false, mdDpDelta: false,
+    // ON: these are what an LLS tune is read from, and the profile that provides them is the only
+    // one that polls them, so a VE run never sees the columns whatever this says.
+    frRegler: true, llsTv: true, mlSoll: true, mlSollLls: true,
     // Ambient temperature off with the other three air channels — it is the reference the intake
     // sensor is checked against, and that check is a job, not a view.
     //

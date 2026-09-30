@@ -64,9 +64,24 @@ export interface PreflightVerdict {
     samplesUsed: number;
 }
 
-/** The duty above which the load model is no longer on its bottom-row rail. INFERENCE, from the
- *  investigation, not a constant in the binary — which is why the test carries a flag saying so. */
-export const PREFLIGHT_DUTY_CEILING_PCT = 25;
+/**
+ * RETIRED, and the car is why.
+ *
+ * `PREFLIGHT_DUTY_CEILING_PCT = 25` claimed the idle valve sits at or under 25 % duty, and above it
+ * "the load model is not on its bottom-row rail". It was the ONE threshold on this surface that was
+ * not read from the binary — an inference from the investigation, and the test said so in its own
+ * `thresholdIsInference` flag.
+ *
+ * Sessions #935 and #936 answered it. This car runs 36.1-38.0 % warm and 41-58 % while warming up,
+ * so the test failed on 100 % of samples of every run there has ever been. A check that is always
+ * red teaches the reader to stop looking at red, which costs more than the check was worth.
+ *
+ * Nothing gated on it — the preflight is diagnosis, not admission — so removing it changes no
+ * verdict. What is lost is the question it was asking, and that question is still open: whether the
+ * Alpha-N load model is on its bottom row at idle. It needs a threshold read from the binary, or a
+ * different signal, before it goes back.
+ */
+
 
 /**
  * The first breakpoint of `KL_MD_RES_LRW` (master 0x97D8), in degrees of steering wheel angle.
@@ -112,7 +127,6 @@ export function evaluateIdlePreflight(
     const wdkSoll = m(s => s.wdkSoll);
     const mlSoll = m(s => s.mlSoll);
     const mlMax = m(s => s.mlSollMaxLls);
-    const llsTv = m(s => s.llsTv);
     const egasMax = m(s => s.egasMaxWdk);
     const resKath = m(s => s.mdResKath);
     const resLrw = m(s => s.mdResLrw);
@@ -205,21 +219,6 @@ export function evaluateIdlePreflight(
                     + (tables.authorityFloorIsRailed ? ''
                         : ' **In THIS binary the first row is not railed at K_LLS_TV_MIN**, so this is an '
                         + 'upper bound on the floor rather than the floor. The real one is lower.'),
-            },
-        },
-        {
-            id: 'LLS_TV',
-            status: judge(llsTv, llsTv !== null && llsTv <= PREFLIGHT_DUTY_CEILING_PCT),
-            value: llsTv, against: null,
-            rule: `<= ${PREFLIGHT_DUTY_CEILING_PCT}`, unit: '%',
-            thresholdIsInference: true,
-            consequence: {
-                ja: '約 25 % を超えていれば、負荷モデルは最下行のレール上に無い。'
-                    + '「Alpha-N はアイドルで固まっている」系の結論は性質が変わる。'
-                    + 'この 25 % だけは BIN からではなく調査ドキュメントからの inference。',
-                en: 'Above about 25 % the load model is not on its bottom-row rail, and the "Alpha-N is '
-                    + 'frozen at idle" conclusions change character. This threshold alone is an inference '
-                    + 'from the investigation rather than a value read from the binary.',
             },
         },
         {

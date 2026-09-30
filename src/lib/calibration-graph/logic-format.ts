@@ -39,12 +39,40 @@ export interface FormatContext {
   plain: boolean;
 }
 
+/**
+ * One condition of a statement, on its own.
+ *
+ * The joined `guard` below is the whole condition as one string, which is what
+ * a single line needs. It is the wrong shape for the picture: a block is
+ * usually a few branches, and the lines inside one branch share their FIRST
+ * condition — so the diagram groups on that, and needs the conditions
+ * separately to do it. `raw` is the grouping key because it is the decompiler's
+ * own text: it does not move when PLAIN is toggled, and two statements inside
+ * one `if` carry the identical string.
+ */
+export interface GuardPart {
+  /** The condition as decompiled: the grouping key, and the tooltip. */
+  raw: string;
+  /** The drawn wording — prose when it parsed, the rewritten C when it did not. */
+  text: string;
+  /**
+   * The condition alone, with no "while"/"のとき" around it.
+   *
+   * The picture reads a condition as a sentence, because it is drawn beside
+   * prose. A code listing writes `if (…)`, where a sentence inside the
+   * brackets would be neither code nor prose. Same condition, two settings.
+   */
+  bare: string;
+}
+
 export interface FormattedLine {
   out: string;
   expr: string;
   /** `expr` clipped to the width the box was measured at; what is drawn. */
   shown?: string;
   guard?: string;
+  /** The same conditions, one by one, in the order the decompiler nested them. */
+  guardParts?: GuardPart[];
   /** Plain-language reading of the guard, when the structure parsed. */
   guardGloss?: string;
   /** Plain-language reading of the assignment, when the operands are known. */
@@ -476,6 +504,32 @@ export function glossFor(st: Statement, ctx: FormatContext): string | undefined 
   const outDesc = describe(st.out, ctx);
   const parts: string[] = [];
   for (const it of st.interp) {
+    // A filter is not a table lookup, and reading it as one produced a
+    // sentence that was simply false. `parse_logic` fills a filter entry's
+    // `tables` with everything it found inside the filter's INPUT — for
+    // `lls_tv_calc` that put `AVAN1_SOLL_FAKTOR` first — and its `axes` with
+    // the helper's last two arguments, which are the state variable and the
+    // time constant. Glossed as a lookup that came out as "interpolate
+    // AVAN1_SOLL_FAKTOR over DAT_00FFEF0C × K_LLS_TAU2": three names, none of
+    // them playing the part the sentence gave it. 55 statements said this.
+    //
+    // The tau is `axes[1]` for all 55, which is the same argument
+    // `formatExpression` already draws as `τ=` — so the gloss and the formula
+    // above it name the same thing, rather than two different readings of one
+    // call.
+    if (it.shape === "filter") {
+      const tau = it.axes[1];
+      const kind = /^IIR/.test(it.helper) ? "IIR" : "PT1";
+      const named = tau ? (describe(tau, ctx) ?? spell(tau, ctx)) : undefined;
+      if (ctx.lang === "ja") {
+        const lag = kind === "PT1" ? "一次遅れフィルタ" : "IIR フィルタ";
+        parts.push(named ? `${lag}（τ = ${named}）` : lag);
+      } else {
+        const lag = kind === "PT1" ? "first-order lag" : "IIR filter";
+        parts.push(named ? `${lag} (τ = ${named})` : lag);
+      }
+      continue;
+    }
     const table = it.tables[0];
     if (!table) continue;
     const tableDesc = describe(table, ctx) ?? spell(table, ctx);
@@ -491,9 +545,14 @@ export function glossFor(st: Statement, ctx: FormatContext): string | undefined 
   if (!parts.length && !outDesc) return undefined;
   const target = outDesc ?? displayName(st.out);
   if (!parts.length) return ctx.lang === "ja" ? `${target} を求める` : `compute ${target}`;
+  // A formula reading one table twice is normal — `lls_tv_calc` subtracts
+  // KF_LLS_TV from a corrected copy and adds it back — but saying so twice in
+  // a one-line reading is noise, not precision. The formula above still shows
+  // both lookups.
+  const said = [...new Set(parts)];
   return ctx.lang === "ja"
-    ? `${target} ← ${parts.join("、")}`
-    : `${target} ← ${parts.join(", ")}`;
+    ? `${target} ← ${said.join("、")}`
+    : `${target} ← ${said.join(", ")}`;
 }
 
 // --------------------------------------------------------------------------
@@ -551,6 +610,20 @@ export function formatStatement(st: Statement, ctx: FormatContext): FormattedLin
   const phrases = (guards.map((g) => g.phrase).filter(Boolean) as string[]).map((p) =>
     guards.length > 1 && p.includes(or) ? `(${p})` : p,
   );
+  // Every guard has a phrase or none of them does — the same all-or-nothing
+  // rule `guardGloss` is built on, applied one condition at a time. A part
+  // standing alone on its own line needs no bracketing: the "or" it may
+  // contain has nothing to bind against up there.
+  const allPhrased = phrases.length === guards.length && phrases.length > 0;
+  const guardParts: GuardPart[] = guards.map((g, i) => ({
+    raw: st.guards[i],
+    text: allPhrased
+      ? ctx.lang === "ja"
+        ? `${g.phrase} のとき`
+        : `while ${g.phrase}`
+      : `when ${g.text}`,
+    bare: g.text,
+  }));
 
   return {
     // The assigned-to name needs the same address resolution as the operands;
@@ -558,6 +631,7 @@ export function formatStatement(st: Statement, ctx: FormatContext): FormattedLin
     out: resolveData(applyRenames(displayName(st.out), sc.rename), ctx, sc),
     expr: formatExpression(st.expr, ctx, sc),
     guard: guards.length ? guards.map((g) => g.text).join(and) : undefined,
+    guardParts: guardParts.length ? guardParts : undefined,
     // Every guard has to have a phrase or none of them does: a condition that
     // is half sentence and half C reads as one condition, not as two.
     guardGloss:

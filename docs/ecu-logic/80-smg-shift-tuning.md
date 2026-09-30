@@ -296,7 +296,7 @@ raw を上げると時定数は**下がる**。`enc` で必ず確認してから
 | K_SMG_MOT_RAB_T_MAX | constant | 0x286E | 0x8A86E | slave | 4.0 | sec | 同打ち切り時間 | 変更不要 | — | code-confirmed |
 | K_SMG_J_MOTOR | constant | 0x280A | 0x8A80A | slave | 0.25 | Nms2 | 回転系全体の慣性。指令スルーレートの上限クランプ `min(指令, T/J)` | **軽量FW時は下げる**。刻み 0.0078。§3.6 | 過大でブリップが鈍る／過小で回転が合わない | code-confirmed |
 | KL_SMG_MOT_J_MOTOR | curve | 0x2ACC | 0x8AACC | slave | 0.0078–0.5 | Nms2 | オブザーバ内の慣性項（用途未確定）。y=0x2ACF | **触らない**（§3.6 の注記） | 用途不明 | xref-only |
-| K_MD_J_MOTOR | constant | 0x9554 | 0x09554 | master | 0.268657 | Nms2 | 別系統の慣性定数。**経路が死んでいる** | 変更しても無効 | 混同注意 | inference |
+| K_MD_J_MOTOR | constant | 0x9554 | 0x09554 | master | 0.268657 | Nms2 | 別系統の慣性定数。**消費者は 2 つ**: `md_max_begr`（加算、file 0x1619A）は `KL_MD_BEGR_GANG` 全段 1000 Nm のレールで不活性だが、`Torque_Limitation`（減算、file 0x16D82）は 10 ms のトルク経路で**実行される** | 実質は変わらない（`K_MD_NBEGR_MIN` = 90 Nm でクランプ）が「経路が死んでいる」は誤り。→ `85-flywheel-inertia-autotune.md` §7.3 | `K_SMG_J_MOTOR` と混同注意。単位系も別 | code-confirmed |
 | K_SMG_MOT_N_REG_P_AH | constant | 0x2870 | 0x8A870 | slave | 0.04 | Nm/Upm | 回転レギュレータ P (AH) | 上げて追従改善 | 発振 | funktionsrahmen-only |
 | K_SMG_MOT_N_REG_P_KH | constant | 0x2871 | 0x8A871 | slave | 0.08 | Nm/Upm | 回転レギュレータ P (KH) | 同上 | 発振 | funktionsrahmen-only |
 | K_SMG_MOT_N_REG_I | constant | 0x2872 | 0x8A872 | slave | 0.003 | Nm/Upm | 同 I 項 | 微増 | ワインドアップ | funktionsrahmen-only |

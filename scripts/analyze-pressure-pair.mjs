@@ -90,7 +90,7 @@ function loadSession(dir) {
         session.tuneSettings.filterConfig, session.tuneSettings.interpolationTable);
     const calc = new M.VECalculator();
     const ve = calc.annotateRfKorr(veMap, processed.data, M.readEgtTables(ab),
-        { curves: M.readRfPtKorrCurves(ab) });
+        { curves: M.readRfPtKorrCurves(ab) }, processed.rawData);
     return { label: session.label, veMap, ve };
 }
 

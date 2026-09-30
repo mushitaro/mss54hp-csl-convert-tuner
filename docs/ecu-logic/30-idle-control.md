@@ -126,8 +126,15 @@ LLR_N_SOLL   = LFR_N_N_SOLL          ← ECU の他の場所はこれを見る�
 | ヒステリシス | `K_LFR_DN_HYS` | `0x9D38` | 100 rpm |
 
 > **重要**：オーバーシュート側（回転が上がりすぎた側）には
-> **比例項も点火項も存在しない**（P は正側のみ、`TZ_NEG` は全ゼロ）。
-> 戻しは遅い I 積分だけ。→ `40-fr-adaptation-bug.md` §3 の A/C ハンチング要因 3。
+> **比例項も点火項も存在しない**。戻しは遅い I 積分だけ。
+> → `40-fr-adaptation-bug.md` §3 の A/C ハンチング要因 3。
+>
+> **★ 訂正（2026-09-05）— 点火項が無い理由は「`TZ_NEG` が全ゼロだから」ではない。**
+> `lfr_calc 0x026A6A` が `MD_RES_LRW_ST` bit1 の落ちている間 `MD_LLR_TZ` を**丸ごと 0 にする**ので、
+> **完全に較正済みの `KL_LFR_TZ_POS`（最大 15 Nm）も同じく不在**である。
+> 原因は**ゲート**であって値ではない。∴ `KL_LFR_TZ_NEG` を埋めても点火項は戻らない —
+> 先に `KL_MD_RES_LRW` を開ける必要がある（`85-flywheel-inertia-autotune.md` §7.2）。
+> なお P 項が正側のみというのは正しい（`KL_LFR_DQP_POS` は `LFR_DN > 0` でしか評価されない）。
 
 ### 適応（Bedarfsadaption, `decomp/master/025b52.txt` `lfra_adapt`）
 
@@ -226,5 +233,19 @@ LLR_N_SOLL   = LFR_N_N_SOLL          ← ECU の他の場所はこれを見る�
 
 `slave/0396a0.txt` `smg_anti_stall_handler`：ストールフラグが立つと SMG のエンジン回転制御へ
 `K_SMG_N_ZIEL_ABWUERG` = 1200 rpm を指令し、効率を `K_SMG_ETA_RES_SCHA` = 85.16 % にクランプ。
-`K_SMG_MOT_N_REG_P_KH` = 0.08 Nm/rpm、`K_SMG_MOT_N_REG_I` = 0.003 Nm/rpm の**独立した第 2 の回転制御器**で、
-クラッチ接続中は LFR と競合しうる。
+**独立した第 2 の回転制御器**。I ゲインは `K_SMG_MOT_N_REG_I` = 0.003 Nm/rpm。
+
+> **★ 訂正（2026-09-05）— P ゲインと競合の記述が誤りだった。**
+> `K_SMG_MOT_N_REG_P_KH`（0.08）が選ばれるのは `0x039472` / `0x03947E` の分岐、すなわち
+> `smg_can_fahrzustand == 8`（Anfahrhilfe）**かつ** `KATH_ZUSTAND != 0` のときだけ。
+> アンチストール状態では入場条件（`0x039FD6`）により `smg_can_fahrzustand == 0` なので、
+> P は目標回転で引く `KL_SMG_MOT_N_REG_P_U`（1200 rpm で 0.10、目標より下）／
+> `_P_D`（0.084、目標より上）から来る。D は `KL_SMG_MOT_N_REG_D_U`（0.2）／`_D_D`（0.838）で、
+> `K_SMG_MOT_N_REG_D_MIN`/`_MAX`（偏差 90–350 rpm）でゲートされる。
+>
+> **「クラッチ接続中は LFR と競合しうる」も成立しない。** この状態は
+> `smg_can_istgang == Neutral`（`0x039F96`）を入場条件にしているので、
+> **クラッチがトルクを伝えている間は走らない**。そして競合するどころか明示的に調停していて、
+> `0x039364`–`0x039374` が `LLR_N_SOLL` の方が高ければ指令目標をそちらへ引き上げる。
+> ∴ 設定値で 2 つが逆向きに引くことはない。
+> **未解決なのは「マスタがどちらのトルク要求を採用するか」**で、これは xref では回収できない。

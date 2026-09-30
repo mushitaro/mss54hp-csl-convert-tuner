@@ -3,21 +3,29 @@
 import React, { useState } from 'react';
 import { CloudUpload, X } from 'lucide-react';
 import {
-    StoredSession, SyncSettings, canSync, listStoredSessions, restoreSession,
+    StoredSession, deleteStoredSession, listStoredSessions, restoreSession,
 } from '@/lib/session-sync/client';
-import { StoredDiagnostic, listStoredDiagnostics } from '@/lib/session-sync/diagnostics';
+import { StoredDiagnostic, deleteStoredDiagnostic, listStoredDiagnostics } from '@/lib/session-sync/diagnostics';
+import type { GateInfo } from '@/hooks/useGateStatus';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
 const TEXT = {
     ja: {
         title: 'SESSION SYNC',
-        intro: '保存は 2 段階です。まず SAVE でこの端末の DB に記録し、次に SYNC で「前回送ってから変わったセッションだけ」をこの配信環境へ送ります。送るのはローカル DB が持っているそのままの形 — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えず、あとで戻せます。',
+        intro: '保存は 2 段階です。まず SAVE でこの端末の DB に記録し、次に SYNC で「前回送ってから変わったセッションだけ」をあなたのアカウントへ送ります。送るのはローカル DB が持っているそのままの形 — セッション記録・ログ・BASE/TUNED の BIN。ローカルは消えず、あとで戻せます。読み書きの診断記録は自動で送られます。',
+        account: '保存先',
+        accountLabel: (l: string | null) => `アカウント ${l ?? '…'}`,
+        signedOut: 'サインインが切れています。SYNC と一覧は、もう一度サインインするまで使えません。この端末のデータはそのまま残ります。',
+        reauth: 'サインインし直す',
+        privacy: 'プライバシーポリシー（ワークス版）',
+        remove: '削除',
+        removeConfirm: (l: string) => `サーバー上の「${l}」を削除します。この端末のセッションは消えません。よろしいですか？`,
+        diagRemoveConfirm: 'この診断記録をサーバーから削除します。よろしいですか？',
         refresh: '取得',
         none: 'まだ 1 件もありません。',
         restore: '取り込む',
         restoreConfirm: (l: string) => `「${l}」をサーバーの内容で上書きします。同じ ID のローカルセッションがあれば置き換わります。よろしいですか？`,
         restored: (l: string) => `「${l}」を取り込みました。`,
-        unavailable: 'このビルドは同期トークンを持っていないので、送信先がありません。',
         loading: '取得中…',
         storeTitle: 'サーバー上のセッション',
         cols: { at: '同期', label: '名前', pts: '点数', ch: 'ch', size: 'サイズ' },
@@ -30,13 +38,20 @@ const TEXT = {
     },
     en: {
         title: 'SESSION SYNC',
-        intro: 'Saving happens in two steps. SAVE records a tune into this device’s database; SYNC then sends only the sessions that have changed since they were last sent. What goes up is exactly what the local database holds — the session record, its log, and its BASE/TUNED binaries. The local copy stays, and it can be pulled back, so a session recorded on a phone can be finished at a desk.',
+        intro: 'Saving happens in two steps. SAVE records a tune into this device’s database; SYNC then sends only the sessions that have changed since they were last sent, to your account. What goes up is exactly what the local database holds — the session record, its log, and its BASE/TUNED binaries. The local copy stays, and it can be pulled back, so a session recorded on a phone can be finished at a desk. Read and write diagnostics are sent by themselves.',
+        account: 'Saved to',
+        accountLabel: (l: string | null) => `account ${l ?? '…'}`,
+        signedOut: 'Signed out. SYNC and these lists wait until you sign in again; everything on this device stays.',
+        reauth: 'Sign in again',
+        privacy: 'Privacy policy (WORKS)',
+        remove: 'Delete',
+        removeConfirm: (l: string) => `Delete "${l}" from the store? The session on this device is not touched.`,
+        diagRemoveConfirm: 'Delete this diagnostic record from the store?',
         refresh: 'Load',
         none: 'Nothing stored yet.',
         restore: 'Pull',
         restoreConfirm: (l: string) => `Overwrite "${l}" with the stored copy? A local session with the same id is replaced.`,
         restored: (l: string) => `Pulled "${l}".`,
-        unavailable: 'This build carries no sync token, so there is no store to talk to.',
         loading: 'Loading…',
         storeTitle: 'Sessions in the store',
         cols: { at: 'Synced', label: 'Label', pts: 'Points', ch: 'ch', size: 'Size' },
@@ -64,13 +79,14 @@ const LOAD_BUTTON = 'shrink-0 min-h-8 px-2 text-[10px] font-bold tracking-wider 
  * back is done from here, because that acts on the STORE's list rather than on a local session that
  * may not exist yet.
  *
- * **No destination fields.** This used to carry an API base URL and a token override, and they were
- * asking the wrong person: the store is a development facility, not a feature offered to drivers,
- * and the token is baked into the preview export by `scripts/embed-sync-token.mjs` — generated on a
- * laptop and never shown to anybody, so "enter the token" was an instruction nobody could follow.
- * The destination is therefore always "this deployment", `canSync` is a fact about the build rather
- * than a setting, and a bench rig that genuinely needs another origin edits
- * `localStorage['mss54hp.sessionSync.v1']` — the one place that override still lives.
+ * **No destination fields, and no token.** The destination is the owner's own account on this
+ * deployment: the preview sits behind the owner gate, which knows who is signed in, and the store
+ * keeps each account's rows apart. So the panel NAMES the destination — "saved to account #A1B2",
+ * from the gate — rather than asking for one. It used to carry a base URL and a token override,
+ * and later a token baked into the export; both are gone.
+ *
+ * Deleting is here as well as restoring, for both lists. The rows are the owner's data about their
+ * own car, and "remove it" is theirs to do without writing to anyone.
  *
  * Named SYNC, not STORE. The name covers a two-step flow — SAVE writes locally, SYNC sends the
  * diff — and "Store" described neither half while reading as "upload, now, directly". The menu
@@ -79,15 +95,16 @@ const LOAD_BUTTON = 'shrink-0 min-h-8 px-2 text-[10px] font-bold tracking-wider 
 export const SessionStorePanel: React.FC<{
     openUp?: boolean;
     /**
-     * The device's sync settings, owned by `useSessionSync` and passed down.
-     *
-     * Read-only here, and passed rather than read from the module, because this panel is rendered
-     * TWICE — on the SESSIONS tab and inside the menu sheet. When each instance held its own copy
-     * and re-read `localStorage` on mount, the value the uploader actually used was whichever
-     * mounted last. There is nothing to edit now, but the single owner stays: two mounts reading
-     * one snapshot cannot disagree about which deployment they just listed.
+     * Who the store is saving for, from `useGateStatus` — passed rather than asked for here,
+     * because this panel is rendered TWICE (the SESSIONS tab and the menu sheet) and two mounts
+     * each polling the gate could name two different states for one browser.
      */
-    settings: SyncSettings;
+    account: GateInfo;
+    /** Signs in again, when that is safe right now (no cable, nothing running); absent otherwise.
+     *  The page owns the rule — see `reauth` there. */
+    onReauth?: () => void;
+    /** The privacy policy's preview section. The page resolves it (language, variant). */
+    privacyUrl: string;
     /** Refreshes the local session list after a pull. */
     onRestored?: () => void;
     /** What the trigger says. Defaults to "Sync", which is what the session list's header wants —
@@ -98,9 +115,8 @@ export const SessionStorePanel: React.FC<{
     /** Replaces the trigger's shape, not its tone. The menu sheet gives it the same cell shape the
      *  controls beside it use; a 16px inline button is not a thumb target. */
     triggerClassName?: string;
-    /** Overrides the trigger's tone as well as its shape. `canSync` decides it otherwise, which is
-     *  right for a door onto a store that may not exist — but once this control IS sync, the tone
-     *  has to be sync's. */
+    /** Overrides the trigger's tone as well as its shape. Neutral otherwise — but once this control
+     *  IS sync, the tone has to be sync's. */
     triggerToneClassName?: string;
     /** The icon on the trigger, when the default cloud is not what this door is called. */
     triggerIcon?: React.ReactNode;
@@ -118,7 +134,7 @@ export const SessionStorePanel: React.FC<{
      */
     topAction?: React.ReactNode;
 }> = ({
-    openUp, settings, onRestored, label = 'Sync', triggerClassName,
+    openUp, account, onReauth, privacyUrl, onRestored, label = 'Sync', triggerClassName,
     triggerToneClassName, triggerIcon, topAction,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -140,7 +156,7 @@ export const SessionStorePanel: React.FC<{
         setBusy(row.id);
         setListError(null);
         try {
-            await restoreSession(row.id, settings);
+            await restoreSession(row.id);
             onRestored?.();
             alert(t.restored(row.label));
         } catch (e) {
@@ -163,7 +179,7 @@ export const SessionStorePanel: React.FC<{
         setDiagLoading(true);
         setListError(null);
         try {
-            setDiags(await listStoredDiagnostics(settings, 25));
+            setDiags(await listStoredDiagnostics(25));
         } catch (e) {
             setListError((e as Error).message);
             setDiags(null);
@@ -176,7 +192,7 @@ export const SessionStorePanel: React.FC<{
         setLoading(true);
         setListError(null);
         try {
-            setRuns(await listStoredSessions(settings));
+            setRuns(await listStoredSessions());
         } catch (e) {
             setListError((e as Error).message);
             setRuns(null);
@@ -184,6 +200,38 @@ export const SessionStorePanel: React.FC<{
             setLoading(false);
         }
     };
+
+    /** Removes one stored session — the store's copy only — after asking. */
+    const removeRun = async (row: StoredSession) => {
+        if (!confirm(t.removeConfirm(row.label))) return;
+        setBusy(row.id);
+        setListError(null);
+        try {
+            await deleteStoredSession(row.id);
+            setRuns(prev => prev?.filter(r => r.id !== row.id) ?? null);
+        } catch (e) {
+            setListError((e as Error).message);
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    /** Removes one diagnostic record, after asking. */
+    const removeDiag = async (row: StoredDiagnostic) => {
+        if (!confirm(t.diagRemoveConfirm)) return;
+        setBusy(row.id);
+        setListError(null);
+        try {
+            await deleteStoredDiagnostic(row.id);
+            setDiags(prev => prev?.filter(d => d.id !== row.id) ?? null);
+        } catch (e) {
+            setListError((e as Error).message);
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    const signedOut = account.state === 'expired';
 
     return (
         <div className="relative">
@@ -194,9 +242,7 @@ export const SessionStorePanel: React.FC<{
             <button
                 onClick={() => setIsOpen(v => !v)}
                 title={t.title}
-                className={`${triggerClassName ?? 'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest'} transition-colors ${triggerToneClassName ?? (canSync(settings)
-                    ? 'text-slate-500 hover:text-blue-400'
-                    : 'text-slate-700 hover:text-slate-500')}`}
+                className={`${triggerClassName ?? 'inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest'} transition-colors ${triggerToneClassName ?? 'text-slate-500 hover:text-blue-400'}`}
             >
                 {triggerIcon ?? <CloudUpload className="w-3 h-3 shrink-0" />} {label}
             </button>
@@ -246,11 +292,30 @@ export const SessionStorePanel: React.FC<{
                         {/* First, above the explanation of it. Everything below this line is setup
                             done once per device; this is the thing done after every run. */}
                         {topAction}
+                        {/* Where it goes, named. The account label is m3's short form (#A1B2), the
+                            same one m3's own pages show, so the owner can match the two. */}
+                        <p className="text-[10px] text-slate-500">
+                            {t.account} <span className="font-mono text-slate-300">{t.accountLabel(account.label)}</span>
+                        </p>
+                        {signedOut && (
+                            <div className="space-y-2">
+                                <p className="text-[9px] text-amber-500/80">{t.signedOut}</p>
+                                {onReauth && (
+                                    <button type="button" onClick={onReauth} className={LOAD_BUTTON}>{t.reauth}</button>
+                                )}
+                            </div>
+                        )}
                         <p className="text-[9px] text-slate-600">{t.intro}</p>
-
-                        {/* Not "enter a token to enable SYNC" — nobody can. A build either shipped
-                            with one or it did not, so this states the fact rather than asking. */}
-                        {!canSync(settings) && <p className="text-[9px] text-amber-500/80">{t.unavailable}</p>}
+                        {/* Cross-origin: a new tab, never this one — a same-tab navigation drops the
+                            serial link and any run not yet saved (config/links.ts). */}
+                        <a
+                            href={privacyUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block text-[9px] text-slate-500 hover:text-slate-300 underline underline-offset-2 transition-colors"
+                        >
+                            {t.privacy}
+                        </a>
                         {listError && <p className="text-[9px] text-red-400 break-words">{listError}</p>}
 
                         {/* The two lists below are the same shape on purpose: a heading, a LOAD
@@ -261,7 +326,7 @@ export const SessionStorePanel: React.FC<{
                                 <span className="text-[10px] text-slate-500 uppercase tracking-wider">{t.storeTitle}</span>
                                 <button
                                     onClick={refresh}
-                                    disabled={!canSync(settings) || loading}
+                                    disabled={signedOut || loading}
                                     className={LOAD_BUTTON}
                                 >
                                     {loading ? t.loading : t.refresh}
@@ -279,6 +344,7 @@ export const SessionStorePanel: React.FC<{
                                                 <th className="py-1 font-normal text-right">{t.cols.pts}</th>
                                                 <th className="py-1 font-normal text-center">{t.cols.ch}</th>
                                                 <th className="py-1 font-normal text-right">{t.cols.size}</th>
+                                                <th className="py-1 font-normal" />
                                                 <th className="py-1 font-normal" />
                                             </tr>
                                         </thead>
@@ -317,6 +383,15 @@ export const SessionStorePanel: React.FC<{
                                                             {busy === r.id ? '…' : t.restore}
                                                         </button>
                                                     </td>
+                                                    <td className="py-1 pl-2 text-right">
+                                                        <button
+                                                            onClick={() => void removeRun(r)}
+                                                            disabled={busy !== null}
+                                                            className="text-slate-500 hover:text-red-400 disabled:text-slate-700 disabled:cursor-wait"
+                                                        >
+                                                            {t.remove}
+                                                        </button>
+                                                    </td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -335,7 +410,7 @@ export const SessionStorePanel: React.FC<{
                                 <span className="text-[10px] text-slate-500 uppercase tracking-wider">{t.diagTitle}</span>
                                 <button
                                     onClick={refreshDiags}
-                                    disabled={!canSync(settings) || diagLoading}
+                                    disabled={signedOut || diagLoading}
                                     className={LOAD_BUTTON}
                                 >
                                     {diagLoading ? t.loading : t.diagRefresh}
@@ -356,6 +431,7 @@ export const SessionStorePanel: React.FC<{
                                                 <th className="py-1 font-normal text-right">{t.diagCols.baud}</th>
                                                 <th className="py-1 font-normal text-right">{t.diagCols.rty}</th>
                                                 <th className="py-1 font-normal">{t.diagCols.err}</th>
+                                                <th className="py-1 font-normal" />
                                             </tr>
                                         </thead>
                                         <tbody className="text-slate-400">
@@ -396,6 +472,15 @@ export const SessionStorePanel: React.FC<{
                                                         {d.completed
                                                             ? <span className="text-emerald-300">{t.diagOk}</span>
                                                             : <span className="text-red-400">{d.error ?? 'FAILED'}</span>}
+                                                    </td>
+                                                    <td className="py-1 pl-2 text-right">
+                                                        <button
+                                                            onClick={() => void removeDiag(d)}
+                                                            disabled={busy !== null}
+                                                            className="text-slate-500 hover:text-red-400 disabled:text-slate-700 disabled:cursor-wait"
+                                                        >
+                                                            {busy === d.id ? '…' : t.remove}
+                                                        </button>
                                                     </td>
                                                 </tr>
                                             ))}

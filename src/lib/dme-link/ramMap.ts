@@ -400,7 +400,7 @@ export const Mss54HpRamSignals = {
      * So at a healthy idle it is low and the branch that runs is `KF_TI_N_RF`, not the 0.859 curve.
      *
      * That distinction is the whole of `requireTiBranchProven`. It USED to refuse every idle cell
-     * in the LOW LOAD corrector; it no longer refuses any, because `TI_F_STAT` left the correction
+     * it was asked about; it no longer refuses any, because `TI_F_STAT` left the correction
      * (session #920 — the trim does not move with the factor) and a branch that cannot change a
      * written byte is not worth a gate. The default is now OFF. The code says which branch runs;
      * this channel is how the CAR says it, which is still worth logging and no longer blocks
@@ -909,6 +909,50 @@ export const COMPRESSOR_RAM_READ = {
     segment: Mss54HpRamSignals.KKOS_ST.segment,
     address: Mss54HpRamSignals.KKOS_ST.address,
     count: Mss54HpRamSignals.KKOS_ST.size,
+} as const;
+
+/**
+ * THE RING, read directly instead of reconstructed — three exchanges, six bytes of payload.
+ *
+ * Every one of these is already inferred today: `LLS_TV` from `AQ_REL` through `KL_AQ_ABS_LLS`
+ * inverted, `ML_SOLL_LLS` from that duty through `KF_LLS_TV` inverted, and `FR_REGLER` not at all.
+ * Reconstruction costs two assumed map inversions and cannot see the integrator, which is the one
+ * thing the whole 0.3 Hz argument is about.
+ *
+ * It matters most when the fix WORKS. `Td` is estimated from a duty-against-rpm cross-correlation,
+ * and that estimate is only as good as the oscillation it locks onto — measured on session #956,
+ * r fell from 0.533 to 0.232 once the ring was flattened, and the lag it reported moved from
+ * 0.58 s to 0.90 s with no way to tell which was real. A phase margin computed on the second
+ * number is 26 degrees; on the first it is 49. Reading the loop directly removes the estimate.
+ *
+ * FAST LANE, all three. These are not state and not events — they are the signals that oscillate,
+ * so a reading carried forward across samples would smear the very thing being measured.
+ *
+ * Three exchanges and not one because segment 0x04 spreads them: 0xD8FC, 0xE9F6 and 0xEF00 are
+ * 1,290 bytes apart at the widest, and a telegram that spanned them would be reading mostly
+ * unrelated RAM to save a round trip.
+ */
+export const LLS_AIR_RAM_READ = {
+    segment: Mss54HpRamSignals.ML_SOLL.segment,
+    address: Mss54HpRamSignals.ML_SOLL.address,
+    count: (Mss54HpRamSignals.ML_SOLL_LLS.address + Mss54HpRamSignals.ML_SOLL_LLS.size)
+        - Mss54HpRamSignals.ML_SOLL.address,
+} as const;
+
+/** Two bytes, `FR_REGLER` — the integrator itself. `IDLE_GOVERNOR_RAM_READ` covers this address
+ *  too, but 96 bytes of it; this run wants the one word on every sample rather than the cluster. */
+export const LLS_INTEGRATOR_RAM_READ = {
+    segment: Mss54HpRamSignals.FR_REGLER.segment,
+    address: Mss54HpRamSignals.FR_REGLER.address,
+    count: Mss54HpRamSignals.FR_REGLER.size,
+} as const;
+
+/** Two bytes, `LLS_TV` — the duty the valve was actually commanded. `IDLE_ACTUATOR_RAM_READ`
+ *  starts here as well, but reads 28 bytes for a diagnosis this run does not make. */
+export const LLS_DUTY_RAM_READ = {
+    segment: Mss54HpRamSignals.LLS_TV.segment,
+    address: Mss54HpRamSignals.LLS_TV.address,
+    count: Mss54HpRamSignals.LLS_TV.size,
 } as const;
 
 /** One byte, `LLS_ST`. On the survey lane rather than beside `KKOS_ST`: bit 7 is latched by a

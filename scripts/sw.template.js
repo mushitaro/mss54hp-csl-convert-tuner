@@ -25,7 +25,19 @@
  * The cost is that a deploy lands one launch late. See the activate handler.
  */
 const CACHE = '__CACHE_NAME__';
-/** `[{ url, bytes }]` — the on-disk size rides along so the install can be reported. See gen-sw.mjs. */
+/**
+ * Where /data/ lands when something actually asks for it.
+ *
+ * Keyed to the build like the precache, and dropped with it on activate: the corpus is served from
+ * a fixed URL, so a re-vendored graph would otherwise be answered from a stale copy forever, and a
+ * calibration table that quietly describes the previous artifact is worse than a download.
+ */
+const DATA_CACHE = CACHE + '-data';
+/**
+ * `[{ url, fetch, bytes }]`. `url` is the cache key, `fetch` is where it is fetched from — the two
+ * differ only for documents (see gen-sw.mjs), and the on-disk size rides along so the install can be
+ * reported.
+ */
 const ASSETS = __ASSETS__;
 
 /** How often the install tells the page where it has got to. 10 Hz, the same rate the DME link
@@ -77,16 +89,66 @@ function rewrap(body, response) {
 }
 
 /**
+ * What each extension's Content-Type must contain. Matched as substrings, so charset suffixes and
+ * the two spellings of JavaScript both pass.
+ *
+ * This is the check that keeps the owner gate's answers out of the cache. Behind the gate an
+ * expired session gets a 401 JSON for an asset and a 302 towards m3 for a document; either one
+ * stored under an asset's name is an app that starts offline and then fails on that file — or, for
+ * the shell, an app that opens as someone else's sign-in page. `ok` alone does not catch every
+ * shape of that (a sign-in page is a 200 somewhere), so the body has to be the KIND of thing the key
+ * names. An extension missing from here must at least not be HTML.
+ */
+const TYPES = {
+    html: ['text/html'],
+    js: ['javascript'],
+    css: ['text/css'],
+    txt: ['text/plain', 'text/x-component'],
+    json: ['json'],
+    webmanifest: ['json'],
+    png: ['image/png'],
+    svg: ['image/svg'],
+    ico: ['image/'],
+    woff2: ['font/', 'woff2', 'application/octet-stream'],
+    bin: ['application/octet-stream'],
+};
+
+/** Why a fetched response may not become this build's copy of `key`, or null when it may. */
+function unfit(response, key) {
+    if (!response.ok) return `${response.status}`;
+    // `basic` is same-origin and readable. An opaque or CORS response is not this site's file.
+    if (response.type !== 'basic') return `type ${response.type}`;
+    if (response.redirected) {
+        // Pages answers `.html` with a 308 to the extensionless path, which is fine; anything that
+        // ends on another origin or inside the gate is the gate talking, not the asset.
+        const to = new URL(response.url);
+        if (to.origin !== self.location.origin || to.pathname.startsWith('/_gate/')) return `redirected to ${to.pathname}`;
+    }
+    const ext = key.slice(key.lastIndexOf('.') + 1).toLowerCase();
+    const type = (response.headers.get('content-type') ?? '').toLowerCase();
+    const want = TYPES[ext];
+    if (want ? !want.some((w) => type.includes(w)) : type.includes('text/html')) return `content-type ${type || '(none)'}`;
+    return null;
+}
+
+/**
  * Stores one asset, counting the bytes as they land.
+ *
+ * Fetched from `asset.fetch` and stored under `asset.url`. For a document those differ: Pages
+ * answers `/index.html` with a 308 to `/`, and fetching the extensionless path directly is one
+ * request instead of two and never meets a redirect that `unfit` would have to judge. The key stays
+ * `/index.html` — `/` must NOT become a key, because useAppUpdate asks the network for `/` to learn
+ * whether there is a new build, and a cached `/` would freeze that answer for ever.
  *
  * Read through a reader rather than in one `blob()`, so `onBytes` is called during the download and
  * not once at the end of it. That distinction is the whole progress display: one Plotly chunk is
  * 4.4 MB of this build's 6.0, so a bar fed by completed files — or by completed bodies — would sit
  * near a quarter of the way across for almost the entire install and then jump to full.
  */
-async function cacheOne(cache, url, onBytes) {
-    const response = await fetch(url, { cache: 'reload' });
-    if (!response.ok) throw new Error(`${response.status} for ${url}`);
+async function cacheOne(cache, asset, onBytes) {
+    const response = await fetch(asset.fetch, { cache: 'reload' });
+    const why = unfit(response, asset.url);
+    if (why) throw new Error(`${why} for ${asset.url}`);
 
     if (!response.body) {
         // No stream to read from. Not expected for any asset in the export, but a Response is
@@ -94,7 +156,7 @@ async function cacheOne(cache, url, onBytes) {
         // be the wrong trade.
         const blob = await response.blob();
         onBytes(blob.size);
-        await cache.put(url, rewrap(blob, response));
+        await cache.put(asset.url, rewrap(blob, response));
         return;
     }
 
@@ -106,11 +168,18 @@ async function cacheOne(cache, url, onBytes) {
         chunks.push(value);
         onBytes(value.byteLength);
     }
-    await cache.put(url, rewrap(new Blob(chunks), response));
+    await cache.put(asset.url, rewrap(new Blob(chunks), response));
 }
 
 self.addEventListener('install', (event) => {
     event.waitUntil((async () => {
+        // Whether this name is already somebody's working cache. It should not be — the name hashes
+        // this build's bytes. If it is, a failed install does NOT leave it exactly as it was: the
+        // assets that did arrive are written straight into it (cacheOne puts into CACHE, there is no
+        // staging cache), and only a cache this install created is deleted on failure. That is
+        // accepted because the same name means the same content hash, so what lands is the same
+        // bytes the existing entries already hold, and each one passed `unfit` first.
+        const existed = await caches.has(CACHE);
         const cache = await caches.open(CACHE);
         const total = ASSETS.reduce((sum, asset) => sum + asset.bytes, 0);
         let loaded = 0;
@@ -146,13 +215,33 @@ self.addEventListener('install', (event) => {
         // then dies on whichever chunk was missing, which is a worse failure
         // than not being offline-capable at all, because it looks like a bug in
         // the tool rather than a missing download.
-        const results = await Promise.allSettled(ASSETS.map((asset) => cacheOne(cache, asset.url, (n) => {
-            loaded += n;
-            report(false);
-        })));
+        // A few at a time, not all 67 at once. Each body is held in memory as chunks and then as
+        // a Blob before it reaches the cache, so "all at once" is the whole build resident at once —
+        // on a 1-2 GB head unit, over a tethered phone, with the app running in front of it. The
+        // install is all-or-nothing either way; this only bounds what it costs while it runs.
+        const LANES = 6;
+        const results = new Array(ASSETS.length);
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(LANES, ASSETS.length) }, async () => {
+            for (;;) {
+                const i = next++;
+                if (i >= ASSETS.length) return;
+                try {
+                    await cacheOne(cache, ASSETS[i], (n) => { loaded += n; report(false); });
+                    results[i] = { status: 'fulfilled' };
+                } catch (error) {
+                    results[i] = { status: 'rejected', reason: error };
+                }
+            }
+        }));
         const failed = ASSETS.filter((_, i) => results[i].status === 'rejected');
         if (failed.length > 0) {
-            await caches.delete(CACHE);
+            // Throwing fails the install, so the worker already running keeps running, from the
+            // cache it already has. That is the whole of "an update that cannot be fetched properly
+            // changes nothing" — an expired session, a gate outage, a captive portal. The next
+            // check tries again. A cache this install created is removed; one that already existed
+            // under this name keeps the entries that were rewritten into it (see `existed` above).
+            if (!existed) await caches.delete(CACHE);
             throw new Error(
                 `precache incomplete: ${failed.length}/${ASSETS.length} failed, ` +
                 `first was ${failed[0].url}`
@@ -171,7 +260,9 @@ self.addEventListener('activate', (event) => {
         // own contents, so anything that is not the current name is a build
         // nobody can reach any more.
         const keys = await caches.keys();
-        await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+        await Promise.all(keys
+            .filter((k) => k !== CACHE && k !== DATA_CACHE)
+            .map((k) => caches.delete(k)));
         await self.clients.claim();
     })());
 });
@@ -219,7 +310,32 @@ self.addEventListener('fetch', (event) => {
     //   And a *navigation* to /api/... — following the download link for a run — matches the
     //   navigate branch above and would be answered with index.html. The user would get the app
     //   where they asked for a CSV, with no error anywhere to explain it.
+    //
+    // The owner gate's own routes go the same way, and for the second reason above with higher
+    // stakes: /_gate/start and /_gate/callback ARE navigations. Answered with the cached shell, the
+    // round trip to m3 would never start, or would never finish — the code in the callback's query
+    // would reach nobody, and "sign in again" would reload the app still signed out. So both
+    // prefixes are let through here, before the navigation fallback can see them.
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return;
+    if (url.pathname.startsWith('/_gate/')) return;
+
+    // The calibration corpus, on first use. It is not precached (see gen-sw.mjs), so this is
+    // what makes the CALIBRATION tab work offline for the build that has it: fetch once, keep it,
+    // serve it from disk every time after. A failed fetch is left to fail — the tab's own loader
+    // already says so, and an empty 200 cached here would be a corpus that is silently wrong.
+    if (url.pathname.startsWith('/data/')) {
+        event.respondWith((async () => {
+            const cache = await caches.open(DATA_CACHE);
+            const hit = await cache.match(request);
+            if (hit) return hit;
+            const response = await fetch(request);
+            // The same test the precache applies: a gate's 401 or a redirect towards m3 is not
+            // the corpus, and a copy of it kept here would be served as the corpus from then on.
+            if (!unfit(response, url.pathname)) event.waitUntil(cache.put(request, response.clone()));
+            return response;
+        })());
+        return;
+    }
 
     // A navigation to any path resolves to the one HTML document. This app is a
     // single exported route; without this, a deep link or a reload while
@@ -235,20 +351,26 @@ self.addEventListener('fetch', (event) => {
             // app cannot recover from on its own. Falling through to the network
             // costs a request and ends the deadlock.
             if (cached && !cached.redirected) return cached;
+            // Offline, or the network answered with something that is not the app — behind the
+            // owner gate an expired session is a redirect towards m3 (opaqueredirect here), and a
+            // gate that cannot reach m3 is a 503. Holding only a poisoned shell, the poisoned
+            // shell is still the app: re-wrapping it is the difference between the tool opening
+            // and a sign-in page or the browser's error page. With no shell at all, the network's
+            // answer is the only one there is — that is how a first visit reaches m3.
+            const shell = async () => new Response(await cached.blob(), {
+                status: 200, statusText: 'OK', headers: cached.headers,
+            });
+            let response;
             try {
-                return await fetch(request);
+                response = await fetch(request);
             } catch {
-                // Offline AND holding only a poisoned shell. Nothing here can
-                // fix that, but a redirected response is still a document —
-                // re-wrapping it is the difference between the app opening and
-                // the browser's error page.
-                if (cached) {
-                    return new Response(await cached.blob(), {
-                        status: 200, statusText: 'OK', headers: cached.headers,
-                    });
-                }
+                if (cached) return shell();
                 throw new Error('offline and no cached shell');
             }
+            if (cached && (response.type === 'opaqueredirect' || response.status < 200 || response.status > 299)) {
+                return shell();
+            }
+            return response;
         })());
         return;
     }

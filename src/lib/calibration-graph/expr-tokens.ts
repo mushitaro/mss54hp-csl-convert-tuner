@@ -12,7 +12,7 @@ import { cells } from "./metrics";
  * never disagree — how wide is this line, where does the wire attach, and what
  * colour is this word. The invariant that keeps them honest is that the tokens
  * concatenate back to exactly the string that is drawn; `verify:cal-logic`
- * asserts it over all 6,164 recovered statements.
+ * asserts it over all 14,524 recovered statements.
  *
  * Offsets are in monospace cells rather than pixels because that is the unit
  * the box was measured in (see ./metrics) — kana are two cells wide, and a
@@ -151,8 +151,37 @@ export function tokenize(text: string, notes: TokenNotes = {}): Token[] {
   return out;
 }
 
-/** The assigned-to name, as its own token; the write wire leaves from here. */
+/**
+ * The assigned-to name, as its own token; the write wire leaves from here.
+ *
+ * A target is ONE thing however many tokens it takes to spell. Taking the first
+ * token of `tokenize` was right only while every target was a bare identifier,
+ * and 4,330 of the 14,524 statements — 29.8% — have one that is not:
+ *
+ *     RAM 0xFFDB83                 drawn as "RAM"
+ *     RAM 0xFFDBAC                 drawn as "RAM"
+ *     KM_ST_ZYL[param_1 & 0xff]    drawn as "KM_ST_ZYL"
+ *
+ * Two writes to two different addresses came out looking like two writes to the
+ * same one, which is worse than showing nothing: the reader has no way to tell
+ * the row apart from the row above it. `cells(l.out)` — what the layout budgets
+ * the column — was always measured on the WHOLE string, so only the drawn text
+ * was short, and the gap sat there looking like padding.
+ *
+ * `name` is the whole spelling too, so picking one address lights that address
+ * and not every other region-named byte in the picture.
+ */
 export function outToken(out: string, notes: TokenNotes = {}): Token {
-  const [token] = tokenize(out, notes);
-  return token ?? { text: out, role: roleOf(out), cell: 0, cells: cells(out), name: out };
+  const parts = tokenize(out, notes);
+  if (parts.length === 1) return parts[0];
+  const head = parts[0];
+  const note = notes[out];
+  return {
+    text: out,
+    role: note?.inferred ? "inferred" : note?.plumbing ? "plumbing" : head?.role ?? roleOf(out),
+    cell: 0,
+    cells: cells(out),
+    name: out,
+    ...(note?.title ? { title: note.title } : head?.title ? { title: head.title } : {}),
+  };
 }

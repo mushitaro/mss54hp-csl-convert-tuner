@@ -283,7 +283,16 @@ export async function reloadForUpdate({ probeMs = 4000, installMs = 60_000, swap
  * The check is one no-store GET of the entry document. Against a datalog's measured 0.3 ms of host
  * gap per sample it is not a cost worth trading a quarter hour of confusion for.
  */
-export function useAppUpdate(pollMs = 2 * 60 * 1000) {
+/**
+ * @param busy whether a DME operation is in flight. The check still runs and the row still lights
+ *        up — knowing a build is waiting is never unwelcome — but the DOWNLOAD it would otherwise
+ *        start does not, because on a head unit that is megabytes arriving through the same CPU the
+ *        DS2 read loop is running on, mid-drive, unasked. The poll comes round every two minutes,
+ *        so it primes itself as soon as the link is idle; nothing has to remember to do it later.
+ */
+export function useAppUpdate(pollMs = 2 * 60 * 1000, busy = false) {
+    const busyRef = useRef(busy);
+    useEffect(() => { busyRef.current = busy; }, [busy]);
     const [updateAvailable, setUpdateAvailable] = useState(false);
     /**
      * The build whose download has already been started, as its chunk set.
@@ -315,7 +324,7 @@ export function useAppUpdate(pollMs = 2 * 60 * 1000) {
                 // pushed" is answerable from the phone rather than only from the desk.
                 setProgress({ incoming: html.match(BUILD_ID)?.[1] });
                 const build = [...served].sort().join('|');
-                if (primed.current !== build) {
+                if (primed.current !== build && !busyRef.current) {
                     primed.current = build;
                     void primeWorker();
                 }

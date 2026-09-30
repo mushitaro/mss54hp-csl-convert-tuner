@@ -30,7 +30,6 @@ fs.writeFileSync(entry, [
     "export { trimNeutrality, learnersFrozen } from '@/lib/log-engine/trimNeutrality';",
     "export { BinaryParser } from '@/lib/binary-engine/parser';",
     "export { readAlphaNTables, tiLoadFactorAt, tiBranchAmbiguous } from '@/lib/ve-calculator/alphaNTable';",
-    "export { tuneLowLoad } from '@/lib/ve-calculator/lowLoadTuner';",
     "export { buildCoverage, coverageCensus } from '@/lib/ve-calculator/cellCoverage';",
     "export { APP_CONFIG } from '@/config/constants';",
 ].join(NL));
@@ -58,9 +57,9 @@ const ab = base.buffer.slice(base.byteOffset, base.byteOffset + base.byteLength)
 // the current map derives a correction on top of a correction, while the log it is derived
 // from was recorded against the BASE that was actually in the ECU.
 //
-// On session #1 the two differ in 21 cells — VE's 15 plus LOW LOAD's 8, less the overlap — and
-// the error is not small: 85 % at 2100 rpm reads 0.687 in the binary against 0.579 in the
-// snapshot, so the correction came out -5.2 % where the truth is -16.6 %.
+// On session #1 the two differ in 21 cells, and the error is not small: 85 % at 2100 rpm reads
+// 0.687 in the binary against 0.579 in the snapshot, so the correction came out -5.2 % where the
+// truth is -16.6 %.
 const veMap = new M.BinaryParser(ab).getVETable();
 const egt = M.readEgtTables(ab);
 const curves = M.readRfPtKorrCurves(ab);
@@ -114,7 +113,7 @@ if (tables) {
 console.log(NL + '3. PRESSURE — 69 mbar inside one drive, with the VE error held fixed' + NL);
 const processed = M.processLogData(rawLog, session.baseFileName, cfg, table);
 const calc = new M.VECalculator();
-const ve = calc.annotateRfKorr(veMap, processed.data, egt, air);
+const ve = calc.annotateRfKorr(veMap, processed.data, egt, air, processed.rawData);
 
 const rpmAxis = veMap.xAxis ?? M.APP_CONFIG.MSS54HP.AXIS_RPM;
 const loadAxis = veMap.yAxis ?? M.APP_CONFIG.MSS54HP.AXIS_LOAD;
@@ -293,21 +292,5 @@ if (moves.length) {
             + '   ' + m.old.toFixed(3) + ' -> ' + m.nw.toFixed(3)
             + '   ' + (m.pct >= 0 ? '+' : '') + m.pct.toFixed(2) + ' %'
             + String(m.n).padStart(9));
-    }
-}
-
-// ---------------------------------------------------------------- 5. low load
-console.log(NL + '5. LOW LOAD' + NL);
-if (!tables) {
-    console.log('   readAlphaNTables refused the binary.');
-} else {
-    const ll = M.tuneLowLoad(processed.data, tables, veMap);
-    if (!ll) {
-        console.log('   returned null.');
-    } else {
-        console.log('   acceptable        ' + ll.acceptable);
-        console.log('   cells measured    ' + ll.report.cellsMeasured);
-        console.log('   samples used      ' + ll.report.samplesUsed);
-        console.log('   rejects           ' + JSON.stringify(ll.report.rejects));
     }
 }
