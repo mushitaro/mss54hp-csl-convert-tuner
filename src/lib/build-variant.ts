@@ -55,96 +55,42 @@ export function useIsPreviewBuild(): boolean {
 }
 
 /**
- * THE SCOPE SWITCH — preview, rendering the set of surfaces production renders.
+ * Where the scope switch kept its state. The switch is gone (2026-09-30): the build badge toggled
+ * WORKS ⇄ AS PRODUCTION, `?scope=production` turned it on as well, and this key held it across
+ * reloads. It answered a question the preview cannot answer — the preview is the development
+ * branch, so closing its experiments still does not run the release's code — and it answered in
+ * staging's violet, so the badge called a build the release candidate that was not. Environments
+ * are told apart by URL alone now, and production's look is checked on the staging URL
+ * (tsunagi-m-release §10). Nothing reads this key.
  *
- * ## Why it exists
- *
- * Checking a change meant looking at staging, because staging is what production will show. But
- * staging is `main`, so every look cost a release cut, and every fix after a look meant deploying
- * two environments and deciding which — a decision that kept being got wrong (operator, 2026-08-31).
- *
- * Nothing about the feature gate is compiled. `featureEnabled` takes a boolean, and that boolean
- * comes from a meta tag read at runtime. So the preview build can answer the production question
- * without being a different build, and the second environment stops being on the path.
- *
- * ## It can only CLOSE, never open
- *
- * That is structural, not a rule to remember. This flag is only ever ANDed with `!` into a variant
- * that is already preview: production carries no `app-variant` tag, so `useBuildVariant()` returns
- * `''` there and no value of this can make it 'preview'. The worst a tampered localStorage entry
- * can do to a production build is close experiments that were never open.
- *
- * ## What it does NOT prove
- *
- * The two deployments differ by their TREE as well as their variant — `main` carries no
- * `functions/`, so staging has no `/api` and preview does. That difference cannot be simulated here
- * and this switch does not claim to: it answers "what does production RENDER", which is the
- * question the last dozen checks were actually asking. Anything about the backend still needs the
- * environment it lives in.
- *
- * Entered by `?scope=production` on the URL or by clicking the build badge, and remembered in
- * localStorage so a reload does not silently put the experiments back.
+ * It is DELETED at boot rather than just ignored, because of who has it: anyone who pressed the
+ * badge, and anyone — on production too — who opened a `?scope=production` link. Left in place, the
+ * next change that reaches for storage again would pin those devices to a mode with no control left
+ * on screen to take them out of it.
  */
-const SCOPE_KEY = 'mss54hp.scope';
-const SCOPE_PRODUCTION = 'production';
-
-/** Read once and cached: `getSnapshot` runs on every render and must not touch storage each time,
- *  and must return a stable value or React re-renders forever. */
-let scopeCache: boolean | null = null;
-const scopeListeners = new Set<() => void>();
-
-function readScope(): boolean {
+const RETIRED_SCOPE_KEY = 'mss54hp.scope';
+if (typeof window !== 'undefined') {
     try {
-        // The URL wins on this load — a link is how the mode gets handed to someone else — and is
-        // written through to storage so the reload after it stays in the mode.
-        if (new URLSearchParams(window.location.search).get('scope') === SCOPE_PRODUCTION) {
-            window.localStorage.setItem(SCOPE_KEY, SCOPE_PRODUCTION);
-            return true;
-        }
-        return window.localStorage.getItem(SCOPE_KEY) === SCOPE_PRODUCTION;
+        window.localStorage.removeItem(RETIRED_SCOPE_KEY);
     } catch {
-        // Private mode, blocked storage, a prerender. The safe answer is the app's own variant.
-        return false;
+        // Private mode: storage refused, so nothing was kept there either.
     }
-}
-
-const subscribeScope = (onChange: () => void) => {
-    scopeListeners.add(onChange);
-    return () => { scopeListeners.delete(onChange); };
-};
-const getScope = () => (scopeCache ??= readScope());
-const getScopeOnServer = () => false;
-
-/** Turn the switch. Exported for the badge, which is both the readout and the control. */
-export function setProductionScope(on: boolean): void {
-    scopeCache = on;
-    try {
-        if (on) window.localStorage.setItem(SCOPE_KEY, SCOPE_PRODUCTION);
-        else window.localStorage.removeItem(SCOPE_KEY);
-    } catch { /* the mode still holds for this page; it just will not survive a reload */ }
-    scopeListeners.forEach(fn => fn());
-}
-
-/** Whether this session is being read AS PRODUCTION. Always false on a production build. */
-export function useProductionScope(): boolean {
-    return useSyncExternalStore(subscribeScope, getScope, getScopeOnServer);
 }
 
 /**
  * Whether PREVIEW SURFACES render — the one answer every feature gate should read.
  *
- * Folds in all three parts so no call site has to remember them: the deployed variant, the dev
- * server (the experiments must be visible where they are developed), and the scope switch. The
+ * Folds in both parts so no call site has to remember the second: the deployed variant, and the
+ * dev server (the experiments must be visible where they are developed). The
  * `useIsPreviewBuild() || DEV_VARIANT_IS_PREVIEW` that used to be written out at each call site is
- * what this replaces — forgetting the second half gave a dev session the wrong app, and forgetting
- * the third would give the scope switch a surface it does not close.
+ * what this replaces — forgetting the second half gave a dev session the wrong app.
+ *
+ * Nothing at runtime overrides it. `app-variant` is the gate's one input and cannot change while the
+ * document is alive: what production renders is read on the staging URL, or from the tab set
+ * verify:features pins — not from this build standing in for another.
  */
 export function usePreviewSurfaces(): boolean {
-    // Both hooks called before either is used: `&&` would short-circuit past the second one, and a
-    // hook that is skipped on some renders is the one rule React has no recovery from.
-    const tagged = useIsPreviewBuild();
-    const asProduction = useProductionScope();
-    return (tagged || DEV_VARIANT_IS_PREVIEW) && !asProduction;
+    return useIsPreviewBuild() || DEV_VARIANT_IS_PREVIEW;
 }
 
 /**

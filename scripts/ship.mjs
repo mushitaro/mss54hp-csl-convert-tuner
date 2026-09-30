@@ -14,9 +14,10 @@
  *   on feat/develop, clean, preview source published → preview → release onto main → every verify
  *   suite → tsc → commit → staging → read both URLs back and check what they actually served
  *
- * The scope switch on the build badge is the other half of the same answer, and it is the half that
- * should get used first: preview read AS PRODUCTION renders the release's surface set, so most
- * checks no longer need staging at all. This is for when the release itself is the thing to move.
+ * Production's look is still checked on staging; this makes getting there cost no decision. For a
+ * while the build badge on the preview doubled as a WORKS ⇄ AS PRODUCTION switch meant to answer
+ * that without staging. It was removed on 2026-09-30, because the preview is the development branch
+ * and no switch inside it runs the release's code (tsunagi-m-release §10).
  *
  * ## What it will not do for you
  *

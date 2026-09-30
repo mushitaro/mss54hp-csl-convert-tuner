@@ -109,7 +109,7 @@ import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
-import { useBuildLabel, useIsPreviewBuild, usePreviewSurfaces, useProductionScope, setProductionScope } from '@/lib/build-variant';
+import { useBuildLabel, useIsPreviewBuild, usePreviewSurfaces } from '@/lib/build-variant';
 import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
@@ -332,37 +332,26 @@ export default function Home() {
    *  nothing compares it). The badge is on whenever it is not empty. Not `buildLabel`: that name is
    *  the build id (`<count>.<sha>`) the credits and the menu show, from useDiagnosticsPublisher. */
   const variantLabel = useBuildLabel();
-  /** What the FEATURE gate reads: the deployed variant, the dev server counting as preview, and
-   *  the scope switch, which can close it and never open it. See usePreviewSurfaces. */
+  /** What the FEATURE gate reads: the deployed variant, with the dev server counting as preview.
+   *  Nothing at runtime overrides it — see usePreviewSurfaces. */
   const featurePreview = usePreviewSurfaces();
-  /** Whether the badge is currently saying AS PRODUCTION — the badge's own readout. */
-  const productionScope = useProductionScope();
   /**
-   * SYNC needs BOTH answers and they are different questions.
-   *
-   * `isPreviewBuild` is about whether an `/api` exists to talk to — production and staging are built
-   * from a tree with no `functions/`, and dev has no backend either, so the ENGINE stays gated on
-   * the deployment. `featurePreview` is about whether the control should be on screen, and the scope
-   * switch closes that: sessionSync is `preview-only`, so a session being read as production must
-   * not show a door production does not have.
-   *
-   * The engine deliberately keeps running under the switch. The rule this mode holds to is that it
-   * changes what RENDERS, not what the app does to anything it is holding — an in-flight upload
-   * stopping because someone looked at the tab set would be a surprise nobody asked for.
+   * Where SYNC's surfaces render. sessionSync owns no tab, so they are gated here (features.ts): on
+   * the build that has an `/api` to talk to, and nowhere else. Production and staging are built from
+   * a tree with no `functions/` and the dev server has no backend, so this is `isPreviewBuild` and
+   * not `featurePreview`, which the dev server also answers true to.
    */
-  const syncSurfaces = isPreviewBuild && featurePreview;
+  const syncSurfaces = isPreviewBuild;
   /**
-   * What the badge says, and whether it is a switch.
+   * What the badge says: this build's NAME (WORKS, STAGING), DEV under `next dev`, nothing on
+   * production. It names the URL that is open and switches nothing.
    *
-   * The dev server gets one too, reading DEV. It has always BEHAVED as preview — the experiments
-   * have to be visible where they are written — and it had no badge only because the badge was
-   * derived from a meta tag that `next dev` never carries. Now that the badge is also the scope
-   * switch, "no badge" would mean the one place the work happens is the one place the switch cannot
-   * be reached.
+   * The dev server gets one because it BEHAVES as preview — the experiments have to be visible where
+   * they are written — and without a badge it would look like the release.
    */
-  const badgeLabel = productionScope ? 'AS PRODUCTION' : (variantLabel || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : ''));
-  /** Staging is production scope already and has nothing to switch; production carries no badge. */
-  const badgeSwitches = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
+  const badgeLabel = variantLabel || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : '');
+  /** Amber on the builds that are not the release (preview, dev); violet on staging, which is. */
+  const badgeNotRelease = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
   /** Where this browser stands with the owner gate — preview only; production and staging have no
    *  gate and ask nothing. Names the SYNC destination, and drives the SIGN IN chip. */
@@ -5033,37 +5022,15 @@ export default function Home() {
               Violet rather than amber for staging, because they mean different things: amber is
               "this is not the release", violet is "this IS the release, one step early". */}
           {badgeLabel && (
-            /* THE BADGE IS ALSO THE SWITCH, on preview. It already had to be on screen to say which
-               build this is, and the mode it toggles is a statement about the same thing — so one
-               element carries both rather than a second control appearing next to it.
-
-               It takes STAGING'S COLOUR in the mode, and that is the point rather than a shortage of
-               hues: violet means "this IS the release, one step early", which is exactly what a
-               preview read at production scope is standing in for. The word changes with it, so the
-               state is legible without knowing the palette.
-
-               Not a control anywhere else. Staging is already production scope and has nothing to
-               switch; production carries no badge at all. */
-            badgeSwitches ? (
-              <button
-                type="button"
-                onClick={() => setProductionScope(!productionScope)}
-                title={productionScope
-                  ? 'Showing only what production shows — experiments and their WRITE rows are closed, and the log records the production channel set. Click to go back to the full WORKS build.'
-                  : 'Click to read this WORKS build as production: the experimental tabs, their WRITE rows and the debug log channels close, so this is the surface set the release will have. The backend is not simulated — /api still exists here and does not on staging.'}
-                className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer
-                  ${productionScope
-                    ? 'text-violet-300 bg-violet-500/15 hover:bg-violet-500/25'
-                    : 'text-amber-300 bg-amber-500/15 hover:bg-amber-500/25'}`}
-              >
-                {badgeLabel}
-              </button>
-            ) : (
-              <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
-                text-violet-300 bg-violet-500/15`}>
-                {variantLabel}
-              </span>
-            )
+            /* A READOUT on every build, never a control (tsunagi-m-chrome §2): it names the URL that
+               is open. Until 2026-09-30 it was also a WORKS ⇄ AS PRODUCTION switch on the preview,
+               and that is why it is not one now — closing the experiments did not make the
+               development branch the release, yet the mode wore staging's violet and said it was.
+               Production's look is read on the staging URL (tsunagi-m-release §10). */
+            <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap
+              ${badgeNotRelease ? 'text-amber-300 bg-amber-500/15' : 'text-violet-300 bg-violet-500/15'}`}>
+              {badgeLabel}
+            </span>
           )}
           {/* SIGN IN — the preview's owner-gate session has ended. Beside the badge because it is a
               fact about this BUILD's reach (its store), not about the car, and on a phone this is
@@ -5100,7 +5067,7 @@ export default function Home() {
               belongs to. */}
           <span className={`shrink-0 ml-auto min-[900px]:ml-0 text-[9px] font-mono text-slate-500 whitespace-nowrap
             ${updateAvailable ? 'hidden min-[900px]:inline' : ''}`}>
-            V2.2.0 β
+            V2.2.1 β
           </span>
 
           <div className="hidden min-[900px]:flex flex-1 min-w-0 items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">
