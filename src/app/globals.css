@@ -261,6 +261,23 @@ body {
   display: none;
 }
 
+/* The guide is written once and read two ways (GuideCarousel.tsx): as the carousel a first visitor
+   gets after agreeing to the disclaimer, and as plain text in the static export for a reader that
+   runs no script — a crawler, an LLM's fetch — which never sees a dialog. The text goes the moment
+   the page runs script: layout.tsx marks <html data-js> before the first paint, so nobody who can be
+   shown the carousel sees it. Keyed on an attribute set before paint, not on React state, so the
+   server HTML and the hydrating render are the same DOM and nothing flashes past first. */
+html[data-js] .no-js-only {
+  display: none;
+}
+
+/* Without script <html lang> stays the export's `en`, so the static copy shows its English half.
+   The Japanese half is in the HTML regardless, for the crawler that reads both. */
+html[lang="ja"] [data-guide-lang="en"],
+html:not([lang="ja"]) [data-guide-lang="ja"] {
+  display: none;
+}
+
 /* Hide Next.js Dev Tools / Static Indicator */
 body:has([data-nextjs-toast]),
 [data-nextjs-toast],

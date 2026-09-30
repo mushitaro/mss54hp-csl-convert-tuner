@@ -7,6 +7,7 @@ import { DropZone, ACCEPT_CSV } from '@/components/DropZone';
 import type { LogicPatches } from '@/lib/binary-engine/patcher';
 import { dialogText } from '@/lib/dialog-text';
 import { useDialogLang } from '@/hooks/useDialogLang';
+import { GuideStatic } from '@/components/GuideCarousel';
 
 /**
  * The ACTIONS sheet's explanations, in the reader's language.
@@ -512,9 +513,16 @@ export const SessionList: React.FC<Props> = ({
     );
 
     if (loading) {
+        // The static export is this state, so this is where the guide's plain-text copy lives: the
+        // one place a reader that runs no script — a crawler — finds what the tool is. Everybody
+        // else is shown the carousel instead, and GuideStatic is hidden from them before the first
+        // paint (see GuideCarousel), which leaves this looking exactly as it did.
         return (
-            <div className="h-full flex items-center justify-center text-slate-700">
-                <p className="text-xs font-mono opacity-50">LOADING SESSIONS...</p>
+            <div className="h-full overflow-y-auto text-slate-700">
+                <div className="min-h-full flex flex-col items-center justify-center gap-10 px-6 py-10">
+                    <GuideStatic />
+                    <p className="text-xs font-mono opacity-50">LOADING SESSIONS...</p>
+                </div>
             </div>
         );
     }

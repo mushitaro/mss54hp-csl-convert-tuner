@@ -1,5 +1,16 @@
 # MSS54HP CSL CONVERT /// TUNER
 
+Tune a CSL-converted BMW E46 M3's MSS54HP DME from your own drive logs, in the browser: upload a
+partial BIN and a TESTO LOG CSV and download the tuned BIN with its checksums corrected, or connect a
+K+DCAN cable and read, log and write the DME directly. Free and open source.
+**Open it: <https://mss54hp-csl-convert-tuner.tsunagi.app/>**
+
+Part of **TSUNAGI///Matrix**, the tools for the BMW E46 M3:
+[E46M3 /// MONITORING](https://github.com/mushitaro/E46M3-Monitoring) ·
+[E46M3SMG2 /// MAPPING](https://github.com/mushitaro/e46m3smg2-mapping) ·
+[MSS54HP CSL CONVERT /// BOOT](https://github.com/mushitaro/mss54hp-csl-convert-boot) ·
+[E46 M35080 /// MIGRATION](https://github.com/mushitaro/e46-m35080-migration)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

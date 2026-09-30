@@ -77,6 +77,7 @@ import { FieldVisibilityPanel } from '@/components/FieldVisibilityPanel';
 import { AdaptationResetDialog } from '@/components/AdaptationResetDialog';
 import { FlashCounterResetDialog } from '@/components/FlashCounterResetDialog';
 import { DisclaimerDialog } from '@/components/DisclaimerDialog';
+import { GuideCarousel } from '@/components/GuideCarousel';
 import { CreditsDialog } from '@/components/CreditsDialog';
 import { MobileMenu, MENU_CELL } from '@/components/MobileMenu';
 import { MessageDialog } from '@/components/MessageDialog';
@@ -132,6 +133,7 @@ import { useUnloadGuard } from '@/hooks/useUnloadGuard';
 import { useScreenWakeLock } from '@/hooks/useScreenWakeLock';
 import { useHiddenWitness } from '@/hooks/useHiddenWitness';
 import { useDisclaimer } from '@/hooks/useDisclaimer';
+import { useGuide } from '@/hooks/useGuide';
 import { useLiveRun } from '@/hooks/useLiveRun';
 import { LiveTelemetryStrip } from '@/components/LiveTelemetryStrip';
 import { LlsLiveStrip } from '@/components/LlsLiveStrip';
@@ -421,6 +423,8 @@ export default function Home() {
   const clearMenuDrag = useCallback(() => setMenuDrag(null), []);
   // アクセス時の免責事項ダイアログ。表示可否と「今後表示しない」の永続化はフックが持つ。
   const disclaimer = useDisclaimer();
+  // 同意の直後に一度だけ出す「使い方」。免責は門のままにして、使い方はその外に置く。
+  const guide = useGuide();
   // ポリシーの URL はブラウザ言語で日英を出し分ける。ヘッダーのリンクは静的 HTML に焼き込まれる
   // ため、判定はマウント後 — 理由は hooks/usePrivacyPolicyUrl.ts に書いてある。
   const privacyUrl = usePrivacyPolicyUrl();
@@ -6604,7 +6608,10 @@ export default function Home() {
         />
       )}
 
-      {disclaimer.open && <DisclaimerDialog onAccept={disclaimer.accept} />}
+      {disclaimer.open && (
+        <DisclaimerDialog onAccept={(dontShowAgain) => { disclaimer.accept(dontShowAgain); guide.offer(); }} />
+      )}
+      {guide.open && <GuideCarousel onClose={guide.close} />}
     </main >
   );
 }

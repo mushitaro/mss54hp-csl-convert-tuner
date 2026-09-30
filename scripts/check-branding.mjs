@@ -19,7 +19,9 @@
  *     the stale tag read first;
  *   - a document with no, or two, `app-label` tags, or another build's: a badge that names no
  *     build, or the wrong one;
- *   - a `sync-token` meta: the shared upload token of the old store, which must never ship again.
+ *   - a `sync-token` meta: the shared upload token of the old store, which must never ship again;
+ *   - a robots.txt that still allows the crawl, or a sitemap.xml left behind: a second copy of the
+ *     release, open to an index.
  *
  * Not a `verify:*` script: those run against main's tree on every release, and main has no
  * branding step to check.
@@ -83,6 +85,15 @@ for (const file of htmlFiles(OUT)) {
     const title = /<meta name="apple-mobile-web-app-title" content="([^"]*)"/.exec(html)?.[1];
     if (title !== undefined && title !== short) fail(`${file}: apple-mobile-web-app-title "${title}", want "${short}"`);
 }
+// Only production is for search engines: a branded export that still invites a crawl is a second
+// copy of the release competing with it in an index.
+const robots = existsSync(join(OUT, 'robots.txt')) ? readFileSync(join(OUT, 'robots.txt'), 'utf8') : null;
+if (robots === null || !/^Disallow:\s*\/\s*$/m.test(robots) || /^Allow:/m.test(robots) || /Sitemap:/i.test(robots)) {
+    fail(`robots.txt does not refuse the crawl: ${JSON.stringify(robots)}`);
+} else ok('robots.txt: Disallow: /');
+if (existsSync(join(OUT, 'sitemap.xml'))) fail('sitemap.xml is still in the export');
+else ok('no sitemap.xml');
+
 if (!docs) fail(`no .html in ${OUT}`);
 else if (!failures) ok(`${docs} document(s): one app-variant "${VARIANT}", one app-label "${LABEL}", dev icons only, no sync-token`);
 

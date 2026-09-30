@@ -13,6 +13,7 @@
  *     description   … — <LABEL> BUILD, not the production tool.
  *     icons         the M ICON dev set (white on black), maskable entries to the dev maskable files
  *     every .html   apple-mobile-web-app-title, app-variant, app-label, icon/apple-touch-icon links
+ *     robots.txt    Disallow: / — and sitemap.xml removed; only production is for search engines
  *
  *     variant   label     short_name
  *     (none)    (none)    CSL TUNER    production — never branded
@@ -72,7 +73,7 @@
  * a cache name, and the second would be served the first's assets. The order is not cosmetic.
  * `scripts/check-branding.mjs` reads the result back afterwards.
  */
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { BUILD_LABEL, labelFor } from './brand-label.mjs';
 
@@ -188,6 +189,15 @@ for (const file of files(OUT, ['.txt'])) {
     const after = swapIcons(before);
     if (after !== before) { writeFileSync(file, after); payloads++; }
 }
+
+// --- Search engines ----------------------------------------------------------------------------
+// Only production is for finding. A branded build is the same pages under another origin, and
+// indexed it would compete with the release it rehearses — staging is open to anyone with the URL.
+// So public/robots.txt (allow everything, here is the sitemap) becomes a refusal, and the sitemap,
+// a list of production's URLs, goes. The canonical link and the JSON-LD stay as built: both already
+// name production, which is what a crawler that reaches this origin anyway should learn.
+writeFileSync(join(OUT, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
+rmSync(join(OUT, 'sitemap.xml'), { force: true });
 
 console.log(`[brand-preview] ${OUT}: "${manifest.name}" / ${shortName} / variant ${VARIANT} / label ${LABEL}, `
     + `${moved.size} icon(s) to the dev set, manifest + ${patched} document(s) + ${payloads} payload(s)`);
