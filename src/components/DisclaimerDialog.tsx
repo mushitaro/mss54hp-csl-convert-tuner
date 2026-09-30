@@ -59,8 +59,6 @@ const TEXT = {
 export const DisclaimerDialog: React.FC<Props> = ({ onAccept }) => {
     const lang = useDialogLang();
     // 送信の門(lib/session-sync/preview-notice.ts)と同じビット: app-variant が preview のときだけ真。
-    // スコープ切替(AS PRODUCTION)では閉じない。あれは描画だけを本番に寄せ、送信は止めないので、
-    // 送る版で notice を隠すと、読まれていないお知らせを押下が「確認済み」にしてしまう。
     const preview = useIsPreviewBuild();
     return <DisclaimerDialogView lang={lang} preview={preview} onAccept={onAccept} />;
 };

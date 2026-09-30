@@ -1,7 +1,7 @@
 {
   "name": "mss54hp-csl-convert-tuner",
   "meshProject": "dme-mapping",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "license": "MIT",
   "scripts": {

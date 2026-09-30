@@ -65,7 +65,7 @@ export function useDisclaimer() {
     const noticeAcknowledged = useSyncExternalStore(
         subscribePreviewNotice, previewNoticeAcknowledged, noticeAcknowledgedOnServer);
     // The bit the dialog reads to show the notice and the send guards read to hold the sends:
-    // app-variant is `preview`. Not the scope switch — see DisclaimerDialog.
+    // app-variant is `preview`.
     const preview = useIsPreviewBuild();
     const open = firstRunDialogOpen({ preview, disclaimerAcknowledged: !disclaimerOpen, noticeAcknowledged });
 
