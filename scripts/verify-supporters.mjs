@@ -34,7 +34,11 @@ try {
 }
 if (project) check('package.json names the MESH line', project === 'dme-mapping', project);
 
-for (const name of ['build', 'build:preview']) {
+// `build:preview` exists only on the development branch: the release drops it from main's
+// package.json (NOT_FOR_MAIN_SCRIPTS in release-scope.mjs), and main builds no preview. Where it
+// exists it must run the step exactly as `build` does; on main there is nothing to check, and
+// checking anyway failed every release at `ship`'s verify stage.
+for (const name of ['build', 'build:preview'].filter(n => n === 'build' || n in pkg.scripts)) {
     const steps = (pkg.scripts[name] ?? '').split('&&').map(s => s.trim());
     const at = steps.indexOf('node scripts/inject-supporters.mjs');
     check(`${name} writes the names`, at >= 0, pkg.scripts[name]);
