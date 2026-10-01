@@ -56,14 +56,14 @@ export const canSync = (): boolean => isPreviewBuild();
  * Why a store request did not land, in the words the SYNC controls show.
  *
  * A kind as well as a message, because the kinds want different responses: `expired` is fixed by
- * signing in again, `tooLarge` by nothing short of a shorter drive, `offline`/`failed` by trying
- * again — which is what the controls offer — and `notice` by confirming the first-run dialog, which
- * is modal, so no control should ever show it.
+ * signing in again, `tooLarge` by nothing short of a shorter drive, `offline`/`unreachable`/`failed`
+ * by trying again — which is what the controls offer — and `notice` by confirming the first-run
+ * dialog, which is modal, so no control should ever show it.
  */
 export class SyncError extends Error {
     // Declared and assigned rather than a `readonly kind` parameter property: `verify:session-wire`
     // loads this module through Node's type stripping, which cannot erase that syntax.
-    readonly kind: 'expired' | 'tooLarge' | 'conflict' | 'offline' | 'failed' | 'notice';
+    readonly kind: 'expired' | 'unreachable' | 'tooLarge' | 'conflict' | 'offline' | 'failed' | 'notice';
     constructor(kind: SyncError['kind'], message: string) {
         super(message);
         this.kind = kind;
@@ -100,8 +100,15 @@ export async function call<T>(path: string, init: { method?: string; body?: unkn
     // Told apart from a status, not from `data`: a 204 and a proxy's HTML both come back null.
     const detail = typeof r.data?.error === 'string' ? r.data.error : null;
     if (r.expired) {
-        markGateExpired();
+        markGate('expired');
         throw new SyncError('expired', 'Signed out of the WORKS build — sign in again to sync. Nothing here was lost.');
+    }
+    // The gate's own refusal: it could not ask m3 who this is (m3 down, or the gate's client secret
+    // no longer matching m3's). Not this device's fault and not fixed by signing in, so it is not
+    // `expired` — and "unavailable", the gate's word for it, told the driver nothing.
+    if (r.status === 503) {
+        markGate('unknown');
+        throw new SyncError('unreachable', 'The store could not confirm this device just now — the sign-in service did not answer. Nothing here was lost.');
     }
     if (r.tooLarge) {
         throw new SyncError('tooLarge', detail && detail !== 'too_large' ? detail : 'Too large to send — the store takes rows up to 1.9 MB.');
@@ -112,16 +119,18 @@ export async function call<T>(path: string, init: { method?: string; body?: unkn
 }
 
 /**
- * Listeners for "the gate said this browser is signed out", so the re-auth chip appears the moment
- * a request finds out rather than on the next status poll. See useGateStatus.
+ * Listeners for what a store request found out about the gate — signed out (401), or unable to
+ * confirm anyone (503) — so the SYNC control and the re-auth chip change the moment a request finds
+ * out rather than on the next status poll. See useGateStatus.
  */
-const expiredListeners = new Set<() => void>();
-export function onGateExpired(listener: () => void): () => void {
-    expiredListeners.add(listener);
-    return () => { expiredListeners.delete(listener); };
+type GateNews = 'expired' | 'unknown';
+const gateListeners = new Set<(state: GateNews) => void>();
+export function onGateState(listener: (state: GateNews) => void): () => void {
+    gateListeners.add(listener);
+    return () => { gateListeners.delete(listener); };
 }
-export function markGateExpired(): void {
-    for (const listener of expiredListeners) listener();
+export function markGate(state: GateNews): void {
+    for (const listener of gateListeners) listener(state);
 }
 
 // --- What is outstanding -------------------------------------------------------------------------
