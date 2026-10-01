@@ -15,7 +15,7 @@
  *
  * To pull them out of D1:
  *
- *     npx wrangler d1 execute mss54hp-tuner-runs --remote --json --command \
+ *     npm run -s wrangler -- d1 execute mss54hp-tuner-runs --remote --json --command \
  *       "SELECT hex(log_json_gz) log, hex(session_json_gz) sess, hex(binaries_json_gz) bins \
  *        FROM sessions WHERE id='<uuid>'" > raw.json
  *

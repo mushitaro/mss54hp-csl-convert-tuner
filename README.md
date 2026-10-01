@@ -11,6 +11,11 @@ Part of **TSUNAGI///Matrix**, the tools for the BMW E46 M3:
 [MSS54HP CSL CONVERT /// BOOT](https://github.com/mushitaro/mss54hp-csl-convert-boot) ·
 [E46 M35080 /// MIGRATION](https://github.com/mushitaro/e46-m35080-migration)
 
+**From an AI assistant or a script:** the same calculations run without the browser in
+[matrix-tsunagi](https://github.com/mushitaro/matrix-tsunagi) — `npx matrix-tsunagi mapping ve --bin my.bin --log drive.csv --out tuned.bin`
+gives this app's VE correction and a tuned BIN byte-for-byte its DOWNLOAD TUNED, and
+`npx -y matrix-tsunagi mcp mapping` serves them as MCP tools. It bundles this repository's own code at a released commit.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

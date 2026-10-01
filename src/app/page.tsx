@@ -361,7 +361,8 @@ export default function Home() {
     sessions: sessionDb.sessions,
     refresh: sessionDb.refresh,
     isPreviewBuild,
-    signedOut: gate.state === 'expired',
+    gate: gate.state,
+    recheckGate: gate.recheck,
     online,
   });
   /**

@@ -156,5 +156,6 @@ run('node', [resolve('scripts', 'check-branding.mjs'), resolve(MAIN, 'out'), VAR
 run('node', [resolve(MAIN, steps[steps.length - 1])], MAIN);
 // In MAIN, not here — see the header. Everything wrangler needs is on the command line, so it
 // wants no `wrangler.jsonc`, and finding none is the correct outcome rather than a missing step.
-run('npx', ['wrangler', 'pages', 'deploy', resolve(MAIN, 'out'),
+// wrangler itself, and its login, are this worktree's (scripts/wrangler.mjs) — main has neither.
+run('node', [resolve('scripts', 'wrangler.mjs'), 'pages', 'deploy', resolve(MAIN, 'out'),
     '--project-name', PROJECT, '--branch', BRANCH], MAIN);

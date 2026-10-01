@@ -15,10 +15,13 @@
  *
  * ## Setup, once
  *
- *   npx wrangler login
- *   npx wrangler d1 create mss54hp-tuner-runs      # copy database_id into this file
+ * `npm run wrangler --` rather than `npx wrangler`: it keeps this tool's Cloudflare login apart from
+ * the machine-wide one other projects switch (scripts/wrangler.mjs).
+ *
+ *   npm run wrangler -- login
+ *   npm run wrangler -- d1 create mss54hp-tuner-runs      # copy database_id into this file
  *   npm run db:migrate:remote
- *   npx wrangler pages project create mss54hp-csl-convert-tuner-preview --production-branch main
+ *   npm run wrangler -- pages project create mss54hp-csl-convert-tuner-preview --production-branch main
  *   # Settings → Runtime → Fail closed. Without it an exhausted Functions quota skips the gate and
  *   # serves every asset to anyone.
  *   # On m3: npm run access:client -- --id tuner-preview … — registers the gate's client and pipes

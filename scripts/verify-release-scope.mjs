@@ -32,7 +32,7 @@ console.log('\n[main carries no backend and no deploy tooling]');
 for (const p of ['functions', 'wrangler.jsonc', 'migrations', 'public/_routes.json']) {
     check(`${p} is in NOT_FOR_MAIN`, NOT_FOR_MAIN.includes(p));
 }
-const TOOL = /^(deploy-|publish-|release-|ship|brand-|assert-gated|gate-verify|check-branding|verify-release-scope)/;
+const TOOL = /^(deploy-|publish-|release-|ship|brand-|assert-gated|gate-verify|check-branding|verify-release-scope|wrangler\.)/;
 const tools = readdirSync('scripts').filter((f) => f.endsWith('.mjs') && TOOL.test(f)).map((f) => `scripts/${f}`);
 const missingTools = tools.filter((t) => !NOT_FOR_MAIN.includes(t));
 check(`all ${tools.length} deploy/publication tools in scripts/ are in NOT_FOR_MAIN`, !missingTools.length, missingTools.join(', '));

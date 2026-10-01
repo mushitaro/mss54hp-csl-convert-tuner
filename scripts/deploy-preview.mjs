@@ -110,5 +110,6 @@ run('npm', ['run', 'build:preview']);
 try { run('node', ['scripts/assert-gated.mjs', OUT]); } catch { refuse('assert-gated failed on the build.'); }
 if (git(['rev-parse', 'HEAD']) !== head) refuse('HEAD moved during the build. Run it again.');
 
-run('npx', ['wrangler', 'pages', 'deploy', OUT, '--project-name', config.name, '--branch', 'main']);
+// Through scripts/wrangler.mjs: this tool's own login, not the one another project last switched to.
+run('node', ['scripts/wrangler.mjs', 'pages', 'deploy', OUT, '--project-name', config.name, '--branch', 'main']);
 console.log(`\nDeployed ${LABEL} ${short}. Read it back with an owner session — see docs/release-environments.md.`);
