@@ -14,6 +14,14 @@ export type SyncPhase =
     /** The owner gate's session has ended. Nothing can land until the owner signs in again, which
      *  the header's SIGN IN chip does; the local database keeps everything meanwhile. */
     | 'signedOut'
+    /**
+     * The gate answered, and could not confirm anybody: m3 did not answer it, or its client secret no
+     * longer matches m3's. Not this device's doing and not fixed by signing in, so it is not
+     * 'signedOut'. It used to read as 'ready' — "Sync 3 sessions", pressable, and the press came back
+     * with the gate's one word, "unavailable" — while the PWA opened from its cache as if nothing
+     * were wrong. Stays pressable: the press asks the gate again before it sends.
+     */
+    | 'unreachable'
     /** The interface is down. Reliable, unlike its opposite — see useOnline. */
     | 'offline'
     | 'busy'
@@ -212,6 +220,16 @@ export function describeSync({ phase, pending, error }: SyncStatus): SyncLook {
                     + 'the local database already has all of it.',
                 disabled: true,
                 tone: 'muted',
+            };
+        case 'unreachable':
+            return {
+                label: pending > 0 ? `Unreachable — ${pending} waiting` : 'Unreachable',
+                title: 'The WORKS build could not confirm this device with the sign-in service just now, so the '
+                    + 'store will not take anything yet. This is not something signing in fixes. Nothing is lost '
+                    + 'meanwhile — the local database already has all of it. Press to check again; once the '
+                    + 'device is confirmed, what is waiting goes up.',
+                disabled: false,
+                tone: 'error',
             };
         case 'offline':
             return {

@@ -7,6 +7,7 @@ import { needsSync, sessionFingerprint, syncSession } from '@/lib/session-sync/c
 import { flushDiagnostics } from '@/lib/session-sync/diagnostics';
 import type { SyncStatus } from '@/lib/session-sync/status';
 import type { UploadState } from '@/components/SessionList';
+import type { GateInfo } from '@/hooks/useGateStatus';
 
 /**
  * Sending sessions to the deployment's store, and what the controls that do it say.
@@ -26,14 +27,17 @@ export function useSessionSync(input: {
     refresh: () => Promise<unknown> | unknown;
     /** Whether this build has an `/api` behind it at all. See `status` below. */
     isPreviewBuild: boolean;
-    /** The owner gate says this browser is signed out (useGateStatus). Nothing can land until the
-     *  owner signs in again, and the control should say that rather than fail at every press. */
-    signedOut: boolean;
+    /** Where this browser stands with the owner gate (useGateStatus). `expired`: nothing can land
+     *  until the owner signs in again. `unknown`: the gate could not confirm anybody. Either way the
+     *  control should say so rather than fail at every press. */
+    gate: GateInfo['state'];
+    /** Asks the gate again, now. A SYNC press calls it before anything is sent. */
+    recheckGate: () => Promise<GateInfo>;
     /** From `useOnline`. Reliable in the negative direction only, which is why it outranks the
      *  error but nothing outranks it. */
     online: boolean;
 }) {
-    const { sessions, refresh, isPreviewBuild, signedOut, online } = input;
+    const { sessions, refresh, isPreviewBuild, gate, recheckGate, online } = input;
 
     const [uploadState, setUploadState] = useState<Record<string, UploadState>>({});
     const [busy, setBusy] = useState(false);
@@ -104,8 +108,15 @@ export function useSessionSync(input: {
         // and the honest answer when there is nothing left to send is `clean`, not a failure with
         // no way out of it.
         setError(null);
-        if (!outstanding.length) return;
         setBusy(true);
+        // The gate is asked at the press rather than trusted from its last answer, which can be
+        // hours old on a phone that slept in a garage. A send the gate will refuse is told so here,
+        // in the control's own words, instead of after the first upload in the gate's.
+        const { state } = await recheckGate();
+        if (state !== 'active' || !outstanding.length) {
+            setBusy(false);
+            return;
+        }
         const failures: string[] = [];
         for (const session of outstanding) {
             const failure = await syncOne(session);
@@ -118,7 +129,7 @@ export function useSessionSync(input: {
         setError(failures.length
             ? `${failures[0]}${failures.length > 1 ? ` (and ${failures.length - 1} more)` : ''}`
             : null);
-    }, [pending, syncOne, refresh]);
+    }, [pending, recheckGate, syncOne, refresh]);
 
     /**
      * What the sync controls say, or null when this build has no store behind them.
@@ -136,15 +147,16 @@ export function useSessionSync(input: {
         phase: busy ? 'busy'
             // Offline outranks the error: "no network" is the actionable half of a failure that
             // happened because there was no network, and it is the one that says what to do
-            // about it. Signed out outranks it for the same reason.
+            // about it. Signed out and unreachable outrank it for the same reason.
             : !online ? 'offline'
-                : signedOut ? 'signedOut'
-                    : error ? 'error'
-                        : pending.length > 0 ? 'ready'
-                            : 'clean',
+                : gate === 'expired' ? 'signedOut'
+                    : gate === 'unknown' ? 'unreachable'
+                        : error ? 'error'
+                            : pending.length > 0 ? 'ready'
+                                : 'clean',
         pending: pending.length,
         error: error ?? undefined,
-    }), [isPreviewBuild, signedOut, busy, online, error, pending.length]);
+    }), [isPreviewBuild, gate, busy, online, error, pending.length]);
 
     return {
         uploadState, pending, status,
