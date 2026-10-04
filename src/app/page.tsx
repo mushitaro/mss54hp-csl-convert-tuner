@@ -105,7 +105,7 @@ import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
-import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
+import { armedPatchesFromHistory, patchesSinceTune, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -2364,10 +2364,14 @@ export default function Home() {
       }
       : armedPatchesFromHistory(session) ?? undefined;
 
+    // The toggles are what the NEXT write does, so a flash recorded after the tune — FINALIZE taking
+    // the patches back off — outranks `tuneSettings` for the four logic patches. `armed` itself is
+    // left alone: it is what the drive ran, and the log replay below reads it.
+    const since = patchesSinceTune(session);
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
       session.baseFileName ?? 'base.bin',
-      armed,
+      since ? { ...armed, ...since } : armed,
     );
     if (!map) return;
 
@@ -4231,7 +4235,11 @@ export default function Home() {
       .map(g => ({
         ...g,
         rows: g.rows
-          .filter(r => featureEnabled(
+          // ...unless it is ARMED. The gate hides what a build cannot offer, not what is already
+          // going into the bytes: RF GATE belongs to 'rfKorr', so production hid it while a BASE
+          // read off a car patched from preview still armed it — WRITE stayed PATCH-ON with PATCH
+          // off, and the one switch that would clear it was not on screen.
+          .filter(r => (r.kind === 'toggle' && r.checked) || featureEnabled(
             r.id.startsWith('cal:') ? 'calibration' : rowFeature[r.id], featurePreview))
           // ...and by MODE, in the WRITE group only. A WRITE row is a DERIVATION, and the mode
           // decides which derivation this session is making — so an IDLE run is no longer offered
