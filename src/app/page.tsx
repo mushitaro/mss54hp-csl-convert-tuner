@@ -105,7 +105,7 @@ import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
-import { armedPatchesFromHistory, patchesSinceTune, patchOnFlash } from '@/lib/db/flashState';
+import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -2364,14 +2364,17 @@ export default function Home() {
       }
       : armedPatchesFromHistory(session) ?? undefined;
 
-    // The toggles are what the NEXT write does, so a flash recorded after the tune — FINALIZE taking
-    // the patches back off — outranks `tuneSettings` for the four logic patches. `armed` itself is
-    // left alone: it is what the drive ran, and the log replay below reads it.
-    const since = patchesSinceTune(session);
+    // The toggles describe the CAR, and the car holds what its last real flash gave it. So that
+    // flash sets the four logic patches, over `tuneSettings`: an archived session's settings are
+    // never rewritten, and FINALIZE's patch-off write lands only in the history — reading the
+    // settings first re-armed PATCH, WOT TH and TANK VENT on a car the list badged FINAL, and the
+    // next WRITE shut the purge valve again (operator, 2026-10-04). `armed` itself is left alone:
+    // it is what the drive ran, and the log replay below reads it.
+    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
       session.baseFileName ?? 'base.bin',
-      since ? { ...armed, ...since } : armed,
+      car ? { ...armed, ...car } : armed,
     );
     if (!map) return;
 
@@ -2558,8 +2561,10 @@ export default function Home() {
         writeVe: session.tuneSettings.writeVe ?? true,
       }
       : armedPatchesFromHistory(session) ?? undefined;
+    // The toggles follow the car's last real flash, as in handleOpenSession.
+    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
-      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', armed);
+      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', car ? { ...armed, ...car } : armed);
     if (!map) return;
 
     // Adopted as the run's buffer, so a later flush appends to this drive rather than starting a

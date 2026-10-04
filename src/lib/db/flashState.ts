@@ -140,7 +140,8 @@ export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): Arme
 }
 
 /**
- * Which logic patches the ECU is holding, for a session whose `tuneSettings` cannot say.
+ * Which logic patches the ECU is holding — the reopened workspace's toggles, and the fallback for a
+ * session whose `tuneSettings` cannot say what its drive ran.
  *
  * `tuneSettings` is written in exactly one place — `saveTune` — so it exists only once a session has
  * derived a VE map. Two ordinary states never reach it: a BASE armed with WRITE PATCH-ON before the
@@ -177,24 +178,3 @@ export function armedPatchesFromHistory(
     };
 }
 
-/**
- * The logic patches the ECU was given AFTER this session's tune went out — or null.
- *
- * `tuneSettings` is written once, when the tune is saved, and an archived session's is never
- * rewritten. A campaign writes the tune PATCH-ON to keep logging, then FINALIZE writes it patch-off
- * — and that second flash lands only in the history. Reopening read `tuneSettings` first, so a
- * session the list badged FINAL came back with PATCH, WOT TH and TANK VENT armed again, and the next
- * WRITE shut the purge valve on a car that had just been put back on the road (operator, 2026-10-04).
- *
- * Anchored on the tune's own hash rather than on "the last flash": only a flash recorded after the
- * one that carried `sha256` is known to be newer than `tuneSettings`. Before that, or when the tune
- * never went out, `tuneSettings` stays the answer — it is what the tune was built with.
- */
-export function patchesSinceTune(
-    session: Pick<TuningSession, 'flashHistory' | 'sha256'>,
-): ArmedPatches | null {
-    const real = realFlashes(session);
-    const tuneAt = session.sha256 ? real.map(f => f.sha256).lastIndexOf(session.sha256) : -1;
-    if (tuneAt < 0 || tuneAt === real.length - 1) return null;
-    return armedPatchesFromHistory(session);
-}
