@@ -2364,10 +2364,17 @@ export default function Home() {
       }
       : armedPatchesFromHistory(session) ?? undefined;
 
+    // The toggles describe the CAR, and the car holds what its last real flash gave it. So that
+    // flash sets the four logic patches, over `tuneSettings`: an archived session's settings are
+    // never rewritten, and FINALIZE's patch-off write lands only in the history — reading the
+    // settings first re-armed PATCH, WOT TH and TANK VENT on a car the list badged FINAL, and the
+    // next WRITE shut the purge valve again (operator, 2026-10-04). `armed` itself is left alone:
+    // it is what the drive ran, and the log replay below reads it.
+    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
       session.baseFileName ?? 'base.bin',
-      armed,
+      car ? { ...armed, ...car } : armed,
     );
     if (!map) return;
 
@@ -2554,8 +2561,10 @@ export default function Home() {
         writeVe: session.tuneSettings.writeVe ?? true,
       }
       : armedPatchesFromHistory(session) ?? undefined;
+    // The toggles follow the car's last real flash, as in handleOpenSession.
+    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
-      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', armed);
+      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', car ? { ...armed, ...car } : armed);
     if (!map) return;
 
     // Adopted as the run's buffer, so a later flush appends to this drive rather than starting a
@@ -4231,7 +4240,11 @@ export default function Home() {
       .map(g => ({
         ...g,
         rows: g.rows
-          .filter(r => featureEnabled(
+          // ...unless it is ARMED. The gate hides what a build cannot offer, not what is already
+          // going into the bytes: RF GATE belongs to 'rfKorr', so production hid it while a BASE
+          // read off a car patched from preview still armed it — WRITE stayed PATCH-ON with PATCH
+          // off, and the one switch that would clear it was not on screen.
+          .filter(r => (r.kind === 'toggle' && r.checked) || featureEnabled(
             r.id.startsWith('cal:') ? 'calibration' : rowFeature[r.id], featurePreview))
           // ...and by MODE, in the WRITE group only. A WRITE row is a DERIVATION, and the mode
           // decides which derivation this session is making — so an IDLE run is no longer offered

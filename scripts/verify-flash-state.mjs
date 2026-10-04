@@ -184,5 +184,25 @@ console.log('\n[the PATCH-ON image a session actually wrote]');
         patchOnFlash(session(flash({ settings: { applyPatch: true } }), flash()))?.applyPatch === true);
 }
 
+console.log('\n[the last real flash is what the car holds, whatever the tune was built with]');
+{
+    // The campaign that broke: the tune went out PATCH-ON, then FINALIZE took the patches off. The
+    // list said FINAL; reopening re-armed PATCH, WOT TH and TANK VENT from `tuneSettings`, and the
+    // next WRITE shut the purge valve again. Reopening now takes the four from this answer.
+    const on = { applyPatch: true, applyWotDisable: true, applyTankVentDisable: true };
+    const finalized = session(flash({ at: 1, tuned: true, settings: on }), flash({ at: 2, tuned: true }));
+    const car = armedPatchesFromHistory(finalized);
+    check('after FINALIZE the car is patch-off',
+        car?.applyPatch === false && car?.applyWotDisable === false && car?.applyTankVentDisable === false,
+        JSON.stringify(car));
+    check('...which is what the FINAL badge says', isTuneOnTheRoad(finalized));
+    // The variant the hash anchor missed: PATCH-OFF written with no tune flashed at all.
+    const patchOffOnly = session(flash({ at: 1, tuned: false, settings: on }), flash({ at: 2, tuned: false }));
+    check('a patch-off write with no tune behind it counts too',
+        armedPatchesFromHistory(patchOffOnly)?.applyTankVentDisable === false);
+    check('a PRACTICE patch-off does not move the car',
+        armedPatchesFromHistory(session(flash({ settings: on }), flash({ practice: true })))?.applyTankVentDisable === true);
+}
+
 console.log(fails === 0 ? '\nALL PASS' : '\n' + fails + ' FAILURE(S)');
 process.exit(fails ? 1 : 0);
