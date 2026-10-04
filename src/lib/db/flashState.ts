@@ -140,7 +140,8 @@ export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): Arme
 }
 
 /**
- * Which logic patches the ECU is holding, for a session whose `tuneSettings` cannot say.
+ * Which logic patches the ECU is holding — the reopened workspace's toggles, and the fallback for a
+ * session whose `tuneSettings` cannot say what its drive ran.
  *
  * `tuneSettings` is written in exactly one place — `saveTune` — so it exists only once a session has
  * derived a VE map. Two ordinary states never reach it: a BASE armed with WRITE PATCH-ON before the
