@@ -74,6 +74,8 @@ export function useSessionDb() {
     const saveResearch = useCallback(async (params: {
         sessionId: string; process: ProcessId; log: LogDataPoint[];
         inertia?: InertiaSample[]; idle?: IdleSample[];
+        /** Analysis settings only; this path creates no TUNED image or write claim. */
+        tuneSettings?: TuneSettings;
     }) => {
         const s = await saveResearchRun(params);
         await refresh();

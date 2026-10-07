@@ -11,7 +11,7 @@
  * being named B, the warning attached to B would silently stop appearing.
  */
 import {
-    LOG_PROFILES, expectedHz, exchangeMs, sampleMs, blocksOf, describeExchanges,
+    LOG_PROFILES, expectedHz, exchangeMs, sampleMs, blocksOf, describeExchanges, productionExchanges,
     LAMBDA_SLOW_LANE_EVERY, LAMBDA_TRUTH_GATE, lambdaTrimAgrees,
     missingPatches, deriveRoute, routeNeedsUnverifiedDivision, processesSupportedBy,
 } from '../src/lib/log-engine/logProfile.ts';
@@ -62,9 +62,22 @@ console.log('\n[what a sample costs, from the exchanges it is made of]');
     const swapped = expectedHz(trimByRam);
     check('reading the trim from RAM instead of block 19 is at least 1.5x faster',
         swapped > veSlow * 1.5, `${swapped.toFixed(2)} vs ${veSlow.toFixed(2)}`);
-    // And the profile as shipped still beats the fallback outright, carrying more channels than it.
-    check('...and the VE profile as shipped is still faster than the fallback', ve > veSlow,
-        `${ve.toFixed(2)} vs ${veSlow.toFixed(2)}`);
+    // Production retains that speed benefit. WORKS now spends two full-rate reads
+    // plus one 1/8-rate read on independent rf_korr/rf_soll/MAP diagnostics; comparing
+    // that richer profile to the block-only fallback no longer measures a speed win.
+    const productionVe = expectedHz(productionExchanges(LOG_PROFILES.VE.exchanges));
+    check('the production VE profile remains faster than the fallback', productionVe > veSlow,
+        `${productionVe.toFixed(2)} vs ${veSlow.toFixed(2)}`);
+    const direct = LOG_PROFILES.VE.exchanges.filter(x =>
+        x.kind === 'ram' && [0xFFEEA6, 0xFFEDEE, 0xFFEED8].includes(x.address));
+    check('WORKS explicitly budgets all three direct RAM diagnostics', direct.length === 3);
+    check('the three diagnostic reads cost 110.9 ms/sample in the declared wire model',
+        Math.abs(sampleMs(direct) - 110.8984375) < 1e-8, sampleMs(direct).toFixed(4));
+    const withoutDirect = LOG_PROFILES.VE.exchanges.filter(x => !direct.includes(x));
+    check('the former WORKS profile still beats the fallback when direct diagnostics are removed',
+        expectedHz(withoutDirect) > veSlow);
+    check('the displayed WORKS rate includes the diagnostic cost',
+        Math.abs(1000 / ve - sampleMs(withoutDirect) - sampleMs(direct)) < 1e-8);
     // ...and it must still be slower than dropping the trim altogether, or something is wrong with
     // the model: EGT reads strictly fewer bytes for strictly fewer channels.
     check('and still slower than reading block 3 alone', ve < egt, `${ve.toFixed(2)} vs ${egt.toFixed(2)}`);

@@ -101,6 +101,8 @@ import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { isFieldPresent } from '@/lib/field-registry/registry';
 import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
+import { operatingCalibrationHold } from '@/lib/ve-calculator/operatingPolicy';
+import { OperatingEvidenceNotice } from '@/components/OperatingEvidenceNotice';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
@@ -627,7 +629,15 @@ export default function Home() {
   const veCalcOptionsFor = (
     config: LogFilterConfig, egt: EgtTables | null, write: boolean,
     curves: RfPtKorrCurves | null = null,
+    recordedBase: ArrayBuffer | null = null,
+    recordedLoadTable: InterpolationPoint[] = interpolationTable,
   ): VeCalcOptions => ({
+    veCorrectionPolicy: config.veCorrectionPolicy,
+    veLearningRate: config.veLearningRate,
+    steadyCalibrationHold: operatingCalibrationHold(recordedBase),
+    steadyLambdaLimits: recordedBase ? new BinaryParser(recordedBase).readLambdaLimits() : null,
+    steadyFilterConfig: config,
+    steadyLoadTable: recordedLoadTable,
     // The whole config goes through resolveRfKorr, which is also what reads the two superseded
     // fields — so an archived session saved as 'nominal' / 'as-logged' / 'tuned' re-derives to the
     // same numbers it recorded without this call site knowing those modes ever existed.
@@ -638,7 +648,7 @@ export default function Home() {
     // new table and writing it are one decision. `write` is a parameter rather than read from
     // state here for the same reason `config` is: the archived-session handlers run in a render
     // scope whose state is one step behind what they just asked to load.
-    writeRfKorr: write,
+    writeRfKorr: write && config.veCorrectionPolicy !== 'steady-retain',
     // The evidence gate, and the rf_korr tuner's own. Both travel in the filter config so a session
     // replays under the thresholds it was built with rather than under today's defaults.
     //
@@ -664,7 +674,7 @@ export default function Home() {
     // `curves`, not the memo. Reopening a session calls this with the curves read from THAT
     // session's BASE while the memo still describes whatever is loaded now — the same trap the
     // note at the reopen call site describes for egtTables and the stored config.
-    normaliseTo: config.normaliseChargeTemp ? curves : null,
+    normaliseTo: config.veCorrectionPolicy !== 'steady-retain' && config.normaliseChargeTemp ? curves : null,
     // Always passed, unlike the normalisation: measuring rf_korr honestly is not an option the
     // operator turns on. Without it the calculation falls back to the trim alone.
     rfKorrAir: { curves, assumedPressureMbar: config.assumedAmbientPressure },
@@ -727,12 +737,13 @@ export default function Home() {
   useEffect(() => { logFileState.setLambdaLimits(lambdaLimits); }, [lambdaLimits]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const veCalcOptions = useMemo(
-    () => veCalcOptionsFor(filterConfig, egtTables, writeRfKorr, rfPtKorrCurves),
+    () => veCalcOptionsFor(filterConfig, egtTables, writeRfKorr, rfPtKorrCurves, binaryBuffer),
     // Hand-listed, and the list is the contract: every input veCalcOptionsFor actually reads has
     // to be here or a toggle change re-renders without re-deriving. `applyRfKorr` alone was enough
     // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
+    [filterConfig, binaryBuffer, interpolationTable,
+      filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
       filterConfig.veMethod, filterConfig.directAuthority, filterConfig.rfKorrSettleSec,
       filterConfig.enableVeCellGate, filterConfig.enableRfKorrCellGate, filterConfig.normaliseChargeTemp,
       filterConfig.assumedAmbientPressure,
@@ -941,7 +952,7 @@ export default function Home() {
         const processed = logFileState.reprocess(cfg);
         if (processed && currentMap) {
           // Built from `cfg`, not from the memo — see runCalculation.
-          runCalculation(currentMap, processed, veCalcOptionsFor(cfg, egtTables, writeRfKorr, rfPtKorrCurves));
+          runCalculation(currentMap, processed, veCalcOptionsFor(cfg, egtTables, writeRfKorr, rfPtKorrCurves, binaryBuffer));
         }
         // Clear only the intent this compute serviced — a newer change may have re-armed.
         if (pendingConfigRef.current === cfg) pendingConfigRef.current = null;
@@ -1042,7 +1053,8 @@ export default function Home() {
    *  Four conditions, all of which have to hold at once, which is why this lives here rather than
    *  in the panel: the panel can see the config and nothing else. */
   const canTuneRfKorr = !!(
-    egtTables                                   // the binary's tables decoded
+    filterConfig.veCorrectionPolicy !== 'steady-retain'
+    && egtTables                                // the binary's tables decoded
     && tunedRfKorr?.acceptable                  // the back-calculation met its own thresholds
     && !tunedRfKorr.report.sensorMissing        // the log carried an exhaust temperature
     // ...and the log was recorded with MAP compensation off. With it on, rf_korr carries the
@@ -1312,8 +1324,13 @@ export default function Home() {
   }, [logFileState.rawLogData, binaryFileState.binaryBuffer]);
   /** Set only when something is wrong — so `!!storeLockReason` IS the "hold the write" decision,
    *  and the row that explains it and the toggle that obeys it cannot come apart. */
-  const storeLockReason = storeNeutrality.verdict === 'learned'
-    ? manifestText.trimLearned(storeNeutrality.worst.toFixed(4)) : undefined;
+  const steadyHold = filterConfig.veCorrectionPolicy === 'steady-retain'
+    ? operatingCalibrationHold(binaryBuffer) : null;
+  const storeLockReason = filterConfig.veCorrectionPolicy === 'steady-retain'
+    ? 'STEADY: comparison only — validate the resulting RF KORR gate and independent thermal-state logs before writing.'
+    : storeNeutrality.verdict === 'learned'
+    ? manifestText.trimLearned(storeNeutrality.worst.toFixed(4))
+    : undefined;
   /**
    * The idle thresholds, decoded from the loaded image.
    *
@@ -2001,6 +2018,7 @@ export default function Home() {
    * a new field through three call sites and forgetting the fourth is the failure this replaces.
    */
   const writeExtras = useMemo<PatchExtras>(() => ({
+    comparisonOnly: filterConfig.veCorrectionPolicy === 'steady-retain',
     tunedRfKorr: rfKorrWrite,
     tunedShape: shapeWrite,
     // The idle proposal, feature-gated like the calibration edits below it and for the same reason:
@@ -2018,7 +2036,7 @@ export default function Home() {
     calibrationEdits: featureEnabled('calibration', featurePreview) && calEdits.armedEdits.length
       ? { edits: calEdits.armedEdits, conflictSpans: calConflictSpans }
       : null,
-  }), [rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
+  }), [filterConfig.veCorrectionPolicy, rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
     calEdits.armedEdits, calConflictSpans, featurePreview]);
 
   /**
@@ -2184,6 +2202,11 @@ export default function Home() {
     base: binaryBuffer,
     rfKorr: rfKorrWrite,
     logLen: logFileState.rawLogData?.length ?? 0,
+    // Equal sample counts can be different imported logs. A comparison can also change settings
+    // without earning any map, so neither map identity nor log length alone makes SAVE truthful.
+    rawLog: logFileState.rawLogData,
+    filterConfig,
+    interpolationTable,
     patch: applyPatch,
     wotThreshold: applyWotDisable,
     tankVent: applyTankVentDisable,
@@ -2293,7 +2316,8 @@ export default function Home() {
     // the middle of: it came back read-only and could no longer be continued. Tuning is a tree, so
     // several branches may legitimately be in progress at once; only one is *open* at a time.
     // Empty drafts hold nothing at all, so they're still dropped rather than piling up as dead rows.
-    for (const s of sessionDb.sessions.filter(s => s.status === 'draft' && !s.baseOrigin)) {
+    for (const s of sessionDb.sessions.filter(s => s.status === 'draft' && !s.baseOrigin
+      && !s.hasLog && !(s.logPointCount > 0) && !s.sha256)) {
       await sessionDb.remove(s.id);
     }
     // No label: the repository names it "Session #<seq>" from the number it assigns.
@@ -2414,7 +2438,8 @@ export default function Home() {
             session.tuneSettings?.filterConfig ?? filterConfig,
             readEgtTables(bins.baseBinaryBuffer),
             storedWriteRfKorr(session.tuneSettings),
-            readRfPtKorrCurves(bins.baseBinaryBuffer)));
+            readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer,
+            session.tuneSettings?.interpolationTable ?? interpolationTable));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -2588,7 +2613,7 @@ export default function Home() {
       // filter config is NOT reloaded here, so the live one is the right one.
       veCalc.runCalculation(map, processed,
         veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr,
-          readRfPtKorrCurves(bins.baseBinaryBuffer)));
+          readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer));
       comparison.applyDefaultsAfterCalculation();
       goToTab('new');
     } else {
@@ -2657,6 +2682,44 @@ export default function Home() {
    *  untuned PATCH-ON BIN for the log run is a real step, and those bytes genuinely went to the ECU,
    *  so they have to be kept for flashHistory's hash to point at anything. */
   const handleSaveSession = async () => {
+    // A comparison must still keep the drive and its analysis settings. BIN refusal belongs to
+    // artifact output, not to recording observations; this branch precedes even manual edits so
+    // an armed edit or a previously computed map cannot route a log through the BIN builder.
+    if (filterConfig.veCorrectionPolicy === 'steady-retain' || newMap?.calibrationStatus === 'comparison-only') {
+      const raw = logFileState.rawLogData;
+      if (!raw?.length) return;
+      const prior = currentSession;
+      let target = prior?.status === 'draft' && !prior.sha256 ? prior : null;
+      if (!target) {
+        // The old BIN, settings and log are one historical record. Preserve all three instead of
+        // saving new observation settings beside a TUNED produced under a different derivation.
+        const priorBinaries = prior ? await sessionDb.loadBinaries(prior.id) : null;
+        target = await sessionDb.newDraft();
+        if (priorBinaries?.baseBinaryBuffer && prior?.baseOrigin) {
+          target = await sessionDb.setBase({
+            sessionId: target.id,
+            baseOrigin: { kind: 'session', sessionId: prior.id, which: 'base' },
+            baseBinaryBuffer: priorBinaries.baseBinaryBuffer,
+            baseFileName: prior.baseFileName ?? 'base.bin',
+          });
+        }
+        // A missing BASE or unknown origin remains unknown. The raw observation is still worth
+        // saving, and it must not be assigned the provenance of an unverified workspace buffer.
+        setActiveSessionId(target.id);
+      }
+      await sessionDb.saveResearch({
+        sessionId: target.id, process: logProcess, log: raw,
+        tuneSettings: {
+          ...buildSettings(),
+          filterConfig: { ...filterConfig, veCorrectionPolicy: 'steady-retain' },
+          writeVe: false, writeWarmup: false, writeRfKorr: false, writeIdle: false, writeLls: false,
+        },
+      });
+      setSavedInputs({ ...saveInputs, sessionId: target.id });
+      void discardLiveRun().catch(() => { /* retain recovery if the cleanup fails */ });
+      liveRun.runIdRef.current = null;
+      return;
+    }
     // No map, but a drive: keep the drive. This is the ONLY way an EGT run's log gets off the heap —
     // its samples carry no lambda trim, so not one VE cell can clear the evidence gate and there is
     // no tune for saveSessionTune to record. Routed to saveResearch for the reason that function
@@ -2972,6 +3035,16 @@ export default function Home() {
           coolantTemp: sample.coolantTemp,
           rf: sample.rf,
           exhaustTemp: sample.exhaustTemp,
+          rfKorrDirect: sample.rfKorrDirect,
+          rfSollDirect: sample.rfSollDirect,
+          rfMapIntegratorDirect: sample.rfMapIntegratorDirect,
+          rfKorrDirectTime: sample.rfKorrDirectTime,
+          rfSollDirectTime: sample.rfSollDirectTime,
+          rfMapIntegratorDirectTime: sample.rfMapIntegratorDirectTime,
+          rfKorrDirectReadMs: sample.rfKorrDirectReadMs,
+          rfSollDirectReadMs: sample.rfSollDirectReadMs,
+          rfMapIntegratorDirectReadMs: sample.rfMapIntegratorDirectReadMs,
+          rfDirectSource: sample.rfDirectSource,
           wdk1: sample.wdk1,
           // Carried into the log rather than only shown live: whether purge was active is a property
           // of the RUN, and it is the thing you want to check when two logs of the same road
@@ -4957,6 +5030,9 @@ export default function Home() {
     // that carries WRITE) sits under the URL bar and cannot be reached. `dvh` tracks the viewport
     // that is actually visible.
     <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
+      {filterConfig.veCorrectionPolicy === 'steady-retain' &&
+        ['current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
+        <OperatingEvidenceNotice points={veCalc.annotatedLog ?? []} hold={steadyHold} />}
       {/* App Header - Ultra Minimal */}
       {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">

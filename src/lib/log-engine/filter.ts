@@ -378,6 +378,7 @@ export const processLogData = (
 
         const point: LogDataPoint = {
             ...current,
+            rawSampleIndex: i,
             correctedLoad: corrected,
             correctionFactor: usedFactor,
         };

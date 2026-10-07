@@ -109,14 +109,16 @@ console.log('\n[the exchanges a production run drops]');
     // on 2026-08-30: MD_DYN_ST and the four torque words answer whether KF_MD_LS_KOMF ever bound,
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named
     // one by one rather than counted, so adding an exchange has to state which side it is on.
-    check('exactly the four debug-only exchanges',
+    // Direct RF RAM is still unverified on this car and belongs to WORKS only.
+    check('exactly the seven debug-only exchanges',
         JSON.stringify(gone.sort()) === JSON.stringify(
-            ['LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M'].sort()),
+            ['LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M',
+                'rf_korr (direct, unverified)', 'rf_soll (direct, unverified)',
+                'rf_p_saug_i (store, unverified)'].sort()),
         gone.join(', '));
     console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);
-    // The rate is not the argument — 2.31 % would not justify removing a channel anyone reads.
-    // Pinned only so that a future exchange added to the debug lane cannot make it one.
+    // Production retains its rate even when WORKS adds diagnostic-only reads.
     check('production is not SLOWER than preview', expectedHz(prod) >= expectedHz(full));
 }
 

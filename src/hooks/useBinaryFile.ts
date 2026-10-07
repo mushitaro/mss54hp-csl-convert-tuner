@@ -10,9 +10,10 @@ import { applyCalibrationEdits } from '@/lib/calibration/apply';
 import type { CalEdit, RunSpan } from '@/lib/calibration/edits';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
+import { isComparisonOnlyOutput, comparisonOnlyOutputMessage } from '@/lib/ve-calculator/comparisonOutput';
 import type { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
-import { dialogText } from '@/lib/dialog-text';
+import { dialogText, detectDialogLang } from '@/lib/dialog-text';
 import { downloadBlob, MIME_BIN } from '@/lib/download';
 
 function getFormattedDate() {
@@ -69,6 +70,7 @@ export function writeClaimsTune(
   writeVe: boolean,
   extras?: PatchExtras,
 ): boolean {
+  if (isComparisonOnlyOutput(newMap, extras)) return false;
   return (writeVe && !!newMap)
     || !!extras?.tunedRfKorr
     || !!extras?.tunedShape
@@ -78,6 +80,9 @@ export function writeClaimsTune(
 }
 
 export type PatchExtras = {
+  /** The active policy has not been validated for binary output, including while its previous
+   *  map is still on screen. Independent of map metadata so a recalculation delay cannot bypass it. */
+  comparisonOnly?: boolean;
   /** The back-calculated KF_RF_KORR_DRREL, 6 x 12 physical values. Null writes nothing. */
   tunedRfKorr?: number[][] | null;
   /** The idle valve duty proposal, `KF_LLS_TV` as 13 x 10 physical per cent. Null writes nothing.
@@ -293,6 +298,12 @@ export function useBinaryFile() {
     settings?: ToggleOverrides,
     extras?: PatchExtras,
   ): ArrayBuffer | null => {
+    // Before the buffer check, toggle overrides, SHAPE composition, WARMUP, generic edits, or any
+    // patcher: every artifact path shares this boundary, regardless of which UI rows are armed.
+    if (isComparisonOnlyOutput(newMap, extras)) {
+      alert(comparisonOnlyOutputMessage(detectDialogLang()));
+      return null;
+    }
     if (!binaryBuffer) return null;
 
     const usePatch = settings?.applyPatch ?? applyPatch;

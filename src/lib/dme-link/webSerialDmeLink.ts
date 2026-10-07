@@ -12,6 +12,7 @@ import {
     mergeSlowLane, type SlowLaneChannels, type SlewChannels,
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
+import { decodeRfDirect, isRfDirectRead, type RfDirectChannels } from './rfDirect';
 import {
     INERTIA_RAM_READ, LAMBDA_TRIM_RAM_READ, RAM_PROBE_READS,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
@@ -2607,13 +2608,23 @@ export class WebSerialDmeLink implements DmeLink {
         // are: they run on the same lane and a single variable would let whichever decoded last
         // erase the other two. NOT carried between samples — see LlsRingChannels.
         let llsRing: Partial<LlsRingChannels> | null = null;
+        // Fresh diagnostics only. These words change across the rf_korr gate and must
+        // never enter lastSlowLane, including when a read fails or is not due.
+        let rfDirect: RfDirectChannels = {};
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
 
             if (exchange.kind === 'ram') {
                 try {
+                    const ramReadStarted = performance.now();
                     const bytes = await this.pollRamChunk(exchange);
+                    const ramReadFinished = performance.now();
+                    if (isRfDirectRead(exchange.segment, exchange.address)) {
+                        rfDirect = { ...rfDirect, ...decodeRfDirect(bytes, exchange.segment, exchange.address,
+                            ramReadStarted, ramReadFinished, this.startTime) };
+                        continue;
+                    }
                     // Dispatched on the address, not on "it is a RAM read". There are two of them in
                     // a VE list now and they mean entirely different things; decoding the intake
                     // temperature as a lambda trim would produce a plausible number (one byte at
@@ -2753,6 +2764,7 @@ export class WebSerialDmeLink implements DmeLink {
             ...slewState,
             ...slewTorque,
             ...llsRing,
+            ...rfDirect,
         };
     }
 

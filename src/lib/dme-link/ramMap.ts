@@ -105,6 +105,20 @@ export interface RamSignal {
 
 export const Mss54HpRamSignals = {
     /**
+     * 0401 master RAM, corroborated by calibration-graph.json r:master:ffeea6 and
+     * calibration-decomp.json f:master:021a70 (neutral 0x400), consumed by 0218d0
+     * as rf_soll * rf_korr >> 10. Diagnostic until checked on this car; never an
+     * automatic substitute for the calculator's reconstructed channel.
+     */
+    RF_KORR_DIRECT: { segment: 0x04, address: 0x00FFEEA6, size: 2, signed: false, scale: 1 / 1024, unit: '' },
+    /** 0401 r:master:ffedee; 01a9d2 writes uint16 AFTER filtering and RF_PT_KORR.
+     *  RF uses 1000 counts per unit filling. This is not the raw Alpha-N lookup. */
+    RF_SOLL_DIRECT: { segment: 0x04, address: 0x00FFEDEE, size: 2, signed: false, scale: 1 / 1000, unit: '' },
+    /** 0401 r:master:ffeed8; 021f2c explicitly stores int16_t. In 0218d0 the
+     *  signed integral is divided by 64 (toward zero) before adding to RF. Keep
+     *  its fractional resolution here: this is the STORE, not proof it was applied. */
+    RF_MAP_INTEGRATOR_DIRECT: { segment: 0x04, address: 0x00FFEED8, size: 2, signed: true, scale: 1 / 64000, unit: '' },
+    /**
      * Indicated torque **after intervention** (`nach Eingriff`) — the torque actually produced.
      *
      * This, and not `MD_IND_OPT_KORR`, is the channel an inertia regression wants. `md_eta_calc`
@@ -753,6 +767,24 @@ export const LAMBDA_TRIM_RAM_READ = {
         - Mss54HpRamSignals.LA_F_REGLER1.address,
 } as const;
 
+/** Separate short reads avoid the 184-byte gap between rf_soll and rf_korr,
+ *  which exceeds the DME's 128-byte read limit. Each carries its own read time. */
+export const RF_KORR_DIRECT_RAM_READ = {
+    segment: Mss54HpRamSignals.RF_KORR_DIRECT.segment,
+    address: Mss54HpRamSignals.RF_KORR_DIRECT.address,
+    count: Mss54HpRamSignals.RF_KORR_DIRECT.size,
+} as const;
+export const RF_SOLL_DIRECT_RAM_READ = {
+    segment: Mss54HpRamSignals.RF_SOLL_DIRECT.segment,
+    address: Mss54HpRamSignals.RF_SOLL_DIRECT.address,
+    count: Mss54HpRamSignals.RF_SOLL_DIRECT.size,
+} as const;
+export const RF_MAP_INTEGRATOR_DIRECT_RAM_READ = {
+    segment: Mss54HpRamSignals.RF_MAP_INTEGRATOR_DIRECT.segment,
+    address: Mss54HpRamSignals.RF_MAP_INTEGRATOR_DIRECT.address,
+    count: Mss54HpRamSignals.RF_MAP_INTEGRATOR_DIRECT.size,
+} as const;
+
 /**
  * The two-byte read the probe sends. Deliberately the smallest legal request against the window the
  * inertia run depends on: a probe that asks for more than the thing it is proving can fail for a
@@ -1032,6 +1064,9 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     const reads = [
         { name: 'INERTIA_RAM_READ', ...INERTIA_RAM_READ },
         { name: 'LAMBDA_TRIM_RAM_READ', ...LAMBDA_TRIM_RAM_READ },
+        { name: 'RF_KORR_DIRECT_RAM_READ', ...RF_KORR_DIRECT_RAM_READ },
+        { name: 'RF_SOLL_DIRECT_RAM_READ', ...RF_SOLL_DIRECT_RAM_READ },
+        { name: 'RF_MAP_INTEGRATOR_DIRECT_RAM_READ', ...RF_MAP_INTEGRATOR_DIRECT_RAM_READ },
         { name: 'AMBIENT_CHARGE_RAM_READ', ...AMBIENT_CHARGE_RAM_READ },
         { name: 'AMBIENT_TEMP_RAM_READ', ...AMBIENT_TEMP_RAM_READ },
         { name: 'IDLE_TORQUE_RAM_READ', ...IDLE_TORQUE_RAM_READ },
@@ -1111,6 +1146,10 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
             }
         }
     };
+    mustCover(RF_KORR_DIRECT_RAM_READ, 'RF_KORR_DIRECT_RAM_READ', [['RF_KORR_DIRECT', R.RF_KORR_DIRECT]]);
+    mustCover(RF_SOLL_DIRECT_RAM_READ, 'RF_SOLL_DIRECT_RAM_READ', [['RF_SOLL_DIRECT', R.RF_SOLL_DIRECT]]);
+    mustCover(RF_MAP_INTEGRATOR_DIRECT_RAM_READ, 'RF_MAP_INTEGRATOR_DIRECT_RAM_READ',
+        [['RF_MAP_INTEGRATOR_DIRECT', R.RF_MAP_INTEGRATOR_DIRECT]]);
     mustCover(IDLE_TORQUE_RAM_READ, 'IDLE_TORQUE_RAM_READ', [
         ['MD_RF_SOLL', R.MD_RF_SOLL], ['ML_SOLL', R.ML_SOLL], ['MD_RF_KORR', R.MD_RF_KORR],
         ['ML_SOLL_LLS', R.ML_SOLL_LLS], ['ML_SOLL_MAX_LLS', R.ML_SOLL_MAX_LLS],

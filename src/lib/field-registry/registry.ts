@@ -11,6 +11,7 @@ import type { LogDataPoint } from '@/lib/types';
  * the DME. It is rendered as a fixed computed column by LogDataTable rather than a toggleable field.
  */
 export type FieldKey =
+    | 'rfKorrDirect' | 'rfSollDirect' | 'rfMapIntegratorDirect' | 'rfKorrDirectTime' | 'rfSollDirectTime' | 'rfMapIntegratorDirectTime' | 'rfKorrDirectReadMs' | 'rfSollDirectReadMs' | 'rfMapIntegratorDirectReadMs' | 'veSteadySeconds'
     | 'rpm' | 'rawLoad' | 'correctedLoad' | 'stft1' | 'stft2' | 'coolantTemp'
     // The LONG-term half of the lambda trim, out of the same telegram as the short-term pair.
     | 'ltft1' | 'ltft2'
@@ -234,6 +235,56 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
     // Derived. `rf_korr` IS a DME variable name, but this column is not the DME's copy of it — it is
     // this app's measurement, (rf/100) / rf_soll, which only equals the DME's under the PATCH. So it
     // is named as a computed value like every other one.
+    rfKorrDirect: {
+        key: 'rfKorrDirect', symbol: 'rf_korr RAM (unverified)', name: 'Direct correction /1024',
+        source: 'derived', unit: '', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#8DBDF2', chartAxis: 'y2',
+    },
+    rfSollDirect: {
+        key: 'rfSollDirect', symbol: 'rf_soll RAM (unverified)', name: 'Filtered filling after RF_PT_KORR',
+        source: 'derived', unit: 'RF', format: v => v.toFixed(4),
+        relevance: 'debug', color: '#8DBDF2', chartAxis: 'y2',
+    },
+    rfMapIntegratorDirect: {
+        key: 'rfMapIntegratorDirect', symbol: 'MAP integrator RAM (unverified)', name: 'Integrator /64000; not proof of application',
+        source: 'derived', unit: 'RF', format: v => v.toFixed(4),
+        relevance: 'debug', color: '#8DBDF2', chartAxis: 'y2',
+    },
+    rfKorrDirectTime: {
+        key: 'rfKorrDirectTime', symbol: 'rf_korr read time', name: 'RAM read midpoint since run start',
+        source: 'derived', unit: 's', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    rfSollDirectTime: {
+        key: 'rfSollDirectTime', symbol: 'rf_soll read time', name: 'RAM read midpoint since run start',
+        source: 'derived', unit: 's', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    rfMapIntegratorDirectTime: {
+        key: 'rfMapIntegratorDirectTime', symbol: 'MAP read time', name: 'RAM read midpoint since run start',
+        source: 'derived', unit: 's', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    rfKorrDirectReadMs: {
+        key: 'rfKorrDirectReadMs', symbol: 'rf_korr read span', name: 'Duration of RAM exchange',
+        source: 'derived', unit: 'ms', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    rfSollDirectReadMs: {
+        key: 'rfSollDirectReadMs', symbol: 'rf_soll read span', name: 'Duration of RAM exchange',
+        source: 'derived', unit: 'ms', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    rfMapIntegratorDirectReadMs: {
+        key: 'rfMapIntegratorDirectReadMs', symbol: 'MAP read span', name: 'Duration of RAM exchange',
+        source: 'derived', unit: 'ms', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#8DBDF2',
+    },
+    veSteadySeconds: {
+        key: 'veSteadySeconds', symbol: 'VE steady window', name: 'Past observed steady seconds; not proof of closed loop',
+        source: 'derived', unit: 's', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#8DBDF2',
+    },
     rfKorr: {
         key: 'rfKorr', symbol: 'RF KORR', name: 'EGT correction, measured from rf / rf_soll',
         source: 'derived', unit: '', format: v => v.toFixed(3),
@@ -583,6 +634,7 @@ export const CORE_ONLY_VISIBILITY: Record<FieldKey, boolean> = (() => {
 })();
 
 export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
+    rfKorrDirect: false, rfSollDirect: false, rfMapIntegratorDirect: false, rfKorrDirectTime: false, rfSollDirectTime: false, rfMapIntegratorDirectTime: false, rfKorrDirectReadMs: false, rfSollDirectReadMs: false, rfMapIntegratorDirectReadMs: false, veSteadySeconds: false,
     rpm: true, rawLoad: true, correctedLoad: true, stft1: true, stft2: true, coolantTemp: true,
     // On, like the short-term pair above it: a settled short-term trim only means something next
     // to the long-term stores it drained into.

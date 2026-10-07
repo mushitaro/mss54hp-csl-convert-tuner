@@ -44,6 +44,7 @@
 import {
     LAMBDA_TRIM_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
     AMBIENT_TEMP_RAM_READ,
+    RF_KORR_DIRECT_RAM_READ, RF_SOLL_DIRECT_RAM_READ, RF_MAP_INTEGRATOR_DIRECT_RAM_READ,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
@@ -597,6 +598,20 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // stores its mean is learned into. All four are tuning — this read never narrows.
             { kind: 'ram', name: 'LA_F_REGLER1/2', ...LAMBDA_TRIM_RAM_READ,
                 provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] },
+            // WORKS diagnostics: separate, timestamped, unverified 0401 RAM words.
+            // k and the filtered target change at the gate, so both are read every
+            // sample. The MAP store is surveyed at 1/8 and is never carried forward.
+            // All three are debug-only and productionExchanges removes them there.
+            // At 9600 8E1 and the existing 35 ms RAM turnaround model this costs
+            // 110.9 ms/sample: WORKS ~4.42 -> ~2.97 Hz; production stays ~4.56 Hz.
+            // A 52-byte k/MAP cluster every sample would cost ~50.8 ms more per
+            // sample than these separate reads. Rates still need an on-car check.
+            { kind: 'ram', name: 'rf_korr (direct, unverified)', ...RF_KORR_DIRECT_RAM_READ,
+                provides: ['rfKorrDirect'] },
+            { kind: 'ram', name: 'rf_soll (direct, unverified)', ...RF_SOLL_DIRECT_RAM_READ,
+                provides: ['rfSollDirect'] },
+            { kind: 'ram', name: 'rf_p_saug_i (store, unverified)', ...RF_MAP_INTEGRATOR_DIRECT_RAM_READ,
+                every: LAMBDA_SLOW_LANE_EVERY, provides: ['rfMapIntegratorDirect'] },
             // Three debug bytes and `tetv`, which is tuning — so this stays in production, and the
             // three ride in free. It also carries the truth gate, which is not a channel at all.
             { ...block(19, LAMBDA_SLOW_LANE_EVERY),

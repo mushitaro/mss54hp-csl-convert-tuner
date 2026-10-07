@@ -5,6 +5,8 @@ import type { FilterResume } from '@/lib/log-engine/filter';
 import type { VeMethod } from '@/lib/ve-calculator/calculator';
 
 export interface VEMap {
+    /** Candidate calculated for diagnosis; must never be serialized into a flashable BIN. */
+    calibrationStatus?: 'comparison-only';
     xAxis: number[]; // RPM
     yAxis: number[]; // Load
     data: number[][]; // VE Values
@@ -16,6 +18,25 @@ export interface BinaryConfig {
 }
 
 export interface LogDataPoint {
+    /** Index in ProcessedLog.rawData, assigned by the filter, not a persisted sensor channel. */
+    rawSampleIndex?: number;
+    /** Fresh 0401 RAM observations; diagnostic only until checked on the actual ECU. */
+    rfKorrDirect?: number;
+    rfSollDirect?: number;
+    /** Signed MAP integrator /64000, not necessarily the RF term applied by rf_calc. */
+    rfMapIntegratorDirect?: number;
+    /** Midpoint of each RAM exchange, seconds since the run began. Never sample-held. */
+    rfKorrDirectTime?: number;
+    rfSollDirectTime?: number;
+    rfMapIntegratorDirectTime?: number;
+    rfKorrDirectReadMs?: number;
+    rfSollDirectReadMs?: number;
+    rfMapIntegratorDirectReadMs?: number;
+    rfDirectSource?: 'ram-0401-unverified';
+    /** Additional calibration evidence, evaluated over the complete chronological raw log. */
+    veEvidenceEligible?: boolean;
+    veEvidenceReason?: string;
+    veSteadySeconds?: number;
     /**
      * The operating point had moved within `transientSettleSec` of this sample.
      *
@@ -538,6 +559,10 @@ export interface LogFilterConfig {
      * was built with.
      */
     rfKorrSettleSec?: number;
+    /** Explicit opt-in. Absence keeps archived calculations on their original path. */
+    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain';
+    /** Exponent of the COMPLETE operating correction, not of rf_korr alone. */
+    veLearningRate?: number;
     /**
      * @deprecated The lower heatmap band is the VE gate's own sample count now, not a separate
      * number. Independent, the two could contradict each other — a cell above the gate and below

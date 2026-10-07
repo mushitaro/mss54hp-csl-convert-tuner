@@ -255,10 +255,33 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
  * deliberately not interchangeable (see EgasMeasurement) and this function is not the place to
  * blur that.
  */
+/** Metadata for a log-only save. Keep this pure so observation settings cannot accidentally
+ * re-label a previously generated TUNED artifact. Callers branch into a new draft in that case. */
+export function researchSessionUpdate(existing: TuningSession, input: {
+    process: ProcessId; log: LogDataPoint[]; tuneSettings?: TuneSettings;
+}): TuningSession {
+    if (input.tuneSettings && existing.sha256) {
+        throw new Error('Save comparison settings in a new draft; the existing TUNED must retain its original settings.');
+    }
+    return {
+        ...existing,
+        process: input.process,
+        hasLog: input.log.length > 0,
+        logPointCount: input.log.length,
+        averageHz: sampleRateHz(input.log),
+        ...(input.tuneSettings ? { tuneSettings: input.tuneSettings } : {}),
+        // The sync fingerprint does not hash sample contents or analysis settings. Equal sample
+        // counts can therefore be different recordings; a successful local save must mark dirty.
+        syncedFingerprint: undefined,
+    };
+}
+
 export async function saveResearchRun(input: {
     sessionId: string;
     process: ProcessId;
     log: LogDataPoint[];
+    /** Optional settings for a comparison-only log. No TUNED image is generated here. */
+    tuneSettings?: TuneSettings;
     /** The unprojected samples, when this is an inertia run. Written alongside `log` rather than
      *  instead of it: `log` feeds the log table and the CSV export, this feeds the estimator, and
      *  neither can be reconstructed from the other. */
@@ -276,13 +299,7 @@ export async function saveResearchRun(input: {
         const existing = await promisify<TuningSession | undefined>(store.get(input.sessionId));
         if (!existing) throw new Error(`Session ${input.sessionId} not found`);
 
-        const updated: TuningSession = {
-            ...existing,
-            process: input.process,
-            hasLog: input.log.length > 0,
-            logPointCount: input.log.length,
-            averageHz: sampleRateHz(input.log),
-        };
+        const updated = researchSessionUpdate(existing, input);
         store.put(updated);
         // Written whenever there is EITHER kind of sample, and deliberately not nested inside a
         // `log.length` guard. The two arrays fail independently — a projection that produced

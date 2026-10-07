@@ -87,6 +87,23 @@ export interface LiveMeasurement {
     coolantTemp?: number;
     /** RF — the DME's relative filling AFTER the EGT correction. Same block as rpm/rawLoad. */
     rf?: number;
+    /** Direct 0401 RAM diagnostics, not yet verified on this car and not tuning inputs.
+     *  rfSollDirect is filtered and includes RF_PT_KORR; both loads use fractions
+     *  (1.0 = 100% RF). The MAP channel is the integral store /64000, not proof
+     *  its gated, integer-rounded contribution was applied to RF. */
+    rfKorrDirect?: number;
+    rfSollDirect?: number;
+    rfMapIntegratorDirect?: number;
+    /** Midpoint of each independent read, seconds from this run's monotonic origin.
+     *  Values occur only on samples actually read; no slow-lane carry or substitution. */
+    rfKorrDirectTime?: number;
+    rfSollDirectTime?: number;
+    rfMapIntegratorDirectTime?: number;
+    /** Full read window in ms; the midpoint is an estimate, not an ECU timestamp. */
+    rfKorrDirectReadMs?: number;
+    rfSollDirectReadMs?: number;
+    rfMapIntegratorDirectReadMs?: number;
+    rfDirectSource?: 'ram-0401-unverified';
     /** TABG — exhaust gas temperature, 16 °C resolution. Same block as rpm/rawLoad. */
     exhaustTemp?: number;
     /** WDK1 — throttle plate position, %. Same block as rpm/rawLoad, so free. Exists to answer

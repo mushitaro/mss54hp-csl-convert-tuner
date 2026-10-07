@@ -1,4 +1,8 @@
 import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr } from '@/lib/types';
+import type { LogFilterConfig } from '@/lib/types';
+import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
+import type { OperatingHold } from './operatingPolicy';
+import { deriveOperatingCorrection } from './steadyEvidence';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD } from '@/config/constants';
 import { chargeTempFactor, rfPtKorrFor, type RfPtKorrCurves } from './chargeTemp';
 import {
@@ -477,28 +481,22 @@ export interface RfKorrAirInput {
 }
 
 export interface VeCalcOptions {
+    /** Opt-in comparison with the existing rf_korr table retained; no BIN output. */
+    veCorrectionPolicy?: LogFilterConfig['veCorrectionPolicy'];
+    veLearningRate?: number;
+    /** null = BASE passed. undefined is unknown and must not authorize a correction. */
+    steadyCalibrationHold?: OperatingHold | null;
+    steadyLambdaLimits?: LambdaLimits | null;
+    steadyFilterConfig?: LogFilterConfig;
+    steadyLoadTable?: { rpm: number; factor: number }[];
     /**
-     * Fold the measured rf_korr into the correction: New = Old * STFT * rf_korr.
-     * This is karter16's "Option 2", and the caller should normally pass it TRUE.
-     *
-     * What it decides is what kf_rf_soll is FOR, and the two answers differ by up to 37 % where
-     * KF_RF_KORR_DRREL peaks:
-     *
-     *   ON  — the table holds filling at NOMINAL exhaust temperature; rf_korr adds the
-     *         cold-exhaust enrichment on top. A map tuned on a cold-exhaust drive is still right
-     *         once the exhaust heats up and rf_korr falls back to 1.0.
-     *   OFF — the table holds filling at whatever rf_korr the log was taken under. Self-consistent
-     *         at that condition, and correct at every condition IF BMW's density model exactly
-     *         matches this engine — because then rf_korr cancels out of the derivation.
-     *
-     * They fail in opposite directions, and that is the whole argument: OFF, on a log taken with a
-     * cold exhaust, writes a table that goes LEAN under load once things warm up. ON is rich-safe.
-     * On an S54 that asymmetry is not a close call, which is why the config default is on.
-     *
-     * Whether the model actually matches cannot be settled from one log. It needs the same cell
-     * sampled at different tabg_delta, and then STFT read against rf_korr: flat means the model
-     * matches, sloped means it does not. `rfKorrMap` / `rfKorrSpreadMap` are what make that
-     * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
+     * Legacy nominal replay: New = Old * trim * rf_korr (before any planned-table division).
+     * Kept for archived sessions. This is a hypothesis about the reference condition, not proof
+     * that multiplying back is the correct next write while the same rf_korr remains active.
+     * At unchanged conditions the multiplicative model instead gives trim * k_applied/k_planned.
+     * Neither formula identifies nominal VE from a single thermal state with unknown additive
+     * terms. The opt-in steady-retain path bypasses this flag and stays comparison-only.
+     * See docs/ve-steady-evidence.md for assumptions and validation still required.
      */
     applyRfKorr?: boolean;
 
@@ -640,9 +638,14 @@ export class VECalculator {
 
         // 1. Binning / Aggregation (Weighted)
         for (const point of logData) this.accumulatePoint(
-            grid, point, plan, tuned, options.normaliseTo, options.rfKorrSettleSec);
+            grid, point, plan, tuned, options.normaliseTo, options.rfKorrSettleSec, options);
 
-        return this.finalizeGrid(currentMap, grid, options);
+        const result = this.finalizeGrid(currentMap, grid, options.veCorrectionPolicy === 'steady-retain'
+            ? { ...options, veMethod: 'direct', directAuthority: 1 } : options);
+        if (options.veCorrectionPolicy === 'steady-retain' && result.newMap) {
+            result.newMap = { ...result.newMap, calibrationStatus: 'comparison-only' };
+        }
+        return result;
     }
 
     /**
@@ -696,6 +699,7 @@ export class VECalculator {
          *  Absent means `RF_KORR_SETTLE_SEC_DEFAULT`. Threaded in for the same reason
          *  `normaliseTo` is: a live flush and the STOP pass must not use different numbers. */
         settleSec?: number,
+        operating?: VeCalcOptions,
     ): void {
         {
             // Use Corrected Load if available, else Raw Load
@@ -741,6 +745,23 @@ export class VECalculator {
             const loadInfo = this.findBoundingIndices(loadVal, this.loadAxis);
 
             if (!rpmInfo || !loadInfo) return;
+
+            if (operating?.veCorrectionPolicy === 'steady-retain') {
+                // No nominal-VE claim and no fallback to old arithmetic on missing evidence.
+                // RAM probes remain diagnostic. The same planned/applied factor cancels only
+                // under this local, unchanged-table hypothesis; another thermal state must test it.
+                if (operating.steadyCalibrationHold !== null || operating.writeRfKorr
+                    || point.veEvidenceEligible !== true || point.ltft1 !== 1 || point.ltft2 !== 1
+                    || point.rfKorrGateOpen === undefined) return;
+                const correction = deriveOperatingCorrection({
+                    trim, kApplied: point.rfKorr, kPlanned: point.rfKorr,
+                    learningRate: operating.veLearningRate ?? 1,
+                });
+                if (correction === undefined) return;
+                this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
+                    correction, point.rfKorr, undefined, point.time);
+                return;
+            }
 
             // The chosen route. Both annotated in the same pass by annotateRfKorr, so switching
             // between them re-derives from the same log without re-reading anything.

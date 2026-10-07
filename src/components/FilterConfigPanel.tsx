@@ -384,7 +384,8 @@ export const FilterConfigPanel: React.FC<Props> = ({
     const onVe = scope === 've';
     const onRfKorr = scope === 'rfkorr';
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
-    const t = TEXT[useDialogLang()];
+    const lang = useDialogLang();
+    const t = TEXT[lang];
 
     /** Which explanations are open. A Set rather than one at a time: these are read against each
      *  other — Min Temp and Cat Protect are the same mechanism — and a panel that shuts the last one
@@ -515,7 +516,8 @@ export const FilterConfigPanel: React.FC<Props> = ({
         : settleSamples === undefined
             ? `${settleSec.toFixed(1)} s`
             : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`;
-    const veMethod: VeMethod = localConfig.veMethod ?? VE_METHOD_DEFAULT;
+    const steadyPolicy = localConfig.veCorrectionPolicy === 'steady-retain';
+    const veMethod: VeMethod = steadyPolicy ? 'direct' : localConfig.veMethod ?? VE_METHOD_DEFAULT;
     const directMethod = veMethod === 'direct';
     const veAuthority = Math.round(100 * (localConfig.directAuthority ?? DIRECT_AUTHORITY_DEFAULT));
     /**
@@ -628,6 +630,31 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 every one is on the tab it belongs to, which is the difference between
                                 scoping a control and hiding a setting that is still running. */}
 
+                            {onVe && rfKorrOpen && (
+                                <section className="space-y-2 border border-slate-700 p-3 rounded">
+                                    <label htmlFor="ve-correction-policy" className="text-xs">
+                                        {lang === 'ja' ? 'VE の計算方式' : 'VE correction policy'}
+                                    </label>
+                                    <select id="ve-correction-policy" disabled={readOnly}
+                                        className="w-full bg-slate-900 border border-slate-700 p-2 text-xs"
+                                        value={localConfig.veCorrectionPolicy ?? 'legacy-nominal'}
+                                        onChange={e => handleChange('veCorrectionPolicy', e.target.value)}>
+                                        <option value="legacy-nominal">{lang === 'ja' ? '従来の掛け戻し（保存ログの再現）' : 'Legacy multiply-back (replay)'}</option>
+                                        <option value="steady-retain">{lang === 'ja' ? '定常区間・現行 RF KORR 維持（検証中）' : 'Steady windows · retain RF KORR (experimental)'}</option>
+                                    </select>
+                                    {localConfig.veCorrectionPolicy === 'steady-retain' && <>
+                                        <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
+                                            ? '過去5秒の定常性を確認し、パージ作動・トリム上限/下限近傍・欠測を除外します。記録時のBASEでMAP補正停止と学習停止を確認できなければ観測のみです。現行RF KORRを維持する比較専用の計算です。別の熱状態での検証が必要なため、このモードではBIN出力を保留します。'
+                                            : 'Uses stable 5-second windows; excludes purge, trim clamp proximity and missing data. Observation only unless the recording BASE confirms MAP compensation and learning disabled. Retains RF KORR for comparison; BIN output is held pending validation at other thermal states.'}</p>
+                                        <SubField label={lang === 'ja' ? '総合補正の学習率 η' : 'Whole-correction learning rate η'}
+                                            value={`${Math.round((localConfig.veLearningRate ?? 1) * 100)} %`}>
+                                            <Slider min={10} max={100} step={10}
+                                                value={Math.round((localConfig.veLearningRate ?? 1) * 100)}
+                                                onChange={v => handleChange('veLearningRate', v / 100)} />
+                                        </SubField>
+                                    </>}
+                                </section>
+                            )}
                             {onVe && (<section className="space-y-4">
                             <Row
                                 {...row('bands')}
@@ -661,7 +688,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                         gate off while four of its six tests kept running. */}
                                     <div className="flex gap-1">
                                         {VE_METHODS.map(m => (
-                                            <button key={m.id} type="button" disabled={readOnly}
+                                            <button key={m.id} type="button" disabled={readOnly || steadyPolicy}
                                                 onClick={() => handleChange('veMethod', m.id)}
                                                 className={`flex-1 min-h-10 px-1 text-[9px] font-bold tracking-wider rounded ${veMethod === m.id
                                                     ? 'bg-blue-600 text-white'
@@ -690,7 +717,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                             onChange={v => handleChange('minVeCellWeight', v)} />
                                     </SubField>
 
-                                    {directMethod ? (
+                                    {steadyPolicy ? null : directMethod ? (
                                         <>
                                             <SubField label={t.subAuthority} value={`${veAuthority} %`}>
                                                 <Slider min={10} max={100} step={5} value={veAuthority}
@@ -832,7 +859,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 {/* RF KORR — not a filter, but it belongs to "how this log becomes a
                                     map" and has to travel with the session for the tune to be
                                     reproducible, which is why it is in this panel at all. */}
-                                <RfKorrSourceControl
+                                {!steadyPolicy && <RfKorrSourceControl
                                     {...row('rfKorrSource')}
                                     source={rfKorrSource}
                                     onChange={setRfKorrSource}
@@ -841,7 +868,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                     readOnly={readOnly}
                                     routeGap={routeGap}
                                     routeSamples={routeSamples}
-                                />
+                                />}
 
                                 {/* The charge-temperature normalisation used to be offered here.
                                     It was measured on session #917 — 31 degC of intake-air span,
