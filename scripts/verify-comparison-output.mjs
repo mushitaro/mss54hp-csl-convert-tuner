@@ -2,6 +2,8 @@
  * inputs only. A server render supplies React's dispatcher; the captured hook's actual build and
  * download methods run unchanged. Rejection occurs before a BASE is read or a patcher is created. */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import ts from 'typescript';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { useBinaryFile, writeClaimsTune } from '../src/hooks/useBinaryFile.ts';
@@ -16,6 +18,29 @@ const extras = {
     tunedRfKorr: [[1.2]], tunedIdleTv: [[40]], tunedLlsTv: [{ row: 0, col: 0, value: 40 }],
     calibrationEdits: { edits: [{ paramId: 'test', raw: [1] }], conflictSpans: [] },
 };
+
+check('the page holds BIN output across either direction of a pending policy change', () => {
+    const source = fs.readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8');
+    const tree = ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let expression;
+    const visit = node => {
+        if (ts.isVariableDeclaration(node) && node.name.getText(tree) === 'writeExtras') {
+            const find = child => {
+                if (ts.isPropertyAssignment(child) && child.name.getText(tree) === 'comparisonOnly') expression = child.initializer.getText(tree);
+                ts.forEachChild(child, find);
+            };
+            find(node.initializer);
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(tree); assert.ok(expression);
+    const held = new Function('filterConfig', 'pendingConfig', `return (${expression});`);
+    const legacy = { veCorrectionPolicy: 'legacy-nominal' }, observation = { veCorrectionPolicy: 'steady-retain' };
+    assert.equal(held(legacy, observation), true);
+    assert.equal(held(observation, legacy), true);
+    assert.equal(held(observation, null), true);
+    assert.equal(held(legacy, null), false);
+});
 
 check('map metadata and current-policy state each independently forbid output', () => {
     assert.equal(isComparisonOnlyOutput(candidate), true);

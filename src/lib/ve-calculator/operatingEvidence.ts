@@ -2,16 +2,16 @@ import type { LogDataPoint, ProcessedLog, VEMap } from '@/lib/types';
 import { interpolateFactor, timeScaleSeconds } from '@/lib/log-engine/filter';
 import { APP_CONFIG } from '@/config/constants';
 import { VECalculator, type VeCalcOptions } from './calculator';
-import { annotateSteadyEvidence } from './steadyEvidence';
+import { annotateSteadyEvidence, type SteadyEvidenceOptions } from './steadyEvidence';
 import { RfKorrLatch } from './egtTables';
 
 /** Shared batch/live pass. Discarding raw rows before this pass would erase gate transitions. */
-export function prepareOperatingEvidence(
-    map: VEMap, processed: ProcessedLog, options: VeCalcOptions,
+export function prepareOperatingTimeline(
+    map: VEMap, raw: LogDataPoint[], options: VeCalcOptions,
 ): LogDataPoint[] {
     const cfg = options.steadyFilterConfig;
     const table = options.steadyLoadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
-    const timeline = processed.rawData.map((p, i) => {
+    const timeline = raw.map((p, i) => {
         const factor = cfg?.enableCorrection ? interpolateFactor(p.rpm, table) : 1;
         return { ...p, rawSampleIndex: i, correctedLoad: p.rawLoad / (factor || 1) };
     });
@@ -28,8 +28,13 @@ export function prepareOperatingEvidence(
         const point = calc.annotateRfKorrPoint(map, p, options.egt, options.rfKorrAir, track?.open ?? null);
         return point.rfKorrGateOpen && track ? { ...point, rfKorrDwellSec: track.dwellSec } : point;
     });
+    return annotateSteadyEvidence(annotated, operatingEvidenceOptions(options, scale));
+}
+
+export function operatingEvidenceOptions(options: VeCalcOptions, scale: number): Partial<SteadyEvidenceOptions> {
+    const cfg = options.steadyFilterConfig;
     const katsOn = cfg?.katsTabgOn ?? 850;
-    const evidence = annotateSteadyEvidence(annotated, {
+    return {
         lambdaLimits: options.steadyLambdaLimits ?? undefined,
         secondsPerTimeUnit: scale,
         minCoolantTemp: Math.max(65, cfg?.enableMinTemp ? cfg.minTemp : 65),
@@ -37,7 +42,13 @@ export function prepareOperatingEvidence(
         katsTabgOff: Math.min(cfg?.katsTabgOff ?? (katsOn - 10), katsOn),
         katsTailSec: cfg?.katsTailSec ?? 20,
         excludeTimeRanges: cfg?.excludeTimeRanges,
-    });
+    };
+}
+
+export function prepareOperatingEvidence(
+    map: VEMap, processed: ProcessedLog, options: VeCalcOptions,
+): LogDataPoint[] {
+    const evidence = prepareOperatingTimeline(map, processed.rawData, options);
     // Preserve the displayed/filtered array's order. Missing or uncheckable samples remain
     // visible, explicitly ineligible; they cannot fall through to a different correction.
     return processed.data.map(p => {

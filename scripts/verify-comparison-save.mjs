@@ -46,6 +46,7 @@ function harness({ target = draft, map = candidate, policy = 'steady-retain', lo
     const calls = [], base = new Uint8Array([1, 2, 3, 4]).buffer;
     const newDraft = { ...draft, id: 'comparison-draft', baseOrigin: null, baseSha256: undefined, hasLog: false, logPointCount: 0 };
     const dependencies = {
+        pendingConfigRef: { current: null },
         filterConfig: { ...settings.filterConfig, veCorrectionPolicy: policy }, newMap: map,
         currentSession: target,
         logFileState: { rawLogData: log }, ensureDraft: async () => { throw new Error('comparison SAVE must not reset the workspace through ensureDraft'); },
@@ -95,6 +96,13 @@ await check('a tagged candidate still saves observations after a UI policy chang
 await check('a stale untagged map during comparison-mode recomputation cannot route SAVE to BIN', async () => {
     const h = harness({ map: ordinary }); await h.invoke();
     assert.ok(h.calls.some(c => c[0] === 'saveResearch'));
+});
+
+await check('pending mode changes cannot save mismatched settings or a stale BIN', async () => {
+    const h = harness({ policy: 'legacy-nominal', map: ordinary });
+    h.dependencies.pendingConfigRef.current = { veCorrectionPolicy: 'steady-retain' };
+    await h.invoke();
+    assert.equal(h.calls.length, 0);
 });
 
 await check('existing TUNED history gets a separate draft with the exact stored BASE', async () => {

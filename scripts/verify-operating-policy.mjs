@@ -3,7 +3,8 @@ import {readFileSync} from 'node:fs';
 import {BinaryParser} from '../src/lib/binary-engine/parser.ts';
 import {BinaryPatcher} from '../src/lib/binary-engine/patcher.ts';
 import {VECalculator} from '../src/lib/ve-calculator/calculator.ts';
-import {operatingCalibrationHold} from '../src/lib/ve-calculator/operatingPolicy.ts';
+import {operatingCalibrationHold,operatingCalibrationContext} from '../src/lib/ve-calculator/operatingPolicy.ts';
+import {summarizeAcquisition} from '../src/lib/ve-calculator/acquisitionEvidence.ts';
 import {prepareOperatingEvidence} from '../src/lib/ve-calculator/operatingEvidence.ts';
 import {processLogData} from '../src/lib/log-engine/filter.ts';
 import {readEgtTables} from '../src/lib/ve-calculator/egtTables.ts';
@@ -38,6 +39,11 @@ assert.equal(operatingCalibrationHold(restored.getBuffer()),'air-model-active');
 // Use the parser's published constant through the existing patcher rather than guess an offset.
 const learningPatcher=new BinaryPatcher(recorded);learningPatcher.setTempThreshold(69);
 assert.equal(operatingCalibrationHold(learningPatcher.getBuffer()),'learning-active');
+const combined=new BinaryPatcher(learningPatcher.getBuffer());combined.enableMapCorrection();
+const context=operatingCalibrationContext(combined.getBuffer());
+assert.equal(context.known,true);assert.equal(context.airModelActive,true);assert.equal(context.learningActive,true);
+assert.equal(context.purgeEnabled,!new BinaryParser(combined.getBuffer()).getTankVentDisabled());
+assert.equal(operatingCalibrationContext(new ArrayBuffer(3)).known,false);
 const neutral=replay(make(1));
 assert.ok(neutral.annotated.some(p=>p.veEvidenceEligible),'fixture must earn steady evidence');
 assert.deepEqual(neutral.result.newMap.data,map.data,'neutral trim and unchanged k must preserve VE');
@@ -69,4 +75,20 @@ assert.deepEqual(replay(make(.95),{...options,veMethod:'statistical',directAutho
     lean.result.newMap,'new policy has one gain, eta, rather than stacking legacy authority');
 assert.ok(replay(make(.95),{...options,steadyFilterConfig:{...cfg,katsTabgOn:800}}).annotated
     .some(p=>p.veEvidenceEligible),'custom cat-protect entry inherits its matching exit threshold');
-console.log('Operating policy: context holds, neutral invariance, direction, gain, missing evidence, RAM isolation, and LIVE/STOP agreement passed.');
+// Acquisition counts include rejected rows and the two RO bands never overlap at 7.5.
+const purging=make(.95).map((p,i)=>({...p,tankVent:5,rfKorrDirect:1.2,rfSollDirect:.6,
+    ...(i%8===0?{rfMapIntegratorDirect:0}:{})}));
+const snapshot=structuredClone(purging),summary=summarizeAcquisition(map,purging,options);
+assert.equal(summary.focus.total,purging.length);assert.equal(summary.adjacent.total,0);
+assert.equal(summary.focus.steady,0);assert.equal(summary.focus.neutral,0);
+assert.equal(summary.focus.purge,purging.length);
+assert.ok(summary.focus.withoutPurgeSteady>0,'diagnostic separates otherwise steady purge samples');
+assert.deepEqual(purging,snapshot,'diagnostic must not annotate or zero purge on stored data');
+assert.deepEqual(summary.direct,{korr:65,soll:65,map:9});
+assert.equal(replay(purging).result.coverage.withEvidence,0,'diagnostic bypass must not reach Tune');
+const cold=summarizeAcquisition(map,make(.95).map(p=>({...p,coolantTemp:20,rawLoad:6})),options);
+assert.equal(cold.adjacent.total,65);assert.equal(cold.adjacent.steady,0);
+assert.equal(cold.focus.total,0);assert.deepEqual(cold.direct,{korr:0,soll:0,map:0});
+const learned=summarizeAcquisition(map,make(.95).map(p=>({...p,ltft1:1.02})),options);
+assert.ok(learned.focus.steady>0);assert.equal(learned.focus.neutral,0,'stable learning is not neutral learning');
+console.log('Operating policy: context holds, acquisition census, purge diagnostic isolation, neutral invariance, direction, gain, missing evidence, RAM isolation, and LIVE/STOP agreement passed.');

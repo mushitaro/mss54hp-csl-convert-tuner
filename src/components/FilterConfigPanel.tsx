@@ -640,7 +640,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                         value={localConfig.veCorrectionPolicy ?? 'legacy-nominal'}
                                         onChange={e => handleChange('veCorrectionPolicy', e.target.value)}>
                                         <option value="legacy-nominal">{lang === 'ja' ? '従来の掛け戻し（保存ログの再現）' : 'Legacy multiply-back (replay)'}</option>
-                                        <option value="steady-retain">{lang === 'ja' ? '定常区間・現行 RF KORR 維持（検証中）' : 'Steady windows · retain RF KORR (experimental)'}</option>
+                                        <option value="steady-retain">{lang === 'ja' ? '観測専用・現行 RF KORR 維持（検証中）' : 'Observation only · retain RF KORR (experimental)'}</option>
                                     </select>
                                     {localConfig.veCorrectionPolicy === 'steady-retain' && <>
                                         <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'

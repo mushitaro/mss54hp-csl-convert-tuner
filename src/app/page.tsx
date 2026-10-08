@@ -933,9 +933,8 @@ export default function Home() {
    * Workspace swaps: resetDerived cancels timer and intent (the pendingTabRef rule, second
    * currency), and handleOpenSession cancels again after its awaits, so a send that slipped in
    * mid-load cannot republish the outgoing session's config over the one the load adopted —
-   * after loadRawLog there is no await left for a timer to interleave with. A SAVE inside the
-   * settle window records the previous derivation, self-consistently; the tweak the hand just
-   * made is not yet part of anything and so is not recorded.
+   * after loadRawLog there is no await left for a timer to interleave with. SAVE waits out a
+   * pending change, and selecting observation mode holds BIN output immediately.
    */
   const handleConfigChange = (newConfig: LogFilterConfig) => {
     // The panel is readOnly on an archived session; this closes the same door for every other
@@ -1324,9 +1323,8 @@ export default function Home() {
   }, [logFileState.rawLogData, binaryFileState.binaryBuffer]);
   /** Set only when something is wrong — so `!!storeLockReason` IS the "hold the write" decision,
    *  and the row that explains it and the toggle that obeys it cannot come apart. */
-  const steadyHold = filterConfig.veCorrectionPolicy === 'steady-retain'
-    ? operatingCalibrationHold(binaryBuffer) : null;
-  const storeLockReason = filterConfig.veCorrectionPolicy === 'steady-retain'
+  const storeLockReason = ((pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'
+    || filterConfig.veCorrectionPolicy === 'steady-retain')
     ? 'STEADY: comparison only — validate the resulting RF KORR gate and independent thermal-state logs before writing.'
     : storeNeutrality.verdict === 'learned'
     ? manifestText.trimLearned(storeNeutrality.worst.toFixed(4))
@@ -2018,7 +2016,8 @@ export default function Home() {
    * a new field through three call sites and forgetting the fourth is the failure this replaces.
    */
   const writeExtras = useMemo<PatchExtras>(() => ({
-    comparisonOnly: filterConfig.veCorrectionPolicy === 'steady-retain',
+    comparisonOnly: (pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'
+      || filterConfig.veCorrectionPolicy === 'steady-retain',
     tunedRfKorr: rfKorrWrite,
     tunedShape: shapeWrite,
     // The idle proposal, feature-gated like the calibration edits below it and for the same reason:
@@ -2036,7 +2035,7 @@ export default function Home() {
     calibrationEdits: featureEnabled('calibration', featurePreview) && calEdits.armedEdits.length
       ? { edits: calEdits.armedEdits, conflictSpans: calConflictSpans }
       : null,
-  }), [filterConfig.veCorrectionPolicy, rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
+  }), [pendingConfig, filterConfig.veCorrectionPolicy, rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
     calEdits.armedEdits, calConflictSpans, featurePreview]);
 
   /**
@@ -2682,6 +2681,8 @@ export default function Home() {
    *  untuned PATCH-ON BIN for the log run is a real step, and those bytes genuinely went to the ECU,
    *  so they have to be kept for flashHistory's hash to point at anything. */
   const handleSaveSession = async () => {
+    // A debounced mode/filter change must finish before persisting settings or a BIN.
+    if (pendingConfigRef.current) return;
     // A comparison must still keep the drive and its analysis settings. BIN refusal belongs to
     // artifact output, not to recording observations; this branch precedes even manual edits so
     // an armed edit or a previously computed map cannot route a log through the BIN builder.
@@ -5030,9 +5031,11 @@ export default function Home() {
     // that carries WRITE) sits under the URL bar and cannot be reached. `dvh` tracks the viewport
     // that is actually visible.
     <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
-      {filterConfig.veCorrectionPolicy === 'steady-retain' &&
-        ['current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
-        <OperatingEvidenceNotice points={veCalc.annotatedLog ?? []} hold={steadyHold} />}
+      {featureEnabled('rfKorr', featurePreview) && logProcess === 'VE' &&
+        ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
+        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={binaryBuffer}
+          options={veCalcOptions} active={(pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'}
+          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'steady-retain' })} />}
       {/* App Header - Ultra Minimal */}
       {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">
