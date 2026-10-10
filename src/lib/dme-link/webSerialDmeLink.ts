@@ -13,8 +13,9 @@ import {
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
 import { decodeRfDirect, isRfDirectRead, type RfDirectChannels } from './rfDirect';
+import { decodeLambdaResponse, readWindow, type ResponseCaptureChannels } from './responseCapture';
 import {
-    INERTIA_RAM_READ, LAMBDA_TRIM_RAM_READ, RAM_PROBE_READS,
+    INERTIA_RAM_READ, LAMBDA_TRIM_RAM_READ, LAMBDA_RESPONSE_RAM_READ, RAM_PROBE_READS,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
@@ -2073,9 +2074,11 @@ export class WebSerialDmeLink implements DmeLink {
      * serve that read" is a slower log, not a failed one.
      */
     async verifyLambdaTrimSource(profile: { exchanges: LogExchange[]; fallback?: LogExchange[] }) {
-        const claim = profile.exchanges.find(x => x.kind === 'ram' && x.count === LAMBDA_TRIM_RAM_READ.count
-            && x.address === LAMBDA_TRIM_RAM_READ.address && x.segment === LAMBDA_TRIM_RAM_READ.segment);
-        if (!claim) return null;   // nothing claimed, nothing to check
+        const claim = profile.exchanges.find(x => x.kind === 'ram'
+            && x.segment === LAMBDA_TRIM_RAM_READ.segment
+            && x.address <= LAMBDA_TRIM_RAM_READ.address
+            && x.address + x.count >= LAMBDA_TRIM_RAM_READ.address + LAMBDA_TRIM_RAM_READ.count);
+        if (!claim || claim.kind !== 'ram') return null;   // nothing claimed, nothing to check
         const fallback = profile.fallback ?? profile.exchanges;
         return this.withGate(async () => {
             this.assertConnected();
@@ -2084,9 +2087,9 @@ export class WebSerialDmeLink implements DmeLink {
             const seen: string[] = [];
             try {
                 for (let i = 0; i < LAMBDA_TRUTH_GATE.pairsTaken; i++) {
-                    const before = await this.readLambdaTrimFromRam();
+                    const before = await this.readLambdaTrimFromRam(claim);
                     const block19 = await this.readLambdaTrimFromBlock19();
-                    const after = await this.readLambdaTrimFromRam();
+                    const after = await this.readLambdaTrimFromRam(claim);
                     // The mean of the readings either side, against the block read between them. The
                     // trim moves continuously, so bracketing is what stops "200 ms passed" from
                     // looking like "the address is wrong".
@@ -2179,11 +2182,14 @@ export class WebSerialDmeLink implements DmeLink {
     /** Sample counter for the idle run, so the slow and survey lanes know when they are due. */
     private idleSampleIndex = 0;
 
-    /** One four-byte RAM read, decoded to bank 1's trim. Poll-shaped: no retry budget, because the
-     *  caller is either a gate that takes three samples or a poll that gets another one in 200 ms. */
-    private async readLambdaTrimFromRam(): Promise<number | undefined> {
-        const { segment, address, count } = LAMBDA_TRIM_RAM_READ;
+    /** Check the exact planned window, including WORKS' extended read. A trim comparison
+     * proves only the trim slice; it does not validate the additional response channels. */
+    private async readLambdaTrimFromRam(
+        read: { segment: number; address: number; count: number } = LAMBDA_TRIM_RAM_READ,
+    ): Promise<number | undefined> {
+        const { segment, address, count } = read;
         const bytes = await this.readMemoryChunk(segment, address, count);
+        if (bytes.length < count) return undefined;
         return decodeRamSignal(Mss54HpRamSignals.LA_F_REGLER1, bytes, address) ?? undefined;
     }
 
@@ -2611,6 +2617,7 @@ export class WebSerialDmeLink implements DmeLink {
         // Fresh diagnostics only. These words change across the rf_korr gate and must
         // never enter lastSlowLane, including when a read fails or is not due.
         let rfDirect: RfDirectChannels = {};
+        let response: ResponseCaptureChannels = {};
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
@@ -2670,6 +2677,20 @@ export class WebSerialDmeLink implements DmeLink {
                             density?.ambientPressure ?? this.lastSlowLane.ambientPressure);
                         continue;
                     }
+                    // Only a lambda read may produce trim values. Refuse a truncated wide
+                    // response as a whole, even when its prefix happens to include STFT.
+                    const wide = exchange.segment === LAMBDA_RESPONSE_RAM_READ.segment
+                        && exchange.address === LAMBDA_RESPONSE_RAM_READ.address
+                        && exchange.count === LAMBDA_RESPONSE_RAM_READ.count;
+                    const narrow = exchange.segment === LAMBDA_TRIM_RAM_READ.segment
+                        && exchange.address === LAMBDA_TRIM_RAM_READ.address
+                        && exchange.count === LAMBDA_TRIM_RAM_READ.count;
+                    if ((!wide && !narrow) || bytes.length < exchange.count) continue;
+                    const window = readWindow(ramReadStarted, ramReadFinished, this.startTime);
+                    if (window) response = { ...response,
+                        lambdaReadTime: window.time, lambdaReadMs: window.ms, lambdaReadSource: 'ram-trim' };
+                    if (wide) response = { ...response, ...decodeLambdaResponse(bytes, exchange.segment,
+                        exchange.address, ramReadStarted, ramReadFinished, this.startTime) };
                     const b1 = decodeRamSignal(Mss54HpRamSignals.LA_F_REGLER1, bytes, exchange.address);
                     const b2 = decodeRamSignal(Mss54HpRamSignals.LA_F_REGLER2, bytes, exchange.address);
                     if (b1 !== null) { stft1 = b1; stftSource = 'ram'; }
@@ -2691,12 +2712,17 @@ export class WebSerialDmeLink implements DmeLink {
             }
 
             if (exchange.selection === STANDARD_MEASUREMENT_BLOCK.selection) {
+                const start = performance.now();
                 std = decodeStandardMeasurementBlock(await this.pollStandardBlock());
+                const window = readWindow(start, performance.now(), this.startTime);
+                if (window) response = { ...response, standardReadTime: window.time, standardReadMs: window.ms };
                 continue;
             }
 
             try {
+                const start = performance.now();
                 const frame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([exchange.selection]));
+                const window = readWindow(start, performance.now(), this.startTime);
                 if (!isPositiveResponse(frame)) continue;
                 if (exchange.selection !== OPERATING_MEASUREMENTS_BLOCK.selection) continue;
                 const op = decodeOperatingMeasurementsBlock(frame.payload);
@@ -2722,6 +2748,8 @@ export class WebSerialDmeLink implements DmeLink {
                     stft1 = block19Trim;
                     stft2 = op.stft2 ?? undefined;
                     if (stft1 !== undefined) stftSource = 'block19';
+                    if (window && (stft1 !== undefined || stft2 !== undefined)) response = { ...response,
+                        lambdaReadTime: window.time, lambdaReadMs: window.ms, lambdaReadSource: 'block19' };
                 }
             } catch {
                 try { await this.resyncTransport(); } catch { }
@@ -2765,6 +2793,7 @@ export class WebSerialDmeLink implements DmeLink {
             ...slewTorque,
             ...llsRing,
             ...rfDirect,
+            ...response,
         };
     }
 

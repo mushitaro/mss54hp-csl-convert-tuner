@@ -6,6 +6,7 @@ import { operatingCalibrationContext } from '@/lib/ve-calculator/operatingPolicy
 import { summarizeAcquisition } from '@/lib/ve-calculator/acquisitionEvidence';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { DialogFrame } from './DialogFrame';
+import { RfResponseSummary } from './RfResponseSummary';
 
 const labels: Record<string, string> = {
     'purge-active': 'パージ作動', 'purge-unknown': 'パージ不明', 'controller-clamp': 'トリム限界近傍',
@@ -20,9 +21,9 @@ const labels: Record<string, string> = {
     'operating-point-unknown': '運転状態欠測', 'trim-unknown': 'トリム欠測', 'lambda-state-unknown': '燃調状態欠測',
 };
 
-export function OperatingEvidenceNotice({ raw, map, base, options, active, readOnly, onEnable }: {
+export function OperatingEvidenceNotice({ raw, map, base, options, active, readOnly, logging, onEnable }: {
     raw: LogDataPoint[] | null; map: VEMap | null; base: ArrayBuffer | null;
-    options: VeCalcOptions; active: boolean; readOnly: boolean; onEnable: () => void;
+    options: VeCalcOptions; active: boolean; readOnly: boolean; logging: boolean; onEnable: () => void;
 }) {
     const ja = useDialogLang() === 'ja';
     const [open, setOpen] = useState(false);
@@ -31,8 +32,8 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
     const dialog = useRef<HTMLDivElement>(null);
     const context = useMemo(() => operatingCalibrationContext(base), [base]);
     // No second full replay in the closed strip, including during LIVE acquisition.
-    const report = useMemo(() => open && map && raw?.length
-        ? summarizeAcquisition(map, raw, options) : null, [open, map, raw, options]);
+    const report = useMemo(() => open && !logging && map && raw?.length
+        ? summarizeAcquisition(map, raw, options) : null, [open, logging, map, raw, options]);
     useEffect(() => {
         if (!open) return;
         const opener = trigger.current;
@@ -40,7 +41,8 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
         const key = (event: KeyboardEvent) => {
             if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); }
             if (event.key === 'Tab') {
-                const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), summary') ?? []);
+                const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), summary') ?? [])
+                    .filter(element => element.checkVisibility());
                 const first = controls[0], last = controls.at(-1);
                 if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -53,9 +55,9 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
         ? entries.map(([r, n]) => `${ja ? labels[r] ?? r : r}: ${n}`).join(' / ')
         : (ja ? '除外なし' : 'No exclusions');
     const held = !context.known || context.airModelActive || context.learningActive;
-    const title = ja ? 'RF計測チェック' : 'RF acquisition check';
+    const title = ja ? 'RF応答チェック' : 'RF response check';
     return <>
-        <button ref={trigger} type="button" onClick={() => setOpen(true)}
+        <button ref={trigger} type="button" onClick={() => setOpen(true)} disabled={logging}
             className="shrink-0 h-10 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-4 text-xs text-slate-200"
             aria-haspopup="dialog" data-testid="rf-acquisition-open">
             <span className="flex items-center gap-2"><Activity className="w-4 h-4" />{title}</span>
@@ -66,6 +68,11 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                 closeButtonClassName="min-w-10 min-h-10 flex items-center justify-center"
                 closeLabel={ja ? '閉じる' : 'Close'} onClose={() => setOpen(false)}>
                 <div className="min-h-0 flex-1 overflow-y-auto space-y-4 pr-1 text-xs leading-relaxed">
+                    {logging ? <p>{ja ? 'ログ停止後に解析できます。' : 'Analysis is available after logging stops.'}</p>
+                        : raw?.length ? <RfResponseSummary raw={raw} base={base} options={options} ja={ja} />
+                        : <p>{ja ? 'ログを読み込むと通過区間の応答を集計します。' : 'Load a log to inspect response during passes.'}</p>}
+                    <details>
+                    <summary className="cursor-pointer min-h-10 py-2 text-slate-200">{ja ? '従来の定常解析・BASE条件' : 'Steady analysis and BASE conditions'}</summary>
                     <section>
                         <p className="font-semibold text-slate-100">{ja ? '1. 記録時BASEの条件' : '1. Recording BASE conditions'}</p>
                         {!context.known ? <p className="text-amber-300">{ja ? 'BASE未確認。校正条件は判定できません。' : 'BASE unknown. Calibration conditions cannot be checked.'}</p> : <dl className="grid grid-cols-2 gap-x-2 gap-y-1 mt-2">
@@ -96,10 +103,11 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                             <p className="text-slate-400">{ja ? 'MAPは間引き読取。RAMは未検証の観測値で、Tuneの入力には使いません。' : 'MAP is read less frequently. RAM observations are unverified and are not Tune inputs.'}</p>
                         </>}
                     </section>
+                    </details>
                     <section>
-                        <p className="font-semibold text-slate-100">{ja ? '3. 計測と保存' : '3. Acquisition and storage'}</p>
-                        <p>{ja ? '操作は停車中に行ってください。校正条件を整えた後、対象と隣接RO帯で各5秒以上、回転数・負荷・トリムが安定した区間を確認します。温度差だけでΔ30のアンカー成立とは判定しません。' : 'Operate while parked. After preparing calibration conditions, check stable RPM, load and trim for at least 5 seconds in both RO bands. Temperature difference alone does not establish a Δ30 anchor.'}</p>
-                        <p className="mt-2">{ja ? '観測専用ではSAVEで生ログ・解析設定・BASEを保存し、SYNCでクラウドへ送ります。既存TUNEDがある場合は別の記録を作ります。比較結果からTune用BINを生成・書き込みしません。' : 'In observation mode, SAVE keeps raw data, analysis settings and BASE; SYNC uploads them. A prior TUNED is preserved in its own record. Comparison results cannot generate or write a Tune BIN.'}</p>
+                        <p className="font-semibold text-slate-100">{ja ? '計測と保存' : 'Acquisition and storage'}</p>
+                        <p>{ja ? '操作は停車中に行い、通常走行で対象域を通過した前後を記録してください。通過応答の収録に5秒間の保持は不要です。Δ30のアンカー成立や必要補正量は、この表示だけでは確定しません。' : 'Operate while parked and log the approach to and exit from ordinary passes. Response capture requires no five-second hold. This display alone does not establish a Δ30 anchor or the required correction.'}</p>
+                        <p className="mt-2">{ja ? '観測専用ではSAVEで追加信号・読出し時刻を含む生ログ、解析設定、BASEを保存し、SYNCでクラウドへ送ります。解析は再読込時に再計算し、解析JSONには版番号を付けます。既存TUNEDがある場合は別の記録を作ります。応答解析からTune用BINを生成・書き込みしません。' : 'Observation SAVE keeps raw signals, read windows, settings and BASE; SYNC uploads them. Analysis is recomputed on reload and exported with a version number. Prior TUNED records are preserved. Response analysis cannot generate or write a Tune BIN.'}</p>
                         {!active && <p className="mt-2 text-amber-300">{ja ? '現在は従来Tuneです。このチェックを開くだけでは計算方式は変わりません。観測用のログは下のボタンで切り替えてください。' : 'Legacy Tune is selected. Opening this check does not change the calculation. Select observation mode below for research logs.'}</p>}
                     </section>
                 </div>

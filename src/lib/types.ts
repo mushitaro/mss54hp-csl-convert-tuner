@@ -3,6 +3,7 @@
 import type { DropCensus } from '@/lib/log-engine/lambdaGates';
 import type { FilterResume } from '@/lib/log-engine/filter';
 import type { VeMethod } from '@/lib/ve-calculator/calculator';
+import type { ResponseCaptureChannels } from '@/lib/dme-link/responseCapture';
 
 export interface VEMap {
     /** Candidate calculated for diagnosis; must never be serialized into a flashable BIN. */
@@ -17,7 +18,7 @@ export interface BinaryConfig {
     tempLimit: number; // K_LAA_TMOT_MIN
 }
 
-export interface LogDataPoint {
+export interface LogDataPoint extends ResponseCaptureChannels {
     /** Index in ProcessedLog.rawData, assigned by the filter, not a persisted sensor channel. */
     rawSampleIndex?: number;
     /** Fresh 0401 RAM observations; diagnostic only until checked on the actual ECU. */

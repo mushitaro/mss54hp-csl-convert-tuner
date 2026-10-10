@@ -42,7 +42,7 @@
  */
 
 import {
-    LAMBDA_TRIM_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
+    LAMBDA_TRIM_RAM_READ, LAMBDA_RESPONSE_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
     AMBIENT_TEMP_RAM_READ,
     RF_KORR_DIRECT_RAM_READ, RF_SOLL_DIRECT_RAM_READ, RF_MAP_INTEGRATOR_DIRECT_RAM_READ,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
@@ -203,7 +203,11 @@ export type LogExchange =
  * channels a tune is read from and not twelve more that only make sense with the disassembly open.
  */
 export function productionExchanges(exchanges: readonly LogExchange[]): LogExchange[] {
-    return exchanges.filter(x => !x.provides?.length
+    return exchanges.map(x => x.kind === 'ram' && x.segment === LAMBDA_RESPONSE_RAM_READ.segment
+        && x.address === LAMBDA_RESPONSE_RAM_READ.address && x.count === LAMBDA_RESPONSE_RAM_READ.count
+        ? { ...x, ...LAMBDA_TRIM_RAM_READ, name: 'LA_F_REGLER1/2',
+            provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] as FieldKey[] }
+        : x).filter(x => !x.provides?.length
         || x.provides.some(key => LOG_FIELD_REGISTRY[key].relevance !== 'debug'));
 }
 
@@ -583,10 +587,8 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
     },
     VE: {
         id: 'VE', label: 'VE',
-        // Block 3 for rpm, load, rf and tabg; four bytes of RAM for the lambda trim that used to
-        // cost a 90-byte block; block 19 every eighth sample for the purge and freeze channels that
-        // exist nowhere else — and, in the same breath, for the check that the four bytes are what
-        // they are claimed to be.
+        // Block 3 for rpm/load/RF/TABG, RAM for trim and response diagnostics, and
+        // block 19 every eighth sample for purge/freeze plus the continuing trim cross-check.
         exchanges: [
             // `provides` from here down is what `productionExchanges` narrows on. It names the LOG
             // channels an exchange puts in the file — not every byte it decodes: `ambientPressure-
@@ -594,16 +596,19 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // these same reads as qualifiers on a channel rather than columns of their own, so they
             // have no registry entry to name and cannot keep an exchange alive by themselves.
             { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
-            // Eight bytes: the short-term pair the correction is read from, and the long-term
-            // stores its mean is learned into. All four are tuning — this read never narrows.
-            { kind: 'ram', name: 'LA_F_REGLER1/2', ...LAMBDA_TRIM_RAM_READ,
-                provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] },
+            // WORKS expands the existing trim read by 24 bytes (~27.5 ms at 9600 8E1).
+            // Production explicitly narrows it back to eight bytes above.
+            { kind: 'ram', name: 'Lambda response (0401, unverified)', ...LAMBDA_RESPONSE_RAM_READ,
+                provides: ['stft1', 'stft2', 'ltft1', 'ltft2', 'o2Precat1Mv', 'o2Precat2Mv',
+                    'lambdaState1', 'lambdaState2', 'lambdaPSteps1', 'lambdaPSteps2', 'baFTi',
+                    'lambdaReadTime', 'lambdaReadMs'] },
             // WORKS diagnostics: separate, timestamped, unverified 0401 RAM words.
             // k and the filtered target change at the gate, so both are read every
             // sample. The MAP store is surveyed at 1/8 and is never carried forward.
             // All three are debug-only and productionExchanges removes them there.
             // At 9600 8E1 and the existing 35 ms RAM turnaround model this costs
-            // 110.9 ms/sample: WORKS ~4.42 -> ~2.97 Hz; production stays ~4.56 Hz.
+            // 110.9 ms/sample, plus 27.5 ms for the wide lambda read above:
+            // WORKS now ~2.74 Hz in this model; production stays ~4.56 Hz.
             // A 52-byte k/MAP cluster every sample would cost ~50.8 ms more per
             // sample than these separate reads. Rates still need an on-car check.
             { kind: 'ram', name: 'rf_korr (direct, unverified)', ...RF_KORR_DIRECT_RAM_READ,

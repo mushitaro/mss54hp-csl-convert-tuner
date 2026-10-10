@@ -13,6 +13,7 @@
 import { LOG_PROFILES, productionExchanges, expectedHz, describeExchanges } from '../src/lib/log-engine/logProfile.ts';
 import { LOG_FIELD_REGISTRY, fieldGroupsFor } from '../src/lib/field-registry/registry.ts';
 import { FEATURES } from '../src/lib/features.ts';
+import { LAMBDA_RESPONSE_RAM_READ, LAMBDA_TRIM_RAM_READ } from '../src/lib/dme-link/ramMap.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -104,7 +105,12 @@ console.log('\n[the exchanges a production run drops]');
 {
     const full = LOG_PROFILES.VE.exchanges;
     const prod = productionExchanges(full);
-    const gone = full.filter(x => !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
+    const expanded = full.find(x => x.kind === 'ram' && x.address === LAMBDA_RESPONSE_RAM_READ.address);
+    const narrowed = prod.find(x => x.kind === 'ram' && x.address === LAMBDA_TRIM_RAM_READ.address);
+    check('WORKS lambda response narrows to the original production trim read',
+        expanded?.count === 32 && narrowed?.count === 8
+        && JSON.stringify(narrowed?.provides) === JSON.stringify(['stft1', 'stft2', 'ltft1', 'ltft2']));
+    const gone = full.filter(x => x !== expanded && !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
     // Every exchange whose `provides` is debug THROUGHOUT. The slew-limiter pair joined the list
     // on 2026-08-30: MD_DYN_ST and the four torque words answer whether KF_MD_LS_KOMF ever bound,
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named

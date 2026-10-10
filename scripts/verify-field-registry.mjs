@@ -17,6 +17,7 @@ import {
     fieldValueKey, describeField,
 } from '../src/lib/field-registry/registry.ts';
 import { STANDARD_MEASUREMENT_BLOCK, OPERATING_MEASUREMENTS_BLOCK } from '../src/lib/dme-link/liveValueBlocks.ts';
+import { Mss54HpRamSignals } from '../src/lib/dme-link/ramMap.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + d)); if (!c) fails++; };
@@ -43,6 +44,15 @@ console.log('\n[a wire channel wears the DME symbol its block actually decodes]'
         19: OPERATING_MEASUREMENTS_BLOCK,
     };
     for (const [key, m] of wire) {
+        if ('segment' in m.source) {
+            const signalName = key === 'rfMapIntegratorDirect' ? 'RF_MAP_INTEGRATOR_DIRECT'
+                : m.symbol.toUpperCase() + (key.endsWith('Direct') ? '_DIRECT' : '');
+            const signal = Mss54HpRamSignals[signalName];
+            check(`${key}: symbol and address match RAM declaration`, signal?.segment === m.source.segment
+                && signal?.address === m.source.address);
+            check(`${key}: unverified provenance remains visible`, describeField(m).includes('unverified on car'));
+            continue;
+        }
         const block = layouts[m.source.selection];
         if (!block) { check(`${key}: selection ${m.source.selection} is a known block`, false); continue; }
         const match = Object.values(block.fields).find(f => f.offset === m.source.offset);

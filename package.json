@@ -5,6 +5,8 @@
     "private": true,
     "license": "MIT",
     "scripts": {
+        "verify:rf-response": "node scripts/verify-rf-response.mjs",
+        "analyze:rf-response": "node scripts/analyze-rf-response.mjs",
         "dev": "next dev -p 5054",
         "build": "next build && node scripts/build-id.mjs && node scripts/inject-supporters.mjs && node scripts/gen-sw.mjs",
         "start": "next start",

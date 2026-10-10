@@ -184,6 +184,17 @@ export const Mss54HpRamSignals = {
     LA_F_REGLER1: { segment: 0x01, address: 0x00FF80CA, size: 2, signed: false, scale: 3.0517578125e-05, unit: '' },
     /** Bank 2. Adjacent to bank 1, so one four-byte read covers both. */
     LA_F_REGLER2: { segment: 0x01, address: 0x00FF80CC, size: 2, signed: false, scale: 3.0517578125e-05, unit: '' },
+    // 0401 master overlay of slave lambda state. Addresses: calibration-graph.json;
+    // semantics: slave 01d6a2/01dc42 (controller), 01ebea (enable), 01b0e2 (injection).
+    // These extra fields remain unverified on the car, even when the trim truth gate passes.
+    USV1: { segment: 0x01, address: 0x00FF80BE, size: 2, signed: false, scale: 1, unit: 'mV' },
+    USV2: { segment: 0x01, address: 0x00FF80C0, size: 2, signed: false, scale: 1, unit: 'mV' },
+    LA_ST_EIN1: { segment: 0x01, address: 0x00FF80C6, size: 1, signed: false, scale: 1, unit: '' },
+    LA_ST_EIN2: { segment: 0x01, address: 0x00FF80C7, size: 1, signed: false, scale: 1, unit: '' },
+    // Saturating P-step counters, NOT O2 crossing counters. Reset when control is disabled.
+    LA_P_SPR_COUNT1: { segment: 0x01, address: 0x00FF80D6, size: 1, signed: false, scale: 1, unit: '' },
+    LA_P_SPR_COUNT2: { segment: 0x01, address: 0x00FF80D7, size: 1, signed: false, scale: 1, unit: '' },
+    BA_F_TI: { segment: 0x01, address: 0x00FF80DC, size: 2, signed: false, scale: 1 / 1024, unit: '' },
     /**
      * Intake air temperature — the one signal the Alpha-N fuel path does NOT have and the MAP path
      * cannot work without.
@@ -767,6 +778,15 @@ export const LAMBDA_TRIM_RAM_READ = {
         - Mss54HpRamSignals.LA_F_REGLER1.address,
 } as const;
 
+/** WORKS: one 32-byte exchange instead of the 8-byte trim read. No extra round trip.
+ * Same telegram reduces transport skew, but the slave/master overlay is not an atomic snapshot. */
+export const LAMBDA_RESPONSE_RAM_READ = {
+    segment: Mss54HpRamSignals.USV1.segment,
+    address: Mss54HpRamSignals.USV1.address,
+    count: Mss54HpRamSignals.BA_F_TI.address + Mss54HpRamSignals.BA_F_TI.size
+        - Mss54HpRamSignals.USV1.address,
+} as const;
+
 /** Separate short reads avoid the 184-byte gap between rf_soll and rf_korr,
  *  which exceeds the DME's 128-byte read limit. Each carries its own read time. */
 export const RF_KORR_DIRECT_RAM_READ = {
@@ -1064,6 +1084,7 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     const reads = [
         { name: 'INERTIA_RAM_READ', ...INERTIA_RAM_READ },
         { name: 'LAMBDA_TRIM_RAM_READ', ...LAMBDA_TRIM_RAM_READ },
+        { name: 'LAMBDA_RESPONSE_RAM_READ', ...LAMBDA_RESPONSE_RAM_READ },
         { name: 'RF_KORR_DIRECT_RAM_READ', ...RF_KORR_DIRECT_RAM_READ },
         { name: 'RF_SOLL_DIRECT_RAM_READ', ...RF_SOLL_DIRECT_RAM_READ },
         { name: 'RF_MAP_INTEGRATOR_DIRECT_RAM_READ', ...RF_MAP_INTEGRATOR_DIRECT_RAM_READ },

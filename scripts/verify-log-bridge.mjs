@@ -90,7 +90,7 @@ console.log('\n[and nothing on the bridge is a channel the registry does not kno
     // every row has and no exchange provides.
     const ALLOWED = [
         'ambientPressureSubstituted', 'ambientTempFromCan', 'pressureDecodeDisagreesMbar',
-        'stftSource', 'rfDirectSource', 'time',
+        'stftSource', 'rfDirectSource', 'lambdaReadSource', 'time',
     ];
     const strays = unknown.filter(k => !ALLOWED.includes(k));
     check('no stray keys', strays.length === 0, strays.join(', '));

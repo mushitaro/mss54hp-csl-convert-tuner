@@ -1,6 +1,7 @@
 import Papa from 'papaparse';
 import { APP_CONFIG } from '@/config/constants';
 import type { LogDataPoint } from '@/lib/types';
+import { parseDiagnosticColumns } from './diagnosticColumns';
 
 type AliasKey = keyof typeof APP_CONFIG.CSV_ALIASES;
 
@@ -204,6 +205,7 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         if (tUmgSub !== undefined) point.ambientTempFromCan = !tUmgSub;
         else if (ambientTemp !== undefined) point.ambientTempFromCan = true;
 
+        parseDiagnosticColumns(row, point);
         results.push(point);
     }
 

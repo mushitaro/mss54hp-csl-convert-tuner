@@ -3046,6 +3046,18 @@ export default function Home() {
           rfSollDirectReadMs: sample.rfSollDirectReadMs,
           rfMapIntegratorDirectReadMs: sample.rfMapIntegratorDirectReadMs,
           rfDirectSource: sample.rfDirectSource,
+          o2Precat1Mv: sample.o2Precat1Mv,
+          o2Precat2Mv: sample.o2Precat2Mv,
+          lambdaState1: sample.lambdaState1,
+          lambdaState2: sample.lambdaState2,
+          lambdaPSteps1: sample.lambdaPSteps1,
+          lambdaPSteps2: sample.lambdaPSteps2,
+          baFTi: sample.baFTi,
+          lambdaReadTime: sample.lambdaReadTime,
+          lambdaReadMs: sample.lambdaReadMs,
+          standardReadTime: sample.standardReadTime,
+          standardReadMs: sample.standardReadMs,
+          lambdaReadSource: sample.lambdaReadSource,
           wdk1: sample.wdk1,
           // Carried into the log rather than only shown live: whether purge was active is a property
           // of the RUN, and it is the thing you want to check when two logs of the same road
@@ -5034,6 +5046,7 @@ export default function Home() {
       {featureEnabled('rfKorr', featurePreview) && logProcess === 'VE' &&
         ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
         <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={binaryBuffer}
+          logging={dmeLink.state === 'tuning'}
           options={veCalcOptions} active={(pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'}
           readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'steady-retain' })} />}
       {/* App Header - Ultra Minimal */}

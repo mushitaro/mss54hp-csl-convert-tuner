@@ -7,6 +7,7 @@ import type { SeedMap } from './fastEntry';
 import type { LinkEventLogSnapshot } from './linkEventLog';
 import type { TransferTimingReport } from './transferTiming';
 import type { LogExchange } from '@/lib/log-engine/logProfile';
+import type { ResponseCaptureChannels } from './responseCapture';
 
 export type { AdaptationSnapshot, FlashCounterInfo };
 
@@ -44,7 +45,7 @@ export interface DmeIdentity {
 
 /** A single live-telemetry sample, using the same field names as LogDataPoint so it can feed
  * straight into the existing log-processing/VE-calculation pipeline. */
-export interface LiveMeasurement {
+export interface LiveMeasurement extends ResponseCaptureChannels {
     /** Seconds since the run started. Note the Testo CSV path uses milliseconds for the same
      *  field name on LogDataPoint — log-engine/filter.ts detects which it is holding. */
     time: number;
