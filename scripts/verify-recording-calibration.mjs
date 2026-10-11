@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { captureRecordingCalibration, recordingCalibrationBuffer } from '../src/lib/db/recordingCalibration.ts';
+import { captureRecordingCalibration, recordingCalibrationBuffer, recoverHistoricalRecordingCalibration } from '../src/lib/db/recordingCalibration.ts';
 import { patchOnImage } from '../src/lib/binary-engine/patcher.ts';
 import { analyzeDataChecksum, readStoredChecksums } from '../src/lib/checksum/dmeDataChecksum.ts';
 import { operatingCalibrationHold } from '../src/lib/ve-calculator/operatingPolicy.ts';
@@ -88,3 +88,28 @@ assert.equal(await recordingCalibrationBuffer(corrupt), null);
 const wrongSha = structuredClone(record); wrongSha.reference.sha256 = '0'.repeat(64);
 assert.equal(await recordingCalibrationBuffer(wrongSha), null);
 console.log('PASS SAVE/SYNC preserves the self-contained reference, imported replacement clears it, corrupted references fail verification');
+
+const historicalInput={recordingSession:later,sessions:[session,later],loadBinaries:async()=>bins,logDurationSec:2};
+const historical=await recoverHistoricalRecordingCalibration(historicalInput);
+assert.equal(historical.status,'recorded-flash-reference');assert.equal(historical.ecuChecksums,undefined);
+assert.equal(historical.historical.recordingSessionId,later.id);
+assert.equal(hash(await recordingCalibrationBuffer(historical)),hash(flashed));
+const historicalSaved=asLogRecord(await gunzipJson(await gzipJson(nextLogRecord('later',undefined,{data,recordingCalibration:historical}))),'later');
+assert.equal(historicalSaved.recordingCalibration.status,'recorded-flash-reference');
+assert.equal(hash(await recordingCalibrationBuffer(historicalSaved.recordingCalibration)),hash(flashed));
+console.log('PASS old-log recovery preserves hash-verified historical provenance without inventing START checksums, through SAVE/SYNC');
+
+for(const changes of [{practice:undefined},{sha256:'0'.repeat(64)},{tuned:true}]){
+    const bad={...session,flashHistory:[{...session.flashHistory[0],...changes}]};
+    assert.equal(await recoverHistoricalRecordingCalibration({...historicalInput,sessions:[bad,later]}),null);
+}
+const newerBad={...session,id:'unavailable',flashHistory:[{...session.flashHistory[0],at:25,sha256:'0'.repeat(64)}]};
+assert.equal(await recoverHistoricalRecordingCalibration({...historicalInput,sessions:[session,newerBad,later]}),null);
+const during={...session,id:'during',flashHistory:[{...session.flashHistory[0],at:31}]};
+assert.equal(await recoverHistoricalRecordingCalibration({...historicalInput,sessions:[session,during,later]}),null);
+const unknownPractice={...session,id:'uncertain',flashHistory:[{...session.flashHistory[0],at:25,practice:undefined}]};
+assert.equal(await recoverHistoricalRecordingCalibration({...historicalInput,sessions:[session,unknownPractice,later]}),null);
+const tamperedHistorical=structuredClone(historical);tamperedHistorical.ecuChecksums=await input.readChecksums();
+assert.equal(await recordingCalibrationBuffer(tamperedHistorical),null);
+assert.equal(await recoverHistoricalRecordingCalibration({...historicalInput,loadBinaries:async id=>id===later.id?{...bins,baseBinaryBuffer:collision.buffer}:bins}),null);
+console.log('PASS newer unverifiable writes, unknown practice, in-log writes, mismatched BASE and counterfeit checksum claims block historical recovery');

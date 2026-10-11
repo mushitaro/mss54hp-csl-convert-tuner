@@ -99,9 +99,11 @@ import { AlertCircle, Download, FileCode, FileSpreadsheet, Zap, Play, Cpu, Trash
 import { PROJECT_REPO_URL } from '@/config/links';
 import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { isFieldPresent } from '@/lib/field-registry/registry';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy, isVeHistoryPolicy } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readDmeCalibration } from '@/lib/ve-calculator/dmeResponse';
+import { readMovingResponseCalibration } from '@/lib/ve-calculator/movingResponseInputs';
+import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { comparisonOnlyOutputMessage } from '@/lib/ve-calculator/comparisonOutput';
 import { operatingCalibrationHold } from '@/lib/ve-calculator/operatingPolicy';
 import { OperatingEvidenceNotice } from '@/components/OperatingEvidenceNotice';
@@ -110,7 +112,7 @@ import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/cha
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
 import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
-import { captureRecordingCalibration, recordingCalibrationBuffer, type RecordingCalibration } from '@/lib/db/recordingCalibration';
+import { captureRecordingCalibration, recordingCalibrationBuffer, recoverHistoricalRecordingCalibration, type RecordingCalibration } from '@/lib/db/recordingCalibration';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -486,6 +488,21 @@ export default function Home() {
   const { correctionMap, acceptedMap } = veCalc;
   /** The tuned grid, under the name every consumer below already uses. */
   const newMap = tunedMap;
+  const movingValidated = newMap?.calibrationStatus === 'moving-validated';
+  const movingWriteLocked = movingValidated && binaryFileState.writeVe;
+  const movingWriteReason = displayLang === 'ja'
+    ? '走行履歴Tuneは記録時の補正設定と採用VEを保持します。別の変更を行う場合はALPHA-Nを解除してください。'
+    : 'Driving-history Tune retains the recorded correction settings and validated VE. Disarm ALPHA-N before making separate changes.';
+  useEffect(() => {
+    if (!movingWriteLocked || !recordingBinary) return;
+    const recorded = readLogicPatches(recordingBinary);
+    binaryFileState.setApplyPatch(recorded.applyPatch);
+    binaryFileState.setApplyTankVentDisable(recorded.applyTankVentDisable);
+    binaryFileState.setApplyRfKorrGateDrop(!!recorded.applyRfKorrGateDrop);
+    // Re-arm against the recording reference once per result, not after every
+    // unrelated render. The byte boundary separately checks all output paths.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movingWriteLocked, newMap, recordingBinary]);
   /** The coverage bands every grid in this page tints with, resolved once from the session's filter
    *  config. Passed explicitly rather than let each MapEditor fall back to its own default, so a
    *  changed setting reaches all four grids or none. */
@@ -640,13 +657,14 @@ export default function Home() {
     recordedLoadTable: InterpolationPoint[] = interpolationTable,
     recordingReference: ArrayBuffer | null = recordingBinary,
   ): VeCalcOptions => {
-    const comparison = isVeComparisonPolicy(config.veCorrectionPolicy);
-    const calibration = comparison ? recordingReference : recordedBase;
+    const history = isVeHistoryPolicy(config.veCorrectionPolicy);
+    const calibration = history ? recordingReference : recordedBase;
     return ({
     veCorrectionPolicy: config.veCorrectionPolicy,
     veLearningRate: config.veLearningRate,
-    steadyCalibrationHold: operatingCalibrationHold(calibration, comparison ? recordedBase : null),
+    steadyCalibrationHold: operatingCalibrationHold(calibration, history ? recordedBase : null),
     dmeCalibration: readDmeCalibration(calibration),
+    movingCalibration: readMovingResponseCalibration(calibration),
     steadyLambdaLimits: calibration ? new BinaryParser(calibration).readLambdaLimits() : null,
     steadyFilterConfig: config,
     steadyLoadTable: recordedLoadTable,
@@ -660,7 +678,7 @@ export default function Home() {
     // new table and writing it are one decision. `write` is a parameter rather than read from
     // state here for the same reason `config` is: the archived-session handlers run in a render
     // scope whose state is one step behind what they just asked to load.
-    writeRfKorr: write && !isVeComparisonPolicy(config.veCorrectionPolicy),
+    writeRfKorr: write && !isVeHistoryPolicy(config.veCorrectionPolicy),
     // The evidence gate, and the rf_korr tuner's own. Both travel in the filter config so a session
     // replays under the thresholds it was built with rather than under today's defaults.
     //
@@ -686,15 +704,15 @@ export default function Home() {
     // `curves`, not the memo. Reopening a session calls this with the curves read from THAT
     // session's BASE while the memo still describes whatever is loaded now — the same trap the
     // note at the reopen call site describes for egtTables and the stored config.
-    normaliseTo: !isVeComparisonPolicy(config.veCorrectionPolicy) && config.normaliseChargeTemp ? curves : null,
+    normaliseTo: !isVeHistoryPolicy(config.veCorrectionPolicy) && config.normaliseChargeTemp ? curves : null,
     // Always passed, unlike the normalisation: measuring rf_korr honestly is not an option the
     // operator turns on. Without it the calculation falls back to the trim alone.
-    rfKorrAir: { curves: comparison ? (calibration ? readRfPtKorrCurves(calibration) : null) : curves,
+    rfKorrAir: { curves: history ? (calibration ? readRfPtKorrCurves(calibration) : null) : curves,
       assumedPressureMbar: config.assumedAmbientPressure },
     rfKorrThresholds: config.enableRfKorrCellGate === false
       ? { minCellSamples: 1, minCellWeight: 0 }
       : { minCellSamples: config.rfKorrMinCellSamples, minCellWeight: config.rfKorrMinCellWeight },
-    egt: comparison ? (calibration ? readEgtTables(calibration) : null) : egt,
+    egt: history ? (calibration ? readEgtTables(calibration) : null) : egt,
   });
   };
 
@@ -741,7 +759,7 @@ export default function Home() {
      thresholds the DME never ran. The toggles are in the dependency list for that reason: arming
      WOT DISABLE changes what the log MEANS, not just what a later write will contain. */
   const lambdaLimits = useMemo(
-    () => isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+    () => isVeHistoryPolicy(filterConfig.veCorrectionPolicy)
       ? (recordingBinary ? new BinaryParser(recordingBinary).readLambdaLimits() : null)
       : (binaryBuffer
       ? new BinaryParser(bytesAsRun(binaryBuffer,
@@ -904,7 +922,7 @@ export default function Home() {
   const handleLogUpload = async (file: File) => {
     recordingEpochRef.current++;
     const processed = await logFileState.parseAndSetLog(file,
-      isVeComparisonPolicy(filterConfig.veCorrectionPolicy) ? null : undefined);
+      isVeHistoryPolicy(filterConfig.veCorrectionPolicy) ? null : undefined);
     if (!processed) return;
     setRecordingCalibration(null);
     setRecordingBinary(null);
@@ -968,6 +986,13 @@ export default function Home() {
     // The panel is readOnly on an archived session; this closes the same door for every other
     // caller — an archived record must not even transiently re-derive under edited settings.
     if (isArchived) return;
+    // Observation-only sessions saved writeVe=false by design. Choosing the
+    // production Tune policy is the explicit transition back to a VE write;
+    // ordinary reprocessing must still preserve a deliberately disarmed map.
+    if (newConfig.veCorrectionPolicy === 'moving-response'
+      && (pendingConfigRef.current ?? filterConfig).veCorrectionPolicy !== 'moving-response') {
+      binaryFileState.setWriteVe(true);
+    }
     pendingConfigRef.current = newConfig;
     setPendingConfig(newConfig);
     if (filterComputeTimer.current !== null) clearTimeout(filterComputeTimer.current);
@@ -1083,7 +1108,7 @@ export default function Home() {
    *  Four conditions, all of which have to hold at once, which is why this lives here rather than
    *  in the panel: the panel can see the config and nothing else. */
   const canTuneRfKorr = !!(
-    !isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+    !isVeHistoryPolicy(filterConfig.veCorrectionPolicy)
     && egtTables                                // the binary's tables decoded
     && tunedRfKorr?.acceptable                  // the back-calculation met its own thresholds
     && !tunedRfKorr.report.sensorMissing        // the log carried an exhaust temperature
@@ -1148,6 +1173,7 @@ export default function Home() {
    *  because a () => void that does nothing is type-correct. It carries the same extras as the
    *  session-save and DME-write paths, because all three must produce identical bytes. */
   const handleDownloadBin = () => {
+    if (veCalc.isCalculating || pendingConfigRef.current) return;
     binaryFileState.downloadBin(newMap, writeExtras);
   };
 
@@ -1815,9 +1841,9 @@ export default function Home() {
   // Memoised because the WARMUP table is derived from it: a fresh object literal per render would
   // re-interpolate 480 cells on every keystroke anywhere on the page.
   const shapeWrite = useMemo(() => (
-    binaryFileState.writeShape && appliedShape && shapeCells > 0
+    !movingValidated && binaryFileState.writeShape && appliedShape && shapeCells > 0
       ? { grid: appliedShape.values, shaped: appliedShape.shaped } : null
-  ), [binaryFileState.writeShape, appliedShape, shapeCells]);
+  ), [movingValidated, binaryFileState.writeShape, appliedShape, shapeCells]);
   /**
    * The SHAPE tab's whole state, in one place because it is read from three.
    *
@@ -2047,6 +2073,7 @@ export default function Home() {
    * a new field through three call sites and forgetting the fourth is the failure this replaces.
    */
   const writeExtras = useMemo<PatchExtras>(() => ({
+    movingReference: recordingBinary,
     comparisonOnly: isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)
       || isVeComparisonPolicy(filterConfig.veCorrectionPolicy),
     tunedRfKorr: rfKorrWrite,
@@ -2066,7 +2093,7 @@ export default function Home() {
     calibrationEdits: featureEnabled('calibration', featurePreview) && calEdits.armedEdits.length
       ? { edits: calEdits.armedEdits, conflictSpans: calConflictSpans }
       : null,
-  }), [pendingConfig, filterConfig.veCorrectionPolicy, rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
+  }), [recordingBinary, pendingConfig, filterConfig.veCorrectionPolicy, rfKorrWrite, shapeWrite, binaryFileState.tunedIdleTv, binaryFileState.tunedLlsTv,
     calEdits.armedEdits, calConflictSpans, featurePreview]);
 
   /**
@@ -2119,7 +2146,7 @@ export default function Home() {
     // Straight after the log, and before the derived tables, because it is read in that order: the
     // log says what was measured, SHAPE says what the surface now looks like and what the tune did
     // to it, and only then is there a reason to look at anything derived FROM that surface.
-    { id: 'shape', label: 'SHAPE (EXP.)', enabled: !!newMap },
+    { id: 'shape', label: 'SHAPE (EXP.)', enabled: !!newMap && !movingValidated },
     // Straight after SHAPE, because it is the same surface seen cold. WARMUP is `kf_rf_soll_kath`
     // — a SECOND Alpha-N table (0xD770) on its own axes, derived from the very grid SHAPE has just
     // finished describing. Reading it two tabs later, after RF KORR's fuel correction, put an
@@ -2154,7 +2181,7 @@ export default function Home() {
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
     // RF KORR, which needs a VE drive before it will open.
     { id: 'calibration', label: 'CALIBRATION', enabled: !!binaryFileState.binaryBuffer },
-  ], [currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables,
+  ], [currentMap, newMap, movingValidated, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables,
     binaryFileState.binaryBuffer, logProcess, idleHasRows]);
 
   // MODE chooses the tabs AND their sequence; the variant then closes whatever it closes. Built by
@@ -2192,6 +2219,12 @@ export default function Home() {
   useEffect(() => {
     const want = pendingTabRef.current;
     if (!want) return;
+    if (want === 'new' && !veCalc.isCalculating && !newMap && (correctionMap || veCalc.movingError)) {
+      pendingTabRef.current = null;
+      setActiveTab(correctionMap ? 'lambda' : 'log');
+      setNarrowPane('map');
+      return;
+    }
     if (!TABS.find(t => t.id === want)?.enabled) return;   // not yet — stay armed
     pendingTabRef.current = null;                          // one-shot
     setActiveTab(want);
@@ -2200,7 +2233,7 @@ export default function Home() {
     // released it, and the screen stayed on DASH with the trim being drawn out of sight. The manual
     // path already pairs these two (onSelectTab does both); this is the same rule for the armed one.
     setNarrowPane('map');
-  }, [TABS, currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr]);
+  }, [TABS, currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, veCalc.isCalculating, veCalc.movingError]);
 
   // Clearing the log or swapping the BASE can disable the tab you're standing on; without this you'd
   // be stranded on a placeholder with its own tab greyed out.
@@ -2269,6 +2302,7 @@ export default function Home() {
    */
   const saveStatus: SaveStatus = useMemo(() => ({
     phase: dmeLink.state === 'tuning' ? 'logging'
+      : veCalc.isCalculating ? 'calculating'
       : !currentSession ? 'nothing'
         // Archived FIRST, before anything about what is loaded.
         //
@@ -2308,7 +2342,7 @@ export default function Home() {
             // label never moved, the cell stayed pressable, and there was no way to tell a save
             // that had happened from one that had not.
             : nothingToSave ? 'saved' : 'ready',
-  }), [dmeLink.state, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave,
+  }), [dmeLink.state, veCalc.isCalculating, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave,
     // Without this the button never noticed the first calibration edit: the memo
     // held the phase it was built with, so SAVE stayed dark over unsaved work.
     calEdits.armedEdits.length]);
@@ -2439,7 +2473,11 @@ export default function Home() {
     if (session.hasLog) {
       const logRecord = await sessionDb.loadLogRecord(session.id);
       const rawLog = logRecord?.data;
-      const recording = logRecord?.recordingCalibration ?? null;
+      const recording = logRecord?.recordingCalibration ?? (rawLog?.length
+        ? await recoverHistoricalRecordingCalibration({ recordingSession: session, sessions: sessionDb.sessions,
+            loadBinaries: sessionDb.loadBinaries,
+            logDurationSec: Math.max(0, rawLog[rawLog.length-1].time - rawLog[0].time) * timeScaleSeconds(rawLog) })
+        : null);
       const recordingBytes = await recordingCalibrationBuffer(recording);
       setRecordingCalibration(recording);
       setRecordingBinary(recordingBytes);
@@ -2456,7 +2494,7 @@ export default function Home() {
           // captured against a car carrying whatever `armed` says, and the full-load gate reads a
           // table WRITE PATCH-ON rewrites. Replaying it through the raw BASE rejected the very
           // pulls the patch exists to keep.
-          isVeComparisonPolicy(session.tuneSettings?.filterConfig.veCorrectionPolicy ?? filterConfig.veCorrectionPolicy)
+          isVeHistoryPolicy(session.tuneSettings?.filterConfig.veCorrectionPolicy ?? filterConfig.veCorrectionPolicy)
           ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
           : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
             applyPatch: !!armed?.applyPatch,
@@ -2510,7 +2548,10 @@ export default function Home() {
     // it needs is the hub — connect, read, start a run. The map is one tap away and is where you
     // go once there is something to look at. (This landed on MAP for a day; the operator asked for
     // DASH, which is the pane the work actually begins in.)
-    goToTab(rebuilt ? 'new' : 'current');
+    if (rebuilt && (session.tuneSettings?.filterConfig ?? filterConfig).veCorrectionPolicy === 'moving-response') {
+      goToTab('current');
+      pendingTabRef.current = 'new';
+    } else goToTab(rebuilt ? 'new' : 'current');
     setNarrowPane('dash');
   };
 
@@ -2643,7 +2684,7 @@ export default function Home() {
        recovered drive would be filtered through the OUTGOING session's binary. */
     const processed = logFileState.loadRawLog(
       points, 'recovered-log.csv', undefined, undefined,
-      isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+      isVeHistoryPolicy(filterConfig.veCorrectionPolicy)
       ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
       : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
         applyPatch: !!armed?.applyPatch,
@@ -2659,7 +2700,10 @@ export default function Home() {
         veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr,
           readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer, interpolationTable, recordingBytes));
       comparison.applyDefaultsAfterCalculation();
-      goToTab('new');
+      if (filterConfig.veCorrectionPolicy === 'moving-response') {
+        goToTab('current');
+        pendingTabRef.current = 'new';
+      } else goToTab('new');
     } else {
       goToTab('current');
     }
@@ -2727,7 +2771,7 @@ export default function Home() {
    *  so they have to be kept for flashHistory's hash to point at anything. */
   const handleSaveSession = async () => {
     // A debounced mode/filter change must finish before persisting settings or a BIN.
-    if (pendingConfigRef.current) return;
+    if (pendingConfigRef.current || veCalc.isCalculating) return;
     // A comparison must still keep the drive and its analysis settings. BIN refusal belongs to
     // artifact output, not to recording observations; this branch precedes even manual edits so
     // an armed edit or a previously computed map cannot route a log through the BIN builder.
@@ -2938,8 +2982,8 @@ export default function Home() {
       ? logFileState.loadRawLog(samples, 'live-session.csv')
       : logFileState.appendRawLog(samples, 'live-session.csv');
     if (processed && currentMap) {
-      if (authoritative) veCalc.runCalculation(currentMap, processed, veCalcOptions);
-      else veCalc.appendCalculation(currentMap, processed, veCalcOptions);
+      if (authoritative) return veCalc.runCalculation(currentMap, processed, veCalcOptions).then(() => processed);
+      veCalc.appendCalculation(currentMap, processed, veCalcOptions);
       return processed;
     }
     return null;
@@ -2976,6 +3020,7 @@ export default function Home() {
   const finishLog = async (failure: string | null) => {
     if (finishedRef.current) return;
     finishedRef.current = true;
+    pendingTabRef.current = liveSamplesRef.current.length ? 'new' : null;
     // Authoritative: the run is over, and everything downstream of here — the stored TUNED, the
     // bytes a WRITE sends — comes from this pass rather than from the live approximation.
     // The authoritative flush, the durable tail, and the recovery record marked stopped but NOT
@@ -2986,7 +3031,7 @@ export default function Home() {
     // must arm nothing, or the move would sit waiting and later hijack an unrelated navigation.
     // Armed before the dialog below so React has committed the move by the time it is dismissed,
     // and TUNED MAP is already open behind it.
-    pendingTabRef.current = flushed ? 'new' : null;
+    if (!flushed) pendingTabRef.current = null;
 
     // Logging runs with the engine going; writing needs it stopped, and stopping it ends the DME's
     // diagnostic session. So this connection physically cannot survive into the write — keeping it
@@ -3095,7 +3140,7 @@ export default function Home() {
     finishedRef.current = false;
     setRecordingCalibration(recording);
     setRecordingBinary(recordingBytes);
-    if (isVeComparisonPolicy(filterConfig.veCorrectionPolicy)) {
+    if (isVeHistoryPolicy(filterConfig.veCorrectionPolicy)) {
       logFileState.setLambdaLimits(recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null);
     }
     liveRun.start({ sessionId: currentSession?.id ?? null, mock: dmeLink.mockMode, exchanges, recordingCalibration: recording });
@@ -3342,6 +3387,7 @@ export default function Home() {
   };
 
   const handleDmeWrite = async () => {
+    if (veCalc.isCalculating || pendingConfigRef.current) return;
     const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, writeExtras);
     if (!patchedBuffer) return;
     // Pin the settings that produced these exact bytes. Reading the toggles again after the write
@@ -4198,8 +4244,8 @@ export default function Home() {
           kind: 'toggle' as const,
           symbol: `${e.name} · 0x${e.address.toString(16).toUpperCase().padStart(4, '0')} · ${e.dims ? `${e.dims.rows}x${e.dims.cols}` : e.count}`,
           checked: !calEdits.heldBack.has(e.paramId) && !owner,
-          disabled: !!owner,
-          lockReason: owner ? manifestText.calLockedByWriter(owner) : manifestText.calEditNote,
+          disabled: !!owner || (movingWriteLocked && calEdits.heldBack.has(e.paramId)),
+          lockReason: movingWriteLocked ? movingWriteReason : owner ? manifestText.calLockedByWriter(owner) : manifestText.calEditNote,
           status: `${changedCellCount(e)} cells`,
           onToggle: (on: boolean) => calEdits.setHeld(e.paramId, !on),
         };
@@ -4239,11 +4285,11 @@ export default function Home() {
             // a different thing from what ALPHA-N writes — so it is a separate decision, off until
             // taken, and counted separately wherever it appears.
             id: 'shape', label: 'SHAPE', kind: 'toggle',
-            checked: binaryFileState.writeShape && shapeCells > 0 && alphaNArmed,
-            disabled: shapeCells === 0 || !alphaNArmed || !!storeLockReason || restoreVe,
+            checked: !movingValidated && binaryFileState.writeShape && shapeCells > 0 && alphaNArmed,
+            disabled: movingValidated || shapeCells === 0 || !alphaNArmed || !!storeLockReason || restoreVe,
             // ALPHA-N before the other locks: it is the row this one is a MODE of, and the rest
             // are about the table rather than about the choice.
-            lockReason: restoreVe
+            lockReason: movingValidated ? movingWriteReason : restoreVe
               ? manifestText.restoreVeLocksShape
               : !alphaNArmed ? manifestText.shapeNeedsAlphaN
                 : storeLockReason ?? (shapeCells === 0
@@ -4387,8 +4433,8 @@ export default function Home() {
         rows: [
           {
             id: 'patch', label: 'PATCH', kind: 'toggle',
-            checked: applyPatch, disabled: !patchStatus,
-            lockReason: !patchStatus ? manifestText.needBinary : undefined,
+            checked: applyPatch, disabled: movingWriteLocked || !patchStatus,
+            lockReason: movingWriteLocked ? movingWriteReason : !patchStatus ? manifestText.needBinary : undefined,
             // One switch, two patches — it arms TANK VENT with it. The two rows below are what
             // that decision does, stated as readouts rather than as second decisions.
             onToggle: (on) => { setApplyPatch(on); setApplyTankVentDisable(on); },
@@ -4411,8 +4457,8 @@ export default function Home() {
           {
             id: 'rfgate', label: 'RF GATE', kind: 'toggle',
             symbol: 'kl_rf_korr_rf_min · 0xE90C · 6pt',
-            checked: applyRfKorrGateDrop, disabled: !patchStatus,
-            lockReason: !patchStatus ? manifestText.needBinary : manifestText.rfGateNote,
+            checked: applyRfKorrGateDrop, disabled: movingWriteLocked || !patchStatus,
+            lockReason: movingWriteLocked ? movingWriteReason : !patchStatus ? manifestText.needBinary : manifestText.rfGateNote,
             status: applyRfKorrGateDrop ? '0.400' : 'OEM',
             // `danger`, matching TANK VENT rather than the two `warn` rows above it: those change
             // what the DME reports, this changes what it INJECTS, over a region BMW left alone.
@@ -4444,7 +4490,7 @@ export default function Home() {
           .map(r => ({ ...r, infoLabel: manifestText.info })),
       }))
       .filter(g => g.rows.length > 0);
-  }, [storeLockReason, alphaNCells, alphaNAvailable, alphaNEarnedNothing,
+  }, [storeLockReason, movingWriteLocked, movingValidated, movingWriteReason, alphaNCells, alphaNAvailable, alphaNEarnedNothing,
     // The LLS row is derived from the drive, so it has to recompute when the drive does —
     // without these the row stays disabled after a run that earned it.
     llsEdits, llsMovedCells, llsSummary?.rolling,
@@ -4478,6 +4524,7 @@ export default function Home() {
   const [restoreGroup] = groupById('restore');
 
   const dmeButtonConfig = (() => {
+    if (veCalc.isCalculating) return { label: 'ANALYZING', Icon: Loader2, onClick: () => {}, disabled: true, spin: true };
     switch (dmeLink.state) {
       case 'disconnected': return { label: 'CONNECTION', Icon: PlugZap, onClick: handleDmeConnect, disabled: false, spin: false };
       case 'connecting': return { label: 'CONNECTING', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
@@ -5144,12 +5191,18 @@ export default function Home() {
     // that carries WRITE) sits under the URL bar and cannot be reached. `dvh` tracks the viewport
     // that is actually visible.
     <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
+      {veCalc.isCalculating && <div role="status" aria-live="polite" className="shrink-0 flex items-center gap-2 px-4 py-2 text-xs border-b border-slate-800 bg-slate-900 text-amber-300">
+        <Loader2 className="w-4 h-4 animate-spin" />{displayLang === 'ja' ? '走行履歴を解析中です。完了すると採用セルをTUNEDに反映します。' : 'Analyzing the driving history. Accepted corrections will appear in TUNED when complete.'}
+      </div>}
+      {veCalc.movingError && <div role="alert" className="shrink-0 px-4 py-2 text-xs border-b border-slate-800 bg-slate-900 text-amber-300">
+        {displayLang === 'ja' ? '履歴解析を完了できませんでした。ログは保持しています。' : 'History analysis could not finish. The log is retained. '}{veCalc.movingError}
+      </div>}
       {featureEnabled('rfKorr', featurePreview) && logProcess === 'VE' &&
         ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
-        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary}
+        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary} recordingKind={recordingCalibration?.status}
           logging={dmeLink.state === 'tuning'}
-          options={veCalcOptions} active={isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)}
-          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'dme-response' })} />}
+          options={veCalcOptions} active={isVeHistoryPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)}
+          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'moving-response' })} />}
       {/* App Header - Ultra Minimal */}
       {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">
@@ -5627,7 +5680,7 @@ export default function Home() {
                     tune, so they cannot apply in this no-tune state anyway.
                     The same expression drives the _PatchON suffix in buildFileName, so the button and
                     the file it produces cannot disagree about whether this BIN is patched. */}
-                {binaryBuffer && !newMap && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning' && (
+                {binaryBuffer && !newMap && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning' && !veCalc.isCalculating && (
                   <button
                     onClick={handleDownloadBin}
                     className="group inline-flex items-center gap-1.5"

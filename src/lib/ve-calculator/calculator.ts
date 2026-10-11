@@ -1,5 +1,6 @@
 import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
 import { DME_RESPONSE_VERSION, type DmeCalibration } from './dmeResponse';
+import type { MovingResponseCalibration } from './movingResponseInputs';
 import type { LogFilterConfig } from '@/lib/types';
 import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import type { OperatingHold } from './operatingPolicy';
@@ -488,6 +489,7 @@ export interface VeCalcOptions {
     /** null = BASE passed. undefined is unknown and must not authorize a correction. */
     steadyCalibrationHold?: OperatingHold | null;
     dmeCalibration?: DmeCalibration | null;
+    movingCalibration?: MovingResponseCalibration | null;
     steadyLambdaLimits?: LambdaLimits | null;
     steadyFilterConfig?: LogFilterConfig;
     steadyLoadTable?: { rpm: number; factor: number }[];
@@ -623,6 +625,9 @@ export class VECalculator {
         rejectMap: (VeReject | null)[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
+        if (options.veCorrectionPolicy === 'moving-response') {
+            throw new Error('Moving-response Tune requires calculateMovingResponseTune with intact RAW history');
+        }
         // Defaults to RF ÷ rf_soll — the route that needs no sensor. A caller that forgets to pass
         // options lands on the same arithmetic the app has always done.
         const plan = resolveRfKorr(options);
@@ -703,6 +708,9 @@ export class VECalculator {
         settleSec?: number,
         operating?: VeCalcOptions,
     ): void {
+        if (operating?.veCorrectionPolicy === 'moving-response') {
+            throw new Error('Moving-response Tune cannot accumulate isolated samples');
+        }
         {
             if (operating?.veCorrectionPolicy === 'dme-response') {
                 const e = point.dmeResponse;

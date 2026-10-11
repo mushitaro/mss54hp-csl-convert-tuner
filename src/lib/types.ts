@@ -7,10 +7,24 @@ import type { ResponseCaptureChannels } from '@/lib/dme-link/responseCapture';
 
 export interface VEMap {
     /** Candidate calculated for diagnosis; must never be serialized into a flashable BIN. */
-    calibrationStatus?: 'comparison-only';
+    calibrationStatus?: 'comparison-only' | 'moving-validated';
+    /** Persisted with veMapSnapshot; qualification belongs to this exact computed map. */
+    movingResponseAudit?: MovingResponseAudit;
     xAxis: number[]; // RPM
     yAxis: number[]; // Load
     data: number[][]; // VE Values
+}
+
+export interface MovingResponseAudit {
+    version: 1;
+    maxStepPercent: number;
+    acceptedCells: number;
+    evidenceRows: number;
+    validationPasses: number;
+    maxCommandConeViolation: number;
+    modelNames: string[];
+    beforeLoss: number;
+    afterLoss: number;
 }
 
 export interface BinaryConfig {
@@ -563,7 +577,7 @@ export interface LogFilterConfig {
      */
     rfKorrSettleSec?: number;
     /** Explicit opt-in. Absence keeps archived calculations on their original path. */
-    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain' | 'dme-response';
+    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain' | 'dme-response' | 'moving-response';
     /** Exponent of the COMPLETE operating correction, not of rf_korr alone. */
     veLearningRate?: number;
     /**
@@ -753,4 +767,9 @@ export interface InterpolationPoint {
 /** Comparison policies cannot produce a flashable calibration, including via manual overrides. */
 export function isVeComparisonPolicy(policy: LogFilterConfig['veCorrectionPolicy']): boolean {
     return policy === 'steady-retain' || policy === 'dme-response';
+}
+
+/** History estimators require the immutable recording reference and intact RAW chronology. */
+export function isVeHistoryPolicy(policy: LogFilterConfig['veCorrectionPolicy']): boolean {
+    return isVeComparisonPolicy(policy) || policy === 'moving-response';
 }

@@ -7,6 +7,7 @@ import { summarizeAcquisition } from '@/lib/ve-calculator/acquisitionEvidence';
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { DialogFrame } from './DialogFrame';
 import { RfResponseSummary } from './RfResponseSummary';
+import type { RecordingCalibration } from '@/lib/db/recordingCalibration';
 
 const labels: Record<string, string> = {
     'purge-active': 'パージ作動', 'purge-unknown': 'パージ不明', 'controller-clamp': 'トリム限界近傍',
@@ -21,11 +22,13 @@ const labels: Record<string, string> = {
     'operating-point-unknown': '運転状態欠測', 'trim-unknown': 'トリム欠測', 'lambda-state-unknown': '燃調状態欠測',
 };
 
-export function OperatingEvidenceNotice({ raw, map, base, options, active, readOnly, logging, onEnable }: {
+export function OperatingEvidenceNotice({ raw, map, base, options, active, readOnly, logging, onEnable, recordingKind }: {
     raw: LogDataPoint[] | null; map: VEMap | null; base: ArrayBuffer | null;
     options: VeCalcOptions; active: boolean; readOnly: boolean; logging: boolean; onEnable: () => void;
+    recordingKind?: RecordingCalibration['status'];
 }) {
     const ja = useDialogLang() === 'ja';
+    const moving = options.veCorrectionPolicy === 'moving-response';
     const [open, setOpen] = useState(false);
     const trigger = useRef<HTMLButtonElement>(null);
     const close = useRef<HTMLButtonElement>(null);
@@ -61,7 +64,8 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
             className="shrink-0 h-10 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-4 text-xs text-slate-200"
             aria-haspopup="dialog" data-testid="rf-acquisition-open">
             <span className="flex items-center gap-2"><Activity className="w-4 h-4" />{title}</span>
-            <span className="text-amber-300">{active ? (ja ? '観測専用' : 'Observation only') : (ja ? '従来Tune' : 'Legacy Tune')} ›</span>
+            <span className="text-amber-300">{moving ? (logging ? (ja ? 'ログ停止後に履歴を解析' : 'History analysis after STOP') : (ja ? '走行履歴Tune' : 'Driving-history Tune'))
+                : active ? (ja ? '観測専用' : 'Observation only') : (ja ? '従来Tune' : 'Legacy Tune')} ›</span>
         </button>
         {open && <div ref={dialog} role="dialog" aria-modal="true" aria-label={title} data-testid="rf-acquisition-dialog">
             <DialogFrame icon={<Activity className="w-3 h-3" />} title={title}
@@ -82,7 +86,9 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                         </dl>}
                         <p className="mt-2 text-amber-300">{held
                             ? (ja ? '校正候補の採用を保留しています。参照BINが未確認・条件不適合、またはVEが解析BASEと不一致です。ログは保存できます。' : 'Calibration candidates are held: the reference is missing, unsuitable, or its VE differs from the analysis BASE. The log can still be saved.')
-                            : (ja ? 'ログ開始時のチェックサムと保存BINが一致しました。全バイトの実車読み戻しではありません。各点の学習値・応答・補正ゲートは引き続き検証します。' : 'Stored BIN matches the checksums read at START. This is not a full ECU readback. Learned values, response and correction gates still need validation.')}</p>
+                            : recordingKind === 'recorded-flash-reference'
+                                ? (ja ? '同じ車両の直前の実書き込み記録と、復元BINのSHA-256が一致しました。旧ログの参照として使います。開始時のチェックサム照合ではなく、未記録の後続書き込みは確認できません。' : 'The reconstructed BIN matches the SHA-256 of the last recorded real flash for this vehicle. Used as the historical reference; START checksums and any later unrecorded writes were not checked.')
+                                : (ja ? 'ログ開始時のチェックサムと保存BINが一致しました。全バイトの実車読み戻しではありません。各点の学習値・応答・補正ゲートは引き続き検証します。' : 'Stored BIN matches the checksums read at START. This is not a full ECU readback. Learned values, response and correction gates still need validation.')}</p>
                     </section>
                     <section>
                         <p className="font-semibold text-slate-100">{ja ? '2. ログ全体の収録状況' : '2. Complete log coverage'}</p>
@@ -100,20 +106,23 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                                     </details>
                                 </div>)}
                             <p className="mt-3 font-mono">RAM: k {report.direct.korr} / soll {report.direct.soll} / MAP {report.direct.map} · {report.total} {ja ? '総点数' : 'total'}</p>
-                            <p className="text-slate-400">{ja ? 'MAPは間引き読取。RAMは未検証の観測値で、Tuneの入力には使いません。' : 'MAP is read less frequently. RAM observations are unverified and are not Tune inputs.'}</p>
+                            <p className="text-slate-400">{ja ? 'MAPは間引き読取。走行履歴Tuneは、記録時刻とDMEロジックに整合する信号を解析に使います。' : 'MAP is read less frequently. Driving-history Tune uses signals consistent with the recorded read windows and DME logic.'}</p>
                         </>}
                     </section>
                     </details>
                     <section>
                         <p className="font-semibold text-slate-100">{ja ? '計測と保存' : 'Acquisition and storage'}</p>
                         <p>{ja ? '操作は停車中に行い、通常走行で対象域を通過した前後を記録してください。通過応答の収録に5秒間の保持は不要です。Δ30のアンカー成立や必要補正量は、この表示だけでは確定しません。' : 'Operate while parked and log the approach to and exit from ordinary passes. Response capture requires no five-second hold. This display alone does not establish a Δ30 anchor or the required correction.'}</p>
-                        <p className="mt-2">{ja ? '観測専用ではSAVEで追加信号・読出し時刻を含む生ログ、解析設定、BASEを保存し、SYNCでクラウドへ送ります。解析は再読込時に再計算し、解析JSONには版番号を付けます。既存TUNEDがある場合は別の記録を作ります。応答解析からTune用BINを生成・書き込みしません。' : 'Observation SAVE keeps raw signals, read windows, settings and BASE; SYNC uploads them. Analysis is recomputed on reload and exported with a version number. Prior TUNED records are preserved. Response analysis cannot generate or write a Tune BIN.'}</p>
-                        {!active && <p className="mt-2 text-amber-300">{ja ? '現在は従来Tuneです。このチェックを開くだけでは計算方式は変わりません。観測用のログは下のボタンで切り替えてください。' : 'Legacy Tune is selected. Opening this check does not change the calculation. Select observation mode below for research logs.'}</p>}
+                        <p className="mt-2">{moving
+                            ? (ja ? 'SAVEで生ログ・読出し時刻・記録時BIN・計算設定を保存し、SYNCでクラウドへ送ります。採用された補正はTUNEDに反映します。未採用のセルはBASEを維持し、補正が一つも成立しない場合はTune用BINを生成しません。'
+                                : 'SAVE retains raw signals, read windows, the recording BIN and calculation settings; SYNC uploads them. Accepted corrections become TUNED. Other cells retain BASE, and no Tune BIN is produced when no correction qualifies.')
+                            : (ja ? '観測専用ではSAVEで追加信号・読出し時刻を含む生ログ、解析設定、BASEを保存し、SYNCでクラウドへ送ります。解析は再読込時に再計算し、解析JSONには版番号を付けます。既存TUNEDがある場合は別の記録を作ります。応答解析からTune用BINを生成・書き込みしません。' : 'Observation SAVE keeps raw signals, read windows, settings and BASE; SYNC uploads them. Analysis is recomputed on reload and exported with a version number. Prior TUNED records are preserved. Response analysis cannot generate or write a Tune BIN.')}</p>
+                        {!active && <p className="mt-2 text-amber-300">{ja ? '現在は従来Tuneです。下のボタンで走行履歴を使う方式に切り替え、ログを再計算できます。' : 'Legacy Tune is selected. Switch below to recalculate this log using its driving history.'}</p>}
                     </section>
                 </div>
                 <div className="shrink-0 pt-3 flex flex-wrap justify-end gap-2">
-                    {options.veCorrectionPolicy !== 'dme-response' && <button type="button" disabled={readOnly} onClick={() => { onEnable(); close.current?.focus(); }} data-testid="rf-acquisition-enable"
-                        className="min-h-10 rounded px-3 bg-amber-500 text-slate-950 font-semibold text-xs disabled:opacity-50">{ja ? 'DME応答の比較に切り替える' : 'Use DME response comparison'}</button>}
+                    {!moving && <button type="button" disabled={readOnly} onClick={() => { onEnable(); close.current?.focus(); }} data-testid="rf-acquisition-enable"
+                        className="min-h-10 rounded px-3 bg-amber-500 text-slate-950 font-semibold text-xs disabled:opacity-50">{ja ? '走行履歴からVEを補正する' : 'Use driving-history VE correction'}</button>}
                     <button ref={close} type="button" onClick={() => setOpen(false)} className="min-h-10 rounded border border-slate-600 px-3 text-xs text-slate-200">{ja ? '閉じる' : 'Close'}</button>
                 </div>
             </DialogFrame>

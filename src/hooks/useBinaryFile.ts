@@ -11,6 +11,7 @@ import type { CalEdit, RunSpan } from '@/lib/calibration/edits';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
 import { isComparisonOnlyOutput, comparisonOnlyOutputMessage } from '@/lib/ve-calculator/comparisonOutput';
+import { movingResponseOutputHold } from '@/lib/ve-calculator/movingResponseOutput';
 import type { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
 import { dialogText, detectDialogLang } from '@/lib/dialog-text';
@@ -113,6 +114,8 @@ export type PatchExtras = {
    * in the manifest's row locks (see lib/calibration/apply.ts).
    */
   calibrationEdits?: { edits: CalEdit[]; conflictSpans: RunSpan[] } | null;
+  /** Required at the final byte boundary for a validated moving-history VE write. */
+  movingReference?: ArrayBuffer | null;
 };
 
 /**
@@ -468,8 +471,10 @@ export function useBinaryFile() {
 
     // Recalculate checksum last, after all other patches have been applied
     patcher.applyChecksumCorrection();
-
-    return patcher.getBuffer();
+    const output = patcher.getBuffer();
+    const hold = useWriteVe ? movingResponseOutputHold(newMap, extras?.movingReference, output, detectDialogLang()) : null;
+    if (hold) { alert(hold); return null; }
+    return output;
   };
 
   /** `newMap` is required, not optional, so that adding a caller cannot silently default to

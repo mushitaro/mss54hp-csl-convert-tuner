@@ -31,7 +31,7 @@ function harness(change) {
         missingPatches:()=>[],bytesPatched:false,bytesTankVentShut:false,featurePreview:true,
         liveExchangesRef:{current:null},finishedRef:{current:true},pendingTabRef:{current:null},
         setRecordingCalibration:r=>calls.push(['reference',r]),setRecordingBinary:b=>calls.push(['binary',b]),
-        filterConfig:{veCorrectionPolicy:'dme-response'},isVeComparisonPolicy:()=>true,
+        filterConfig:{veCorrectionPolicy:'dme-response'},isVeHistoryPolicy:()=>true,
         logFileState:{setLambdaLimits:v=>calls.push(['limits',v])},liveRun:{start:r=>calls.push(['recovery',r])},
     };
     return {calls,record,deps,invoke:executable('startTune',deps)};
@@ -43,6 +43,10 @@ assert.equal(normal.calls.at(-1)[0],'poll');
 assert.equal(normal.calls.find(x=>x[0]==='limits')[1],null);
 assert.equal(normal.deps.liveExchangesRef.current[0],'fixture-exchange');
 console.log('PASS unknown calibration still records; provenance is attached before polling and crash-recovery creation');
+const moving=harness();moving.deps.filterConfig.veCorrectionPolicy='moving-response';await moving.invoke();
+assert.equal(moving.calls.find(x=>x[0]==='recovery')[1].recordingCalibration,moving.record);
+assert.equal(moving.calls.find(x=>x[0]==='limits')[1],null);
+console.log('PASS moving-response START attaches recording provenance and refuses inferred lambda calibration');
 for(const mutate of [d=>d.recordingEpochRef.current++,d=>{d.dmeLink.readLinkState=()=>({identity:{vin:'other'},mockMode:false});}]) {
     const h=harness(mutate);await h.invoke();assert.equal(h.calls.length,0);
 }
@@ -57,7 +61,7 @@ assert.equal(deps.startingTuneRef.current,false);
 console.log('PASS concurrent START clicks are coalesced and a failed start releases the guard');
 for(const processed of [null,{data:[]}]) {
     const calls=[];
-    const deps={recordingEpochRef:{current:0},filterConfig:{veCorrectionPolicy:'dme-response'},isVeComparisonPolicy:()=>true,
+    const deps={recordingEpochRef:{current:0},filterConfig:{veCorrectionPolicy:'dme-response'},isVeHistoryPolicy:()=>true,
         logFileState:{parseAndSetLog:async(file,limits)=>{assert.equal(limits,null);return processed;}},
         setRecordingCalibration:v=>calls.push(v),setRecordingBinary:v=>calls.push(v),currentMap:null};
     await executable('handleLogUpload',deps)({name:'import.csv'});

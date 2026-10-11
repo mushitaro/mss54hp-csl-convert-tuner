@@ -48,6 +48,7 @@
   // the other half of the repo wrong. Two roots, one for each runtime.
   "exclude": [
     "node_modules",
-    "functions"
+    "functions",
+    "out"
   ]
 }

@@ -9,7 +9,7 @@ import { MAX_SAMPLE_SD } from '@/lib/ve-calculator/veScatter';
 import { useFeatureEnabled } from '@/lib/build-variant';
 import {
     LogFilterConfig, RfKorrSource, resolveRfKorr, resolveTransientWindow,
-    TRANSIENT_SETTLE_SEC_DEFAULT, isVeComparisonPolicy,
+    TRANSIENT_SETTLE_SEC_DEFAULT, isVeHistoryPolicy,
 } from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
 import { COVERAGE_OK_DEFAULT } from './MapEditor';
@@ -516,7 +516,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
         : settleSamples === undefined
             ? `${settleSec.toFixed(1)} s`
             : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`;
-    const steadyPolicy = isVeComparisonPolicy(localConfig.veCorrectionPolicy);
+    const steadyPolicy = isVeHistoryPolicy(localConfig.veCorrectionPolicy);
     const veMethod: VeMethod = steadyPolicy ? 'direct' : localConfig.veMethod ?? VE_METHOD_DEFAULT;
     const directMethod = veMethod === 'direct';
     const veAuthority = Math.round(100 * (localConfig.directAuthority ?? DIRECT_AUTHORITY_DEFAULT));
@@ -639,10 +639,22 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                         className="w-full bg-slate-900 border border-slate-700 p-2 text-xs"
                                         value={localConfig.veCorrectionPolicy ?? 'legacy-nominal'}
                                         onChange={e => handleChange('veCorrectionPolicy', e.target.value)}>
+                                        <option value="moving-response">{lang === 'ja' ? '走行履歴から補正・1回最大5%' : 'Driving-history correction · maximum 5% per update'}</option>
                                         <option value="legacy-nominal">{lang === 'ja' ? '従来の掛け戻し（保存ログの再現）' : 'Legacy multiply-back (replay)'}</option>
                                         <option value="steady-retain">{lang === 'ja' ? '観測専用・現行 RF KORR 維持（検証中）' : 'Observation only · retain RF KORR (experimental)'}</option>
                                         <option value="dme-response">{lang === 'ja' ? 'DME応答で比較・現行 RF KORR 維持' : 'DME response comparison · retain RF KORR'}</option>
                                     </select>
+                                    {localConfig.veCorrectionPolicy === 'moving-response' && <>
+                                        <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
+                                            ? 'ログ停止後に履歴を解析し、噴射量・ラムダ応答・運転点の移動を記録時のBINと照合して、独立区間で検証します。回転数やROの保持は不要です。採用セルを1回最大5%まで補正し、情報不足のセルはBASEを維持します。'
+                                            : 'After logging stops, analyzes injection, lambda response and the moving operating point against the recording BIN, validated on independent passages. No held RPM or RO is required. Accepted cells change by at most 5% per update; unresolved cells retain BASE.'}</p>
+                                        <SubField label={lang === 'ja' ? '今回の補正率 η' : 'Correction rate for this update η'}
+                                            value={`${Math.round((localConfig.veLearningRate ?? 1) * 100)} %`}>
+                                            <Slider min={10} max={100} step={10}
+                                                value={Math.round((localConfig.veLearningRate ?? 1) * 100)}
+                                                onChange={v => handleChange('veLearningRate', v / 100)} />
+                                        </SubField>
+                                    </>}
                                     {localConfig.veCorrectionPolicy === 'dme-response' && <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
                                         ? 'DMEの実測補正と停止・再開を追い、両バンクで2往復の応答を比較します。固定の待ち時間や運転点保持は採用条件にしません。補正中・信号不足は未確定として残します。現在は比較専用で、BIN出力は保留します。'
                                         : 'Tracks measured DME correction and controller resets; compares two cycles in both banks. No fixed settling time or held operating point. Unfinished or missing responses stay unresolved. Comparison only; BIN output remains held.'}</p>}

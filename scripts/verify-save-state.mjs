@@ -26,13 +26,15 @@ const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n
 
 /** Every phase the type allows. A new one must be added here, which is the point. */
 const PHASES = [
-    'runRecorded', 'nothing', 'baseOnly', 'logOnly', 'archived', 'logging', 'busy', 'saved', 'ready',
+    'runRecorded', 'nothing', 'baseOnly', 'logOnly', 'archived', 'logging', 'calculating', 'busy', 'saved', 'ready',
 ];
 
 /** The states in which the work IS on the device and there is nothing to press. */
 const SETTLED = ['runRecorded', 'baseOnly', 'archived', 'saved'];
 /** The states with something outstanding to write. */
 const PRESSABLE = ['logOnly', 'ready'];
+check('calculation cannot save a partial result', describeSave({ phase: 'calculating' }).disabled
+    && describeSave({ phase: 'calculating' }).tone === 'busy', 'wait for the authoritative calculation');
 
 console.log('\n[a settled state says so, and cannot be pressed]');
 for (const phase of SETTLED) {

@@ -71,3 +71,7 @@ scripts/.*-entry.ts
 # scripts/.w.mjs slipped past both and into a commit.
 scripts/.*.mjs
 scripts/.*.ts
+
+# Python replay scripts import shared numerical helpers.
+__pycache__/
+*.pyc

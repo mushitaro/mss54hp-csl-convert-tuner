@@ -48,6 +48,7 @@ function harness({ target = draft, map = candidate, policy = 'steady-retain', lo
     const newDraft = { ...draft, id: 'comparison-draft', baseOrigin: null, baseSha256: undefined, hasLog: false, logPointCount: 0 };
     const dependencies = {
         isVeComparisonPolicy,
+        veCalc: { isCalculating: false },
         pendingConfigRef: { current: null },
         filterConfig: { ...settings.filterConfig, veCorrectionPolicy: policy }, newMap: map,
         currentSession: target,
@@ -112,6 +113,13 @@ await check('a stale untagged map during comparison-mode recomputation cannot ro
 await check('pending mode changes cannot save mismatched settings or a stale BIN', async () => {
     const h = harness({ policy: 'legacy-nominal', map: ordinary });
     h.dependencies.pendingConfigRef.current = { veCorrectionPolicy: 'steady-retain' };
+    await h.invoke();
+    assert.equal(h.calls.length, 0);
+});
+
+await check('a moving-history calculation cannot save an unfinished map or a false log-only result', async () => {
+    const h = harness({ policy: 'moving-response', map: null });
+    h.dependencies.veCalc.isCalculating = true;
     await h.invoke();
     assert.equal(h.calls.length, 0);
 });

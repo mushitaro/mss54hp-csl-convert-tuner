@@ -1,16 +1,22 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { VECalculator, VeCalcOptions, type VeReject } from '@/lib/ve-calculator/calculator';
 import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } from '@/lib/ve-calculator/rfKorrTuner';
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { summariseChargeTemp, type ChargeTempInfo } from '@/lib/ve-calculator/chargeTemp';
 import { RfKorrLatch } from '@/lib/ve-calculator/egtTables';
-import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
+import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy, isVeHistoryPolicy } from '@/lib/types';
 import { MAP_DIMENSIONS, APP_CONFIG } from '@/config/constants';
-import { timeScaleSeconds } from '@/lib/log-engine/filter';
+import { interpolateFactor, timeScaleSeconds } from '@/lib/log-engine/filter';
 import { detectDriveSplit, type DriveSplit } from '@/lib/log-engine/driveSplit';
 import { prepareOperatingEvidence } from '@/lib/ve-calculator/operatingEvidence';
+import { startMovingResponseWorker, type MovingResponseJob } from '@/lib/ve-calculator/movingResponseWorker';
 
 export function useVeCalculation() {
+  const calculationEpoch = useRef(0);
+  const movingJob = useRef<MovingResponseJob | null>(null);
+  const [isCalculating, setIsCalculating] = useState(false);
+  const [movingError, setMovingError] = useState<string | null>(null);
+  useEffect(() => () => { calculationEpoch.current++; movingJob.current?.cancel(); }, []);
   /**
    * The live accumulator: the grid so far, the annotated samples so far, and how many of the
    * filtered log they account for.
@@ -38,6 +44,7 @@ export function useVeCalculation() {
     gateTrack: Map<number, { open: boolean; dwellSec: number }>;
   } | null>(null);
   const [newMap, setNewMap] = useState<VEMap | null>(null);
+  const [movingPending, setMovingPending] = useState(false);
   const [mapData, setMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
   const [hitMap, setHitMap] = useState<number[][] | null>(null);
   const [correctionMap, setCorrectionMap] = useState<number[][] | null>(null);
@@ -113,14 +120,33 @@ export function useVeCalculation() {
 
   const [coverage, setCoverage] = useState<{ withEvidence: number; withAnyData: number; total: number } | null>(null);
 
-  const runCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
+  const runCalculation = async (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
+    const moving = options.veCorrectionPolicy === 'moving-response';
+    // Clear the preceding writable result before awaiting a worker. A reset or
+    // another session/calculation invalidates its reply, including late failures.
+    if (moving) reset();
+    else { movingJob.current?.cancel(); movingJob.current = null; }
+    const epoch = ++calculationEpoch.current;
+    setIsCalculating(moving);
+    setMovingError(null);
+    setMovingPending(false);
     const calc = new VECalculator();
+    // All RAW rows reach the history estimator, including OFF/cut/acceleration.
+    // A filter may suppress an O2 observation; it cannot erase the earlier fuel history.
+    const movingRaw = moving ? processed.rawData.map((p, rawSampleIndex) => {
+      const factor = options.steadyFilterConfig?.enableCorrection
+        ? interpolateFactor(p.rpm, options.steadyLoadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE) : 1;
+      return { ...p, rawSampleIndex, correctedLoad: factor > 0 ? p.rawLoad / factor : NaN };
+    }) : null;
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
     // `processed.rawData` as the latch source, not `processed.data`. The rf_korr latch is a DME
     // state machine and it advanced on every sample the car took, including the ones the filters
     // below removed — see ProcessedLog.rawData and RfKorrLatch.
-    const annotated = isVeComparisonPolicy(options.veCorrectionPolicy)
+    const annotated = movingRaw ? processed.data.map(p => {
+      const candidate = p.rawSampleIndex === undefined ? undefined : movingRaw[p.rawSampleIndex];
+      return candidate?.time === p.time ? candidate : { ...p, veEvidenceEligible: false, veEvidenceReason: 'history-missing' };
+    }) : isVeComparisonPolicy(options.veCorrectionPolicy)
       ? prepareOperatingEvidence(map, processed, options)
       : calc.annotateRfKorr(map, processed.data, options.egt, options.rfKorrAir, processed.rawData);
     // Between the two: the tuner reads the annotated log and the VE calculation may go on to
@@ -145,7 +171,26 @@ export function useVeCalculation() {
     // The tuned table comes from THIS run, not from the caller. It is derived from the same log
     // the map is about to be built from, so passing it in would mean the caller had to run the
     // tuner first and the two could describe different drives.
-    const result = calc.calculateNewVEMap(map, annotated, { ...options, tunedRfKorr: rfKorr });
+    let result: ReturnType<VECalculator['calculateNewVEMap']>;
+    if (movingRaw) {
+      setAnnotatedLog(annotated);
+      try {
+        const job = startMovingResponseWorker({ map, raw: movingRaw, options });
+        movingJob.current = job;
+        const reply = await job.result;
+        if (epoch !== calculationEpoch.current) return;
+        movingJob.current = null;
+        setIsCalculating(false);
+        if (!reply) return;
+        result = reply;
+      } catch (error) {
+        if (epoch !== calculationEpoch.current) return;
+        movingJob.current = null;
+        setIsCalculating(false);
+        setMovingError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    } else result = calc.calculateNewVEMap(map, annotated, { ...options, tunedRfKorr: rfKorr });
 
     /*
      * What restating this log would do to it: measured always, applied inside the calculator.
@@ -161,7 +206,7 @@ export function useVeCalculation() {
     // Counted off the ANNOTATED log, because that is where the refusal happens: a sample with no
     // air data comes back without an rfKorr and the calculation falls back to the trim alone.
     const candidates = annotated.filter(p => p.rf !== undefined).length;
-    const normaliseTo = isVeComparisonPolicy(options.veCorrectionPolicy) ? null : options.normaliseTo ?? null;
+    const normaliseTo = isVeHistoryPolicy(options.veCorrectionPolicy) ? null : options.normaliseTo ?? null;
     setChargeTempInfo({
       ...summariseChargeTemp(processed.data, normaliseTo, !!normaliseTo),
       rfKorrMeasured: annotated.filter(p => p.rfKorr !== undefined).length,
@@ -239,6 +284,14 @@ export function useVeCalculation() {
    * the app. Live is allowed to be an approximation; the artefact is not.
    */
   const appendCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
+    if (options.veCorrectionPolicy === 'moving-response') {
+      // The multi-model solve belongs to STOP, not the main-thread DS2 polling
+      // loop. Retain the growing log and remove the preceding run's writable map.
+      reset();
+      setMovingPending(true);
+      setAnnotatedLog(processed.data);
+      return;
+    }
     if (isVeComparisonPolicy(options.veCorrectionPolicy)) {
       // Causal whole-history replay first: the new policy must agree at LIVE and STOP.
       // The original incremental accumulator is kept solely for archived policy replay.
@@ -329,10 +382,17 @@ export function useVeCalculation() {
   };
 
   const reset = () => {
+    calculationEpoch.current++;
+    movingJob.current?.cancel();
+    movingJob.current = null;
+    setIsCalculating(false);
+    setMovingError(null);
     liveRef.current = null;
+    setMovingPending(false);
     // With the log, so a new workspace cannot inherit the last drive's verdict.
     setDriveSplit(null);
     setNewMap(null);
+    setMapData(Array.from({ length: MAP_DIMENSIONS.rows }, () => Array(MAP_DIMENSIONS.cols).fill(100)));
     setWeightMap(null);
     setAcceptedMap(null);
     // Both were missing here. A stale rejectMap only mislabels a cleared map; a stale demandMap
@@ -352,6 +412,9 @@ export function useVeCalculation() {
 
   return {
     newMap,
+    movingPending,
+    isCalculating,
+    movingError,
     mapData,
     hitMap,
     correctionMap,

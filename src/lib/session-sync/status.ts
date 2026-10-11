@@ -112,6 +112,8 @@ export type SavePhase =
     | 'archived'
     /** A datalog is running. The map is still being rebuilt every few hundred ms. */
     | 'logging'
+    /** A finished drive is being solved; no final output may be saved yet. */
+    | 'calculating'
     | 'busy'
     | 'ready';
 
@@ -188,6 +190,8 @@ export function describeSave({ phase }: SaveStatus): SaveLook {
             };
         case 'busy':
             return { label: 'Saving…', title: 'Writing this tune into the device database.', disabled: true, tone: 'busy' };
+        case 'calculating':
+            return { label: 'Analyzing…', title: 'Solving the recorded driving history. Save becomes available when the final result is ready.', disabled: true, tone: 'busy' };
         case 'saved':
             return {
                 label: 'Saved',

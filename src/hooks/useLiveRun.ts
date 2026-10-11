@@ -167,6 +167,7 @@ export function useLiveRun(input: {
      * schedules another 500 ms later, and a flush already in flight is about to show the same answer.
      */
     const flushBusyRef = useRef(false);
+    const flushGenerationRef = useRef(0);
 
     /**
      * Runs the UI flush WITHOUT blocking the DS2 poll loop.
@@ -188,7 +189,9 @@ export function useLiveRun(input: {
         if (flushBusyRef.current) return;
         if (Date.now() - lastFlushRef.current < FLUSH_INTERVAL_MS) return;
         flushBusyRef.current = true;
+        const generation = flushGenerationRef.current;
         const run = () => {
+            if (generation !== flushGenerationRef.current) return;
             try { runFlush(true); } finally { flushBusyRef.current = false; }
         };
         const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void })
@@ -253,6 +256,7 @@ export function useLiveRun(input: {
     const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[];
         recordingCalibration?: RecordingCalibration }) => {
         samplesRef.current = [];
+        flushGenerationRef.current++;
         exchangesRef.current = run.exchanges;
         lastFlushRef.current = 0;
         flushBusyRef.current = false;
@@ -281,6 +285,10 @@ export function useLiveRun(input: {
      * the window in which the result is read and a decision made.
      */
     const finish = useCallback(async () => {
+        // A queued LIVE flush must not arrive after STOP and replace/cancel the
+        // full-history result while its Worker is still running.
+        flushGenerationRef.current++;
+        flushBusyRef.current = false;
         // Authoritative: the run is over, and everything downstream — the stored TUNED, the bytes a
         // WRITE sends — comes from this pass rather than from the live approximation.
         const flushed = runFlush(true, true);
@@ -294,6 +302,8 @@ export function useLiveRun(input: {
     /** Drops the buffered run without touching the recovery store — for the paths that replace the
      *  workspace rather than end a drive (a new session, a CSV import, a discard). */
     const reset = useCallback(() => {
+        flushGenerationRef.current++;
+        flushBusyRef.current = false;
         samplesRef.current = [];
         exchangesRef.current = null;
         queueRef.current = [];
