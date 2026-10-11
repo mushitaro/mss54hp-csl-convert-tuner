@@ -1,11 +1,11 @@
 /**
- * The file workflow, pinned to the bytes the app hands back.
+ * Historical file replay, pinned to the bytes the app handed back.
  *
  * README "A. File workflow": UPLOAD BIN (a partial BIN), TESTO CSV (a drive log), DOWNLOAD TUNED.
- * This runs that path headlessly under a first load's defaults and checks the tuned BIN against a
+ * This pins the legacy calculation used on 2026-09-30 and checks the tuned BIN against a
  * golden SHA-256 that was measured from the APP — the production build in headless Chrome, the
  * fixture files set on the two upload inputs and the Download Tuned blob hashed — not from this
- * script. The two agreeing is what makes the hash mean "what the app produces" rather than "what
+ * script. The two agreeing is what makes the hash mean "what the legacy replay produces" rather than "what
  * this script produces".
  *
  * Why it exists: the next step is the same computation outside the browser (a tool an LLM can call
@@ -16,8 +16,10 @@
  *
  * Every function the bytes pass through is the app's own, imported from src/: parseLogFile,
  * processLogData, the VECalculator, tuneRfKorrTable, writtenVeGrid, the BinaryPatcher and the
- * checksum. The defaults are the app's too (DEFAULT_FILTER_CONFIG, moved out of useLogFile into
- * lib/log-engine/filterDefaults.ts for this). The ORDER is re-composed, because the app composes
+ * checksum. Filter defaults come from the app, with the historical legacy policy explicit.
+ * New work defaults to moving-response and is tested by verify-tune-policy-workflow and the
+ * verify-moving-response-* checks. This fixture must not redefine the new-work default merely
+ * to reproduce an old golden. The ORDER is re-composed, because the app composes
  * inside React hooks this cannot call:
  *
  *     useBinaryFile.uploadBinary        toggles detected from the bytes (useBinaryFile.ts ~255)
@@ -88,12 +90,15 @@ const curves = M.readRfPtKorrCurves(base);
 const lambdaLimits = new M.BinaryParser(M.bytesAsRun(base, toggles)).readLambdaLimits();
 
 // --- TESTO CSV -----------------------------------------------------------------------------------
-const cfg = M.DEFAULT_FILTER_CONFIG;
+check('new work defaults to history Tune, independently of this legacy replay',
+    M.DEFAULT_FILTER_CONFIG.veCorrectionPolicy === 'moving-response');
+const cfg = { ...M.DEFAULT_FILTER_CONFIG, veCorrectionPolicy: 'legacy-nominal' };
 const raw = M.parseLogFile(fs.readFileSync(CSV, 'utf8'));
 const processed = M.processLogData(raw, path.basename(CSV), cfg, M.APP_CONFIG.MSS54HP.INTERPOLATION_TABLE, lambdaLimits);
 
 // veCalcOptionsFor(cfg, egt, writeRfKorr = false, curves), field for field.
 const options = {
+    veCorrectionPolicy: cfg.veCorrectionPolicy,
     rfKorrSource: cfg.rfKorrSource,
     rfKorrMode: cfg.rfKorrMode,
     applyRfKorr: cfg.applyRfKorr,
@@ -172,7 +177,7 @@ if (GOLDEN === null) {
     console.log('  NOT PINNED — measure the golden from the app and write it into GOLDEN.');
     process.exit(2);
 }
-check('the tuned BIN is byte-for-byte what the app downloads', hash === GOLDEN, `got ${hash}, the app gave ${GOLDEN}`);
+check('legacy replay remains byte-for-byte the historical app download', hash === GOLDEN, `got ${hash}, the app gave ${GOLDEN}`);
 
 console.log(fails ? `\n${fails} FAIL` : '\nall PASS');
 process.exit(fails ? 1 : 0);

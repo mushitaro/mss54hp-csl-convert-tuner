@@ -1,4 +1,4 @@
-import { LogDataPoint } from '@/lib/types';
+import type { LogDataPoint, LogFilterConfig, InterpolationPoint } from '@/lib/types';
 import type { RecordingCalibration } from './recordingCalibration';
 
 /**
@@ -35,6 +35,14 @@ export const LIVE_DB_VERSION = 1;
 export const RUNS_STORE = 'runs';
 export const CHUNKS_STORE = 'chunks';
 
+/** Settings selected when START was pressed. Recovery must not borrow the settings of whichever
+ * session happens to be open after a reload. Optional on old records, whose RAW is explicitly
+ * re-analyzed with the current Tune defaults. IndexedDB needs no schema upgrade for this field. */
+export interface LiveCalculationSnapshot {
+    filterConfig: LogFilterConfig;
+    interpolationTable: InterpolationPoint[];
+}
+
 export interface LiveRunRecord {
     runId: string;
     /** The session this run belongs to. START TUNE is only offered with a session open (the hub's
@@ -48,6 +56,7 @@ export interface LiveRunRecord {
      *  Surfaced on the offer so a simulated run is never mistaken for a drive. */
     mock: boolean;
     recordingCalibration?: RecordingCalibration;
+    calculationSnapshot?: LiveCalculationSnapshot;
     /** Set when the run stopped through the app. Unset means the page went away mid-run — the case
      *  this store exists for. Both are offered for recovery; only the wording differs. */
     endedAt?: number;
@@ -135,9 +144,14 @@ function chunkRange(runId: string): IDBKeyRange {
  * so by the time a new run begins the user has already answered it. Keeping both would mean a second
  * reload offered the older, less interesting run.
  */
-export async function beginLiveRun(meta: { sessionId: string; mock: boolean; recordingCalibration?: RecordingCalibration }): Promise<string> {
+export async function beginLiveRun(meta: { sessionId: string; mock: boolean;
+    recordingCalibration?: RecordingCalibration; calculationSnapshot?: LiveCalculationSnapshot }): Promise<string> {
     const runId = crypto.randomUUID();
     const now = Date.now();
+    // Clone before opening IndexedDB: START does not await this call, and the operator may change
+    // a nested filter range or a load-table point before the database finishes opening.
+    const calculationSnapshot = meta.calculationSnapshot === undefined
+        ? undefined : structuredClone(meta.calculationSnapshot);
     const db = await openLiveDb();
     try {
         await runTransaction(db, [RUNS_STORE, CHUNKS_STORE], 'readwrite', tx => {
@@ -147,6 +161,7 @@ export async function beginLiveRun(meta: { sessionId: string; mock: boolean; rec
                 runId, sessionId: meta.sessionId, startedAt: now, updatedAt: now,
                 pointCount: 0, mock: meta.mock,
                 recordingCalibration: meta.recordingCalibration,
+                calculationSnapshot,
             } satisfies LiveRunRecord);
         });
         return runId;

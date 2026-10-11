@@ -16,6 +16,8 @@ import { DriveSplitChip } from '@/components/DriveSplitNotice';
 import { TunedStatusBar } from '@/components/TunedStatusBar';
 import { activeExclusion } from '@/lib/log-engine/driveSplit';
 import { DropCensusLine } from '@/components/DropCensus';
+import { freshTuneFilterConfig, replayTuneFilterConfig } from '@/lib/log-engine/tunePolicy';
+import { APP_CONFIG } from '@/config/constants';
 import {
   type ProcessId, LOG_PROFILES, expectedHz, describeExchanges, missingPatches, deriveRoute,
   selectableModes as selectableModesFor,
@@ -122,7 +124,7 @@ import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
 import { TUNE_ADAPTATION_CLEAR, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
-import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
+import { discardLiveRun, findRecoverableRun, loadLiveRunPoints, type LiveCalculationSnapshot } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { dialogText } from '@/lib/dialog-text';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
@@ -872,6 +874,7 @@ export default function Home() {
   const handleUploadBase = async (session: TuningSession, file: File) => {
     setActiveSessionId(session.id);
     resetDerived();
+    logFileState.reprocess(freshTuneFilterConfig(filterConfig));
     const map = await binaryFileState.uploadBinary(file);
     if (!map) return;
     const buffer = await file.arrayBuffer();
@@ -1347,7 +1350,8 @@ export default function Home() {
     // correct 4.56 Hz run as faster than possible. Not applied to the live list: that one is what
     // the link actually settled on, already narrowed at START TUNE.
     const exchanges = (dmeLink.state === 'tuning' ? liveExchangesRef.current : null)
-      ?? (featurePreview ? profile.exchanges : productionExchanges(profile.exchanges));
+      ?? (featurePreview || (logProcess === 'VE' && isVeHistoryPolicy(filterConfig.veCorrectionPolicy))
+        ? profile.exchanges : productionExchanges(profile.exchanges));
     const want = expectedHz(exchanges);
     return {
       hz, want,
@@ -2399,21 +2403,32 @@ export default function Home() {
     const created = await sessionDb.newDraft();
     setActiveSessionId(created.id);
     resetDerived();
+    logFileState.reprocess(freshTuneFilterConfig(filterConfig));
     goToTab('startup');
     return created;
   };
 
   /** Opens a saved session. Draft -> keep tuning. Archived -> reference + flash only. */
   const handleOpenSession = async (session: TuningSession) => {
+    // Saved logs replay their own method, including records predating this field.
+    // A BASE-only draft is new work and must not inherit the last opened method.
+    const restoredConfig = session.hasLog
+      ? replayTuneFilterConfig(session.tuneSettings?.filterConfig)
+      : freshTuneFilterConfig(session.tuneSettings?.filterConfig ?? filterConfig);
+    const restoredTable = session.tuneSettings?.interpolationTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
     // The base-less branch still swaps the ACTIVE session, so it must drop the outgoing
     // session's derived state like the main path does — without this, a log parked on an
     // empty draft ran the previous session's binary through runCalculation and showed a
     // cross-session tune under the new draft's identity.
-    if (!session.baseOrigin) { resetDerived(); setActiveSessionId(session.id); goToTab('startup'); return; }
+    if (!session.baseOrigin) {
+      resetDerived(); logFileState.reprocess(restoredConfig);
+      setActiveSessionId(session.id); goToTab('startup'); return;
+    }
     const bins = await sessionDb.loadBinaries(session.id);
     if (!bins) { alert(dialogText().noStoredBinary); return; }
 
     resetDerived();
+    logFileState.reprocess(restoredConfig);
     setActiveSessionId(session.id);
     // Stage the stored calibration edits for the effect that re-arms them once the NEW buffer
     // is in state — restoreEdits must rebase against those bytes, and this scope still holds
@@ -2495,8 +2510,8 @@ export default function Home() {
         const processed = logFileState.loadRawLog(
           rawLog,
           (session.binaryFileName ?? 'session').replace(/\.bin$/i, '.csv'),
-          session.tuneSettings?.filterConfig,
-          session.tuneSettings?.interpolationTable,
+          restoredConfig,
+          restoredTable,
           // Explicit, for the reason the comment below gives about config and table: the effect
           // that pushes `lambdaLimits` into the hook has not run yet in this scope, so the hook
           // still holds the OUTGOING session's binary. Read them from the bytes just loaded —
@@ -2504,7 +2519,7 @@ export default function Home() {
           // captured against a car carrying whatever `armed` says, and the full-load gate reads a
           // table WRITE PATCH-ON rewrites. Replaying it through the raw BASE rejected the very
           // pulls the patch exists to keep.
-          isVeHistoryPolicy(session.tuneSettings?.filterConfig.veCorrectionPolicy ?? filterConfig.veCorrectionPolicy)
+          isVeHistoryPolicy(restoredConfig.veCorrectionPolicy)
           ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
           : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
             applyPatch: !!armed?.applyPatch,
@@ -2522,11 +2537,11 @@ export default function Home() {
           // reading the absent field as plain false would drop the table write from every archived
           // 'tuned' session and its sha256 check would fail against bytes that were correct.
           veCalc.runCalculation(map, processed, veCalcOptionsFor(
-            session.tuneSettings?.filterConfig ?? filterConfig,
+            restoredConfig,
             readEgtTables(bins.baseBinaryBuffer),
             storedWriteRfKorr(session.tuneSettings),
             readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer,
-            session.tuneSettings?.interpolationTable ?? interpolationTable, recordingBytes));
+            restoredTable, recordingBytes));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -2558,7 +2573,7 @@ export default function Home() {
     // it needs is the hub — connect, read, start a run. The map is one tap away and is where you
     // go once there is something to look at. (This landed on MAP for a day; the operator asked for
     // DASH, which is the pane the work actually begins in.)
-    if (rebuilt && (session.tuneSettings?.filterConfig ?? filterConfig).veCorrectionPolicy === 'moving-response') {
+    if (rebuilt && restoredConfig.veCorrectionPolicy === 'moving-response') {
       goToTab('current');
       pendingTabRef.current = 'new';
     } else goToTab(rebuilt ? 'new' : 'current');
@@ -2630,7 +2645,7 @@ export default function Home() {
         });
         if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
       }
-      await restoreRun(run.runId, run.sessionId, run.recordingCalibration);
+      await restoreRun(run.runId, run.sessionId, run.recordingCalibration, run.calculationSnapshot);
     })();
     // One-shot, guarded by the ref: re-running on every sessions refresh would re-offer a run the
     // user has already answered for.
@@ -2645,13 +2660,20 @@ export default function Home() {
    * store. The recovery record is deliberately NOT cleared on success: the samples are back in
    * memory, which is exactly the fragile place they were lost from, so the net stays up until SAVE.
    */
-  const restoreRun = async (runId: string, sessionId: string, recording?: RecordingCalibration) => {
+  const restoreRun = async (runId: string, sessionId: string, recording?: RecordingCalibration,
+    calculationSnapshot?: LiveCalculationSnapshot) => {
     const session = sessionDb.sessions.find(s => s.id === sessionId);
     const bins = session ? await sessionDb.loadBinaries(sessionId) : null;
     if (!session || !bins) { alert(dialogText().recoverFailed); return; }
 
     const points = await loadLiveRunPoints(runId).catch(() => [] as LogDataPoint[]);
     if (points.length === 0) { alert(dialogText().recoverFailed); return; }
+
+    // New recovery records carry the actual START settings. Older records have
+    // no such provenance; re-analyze their RAW under the current Tune method,
+    // never under whichever unrelated session happened to be open.
+    const recoveredConfig = calculationSnapshot?.filterConfig ?? freshTuneFilterConfig();
+    const recoveredTable = calculationSnapshot?.interpolationTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
 
     resetDerived();
     const recordingBytes = await recordingCalibrationBuffer(recording);
@@ -2693,8 +2715,8 @@ export default function Home() {
        effect that pushes `lambdaLimits` into the hook has not run in this scope, so without this the
        recovered drive would be filtered through the OUTGOING session's binary. */
     const processed = logFileState.loadRawLog(
-      points, 'recovered-log.csv', undefined, undefined,
-      isVeHistoryPolicy(filterConfig.veCorrectionPolicy)
+      points, 'recovered-log.csv', recoveredConfig, recoveredTable,
+      isVeHistoryPolicy(recoveredConfig.veCorrectionPolicy)
       ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
       : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
         applyPatch: !!armed?.applyPatch,
@@ -2705,12 +2727,12 @@ export default function Home() {
     if (processed) {
       // Same stale-scope reason as the archived rebuild: `loadFromBuffer` above only scheduled
       // the binary swap, so the egtTables memo still describes whatever was loaded before. The
-      // filter config is NOT reloaded here, so the live one is the right one.
+      // recovery settings are passed explicitly before React adopts their state.
       veCalc.runCalculation(map, processed,
-        veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr,
-          readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer, interpolationTable, recordingBytes));
+        veCalcOptionsFor(recoveredConfig, readEgtTables(bins.baseBinaryBuffer), storedWriteRfKorr(session.tuneSettings),
+          readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer, recoveredTable, recordingBytes));
       comparison.applyDefaultsAfterCalculation();
-      if (filterConfig.veCorrectionPolicy === 'moving-response') {
+      if (recoveredConfig.veCorrectionPolicy === 'moving-response') {
         goToTab('current');
         pendingTabRef.current = 'new';
       } else goToTab('new');
@@ -2950,6 +2972,7 @@ export default function Home() {
     const target = await ensureDraft();
     if (!target) return;
     resetDerived();
+    logFileState.reprocess(freshTuneFilterConfig(filterConfig));
     const fileName = `DME_Read_${Date.now()}.bin`;
     await binaryFileState.loadFromBuffer(buffer, fileName);
     await sessionDb.setBase({
@@ -3137,7 +3160,9 @@ export default function Home() {
     // first would hand it a list the disassembly never described.
     //
     // Both lists are annotated, so a production run that falls back is still a production run.
-    const exchanges = featurePreview
+    // The history estimator needs the controller response and direct injection
+    // reads even when experimental display panels are hidden in this build.
+    const exchanges = featurePreview || (logProcess === 'VE' && isVeHistoryPolicy(filterConfig.veCorrectionPolicy))
       ? (await dmeLink.verifyLogProfile(profile)).exchanges
       : productionExchanges((await dmeLink.verifyLogProfile(profile)).exchanges);
     const connected = dmeLink.readLinkState();
@@ -3153,7 +3178,8 @@ export default function Home() {
     if (isVeHistoryPolicy(filterConfig.veCorrectionPolicy)) {
       logFileState.setLambdaLimits(recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null);
     }
-    liveRun.start({ sessionId: currentSession?.id ?? null, mock: dmeLink.mockMode, exchanges, recordingCalibration: recording });
+    liveRun.start({ sessionId: currentSession?.id ?? null, mock: dmeLink.mockMode, exchanges, recordingCalibration: recording,
+      calculationSnapshot: { filterConfig, interpolationTable } });
     // LAMBDA FEEDBACK is where a run is actually read — it is the trim the log is being captured to
     // measure. It is disabled at this instant (no correctionMap, no newMap), which is exactly what
     // arming is for; the first sample's unthrottled flush releases it.
@@ -5209,12 +5235,6 @@ export default function Home() {
       {veCalc.movingError && <div role="alert" className="shrink-0 px-4 py-2 text-xs border-b border-slate-800 bg-slate-900 text-amber-300">
         {displayLang === 'ja' ? '履歴解析を完了できませんでした。ログは保持しています。' : 'History analysis could not finish. The log is retained. '}{veCalc.movingError}
       </div>}
-      {featureEnabled('rfKorr', featurePreview) && logProcess === 'VE' &&
-        ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
-        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary} recordingKind={recordingCalibration?.status}
-          logging={dmeLink.state === 'tuning'}
-          options={veCalcOptions} active={isVeHistoryPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)}
-          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'moving-response' })} />}
       {/* App Header - Ultra Minimal */}
       {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">
@@ -5603,6 +5623,9 @@ export default function Home() {
                   readOnly={isArchived}
                 />
                 <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived}
+                  diagnostics={featureEnabled('rfKorr', featurePreview) && logProcess === 'VE'
+                    ? <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary}
+                        recordingKind={recordingCalibration?.status} logging={dmeLink.state === 'tuning'} options={veCalcOptions} /> : undefined}
                   /* Which stream the tab behind this panel is reading — see its `scope` prop.
                      One expression, both call sites, so the two cannot answer differently. */
                   scope={activeTab === 'rfkorr' ? 'rfkorr' : 've'}
@@ -6693,6 +6716,9 @@ export default function Home() {
               openUp
             />
             <FilterConfigPanel config={filterConfig} onConfigChange={handleConfigChange} readOnly={isArchived}
+                diagnostics={featureEnabled('rfKorr', featurePreview) && logProcess === 'VE'
+                  ? <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary}
+                      recordingKind={recordingCalibration?.status} logging={dmeLink.state === 'tuning'} options={veCalcOptions} /> : undefined}
                 scope={activeTab === 'rfkorr' ? 'rfkorr' : 've'}
                 channels={logChannels} measuredHz={logRate?.hz} routeGap={routeGap} routeSamples={routeSamples} openUp />
             {/* Same swap as the wide cluster above — see the note there. */}

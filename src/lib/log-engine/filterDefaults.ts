@@ -10,6 +10,9 @@ import { VE_MIN_WEIGHT_DEFAULT, RF_KORR_SETTLE_SEC_DEFAULT } from '@/lib/ve-calc
  * starting state and nothing else.
  */
 export const DEFAULT_FILTER_CONFIG: LogFilterConfig = {
+  // Fresh work uses the validated history estimator. Stored logs resolve their
+  // original policy separately; a missing field there still means legacy replay.
+  veCorrectionPolicy: 'moving-response',
   enableCorrection: true,
   enableMinTemp: true,
   minTemp: 65,

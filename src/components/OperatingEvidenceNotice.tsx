@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Activity } from 'lucide-react';
 import type { LogDataPoint, VEMap } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
@@ -22,19 +23,18 @@ const labels: Record<string, string> = {
     'operating-point-unknown': '運転状態欠測', 'trim-unknown': 'トリム欠測', 'lambda-state-unknown': '燃調状態欠測',
 };
 
-export function OperatingEvidenceNotice({ raw, map, base, options, active, readOnly, logging, onEnable, recordingKind }: {
+export function OperatingEvidenceNotice({ raw, map, base, options, logging, recordingKind }: {
     raw: LogDataPoint[] | null; map: VEMap | null; base: ArrayBuffer | null;
-    options: VeCalcOptions; active: boolean; readOnly: boolean; logging: boolean; onEnable: () => void;
+    options: VeCalcOptions; logging: boolean;
     recordingKind?: RecordingCalibration['status'];
 }) {
     const ja = useDialogLang() === 'ja';
-    const moving = options.veCorrectionPolicy === 'moving-response';
     const [open, setOpen] = useState(false);
     const trigger = useRef<HTMLButtonElement>(null);
     const close = useRef<HTMLButtonElement>(null);
     const dialog = useRef<HTMLDivElement>(null);
     const context = useMemo(() => operatingCalibrationContext(base), [base]);
-    // No second full replay in the closed strip, including during LIVE acquisition.
+    // Opening diagnostics is the only trigger for this additional replay.
     const report = useMemo(() => open && !logging && map && raw?.length
         ? summarizeAcquisition(map, raw, options) : null, [open, logging, map, raw, options]);
     useEffect(() => {
@@ -57,17 +57,16 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
     const reasonText = (entries: [string, number][]) => entries.length
         ? entries.map(([r, n]) => `${ja ? labels[r] ?? r : r}: ${n}`).join(' / ')
         : (ja ? '除外なし' : 'No exclusions');
-    const held = !context.known || context.airModelActive || context.learningActive || (active && !!options.steadyCalibrationHold);
-    const title = ja ? 'RF応答チェック' : 'RF response check';
+    const held = !context.known || context.airModelActive || context.learningActive || !!options.steadyCalibrationHold;
+    const title = ja ? 'RF応答の詳細' : 'Response diagnostics';
     return <>
         <button ref={trigger} type="button" onClick={() => setOpen(true)} disabled={logging}
-            className="shrink-0 h-10 flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-4 text-xs text-slate-200"
+            className="inline-flex min-h-10 items-center gap-2 text-xs text-indigo-300 hover:text-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed transition-colors"
             aria-haspopup="dialog" data-testid="rf-acquisition-open">
-            <span className="flex items-center gap-2"><Activity className="w-4 h-4" />{title}</span>
-            <span className="text-amber-300">{moving ? (logging ? (ja ? 'ログ停止後に履歴を解析' : 'History analysis after STOP') : (ja ? '走行履歴Tune' : 'Driving-history Tune'))
-                : active ? (ja ? '観測専用' : 'Observation only') : (ja ? '従来Tune' : 'Legacy Tune')} ›</span>
+            <Activity className="w-4 h-4" />{title}<span aria-hidden="true">›</span>
         </button>
-        {open && <div ref={dialog} role="dialog" aria-modal="true" aria-label={title} data-testid="rf-acquisition-dialog">
+        {logging && <p className="text-[10px] text-slate-400">{ja ? 'ログ停止後に確認できます。' : 'Available after logging stops.'}</p>}
+        {open && createPortal(<div ref={dialog} role="dialog" aria-modal="true" aria-label={title} data-testid="rf-acquisition-dialog">
             <DialogFrame icon={<Activity className="w-3 h-3" />} title={title}
                 closeButtonClassName="min-w-10 min-h-10 flex items-center justify-center"
                 closeLabel={ja ? '閉じる' : 'Close'} onClose={() => setOpen(false)}>
@@ -113,19 +112,15 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                     <section>
                         <p className="font-semibold text-slate-100">{ja ? '計測と保存' : 'Acquisition and storage'}</p>
                         <p>{ja ? '操作は停車中に行い、通常走行で対象域を通過した前後を記録してください。通過応答の収録に5秒間の保持は不要です。Δ30のアンカー成立や必要補正量は、この表示だけでは確定しません。' : 'Operate while parked and log the approach to and exit from ordinary passes. Response capture requires no five-second hold. This display alone does not establish a Δ30 anchor or the required correction.'}</p>
-                        <p className="mt-2">{moving
-                            ? (ja ? 'SAVEで生ログ・読出し時刻・記録時BIN・計算設定を保存し、SYNCでクラウドへ送ります。採用された補正はTUNEDに反映します。未採用のセルはBASEを維持し、補正が一つも成立しない場合はTune用BINを生成しません。'
-                                : 'SAVE retains raw signals, read windows, the recording BIN and calculation settings; SYNC uploads them. Accepted corrections become TUNED. Other cells retain BASE, and no Tune BIN is produced when no correction qualifies.')
-                            : (ja ? '観測専用ではSAVEで追加信号・読出し時刻を含む生ログ、解析設定、BASEを保存し、SYNCでクラウドへ送ります。解析は再読込時に再計算し、解析JSONには版番号を付けます。既存TUNEDがある場合は別の記録を作ります。応答解析からTune用BINを生成・書き込みしません。' : 'Observation SAVE keeps raw signals, read windows, settings and BASE; SYNC uploads them. Analysis is recomputed on reload and exported with a version number. Prior TUNED records are preserved. Response analysis cannot generate or write a Tune BIN.')}</p>
-                        {!active && <p className="mt-2 text-amber-300">{ja ? '現在は従来Tuneです。下のボタンで走行履歴を使う方式に切り替え、ログを再計算できます。' : 'Legacy Tune is selected. Switch below to recalculate this log using its driving history.'}</p>}
+                        <p className="mt-2">{ja
+                            ? 'SAVEで生ログ・読出し時刻・参照BIN・計算設定を保存し、SYNCでクラウドへ送ります。この画面はRF応答の診断です。VE補正の採用結果はTUNEDで確認してください。'
+                            : 'SAVE retains raw signals, read windows, reference BIN and calculation settings; SYNC uploads them. This screen inspects RF response. Check TUNED for accepted VE corrections.'}</p>
                     </section>
                 </div>
                 <div className="shrink-0 pt-3 flex flex-wrap justify-end gap-2">
-                    {!moving && <button type="button" disabled={readOnly} onClick={() => { onEnable(); close.current?.focus(); }} data-testid="rf-acquisition-enable"
-                        className="min-h-10 rounded px-3 bg-amber-500 text-slate-950 font-semibold text-xs disabled:opacity-50">{ja ? '走行履歴からVEを補正する' : 'Use driving-history VE correction'}</button>}
                     <button ref={close} type="button" onClick={() => setOpen(false)} className="min-h-10 rounded border border-slate-600 px-3 text-xs text-slate-200">{ja ? '閉じる' : 'Close'}</button>
                 </div>
             </DialogFrame>
-        </div>}
+        </div>, document.body)}
     </>;
 }

@@ -9,6 +9,7 @@ import type { LogDataPoint } from '@/lib/types';
 import type { LogExchange } from '@/lib/log-engine/logProfile';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { appendLiveChunk, beginLiveRun, endLiveRun } from '@/lib/db/liveRunRepository';
+import type { LiveCalculationSnapshot } from '@/lib/db/liveRunRepository';
 import type { RecordingCalibration } from '@/lib/db/recordingCalibration';
 
 /** Live Hz readout tuning. 24 samples is ~3 s of history on the cable and ~0.5 s under PRACTICE —
@@ -254,7 +255,7 @@ export function useLiveRun(input: {
      * id lands, and the queue is what it reads from, so nothing is dropped.
      */
     const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[];
-        recordingCalibration?: RecordingCalibration }) => {
+        recordingCalibration?: RecordingCalibration; calculationSnapshot?: LiveCalculationSnapshot }) => {
         samplesRef.current = [];
         flushGenerationRef.current++;
         exchangesRef.current = run.exchanges;
@@ -271,7 +272,8 @@ export function useLiveRun(input: {
         highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
         publishReadout(EMPTY_READOUT);
         if (run.sessionId) {
-            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock, recordingCalibration: run.recordingCalibration })
+            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock, recordingCalibration: run.recordingCalibration,
+                calculationSnapshot: run.calculationSnapshot })
                 .then(id => { runIdRef.current = id; })
                 .catch(() => { /* no recovery record; the run itself is unaffected */ });
         }
