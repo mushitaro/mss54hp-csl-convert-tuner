@@ -4,8 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { build } from 'esbuild';
 const root=path.resolve(import.meta.dirname,'..');
-if(process.argv.length!==3 || process.argv.includes('--help')) {
-    console.log('Usage: node scripts/analyze-dme-response.mjs <exported-session-directory>');
+if(![3,5].includes(process.argv.length) || (process.argv.length===5 && process.argv[3]!=='--recorded-flash') || process.argv.includes('--help')) {
+    console.log('Usage: node scripts/analyze-dme-response.mjs <exported-session-directory> [--recorded-flash <source-session-directory>]');
     process.exit(process.argv.includes('--help')?0:2);
 }
 const input=path.resolve(process.argv[2]), read=f=>JSON.parse(fs.readFileSync(path.join(input,f),'utf8'));
@@ -24,10 +24,30 @@ export { VECalculator } from './src/lib/ve-calculator/calculator';
 export { BinaryParser } from './src/lib/binary-engine/parser';
 export { readEgtTables } from './src/lib/ve-calculator/egtTables';
 export { readRfPtKorrCurves } from './src/lib/ve-calculator/chargeTemp';
+export { patchOnImage } from './src/lib/binary-engine/patcher';
 export { processLogData } from './src/lib/log-engine/filter';`,resolveDir:root,loader:'ts'},
     bundle:true,platform:'node',format:'esm',write:false,alias:{'@':path.join(root,'src')}});
 const m=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
-const ab=base.buffer.slice(base.byteOffset,base.byteOffset+base.byteLength), parser=new m.BinaryParser(ab);
+let recordedBytes=base, recordedCalibration=null;
+if(process.argv[4]) {
+    const source=path.resolve(process.argv[4]);
+    const prior=JSON.parse(fs.readFileSync(path.join(source,'session.json'),'utf8'));
+    const sourceBase=fs.readFileSync(path.join(source,'base.bin'));
+    if(sha(sourceBase)!==prior.baseSha256)throw new Error('Flash source BASE identity differs.');
+    if(session.baseOrigin?.kind!=='dme' || prior.baseOrigin?.kind!=='dme' || !session.baseOrigin.vin || session.baseOrigin.vin!==prior.baseOrigin.vin)
+        throw new Error('Historical flash requires the same recorded vehicle identity.');
+    const flash=prior.flashHistory.filter(f=>f.practice===false && f.at<=session.createdAt).sort((a,b)=>b.at-a.at)[0];
+    if(!flash || flash.tuned!==false)throw new Error('Expected an explicit real patch-only flash before this session.');
+    recordedBytes=Buffer.from(m.patchOnImage(sourceBase.buffer.slice(sourceBase.byteOffset,sourceBase.byteOffset+sourceBase.byteLength),flash.settings));
+    if(sha(recordedBytes)!==flash.sha256)throw new Error('Reconstructed flash SHA-256 does not match the write record.');
+    const originalMap=new m.BinaryParser(base.buffer.slice(base.byteOffset,base.byteOffset+base.byteLength)).getVETable();
+    const recordedMap=new m.BinaryParser(recordedBytes.buffer.slice(recordedBytes.byteOffset,recordedBytes.byteOffset+recordedBytes.byteLength)).getVETable();
+    if(JSON.stringify(originalMap)!==JSON.stringify(recordedMap))throw new Error('Recording VE differs from comparison BASE.');
+    recordedCalibration={kind:'hash-verified-recorded-flash',sourceSessionId:prior.id,sourceSeq:prior.seq,at:flash.at,sha256:flash.sha256,
+        context:m.operatingCalibrationContext(recordedBytes.buffer.slice(recordedBytes.byteOffset,recordedBytes.byteOffset+recordedBytes.byteLength)),
+        limitation:'Historical write evidence, not a contemporaneous ECU readback; assumes no subsequent unrecorded write.'};
+}
+const ab=recordedBytes.buffer.slice(recordedBytes.byteOffset,recordedBytes.byteOffset+recordedBytes.byteLength), parser=new m.BinaryParser(ab);
 const map=parser.getVETable(), settings=session.tuneSettings, cfg=settings?.filterConfig, table=settings?.interpolationTable;
 if(!cfg || (cfg.enableCorrection && !Array.isArray(table)))throw new Error('Saved filter/load calibration missing.');
 const calc=new m.VECalculator(), options={steadyFilterConfig:cfg,steadyLoadTable:table,
@@ -64,14 +84,15 @@ for(let r=0;r<map.yAxis.length;r++)for(let c=0;c<map.xAxis.length;c++) {
         candidateWeightBeforeCalibrationHold:responseOnly.weightMap[r][c]});
 }
 const summary={version:m.DME_RESPONSE_VERSION,session:session.seq,baseSha256:sha(base),logSha256:sha(JSON.stringify(raw)),
-    calibrationHold:options.steadyCalibrationHold,calibration:options.dmeCalibration,
+    calibrationHold:options.steadyCalibrationHold,calibration:options.dmeCalibration,recordedCalibration,
     all:m.summarizeDmeResponse(dme),focus:m.summarizeDmeResponse(dme.filter(focus)),
     focusAfterLegacyFilters:m.summarizeDmeResponse(newPoints.filter(focus)),
     oldFocusPointDemand:{count:pointDemands.length,min:pointDemands[0]??null,median:pointDemands[Math.floor(pointDemands.length/2)]??null,max:pointDemands.at(-1)??null},
     cells,comparisonOnly:true,limits:['BASE is not a current ECU readback.','RAM correspondence and unlogged fuel terms remain unverified.',
         'Candidate means are conditional on comparable trajectories and unchanged RF calibration, not measured nominal VE.',
         'Zero candidates/weight means unresolved; it does not mean zero required correction.','Legacy comparison excludes optional charge-temperature normalization and RF-table writes.']};
-const out=path.join(root,'archive','dme-response',path.basename(input));fs.mkdirSync(out,{recursive:true});
+const out=path.join(root,'archive',recordedCalibration?'dme-response-flash-context':'dme-response',path.basename(input));fs.mkdirSync(out,{recursive:true});
+if(recordedCalibration)fs.writeFileSync(path.join(out,'recorded-flash.bin'),recordedBytes);
 // Preserve actual calculator counts, weights and cell verdicts separately. A DME input is a
 // completed pair of cycles; it is not a raw log row and not interchangeable with legacy hits.
 const packGrid=result=>({hits:result.hitMap,weights:result.weightMap,accepted:result.acceptedMap,
@@ -79,7 +100,7 @@ const packGrid=result=>({hits:result.hitMap,weights:result.weightMap,accepted:re
 const maps={session:session.seq,baseSha256:sha(base),logSha256:sha(JSON.stringify(raw)),
     logFileSha256:sha(fs.readFileSync(path.join(input,'log.json'))),
     rpm:map.xAxis,load:map.yAxis,baseline:map.data,rawPoints:raw.length,filteredPoints:processed.data.length,
-    calibrationHold:options.steadyCalibrationHold,comparisonOnly:true,
+    calibrationHold:options.steadyCalibrationHold,recordedCalibration,comparisonOnly:true,
     settings:{minCellSamples:options.minCellSamples??3,minCellWeight:options.minCellWeight??2.5,
         veMethod:options.veMethod??'direct',rfKorrSettleSec:cfg.rfKorrSettleSec??1},
     legacy:{unit:'raw-sample-corner-hits',...packGrid(oldMap)},

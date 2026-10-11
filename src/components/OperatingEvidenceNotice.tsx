@@ -54,7 +54,7 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
     const reasonText = (entries: [string, number][]) => entries.length
         ? entries.map(([r, n]) => `${ja ? labels[r] ?? r : r}: ${n}`).join(' / ')
         : (ja ? '除外なし' : 'No exclusions');
-    const held = !context.known || context.airModelActive || context.learningActive;
+    const held = !context.known || context.airModelActive || context.learningActive || (active && !!options.steadyCalibrationHold);
     const title = ja ? 'RF応答チェック' : 'RF response check';
     return <>
         <button ref={trigger} type="button" onClick={() => setOpen(true)} disabled={logging}
@@ -72,17 +72,17 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                         : raw?.length ? <RfResponseSummary raw={raw} base={base} options={options} ja={ja} />
                         : <p>{ja ? 'ログを読み込むと通過区間の応答を集計します。' : 'Load a log to inspect response during passes.'}</p>}
                     <details>
-                    <summary className="cursor-pointer min-h-10 py-2 text-slate-200">{ja ? '従来の定常解析・BASE条件' : 'Steady analysis and BASE conditions'}</summary>
+                    <summary className="cursor-pointer min-h-10 py-2 text-slate-200">{ja ? '従来の定常解析・記録時の設定' : 'Steady analysis and recording calibration'}</summary>
                     <section>
-                        <p className="font-semibold text-slate-100">{ja ? '1. 記録時BASEの条件' : '1. Recording BASE conditions'}</p>
-                        {!context.known ? <p className="text-amber-300">{ja ? 'BASE未確認。校正条件は判定できません。' : 'BASE unknown. Calibration conditions cannot be checked.'}</p> : <dl className="grid grid-cols-2 gap-x-2 gap-y-1 mt-2">
+                        <p className="font-semibold text-slate-100">{ja ? '1. 記録時に照合したBIN' : '1. Recording BIN reference'}</p>
+                        {!context.known ? <p className="text-amber-300">{ja ? '記録時のBINを照合できていません。保存BASEや書き込み予定の設定から、実車のパッチ状態を推定しません。' : 'No verified recording reference. Saved BASE and future write settings do not establish the installed patches.'}</p> : <dl className="grid grid-cols-2 gap-x-2 gap-y-1 mt-2">
                             <dt>MAP / HFM</dt><dd className={context.airModelActive ? 'text-amber-300' : 'text-slate-200'}>{context.airModelActive ? (ja ? '有効・校正保留' : 'Active · held') : (ja ? '停止' : 'Disabled')}</dd>
                             <dt>{ja ? '学習温度範囲' : 'Learning window'}</dt><dd className={context.learningActive ? 'text-amber-300' : 'text-slate-200'}>{context.learningActive ? `${context.learningWindow.tmotMin}–${context.learningWindow.tmotMax} °C` : (ja ? '停止' : 'Frozen')}</dd>
                             <dt>{ja ? 'パージ制御' : 'Purge control'}</dt><dd className={context.purgeEnabled ? 'text-amber-300' : 'text-slate-200'}>{context.purgeEnabled ? (ja ? '有効・作動中の点は除外' : 'Enabled · active samples excluded') : (ja ? '停止' : 'Disabled')}</dd>
                         </dl>}
                         <p className="mt-2 text-amber-300">{held
-                            ? (ja ? 'このBASEでは校正保留です。追加走行の前に計測条件の準備が必要です。パッチの画面設定だけでは、この判定は変わりません。' : 'Calibration held. Prepare the recording conditions before another drive. Patch toggles alone do not change this check.')
-                            : (ja ? 'BASEの前提条件を確認しました。学習値・定常性・補正ゲートの検証は別途必要です。' : 'BASE prerequisites checked. Learned values, stability and correction gates still need validation.')}</p>
+                            ? (ja ? '校正候補の採用を保留しています。参照BINが未確認・条件不適合、またはVEが解析BASEと不一致です。ログは保存できます。' : 'Calibration candidates are held: the reference is missing, unsuitable, or its VE differs from the analysis BASE. The log can still be saved.')
+                            : (ja ? 'ログ開始時のチェックサムと保存BINが一致しました。全バイトの実車読み戻しではありません。各点の学習値・応答・補正ゲートは引き続き検証します。' : 'Stored BIN matches the checksums read at START. This is not a full ECU readback. Learned values, response and correction gates still need validation.')}</p>
                     </section>
                     <section>
                         <p className="font-semibold text-slate-100">{ja ? '2. ログ全体の収録状況' : '2. Complete log coverage'}</p>

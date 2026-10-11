@@ -9,6 +9,7 @@ import type { LogDataPoint } from '@/lib/types';
 import type { LogExchange } from '@/lib/log-engine/logProfile';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { appendLiveChunk, beginLiveRun, endLiveRun } from '@/lib/db/liveRunRepository';
+import type { RecordingCalibration } from '@/lib/db/recordingCalibration';
 
 /** Live Hz readout tuning. 24 samples is ~3 s of history on the cable and ~0.5 s under PRACTICE —
  *  long enough to ride out one retried exchange either way. Publishing at 4 Hz keeps the digits
@@ -249,7 +250,8 @@ export function useLiveRun(input: {
      * first samples must not wait on IndexedDB. They queue up regardless — `persist` no-ops until the
      * id lands, and the queue is what it reads from, so nothing is dropped.
      */
-    const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[] }) => {
+    const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[];
+        recordingCalibration?: RecordingCalibration }) => {
         samplesRef.current = [];
         exchangesRef.current = run.exchanges;
         lastFlushRef.current = 0;
@@ -265,7 +267,7 @@ export function useLiveRun(input: {
         highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
         publishReadout(EMPTY_READOUT);
         if (run.sessionId) {
-            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock })
+            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock, recordingCalibration: run.recordingCalibration })
                 .then(id => { runIdRef.current = id; })
                 .catch(() => { /* no recovery record; the run itself is unaffected */ });
         }

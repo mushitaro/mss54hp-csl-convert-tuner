@@ -7,6 +7,7 @@ import type { AdaptationSnapshot } from '@/lib/dme-link/adaptationBlocks';
 import type { EgasMeasurement, InertiaSample, IdleSample } from '@/lib/dme-link/types';
 import type { LlsSample } from '@/lib/lls/fromLog';
 import type { CalEdit } from '@/lib/calibration/edits';
+import type { RecordingCalibration } from './recordingCalibration';
 
 export const DB_NAME = 'mss54hp-tuner-db';
 // 3: adds `seq`. Existing rows have no number, and the lineage badges are built on it, so the
@@ -309,6 +310,8 @@ export interface TuningSession {
 export interface SessionLogRecord {
     sessionId: string;
     data: LogDataPoint[];
+    /** Immutable calibration reference checked at START, separate from future write settings. */
+    recordingCalibration?: RecordingCalibration;
 
     /**
      * The raw samples of an inertia run, stored unprojected.

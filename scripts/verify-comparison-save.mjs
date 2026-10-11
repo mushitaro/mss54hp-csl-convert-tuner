@@ -51,6 +51,7 @@ function harness({ target = draft, map = candidate, policy = 'steady-retain', lo
         pendingConfigRef: { current: null },
         filterConfig: { ...settings.filterConfig, veCorrectionPolicy: policy }, newMap: map,
         currentSession: target,
+        recordingCalibration: { version: 1, status: 'unresolved', reason: 'no-reference', checkedAt: 12, vin: 'fixture', mock: false },
         logFileState: { rawLogData: log }, ensureDraft: async () => { throw new Error('comparison SAVE must not reset the workspace through ensureDraft'); },
         sessionDb: {
             loadBinaries: async id => { calls.push(['loadBinaries', id]); return { baseBinaryBuffer: base }; },
@@ -80,6 +81,7 @@ await check('comparison SAVE stores raw and settings whether a candidate or manu
         const h = harness({ map, edited }); await h.invoke();
         const save = h.calls.find(c => c[0] === 'saveResearch')?.[1];
         assert.ok(save); assert.equal(save.log, raw); assert.equal(save.sessionId, 'draft');
+        assert.equal(save.recordingCalibration, h.dependencies.recordingCalibration);
         assert.equal(save.tuneSettings.filterConfig.veCorrectionPolicy, 'steady-retain');
         assert.equal(save.tuneSettings.writeVe, false);
         assert.equal(save.tuneSettings.writeRfKorr, false);
@@ -200,6 +202,7 @@ await check('SAVE dirtiness includes raw identity and analysis settings when no 
     assert.match(properties.get('rawLog'), /logFileState\.rawLogData/);
     assert.ok(properties.has('filterConfig'));
     assert.ok(properties.has('interpolationTable'));
+    assert.ok(properties.has('recordingCalibration'));
 });
 
 console.log(`\n${passed} comparison observation-save checks passed.`);

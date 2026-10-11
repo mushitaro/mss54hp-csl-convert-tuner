@@ -2,6 +2,7 @@ import type { ProcessId } from '@/lib/log-engine/logProfile';
 import type { LogDataPoint, VEMap } from '@/lib/types';
 import type { InertiaSample, IdleSample } from '@/lib/dme-link/types';
 import type { LlsSample } from '@/lib/lls/fromLog';
+import type { RecordingCalibration } from './recordingCalibration';
 import { sampleRateHz } from '@/lib/log-engine/rate';
 import {
     openDb,
@@ -139,6 +140,7 @@ export interface SaveTuneInput {
     veMapSnapshot?: VEMap;
     tuneSettings: TuneSettings;
     log: LogDataPoint[] | null;
+    recordingCalibration?: RecordingCalibration | null;
 }
 
 /** Records the tuned output of a draft: the bytes, the map, and the settings that produced them.
@@ -171,13 +173,17 @@ export interface SaveTuneInput {
 export function nextLogRecord(
     sessionId: string,
     prior: SessionLogRecord | undefined,
-    incoming: { data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[]; lls?: LlsSample[] },
+    incoming: { data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[]; lls?: LlsSample[];
+        recordingCalibration?: RecordingCalibration | null },
 ): SessionLogRecord | null {
     const merged: SessionLogRecord = {
         ...prior,
         sessionId,
         data: incoming.data ?? prior?.data ?? [],
     };
+    // Replacing the log also replaces its provenance. In particular, an imported
+    // CSV must not inherit the previous drive's checksum match.
+    if (incoming.data !== undefined) merged.recordingCalibration = incoming.recordingCalibration ?? undefined;
     if (incoming.inertia?.length) merged.inertia = incoming.inertia;
     if (incoming.idle?.length) merged.idle = incoming.idle;
     if (incoming.lls?.length) merged.lls = incoming.lls;
@@ -213,6 +219,8 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             // same rule as a live DS2 run. Assigned unconditionally: `...existing` means a
             // conditional spread would let a previous log's rate survive a re-save with a new one.
             averageHz: sampleRateHz(input.log ?? []),
+            // A new recording reference can change while byte hash and row count stay equal.
+            syncedFingerprint: undefined,
         };
         store.put(updated);
 
@@ -228,7 +236,7 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             // only copy an estimator can read and cannot be reconstructed from `data`.
             const logStore = tx.objectStore(SESSION_LOGS_STORE);
             const prior = await promisify<SessionLogRecord | undefined>(logStore.get(input.sessionId));
-            const record = nextLogRecord(input.sessionId, prior, { data: input.log! });
+            const record = nextLogRecord(input.sessionId, prior, { data: input.log!, recordingCalibration: input.recordingCalibration });
             if (record) logStore.put(record);
         }
         await txDone(tx);
@@ -280,6 +288,7 @@ export async function saveResearchRun(input: {
     sessionId: string;
     process: ProcessId;
     log: LogDataPoint[];
+    recordingCalibration?: RecordingCalibration | null;
     /** Optional settings for a comparison-only log. No TUNED image is generated here. */
     tuneSettings?: TuneSettings;
     /** The unprojected samples, when this is an inertia run. Written alongside `log` rather than
@@ -309,6 +318,7 @@ export async function saveResearchRun(input: {
         const prior = await promisify<SessionLogRecord | undefined>(logStore.get(input.sessionId));
         const record = nextLogRecord(input.sessionId, prior, {
             data: input.log, inertia: input.inertia, idle: input.idle, lls: input.lls,
+            recordingCalibration: input.recordingCalibration,
         });
         if (record) logStore.put(record);
         await txDone(tx);

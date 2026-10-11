@@ -289,7 +289,8 @@ rf_soll_no_filter = kf_rf_soll(N, aq_rel_rf)
                                                           ← AVAN1_SOLL_FAKTOR ≠ 0 のときだけ
                   + kf_rf_soll_ask(N, aq_rel_rf)          ← ask_zustand_dpr bit0 が立っているときだけ
 
-rf_soll_filter    = PT1(rf_soll_no_filter, τ)   τ = rf_soll_tau_up（上昇時） / k_rf_soll_tau_down = 0.0700（下降時）
+g                 = (上昇時 rf_soll_tau_up / 下降時 k_rf_soll_tau_down) / 16384
+rf_soll_filter    = g × rf_soll_no_filter + (1 − g) × 前回値   ← 燃焼セグメントごと、整数丸めあり
 
 rf_soll           = (rf_soll_filter × RF_PT_KORR) >> 12       4096 = 1.000
 RF                = (rf_soll × rf_korr)          >> 10        1024 = 1.000
@@ -299,7 +300,7 @@ RF                = (rf_soll × rf_korr)          >> 10        1024 = 1.000
 |---|---|---|
 | **KATH ブレンド** | `AVAN1_SOLL_FAKTOR = 0`（触媒暖機が抜けている） | 実動作点（875 rpm, y 0.4534 %）で 0.2161 対 0.2301 = **+6.5 %**、1100 rpm では **+45 %**。rpm で桁が違うので単一の数字で警告してはいけない。→ `67-tuning-procedure.md` STEP 9 |
 | **ASK 加算** | スノーケルフラップ閉（`ask_zustand_dpr` bit0 = 0） | 加算項なので RF が上振れる |
-| **一次遅れ** | 定常サンプルのみ（`aq_rel_rf` が動いていない） | 過渡では表の瞬時値ではなく遅れた値が出る |
+| **一次遅れ** | 履歴による差が評価精度より小さい、または履歴を再現したとき | 過渡では表の瞬時値ではなく遅れた値が出る。運転点保持だけが扱い方ではない |
 
 **重要なのは、ゲートがこの 3 つを自分で検出することである。** どれが生きていても
 予測は実測から外れ、§0 の中央値／散らばり判定に落ちる。つまり *`AVAN1_SOLL_FAKTOR` を

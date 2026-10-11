@@ -20,6 +20,7 @@ import {
     deleteSession,
 } from '@/lib/db/sessionRepository';
 import type { InertiaSample, IdleSample } from '@/lib/dme-link/types';
+import type { RecordingCalibration } from '@/lib/db/recordingCalibration';
 
 export function useSessionDb() {
     const [sessions, setSessions] = useState<TuningSession[]>([]);
@@ -60,6 +61,7 @@ export function useSessionDb() {
     const saveSessionTune = useCallback(async (params: {
         sessionId: string; binaryFileName: string; tunedBinaryBuffer: ArrayBuffer;
         veMapSnapshot?: VEMap; tuneSettings: TuneSettings; log: LogDataPoint[] | null;
+        recordingCalibration?: RecordingCalibration | null;
     }) => {
         const s = await saveTune(params);
         await refresh();
@@ -73,6 +75,7 @@ export function useSessionDb() {
 
     const saveResearch = useCallback(async (params: {
         sessionId: string; process: ProcessId; log: LogDataPoint[];
+        recordingCalibration?: RecordingCalibration | null;
         inertia?: InertiaSample[]; idle?: IdleSample[];
         /** Analysis settings only; this path creates no TUNED image or write claim. */
         tuneSettings?: TuneSettings;
@@ -113,6 +116,7 @@ export function useSessionDb() {
     }, [refresh]);
 
     const loadLog = useCallback((id: string) => getSessionLog(id), []);
+    const loadLogRecord = useCallback((id: string) => getSessionLogRecord(id), []);
     /**
      * The raw idle samples of a stored run, or null.
      *
@@ -129,6 +133,6 @@ export function useSessionDb() {
         sessions, loading, error, refresh,
         newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
         recordFlashCounterReset, remove,
-        loadLog, loadIdleRun, loadBinaries,
+        loadLog, loadLogRecord, loadIdleRun, loadBinaries,
     };
 }

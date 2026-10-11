@@ -1,4 +1,5 @@
 import { LogDataPoint } from '@/lib/types';
+import type { RecordingCalibration } from './recordingCalibration';
 
 /**
  * Crash recovery for a data log in progress.
@@ -46,6 +47,7 @@ export interface LiveRunRecord {
     /** PRACTICE runs are recorded too, so the recovery path itself can be rehearsed without a car.
      *  Surfaced on the offer so a simulated run is never mistaken for a drive. */
     mock: boolean;
+    recordingCalibration?: RecordingCalibration;
     /** Set when the run stopped through the app. Unset means the page went away mid-run — the case
      *  this store exists for. Both are offered for recovery; only the wording differs. */
     endedAt?: number;
@@ -133,7 +135,7 @@ function chunkRange(runId: string): IDBKeyRange {
  * so by the time a new run begins the user has already answered it. Keeping both would mean a second
  * reload offered the older, less interesting run.
  */
-export async function beginLiveRun(meta: { sessionId: string; mock: boolean }): Promise<string> {
+export async function beginLiveRun(meta: { sessionId: string; mock: boolean; recordingCalibration?: RecordingCalibration }): Promise<string> {
     const runId = crypto.randomUUID();
     const now = Date.now();
     const db = await openLiveDb();
@@ -144,6 +146,7 @@ export async function beginLiveRun(meta: { sessionId: string; mock: boolean }): 
             tx.objectStore(RUNS_STORE).put({
                 runId, sessionId: meta.sessionId, startedAt: now, updatedAt: now,
                 pointCount: 0, mock: meta.mock,
+                recordingCalibration: meta.recordingCalibration,
             } satisfies LiveRunRecord);
         });
         return runId;

@@ -125,7 +125,7 @@ export function useLogFile() {
   }, [maxWindowStart]);
 
   // Parses a new CSV file, sets raw+processed state, and returns the processed result
-  const parseAndSetLog = async (file: File): Promise<ProcessedLog | null> => {
+  const parseAndSetLog = async (file: File, limits?: LambdaLimits | null): Promise<ProcessedLog | null> => {
     const text = await file.text();
     const rawData = parseLogFile(text);
 
@@ -135,7 +135,9 @@ export function useLogFile() {
     }
 
     publishRaw(rawData);
-    const processed = processLogData(rawData, file.name, filterConfig, interpolationTable, lambdaLimits);
+    const effectiveLimits = limits !== undefined ? limits : latest.current.lambdaLimits;
+    if (limits !== undefined) publishLimits(limits);
+    const processed = processLogData(rawData, file.name, filterConfig, interpolationTable, effectiveLimits);
     publishFile(file);
     publishProcessed(processed);
     resetView();

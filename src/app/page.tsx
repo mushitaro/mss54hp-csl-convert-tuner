@@ -110,6 +110,7 @@ import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/cha
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
 import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
+import { captureRecordingCalibration, recordingCalibrationBuffer, type RecordingCalibration } from '@/lib/db/recordingCalibration';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -259,6 +260,9 @@ export default function Home() {
    */
   const liveRun = useLiveRun({ flush: (force, authoritative) => flushRef.current(force, authoritative) });
   const liveSamplesRef = liveRun.samplesRef;
+  const [recordingCalibration, setRecordingCalibration] = useState<RecordingCalibration | null>(null);
+  const [recordingBinary, setRecordingBinary] = useState<ArrayBuffer | null>(null);
+  const recordingEpochRef = useRef(0);
   const liveExchangesRef = liveRun.exchangesRef;
   const hzValueRef = liveRun.hzValueRef;
   // Hub/wing cluster auto-fit: measures real available space vs. the cluster's natural size and
@@ -634,12 +638,16 @@ export default function Home() {
     curves: RfPtKorrCurves | null = null,
     recordedBase: ArrayBuffer | null = null,
     recordedLoadTable: InterpolationPoint[] = interpolationTable,
-  ): VeCalcOptions => ({
+    recordingReference: ArrayBuffer | null = recordingBinary,
+  ): VeCalcOptions => {
+    const comparison = isVeComparisonPolicy(config.veCorrectionPolicy);
+    const calibration = comparison ? recordingReference : recordedBase;
+    return ({
     veCorrectionPolicy: config.veCorrectionPolicy,
     veLearningRate: config.veLearningRate,
-    steadyCalibrationHold: operatingCalibrationHold(recordedBase),
-    dmeCalibration: readDmeCalibration(recordedBase),
-    steadyLambdaLimits: recordedBase ? new BinaryParser(recordedBase).readLambdaLimits() : null,
+    steadyCalibrationHold: operatingCalibrationHold(calibration, comparison ? recordedBase : null),
+    dmeCalibration: readDmeCalibration(calibration),
+    steadyLambdaLimits: calibration ? new BinaryParser(calibration).readLambdaLimits() : null,
     steadyFilterConfig: config,
     steadyLoadTable: recordedLoadTable,
     // The whole config goes through resolveRfKorr, which is also what reads the two superseded
@@ -681,12 +689,14 @@ export default function Home() {
     normaliseTo: !isVeComparisonPolicy(config.veCorrectionPolicy) && config.normaliseChargeTemp ? curves : null,
     // Always passed, unlike the normalisation: measuring rf_korr honestly is not an option the
     // operator turns on. Without it the calculation falls back to the trim alone.
-    rfKorrAir: { curves, assumedPressureMbar: config.assumedAmbientPressure },
+    rfKorrAir: { curves: comparison ? (calibration ? readRfPtKorrCurves(calibration) : null) : curves,
+      assumedPressureMbar: config.assumedAmbientPressure },
     rfKorrThresholds: config.enableRfKorrCellGate === false
       ? { minCellSamples: 1, minCellWeight: 0 }
       : { minCellSamples: config.rfKorrMinCellSamples, minCellWeight: config.rfKorrMinCellWeight },
-    egt,
+    egt: comparison ? (calibration ? readEgtTables(calibration) : null) : egt,
   });
+  };
 
   /** The DME's EGT tables, read out of the BASE that is loaded right now.
    *
@@ -720,7 +730,10 @@ export default function Home() {
    * than assume — and derived from the same dependency for the same reason: these gates have to
    * describe the bytes the DME was running, and one of them is a table this app patches.
    */
-  /* Read from the bytes the DME was RUNNING, not from the BASE — see bytesAsRun.
+  /* Comparison policies use the immutable START reference. The legacy branch
+     below keeps its historical reconstruction for reproducibility; its toggles
+     are not evidence of what the car actually ran.
+     Original legacy rationale: see bytesAsRun.
      `KF_BZ_WDK_VL` is one of the tables WRITE PATCH-ON changes, and this is the reader that decides
      which samples were taken at full load. During a live run the workspace already held the patched
      bytes (the post-flash reload puts them there), so the gate was inert as intended; a session
@@ -728,12 +741,14 @@ export default function Home() {
      thresholds the DME never ran. The toggles are in the dependency list for that reason: arming
      WOT DISABLE changes what the log MEANS, not just what a later write will contain. */
   const lambdaLimits = useMemo(
-    () => (binaryBuffer
+    () => isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+      ? (recordingBinary ? new BinaryParser(recordingBinary).readLambdaLimits() : null)
+      : (binaryBuffer
       ? new BinaryParser(bytesAsRun(binaryBuffer,
         { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop }))
         .readLambdaLimits()
       : null),
-    [binaryBuffer, applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop]);
+    [binaryBuffer, applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop, recordingBinary, filterConfig.veCorrectionPolicy]);
 
   // Push it into the log hook so every later re-process (a filter drag, a table edit) uses the same
   // gates that produced the tune. Call sites that load a log in the same tick as a new binary pass
@@ -746,7 +761,7 @@ export default function Home() {
     // to be here or a toggle change re-renders without re-deriving. `applyRfKorr` alone was enough
     // when it was the only rf_korr input; it is not any more.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filterConfig, binaryBuffer, interpolationTable,
+    [filterConfig, binaryBuffer, recordingBinary, interpolationTable,
       filterConfig.rfKorrSource, filterConfig.rfKorrMode, filterConfig.applyRfKorr,
       filterConfig.veMethod, filterConfig.directAuthority, filterConfig.rfKorrSettleSec,
       filterConfig.enableVeCellGate, filterConfig.enableRfKorrCellGate, filterConfig.normaliseChargeTemp,
@@ -808,6 +823,9 @@ export default function Home() {
   // the BASE: newMap is otherwise only reset by handleClearLog, so a stale tune from the last
   // session would be grafted onto the new binary by buildPatchedBuffer.
   const resetDerived = () => {
+    recordingEpochRef.current++;
+    setRecordingCalibration(null);
+    setRecordingBinary(null);
     binaryFileState.clear();
     veCalc.reset();
     logFileState.clear();
@@ -884,9 +902,15 @@ export default function Home() {
   };
 
   const handleLogUpload = async (file: File) => {
-    const processed = await logFileState.parseAndSetLog(file);
+    recordingEpochRef.current++;
+    const processed = await logFileState.parseAndSetLog(file,
+      isVeComparisonPolicy(filterConfig.veCorrectionPolicy) ? null : undefined);
+    if (!processed) return;
+    setRecordingCalibration(null);
+    setRecordingBinary(null);
     if (processed && currentMap) {
-      runCalculation(currentMap, processed);
+      runCalculation(currentMap, processed, veCalcOptionsFor(filterConfig, egtTables, writeRfKorr,
+        rfPtKorrCurves, binaryBuffer, interpolationTable, null));
       goToTab('diff'); // jump to the result only on the initial CSV load
     }
   };
@@ -1013,6 +1037,9 @@ export default function Home() {
   const handleClearLog = (e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent triggering file select
     if (confirm(dialogText().clearLog)) {
+      recordingEpochRef.current++;
+      setRecordingCalibration(null);
+      setRecordingBinary(null);
       logFileState.clear();
       veCalc.reset();
       if (activeTab === 'log' || activeTab === 'new' || activeTab === 'diff' || activeTab === 'lambda') {
@@ -2208,6 +2235,7 @@ export default function Home() {
     // Equal sample counts can be different imported logs. A comparison can also change settings
     // without earning any map, so neither map identity nor log length alone makes SAVE truthful.
     rawLog: logFileState.rawLogData,
+    recordingCalibration,
     filterConfig,
     interpolationTable,
     patch: applyPatch,
@@ -2396,8 +2424,9 @@ export default function Home() {
     // flash sets the four logic patches, over `tuneSettings`: an archived session's settings are
     // never rewritten, and FINALIZE's patch-off write lands only in the history — reading the
     // settings first re-armed PATCH, WOT TH and TANK VENT on a car the list badged FINAL, and the
-    // next WRITE shut the purge valve again (operator, 2026-10-04). `armed` itself is left alone:
-    // it is what the drive ran, and the log replay below reads it.
+    // next WRITE shut the purge valve again (operator, 2026-10-04). `armed` is kept
+    // for legacy replay. Comparison policies use the log's verified recording
+    // reference below; a future write setting is not installed-state evidence.
     const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
@@ -2408,7 +2437,12 @@ export default function Home() {
 
     let rebuilt = false;
     if (session.hasLog) {
-      const rawLog = await sessionDb.loadLog(session.id);
+      const logRecord = await sessionDb.loadLogRecord(session.id);
+      const rawLog = logRecord?.data;
+      const recording = logRecord?.recordingCalibration ?? null;
+      const recordingBytes = await recordingCalibrationBuffer(recording);
+      setRecordingCalibration(recording);
+      setRecordingBinary(recordingBytes);
       if (rawLog && rawLog.length > 0) {
         const processed = logFileState.loadRawLog(
           rawLog,
@@ -2422,7 +2456,9 @@ export default function Home() {
           // captured against a car carrying whatever `armed` says, and the full-load gate reads a
           // table WRITE PATCH-ON rewrites. Replaying it through the raw BASE rejected the very
           // pulls the patch exists to keep.
-          new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
+          isVeComparisonPolicy(session.tuneSettings?.filterConfig.veCorrectionPolicy ?? filterConfig.veCorrectionPolicy)
+          ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
+          : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
             applyPatch: !!armed?.applyPatch,
             applyWotDisable: !!armed?.applyWotDisable,
             applyTankVentDisable: !!armed?.applyTankVentDisable,
@@ -2442,7 +2478,7 @@ export default function Home() {
             readEgtTables(bins.baseBinaryBuffer),
             storedWriteRfKorr(session.tuneSettings),
             readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer,
-            session.tuneSettings?.interpolationTable ?? interpolationTable));
+            session.tuneSettings?.interpolationTable ?? interpolationTable, recordingBytes));
           comparison.applyDefaultsAfterCalculation();
           rebuilt = true;
         }
@@ -2543,7 +2579,7 @@ export default function Home() {
         });
         if (!accept) { await discardLiveRun(run.runId).catch(() => { }); return; }
       }
-      await restoreRun(run.runId, run.sessionId);
+      await restoreRun(run.runId, run.sessionId, run.recordingCalibration);
     })();
     // One-shot, guarded by the ref: re-running on every sessions refresh would re-offer a run the
     // user has already answered for.
@@ -2558,7 +2594,7 @@ export default function Home() {
    * store. The recovery record is deliberately NOT cleared on success: the samples are back in
    * memory, which is exactly the fragile place they were lost from, so the net stays up until SAVE.
    */
-  const restoreRun = async (runId: string, sessionId: string) => {
+  const restoreRun = async (runId: string, sessionId: string, recording?: RecordingCalibration) => {
     const session = sessionDb.sessions.find(s => s.id === sessionId);
     const bins = session ? await sessionDb.loadBinaries(sessionId) : null;
     if (!session || !bins) { alert(dialogText().recoverFailed); return; }
@@ -2567,6 +2603,9 @@ export default function Home() {
     if (points.length === 0) { alert(dialogText().recoverFailed); return; }
 
     resetDerived();
+    const recordingBytes = await recordingCalibrationBuffer(recording);
+    setRecordingCalibration(recording ?? null);
+    setRecordingBinary(recordingBytes);
     setActiveSessionId(sessionId);
     /* The same bag handleOpenSession resolves, and for the same reason — this used to pass NO third
        argument at all, not even the conditional one, so a crash recovery landed patch-off even for a
@@ -2604,7 +2643,9 @@ export default function Home() {
        recovered drive would be filtered through the OUTGOING session's binary. */
     const processed = logFileState.loadRawLog(
       points, 'recovered-log.csv', undefined, undefined,
-      new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
+      isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+      ? (recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null)
+      : new BinaryParser(bytesAsRun(bins.baseBinaryBuffer, {
         applyPatch: !!armed?.applyPatch,
         applyWotDisable: !!armed?.applyWotDisable,
         applyTankVentDisable: !!armed?.applyTankVentDisable,
@@ -2616,7 +2657,7 @@ export default function Home() {
       // filter config is NOT reloaded here, so the live one is the right one.
       veCalc.runCalculation(map, processed,
         veCalcOptionsFor(filterConfig, readEgtTables(bins.baseBinaryBuffer), writeRfKorr,
-          readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer));
+          readRfPtKorrCurves(bins.baseBinaryBuffer), bins.baseBinaryBuffer, interpolationTable, recordingBytes));
       comparison.applyDefaultsAfterCalculation();
       goToTab('new');
     } else {
@@ -2714,6 +2755,7 @@ export default function Home() {
       }
       await sessionDb.saveResearch({
         sessionId: target.id, process: logProcess, log: raw,
+        recordingCalibration,
         tuneSettings: {
           ...buildSettings(),
           filterConfig: { ...filterConfig, veCorrectionPolicy: isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
@@ -2758,6 +2800,7 @@ export default function Home() {
           tunedBinaryBuffer: patched,
           tuneSettings: buildSettings(),
           log: logFileState.rawLogData,
+          recordingCalibration,
         });
         // `saveSessionTune` stores the log but not what KIND of run it was, and
         // this branch now runs in front of `saveResearch` — which was the only
@@ -2782,6 +2825,7 @@ export default function Home() {
         sessionId: target.id,
         process: logProcess,
         log: logFileState.rawLogData,
+        recordingCalibration,
       });
       // What makes the cell read SAVED. This path has no dialog of its own — the tune path asks
       // whether to stay in the session, this one has nothing to ask — so before this it was the
@@ -2804,6 +2848,7 @@ export default function Home() {
       veMapSnapshot: newMap,
       tuneSettings: buildSettings(),
       log: logFileState.rawLogData,
+      recordingCalibration,
     });
 
     // `target.id` rather than the render's own: ensureDraft may have just created the session this
@@ -2966,8 +3011,10 @@ export default function Home() {
    *  cable). */
   const finishLogRef = useRef(finishLog);
   finishLogRef.current = finishLog;
+  const startingTuneRef = useRef(false);
 
-  const handleStartTune = async () => {
+  const startTune = async () => {
+    const recordingEpoch = recordingEpochRef.current;
     const profile = LOG_PROFILES[logProcess];
     // INERTIA does not run from here, and must not silently try.
     //
@@ -2993,9 +3040,27 @@ export default function Home() {
       setNarrowPane('map');
       return;
     }
+    let recording: RecordingCalibration;
+    try {
+      recording = await captureRecordingCalibration({
+        sessions: sessionDb.sessions, loadBinaries: sessionDb.loadBinaries,
+        readChecksums: dmeLink.readDataChecksums,
+        vin: dmeLink.readLinkState().identity?.vin ?? null, mock: dmeLink.readLinkState().mockMode,
+      });
+    } catch {
+      // Keep the observations even if a reference cannot be recovered from the local store.
+      recording = { version: 1, status: 'unresolved', reason: 'no-reference', checkedAt: Date.now(),
+        vin: dmeLink.readLinkState().identity?.vin ?? null, mock: dmeLink.readLinkState().mockMode };
+    }
+    const recordingBytes = await recordingCalibrationBuffer(recording);
+    if (recordingEpoch !== recordingEpochRef.current) return;
+    const actualPatches = recordingBytes ? readLogicPatches(recordingBytes) : null;
     // Preflight, before a drive rather than after one. Overridable — see missingPatches for why —
     // but never silent, because the cost of finding out afterwards is the whole run.
-    const missing = missingPatches(profile, { patched: bytesPatched, tankVentShut: bytesTankVentShut });
+    const missing = missingPatches(profile, {
+      patched: actualPatches?.applyPatch ?? bytesPatched,
+      tankVentShut: actualPatches?.applyTankVentDisable ?? bytesTankVentShut,
+    });
     if (missing.length) {
       const tPre = dialogText();
       const go = await ask({
@@ -3020,12 +3085,20 @@ export default function Home() {
     const exchanges = featurePreview
       ? (await dmeLink.verifyLogProfile(profile)).exchanges
       : productionExchanges((await dmeLink.verifyLogProfile(profile)).exchanges);
+    const connected = dmeLink.readLinkState();
+    if (recordingEpoch !== recordingEpochRef.current || connected.mockMode !== recording.mock
+      || (connected.identity?.vin ?? null) !== recording.vin) return;
     liveExchangesRef.current = exchanges;
     if (currentSession) {
       void sessionDb.setProcess(currentSession.id, logProcess).catch(() => { /* label only */ });
     }
     finishedRef.current = false;
-    liveRun.start({ sessionId: currentSession?.id ?? null, mock: dmeLink.mockMode, exchanges });
+    setRecordingCalibration(recording);
+    setRecordingBinary(recordingBytes);
+    if (isVeComparisonPolicy(filterConfig.veCorrectionPolicy)) {
+      logFileState.setLambdaLimits(recordingBytes ? new BinaryParser(recordingBytes).readLambdaLimits() : null);
+    }
+    liveRun.start({ sessionId: currentSession?.id ?? null, mock: dmeLink.mockMode, exchanges, recordingCalibration: recording });
     // LAMBDA FEEDBACK is where a run is actually read — it is the trim the log is being captured to
     // measure. It is disabled at this instant (no correctionMap, no newMap), which is exactly what
     // arming is for; the first sample's unthrottled flush releases it.
@@ -3138,6 +3211,13 @@ export default function Home() {
       // trim checked out, the both-blocks fallback if it did not.
       exchanges,
     );
+  };
+
+  const handleStartTune = async () => {
+    if (startingTuneRef.current) return;
+    startingTuneRef.current = true;
+    try { await startTune(); }
+    finally { startingTuneRef.current = false; }
   };
 
   /** The inertia run, with the same diagnostic publish the datalog now does. Wrapped here rather
@@ -3419,6 +3499,7 @@ export default function Home() {
             tunedBinaryBuffer: patchedBuffer,
             tuneSettings: flashedSettings,
             log: logFileState.rawLogData,
+            recordingCalibration,
           });
         }
 
@@ -3463,6 +3544,7 @@ export default function Home() {
             veMapSnapshot: newMap,
             tuneSettings: flashedSettings,
             log: logFileState.rawLogData,
+            recordingCalibration,
           });
         }
         await sessionDb.recordFlash(target.id, {
@@ -5064,7 +5146,7 @@ export default function Home() {
     <main className="h-[100svh] flex flex-col bg-slate-950 font-sans text-slate-300 overflow-hidden selection:bg-blue-500/30">
       {featureEnabled('rfKorr', featurePreview) && logProcess === 'VE' &&
         ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
-        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={binaryBuffer}
+        <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={recordingBinary}
           logging={dmeLink.state === 'tuning'}
           options={veCalcOptions} active={isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)}
           readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'dme-response' })} />}
