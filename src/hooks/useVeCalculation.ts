@@ -10,12 +10,24 @@ import { interpolateFactor, timeScaleSeconds } from '@/lib/log-engine/filter';
 import { detectDriveSplit, type DriveSplit } from '@/lib/log-engine/driveSplit';
 import { prepareOperatingEvidence } from '@/lib/ve-calculator/operatingEvidence';
 import { startMovingResponseWorker, type MovingResponseJob } from '@/lib/ve-calculator/movingResponseWorker';
+import { createMovingLiveAccumulator, appendMovingLive, type MovingLiveAccumulator, type MovingLiveCoverage } from '@/lib/ve-calculator/movingResponseLive';
+
+/** Acquisition depends on the recorded calibration and source filters, never on
+ * a display threshold or on how many legacy-filtered rows remain. */
+function movingLiveKey(options: VeCalcOptions): string {
+  return JSON.stringify([options.movingCalibration, !!options.egt, options.steadyCalibrationHold, options.steadyLambdaLimits,
+    options.writeRfKorr, options.steadyLoadTable, options.steadyFilterConfig?.enableCorrection,
+    options.steadyFilterConfig?.minTemp, options.steadyFilterConfig?.excludeTimeRanges]);
+}
 
 export function useVeCalculation() {
   const calculationEpoch = useRef(0);
   const movingJob = useRef<MovingResponseJob | null>(null);
   const [isCalculating, setIsCalculating] = useState(false);
   const [movingError, setMovingError] = useState<string | null>(null);
+  const [liveAcquisition, setLiveAcquisition] = useState<MovingLiveCoverage | null>(null);
+  const movingLiveRef = useRef<{ map: VEMap; key: string; first: LogDataPoint | undefined;
+    consumed: number; accumulator: MovingLiveAccumulator } | null>(null);
   useEffect(() => () => { calculationEpoch.current++; movingJob.current?.cancel(); }, []);
   /**
    * The live accumulator: the grid so far, the annotated samples so far, and how many of the
@@ -124,8 +136,15 @@ export function useVeCalculation() {
     const moving = options.veCorrectionPolicy === 'moving-response';
     // Clear the preceding writable result before awaiting a worker. A reset or
     // another session/calculation invalidates its reply, including late failures.
-    if (moving) reset();
-    else { movingJob.current?.cancel(); movingJob.current = null; }
+    if (moving) {
+      reset();
+      // STOP/reopen recomputes the acquisition view from intact RAW once. Keep
+      // it visible while the worker runs and if no writable correction results.
+      setLiveAcquisition(appendMovingLive(createMovingLiveAccumulator(map, options), processed.rawData));
+    } else {
+      movingJob.current?.cancel(); movingJob.current = null;
+      movingLiveRef.current = null; setLiveAcquisition(null);
+    }
     const epoch = ++calculationEpoch.current;
     setIsCalculating(moving);
     setMovingError(null);
@@ -285,9 +304,19 @@ export function useVeCalculation() {
    */
   const appendCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
     if (options.veCorrectionPolicy === 'moving-response') {
-      // The multi-model solve belongs to STOP, not the main-thread DS2 polling
-      // loop. Retain the growing log and remove the preceding run's writable map.
-      reset();
+      // Only new RAW rows update the measurement grid. A measurement is never
+      // published as an accepted correction; the multi-model solve stays at STOP.
+      const key = movingLiveKey(options);
+      let live = movingLiveRef.current;
+      if (!live || live.map !== map || live.key !== key || live.first !== processed.rawData[0]
+        || live.consumed > processed.rawData.length) {
+        reset();
+        live = { map, key, first: processed.rawData[0], consumed: 0,
+          accumulator: createMovingLiveAccumulator(map, options) };
+        movingLiveRef.current = live;
+      }
+      setLiveAcquisition(appendMovingLive(live.accumulator, processed.rawData));
+      live.consumed = processed.rawData.length;
       setMovingPending(true);
       setAnnotatedLog(processed.data);
       return;
@@ -388,6 +417,8 @@ export function useVeCalculation() {
     setIsCalculating(false);
     setMovingError(null);
     liveRef.current = null;
+    movingLiveRef.current = null;
+    setLiveAcquisition(null);
     setMovingPending(false);
     // With the log, so a new workspace cannot inherit the last drive's verdict.
     setDriveSplit(null);
@@ -412,6 +443,7 @@ export function useVeCalculation() {
 
   return {
     newMap,
+    liveAcquisition,
     movingPending,
     isCalculating,
     movingError,

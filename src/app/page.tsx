@@ -145,6 +145,7 @@ import { useLiveRun } from '@/hooks/useLiveRun';
 import { LiveTelemetryStrip } from '@/components/LiveTelemetryStrip';
 import { LlsLiveStrip } from '@/components/LlsLiveStrip';
 import { LiveDriveStrip } from '@/components/LiveDriveStrip';
+import { MovingAcquisitionSummary } from '@/components/MovingAcquisitionSummary';
 import { MapZoomButtons } from '@/components/MapZoomButtons';
 
 // TabId moved to lib/features.ts, beside the registry that decides which tabs a variant renders.
@@ -488,6 +489,12 @@ export default function Home() {
   const { correctionMap, acceptedMap } = veCalc;
   /** The tuned grid, under the name every consumer below already uses. */
   const newMap = tunedMap;
+  const movingAcquisition = filterConfig.veCorrectionPolicy === 'moving-response'
+    && veCalc.liveAcquisition
+    && (dmeLink.state === 'tuning' || veCalc.isCalculating || veCalc.movingError || !newMap)
+    ? veCalc.liveAcquisition : null;
+  const movingAcquisitionPhase = veCalc.isCalculating ? 'analyzing'
+    : veCalc.movingError ? 'error' : dmeLink.state === 'tuning' ? 'recording' : 'unresolved';
   const movingValidated = newMap?.calibrationStatus === 'moving-validated';
   const movingWriteLocked = movingValidated && binaryFileState.writeVe;
   const movingWriteReason = displayLang === 'ja'
@@ -805,7 +812,11 @@ export default function Home() {
   const runCalculation = (
     map: NonNullable<typeof currentMap>, processed: ProcessedLog, options = veCalcOptions,
   ) => {
-    veCalc.runCalculation(map, processed, options);
+    if (options.veCorrectionPolicy === 'moving-response' && dmeLink.state === 'tuning') {
+      veCalc.appendCalculation(map, processed, options);
+    } else {
+      veCalc.runCalculation(map, processed, options);
+    }
     comparison.applyDefaultsAfterCalculation();
   };
 
@@ -2129,10 +2140,9 @@ export default function Home() {
   const ALL_TABS: { id: TabId; label: string; enabled: boolean }[] = useMemo(() => [
     { id: 'startup', label: 'STARTUP', enabled: true },
     { id: 'current', label: 'CURRENT MAP', enabled: !!currentMap },
-    /* `correctionMap` alone. It used to also require `newMap`, which is withheld until a cell
-       clears the evidence gate — so the tab that shows the TRIM waited on the map, and the move
-       START TUNE arms was released seconds after the button rather than at the first sample. */
-    { id: 'lambda', label: 'LAMBDA FEEDBACK', enabled: !!correctionMap },
+    // Moving LIVE shows measured points from the first RAW sample. Final feedback
+    // remains a separate result; no writable map is needed to watch acquisition.
+    { id: 'lambda', label: movingAcquisition ? 'MEASUREMENT' : 'LAMBDA FEEDBACK', enabled: !!correctionMap || !!movingAcquisition },
     { id: 'new', label: 'TUNED MAP', enabled: !!newMap },
     { id: 'diff', label: 'DIFFERENCE %', enabled: !!currentMap },
     // The one tab whose LABEL moves with the mode, because a label is a promise about what it
@@ -2181,7 +2191,7 @@ export default function Home() {
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
     // RF KORR, which needs a VE drive before it will open.
     { id: 'calibration', label: 'CALIBRATION', enabled: !!binaryFileState.binaryBuffer },
-  ], [currentMap, newMap, movingValidated, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables,
+  ], [currentMap, newMap, movingValidated, correctionMap, movingAcquisition, processedLog, warmupMap, tunedRfKorr, idleTables,
     binaryFileState.binaryBuffer, logProcess, idleHasRows]);
 
   // MODE chooses the tabs AND their sequence; the variant then closes whatever it closes. Built by
@@ -2219,9 +2229,9 @@ export default function Home() {
   useEffect(() => {
     const want = pendingTabRef.current;
     if (!want) return;
-    if (want === 'new' && !veCalc.isCalculating && !newMap && (correctionMap || veCalc.movingError)) {
+    if (want === 'new' && !veCalc.isCalculating && !newMap && (correctionMap || movingAcquisition || veCalc.movingError)) {
       pendingTabRef.current = null;
-      setActiveTab(correctionMap ? 'lambda' : 'log');
+      setActiveTab(correctionMap || movingAcquisition ? 'lambda' : 'log');
       setNarrowPane('map');
       return;
     }
@@ -2233,7 +2243,7 @@ export default function Home() {
     // released it, and the screen stayed on DASH with the trim being drawn out of sight. The manual
     // path already pairs these two (onSelectTab does both); this is the same rule for the armed one.
     setNarrowPane('map');
-  }, [TABS, currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, veCalc.isCalculating, veCalc.movingError]);
+  }, [TABS, currentMap, newMap, correctionMap, movingAcquisition, processedLog, warmupMap, tunedRfKorr, veCalc.isCalculating, veCalc.movingError]);
 
   // Clearing the log or swapping the BASE can disable the tab you're standing on; without this you'd
   // be stranded on a placeholder with its own tab greyed out.
@@ -4040,10 +4050,12 @@ export default function Home() {
        produces a map identical to the BASE, and returning it once let a flash slot write the BASE
        back to a car under a TUNED name — so it stays exactly as it is. This view simply stops
        asking it. */
-    () => (correctionMap && currentMap)
-      ? { xAxis: currentMap.xAxis, yAxis: currentMap.yAxis, data: correctionMap }
+    () => (currentMap && movingAcquisition)
+      ? { xAxis: currentMap.xAxis, yAxis: currentMap.yAxis, data: movingAcquisition.cells.map(row => row.map(cell => cell.recorded)) }
+      : (correctionMap && currentMap)
+        ? { xAxis: currentMap.xAxis, yAxis: currentMap.yAxis, data: correctionMap }
       : null,
-    [correctionMap, currentMap]);
+    [correctionMap, currentMap, movingAcquisition]);
   /** The RF KORR grid and surface, from the one selection they share. Memoised for the same reason
    *  as the two above — MapVisualizer is memoised, and a fresh object each render defeats it. */
   const rfKorrSurface = useMemo(
@@ -5562,18 +5574,18 @@ export default function Home() {
                       <span className="text-slate-300 font-bold">{logRate.hz.toFixed(2)}</span>
                     </>
                   )}
-                  <span className="text-slate-500">VALID</span>
-                  <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
-                  <span className="text-slate-600">TOTAL</span>
-                  <span className="text-slate-500">{(processedLog.validCount + processedLog.droppedCount).toLocaleString()}</span>
+                  <span className="text-slate-500">{movingAcquisition ? 'CANDIDATES' : 'VALID'}</span>
+                  <span className={movingAcquisition ? 'text-indigo-300 font-bold' : 'text-blue-400 font-bold'}>{(movingAcquisition?.candidateRows ?? processedLog.validCount).toLocaleString()}</span>
+                  <span className="text-slate-600">{movingAcquisition ? 'RAW' : 'TOTAL'}</span>
+                  <span className="text-slate-500">{(movingAcquisition ? processedLog.rawData.length : (processedLog.validCount + processedLog.droppedCount)).toLocaleString()}</span>
                   {/* Last, and last on the phone's band too — one slot for this readout at both
                       widths. It stood between VALID and TOTAL, where its two states are two
                       different widths (⚠ −6.0 % against ✂ 5m): excluding the stretch moved TOTAL
                       sideways, so the number you were reading changed place at the moment you
                       acted, and the same readout sat in two positions depending on the screen.
                       At the end it cannot push anything, which is the whole of the fix. */}
-                  <DriveSplitChip
-                    split={driveSplit} excludedSpan={splitExcludedSpan} onOpen={openSplitDetail} />
+                  {!movingAcquisition && <DriveSplitChip
+                    split={driveSplit} excludedSpan={splitExcludedSpan} onOpen={openSplitDetail} />}
                 </div>
               )}
               {/* The three config panels, in VE modes only — see `veSurfaces`. */}
@@ -5819,8 +5831,8 @@ export default function Home() {
                 )}
                 {processedLog && (
                   <span className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
-                    <span className="text-slate-500">VALID</span>
-                    <span className="text-blue-400 font-bold">{processedLog.validCount.toLocaleString()}</span>
+                    <span className="text-slate-500">{movingAcquisition ? 'CANDIDATES' : 'VALID'}</span>
+                    <span className={movingAcquisition ? 'text-indigo-300 font-bold' : 'text-blue-400 font-bold'}>{(movingAcquisition?.candidateRows ?? processedLog.validCount).toLocaleString()}</span>
                   </span>
                 )}
                 {/* TOTAL, and it is still the door. DROP stood here for a while because it was the
@@ -5828,14 +5840,16 @@ export default function Home() {
                     difference — so TOTAL is the number the row could not otherwise give you, and
                     the one that says whether the drive was long enough to argue about at all.
                     Tapping still opens the census that says why the difference exists. */}
-                {processedLog && (
+                {processedLog && (movingAcquisition ? (
+                  <span className="text-[9px] font-mono text-slate-500">RAW {processedLog.rawData.length.toLocaleString()}</span>
+                ) : (
                   <DropCensusLine
                     census={processedLog.dropCensus} chip className="leading-none"
                     total={processedLog.validCount + processedLog.droppedCount} />
-                )}
+                ))}
                 {/* Last, after the counts it qualifies: VALID is one number for a drive that this
                     says was two. */}
-                {processedLog && (
+                {processedLog && !movingAcquisition && (
                   <DriveSplitChip
                     split={driveSplit} excludedSpan={splitExcludedSpan} onOpen={openSplitDetail} />
                 )}
@@ -5855,7 +5869,19 @@ export default function Home() {
                 box instead — closing whitespace to solve a whitespace problem, which is backwards
                 in a system whose rule is to take the space. The band opens its own instead. */}
             <div className="absolute inset-0 pt-2 pb-2 px-4">
-              {(activeTab === 'current' && currentMap) && <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} {...coverageBands} weightData={weightMap ?? undefined} zoom={mapZoom.zoom} />}
+              {(activeTab === 'current' && currentMap) && (
+                <div className="h-full w-full flex flex-col">
+                  {movingAcquisition && <MovingAcquisitionSummary coverage={movingAcquisition} mapData={currentMap}
+                    selected={coverageCell} onClose={() => setCoverageCell(null)} phase={movingAcquisitionPhase} />}
+                  <div className="flex-1 min-h-0 relative">
+                    <MapEditor mapData={currentMap} hitData={hitMap ?? undefined} {...coverageBands}
+                      weightData={weightMap ?? undefined} zoom={mapZoom.zoom}
+                      liveAcquisition={movingAcquisition ?? undefined}
+                      onCellSelect={movingAcquisition ? toggleCoverageCell : undefined}
+                      selected={movingAcquisition ? coverageCell : null} />
+                  </div>
+                </div>
+              )}
               {(activeTab === 'new' && newMap) && (
                 <div className="h-full w-full flex flex-col">
                   {/* One strip where there were two rows and a paragraph. The drive split, the
@@ -5961,10 +5987,11 @@ export default function Home() {
                   {dmeLink.state === 'tuning' && (
                     <LiveDriveStrip
                       feed={liveRun.readout}
-                      interpolationTable={interpolationTable}
+                      interpolationTable={movingAcquisition && !filterConfig.enableCorrection ? undefined : interpolationTable}
+                      acquisition={movingAcquisition}
                       settleSec={filterConfig.highLoadSettleSec}
-                      view={activeDriveView}
-                      views={driveViews}
+                      view={movingAcquisition ? 've' : activeDriveView}
+                      views={movingAcquisition ? ['ve'] : driveViews}
                       onViewChange={setDriveView}
                       hitMap={hitMap}
                       rpmAxis={currentMap?.xAxis}
@@ -5972,30 +5999,35 @@ export default function Home() {
                       coverageOk={filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT}
                     />
                   )}
+                  {movingAcquisition && <MovingAcquisitionSummary coverage={movingAcquisition} mapData={lambdaVisualMap}
+                    selected={coverageCell} onClose={() => setCoverageCell(null)} phase={movingAcquisitionPhase} />}
                   {/* `relative` for the same reason the TUNED tab needs it: the readout is an
                       overlay on the foot of the box, not a row under it, so selecting a cell in the
                       bottom row does not push the grid out from under the finger. */}
                   <div className="flex-1 min-h-0 relative">
                     <MapEditor
                       mapData={lambdaVisualMap!}
+                      liveAcquisition={movingAcquisition ?? undefined}
+                      valueFormat={movingAcquisition ? String : undefined}
+                      valueLabel={movingAcquisition ? 'RECORDED' : undefined}
                       hitData={hitMap || undefined} {...coverageBands}
                       weightData={weightMap || undefined}
                       zoom={mapZoom.zoom}
                       onCellSelect={toggleCoverageCell}
                       selected={coverageCell}
-                      bottomInset={coverageInset}
+                      bottomInset={movingAcquisition ? 0 : coverageInset}
                     />
                     {/* The same readout as TUNED MAP, and deliberately the same component: this is
                         the tab a cell's trustworthiness is judged on while driving, and two
                         readouts of one cell would be two places for the numbers to drift apart. */}
-                    <CoverageDetail
+                    {!movingAcquisition && <CoverageDetail
                       cell={coverageCell ? coverage[coverageCell.row]?.[coverageCell.col] : null}
                       map={lambdaVisualMap}
                       demand={coverageCell ? veCalc.demandMap?.[coverageCell.row]?.[coverageCell.col] : undefined}
                       rfKorr={coverageCell ? veCalc.rfKorrMap?.[coverageCell.row]?.[coverageCell.col] : undefined}
                       rfKorrSpread={coverageCell ? veCalc.rfKorrSpreadMap?.[coverageCell.row]?.[coverageCell.col] : undefined}
                       onHeightChange={setCoverageInset}
-                    />
+                    />}
                   </div>
                 </div>
               )}
@@ -6377,7 +6409,7 @@ export default function Home() {
                 <MapVisualizer mapData={deferredCharts.diffVisualMap} title="" zAxisLabel="Diff %" scale="deviation" deviationMidpoint={0} />
               )}
               {graphOnScreen && (activeTab === 'lambda' && deferredCharts.lambdaVisualMap) && (
-                <MapVisualizer mapData={deferredCharts.lambdaVisualMap} title="" zAxisLabel="Lambda" scale="deviation" deviationMidpoint={1} />
+                <MapVisualizer mapData={deferredCharts.lambdaVisualMap} title="" zAxisLabel={movingAcquisition ? 'Recorded samples' : 'Lambda'} scale={movingAcquisition ? 'magnitude' : 'deviation'} deviationMidpoint={1} />
               )}
               {/* The correction is a multiplier centred on 1.0, and only the departure from it
                   means anything, so it takes the deviation scale like the two signed maps above

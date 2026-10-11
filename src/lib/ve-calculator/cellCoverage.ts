@@ -164,13 +164,16 @@ export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
         const row: CellCoverage[] = [];
         for (let c = 0; c < cols; c++) {
             const samples = hitMap?.[r]?.[c] ?? 0;
-            const reason = rejectMap?.[r]?.[c] ?? null;
+            // Only an explicit null verdict means accepted. No calculation yet
+            // must not turn an untouched grid into 480 "no change" decisions.
+            const verdict = rejectMap?.[r]?.[c];
+            const reason = verdict === undefined ? 'no-evidence' : verdict;
             const correction = correctionMap?.[r]?.[c] ?? 1;
             row.push({
                 row: r, col: c, samples,
                 weight: weightMap?.[r]?.[c],
                 correction, reason,
-                belowReach: samples === 0 && r < floorRow,
+                belowReach: samples === 0 && Number.isFinite(floorRow) && r < floorRow,
                 // A written cell whose correction came out 1.000 IS the "nothing to change"
                 // answer, and saying so is worth more than colouring it as a change of zero. The
                 // cell is written either way, so the distinction has to be read off the number.

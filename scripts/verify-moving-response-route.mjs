@@ -116,8 +116,8 @@ const findTab=n=>{if(ts.isCallExpression(n)&&n.expression.getText(ast)==='useEff
 assert(tabCallback);
 const tabCode=ts.transpileModule(`const resolvePending=${tabCallback.getText(ast)};`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
 const tabRef={current:'new'},nav=[];
-const resolveTab=(calculating,newMap,correctionMap,error=null)=>new Function('pendingTabRef','TABS','veCalc','newMap','correctionMap','setActiveTab','setNarrowPane',`${tabCode}\nreturn resolvePending();`)
-    (tabRef,[{id:'new',enabled:!!newMap},{id:'lambda',enabled:!!correctionMap}],{isCalculating:calculating,movingError:error},newMap,correctionMap,v=>nav.push(v),()=>{});
+const resolveTab=(calculating,newMap,correctionMap,error=null)=>new Function('pendingTabRef','TABS','veCalc','newMap','correctionMap','movingAcquisition','setActiveTab','setNarrowPane',`${tabCode}\nreturn resolvePending();`)
+    (tabRef,[{id:'new',enabled:!!newMap},{id:'lambda',enabled:!!correctionMap}],{isCalculating:calculating,movingError:error},newMap,correctionMap,null,v=>nav.push(v),()=>{});
 resolveTab(true,null,null);assert.equal(tabRef.current,'new');assert.deepEqual(nav,[]);
 resolveTab(false,result.newMap,result.correctionMap);assert.equal(tabRef.current,null);assert.deepEqual(nav,['new']);
 tabRef.current='new';resolveTab(false,null,result.correctionMap);assert.equal(tabRef.current,null);assert.deepEqual(nav,['new','lambda']);
