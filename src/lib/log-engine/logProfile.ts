@@ -170,7 +170,7 @@ export const BLOCK_COST: Record<number, BlockCost> = {
  * the annotation is complete on the profile production can actually run.
  */
 export type LogExchange =
-    | { kind: 'block'; selection: number; every?: number; provides?: readonly FieldKey[] }
+    | { kind: 'block'; selection: number; every?: number; productionEvery?: number; provides?: readonly FieldKey[] }
     | {
         kind: 'ram';
         /** For the event log and the diagnostics record — a numeric address in a trace is unreadable. */
@@ -207,6 +207,8 @@ export function productionExchanges(exchanges: readonly LogExchange[]): LogExcha
         && x.address === LAMBDA_RESPONSE_RAM_READ.address && x.count === LAMBDA_RESPONSE_RAM_READ.count
         ? { ...x, ...LAMBDA_TRIM_RAM_READ, name: 'LA_F_REGLER1/2',
             provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] as FieldKey[] }
+        : x.kind === 'block' && x.productionEvery !== undefined
+        ? { ...x, every: x.productionEvery }
         : x).filter(x => !x.provides?.length
         || x.provides.some(key => LOG_FIELD_REGISTRY[key].relevance !== 'debug'));
 }
@@ -255,7 +257,7 @@ export function describeExchanges(exchanges: readonly LogExchange[]): string {
 }
 
 /** A block read, spelled out. */
-const block = (selection: number, every?: number): LogExchange =>
+const block = (selection: number, every?: number): Extract<LogExchange, { kind: 'block' }> =>
     every === undefined ? { kind: 'block', selection } : { kind: 'block', selection, every };
 
 /**
@@ -588,14 +590,15 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
     VE: {
         id: 'VE', label: 'VE',
         // Block 3 for rpm/load/RF/TABG, RAM for trim and response diagnostics, and
-        // block 19 every eighth sample for purge/freeze plus the continuing trim cross-check.
+        // block 19 every sample in WORKS for TI1..TI6 and a contemporaneous trim pair.
+        // Production keeps the existing 1/8 purge/trim-cross-check cadence.
         exchanges: [
             // `provides` from here down is what `productionExchanges` narrows on. It names the LOG
             // channels an exchange puts in the file — not every byte it decodes: `ambientPressure-
             // Substituted`, `ambientTempFromCan` and `pressureDecodeDisagreesMbar` ride along on
             // these same reads as qualifiers on a channel rather than columns of their own, so they
             // have no registry entry to name and cannot keep an exchange alive by themselves.
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'baseInjectionMs'] },
             // WORKS expands the existing trim read by 24 bytes (~27.5 ms at 9600 8E1).
             // Production explicitly narrows it back to eight bytes above.
             { kind: 'ram', name: 'Lambda response (0401, unverified)', ...LAMBDA_RESPONSE_RAM_READ,
@@ -608,7 +611,9 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // All three are debug-only and productionExchanges removes them there.
             // At 9600 8E1 and the existing 35 ms RAM turnaround model this costs
             // 110.9 ms/sample, plus 27.5 ms for the wide lambda read above:
-            // WORKS now ~2.74 Hz in this model; production stays ~4.56 Hz.
+            // Before the full-rate injection response this was ~2.74 Hz in the model.
+            // Block 19 below now adds ~171.9 ms/sample: ~1.86 Hz. This is a model,
+            // not an on-car promise; production stays ~4.56 Hz.
             // A 52-byte k/MAP cluster every sample would cost ~50.8 ms more per
             // sample than these separate reads. Rates still need an on-car check.
             { kind: 'ram', name: 'rf_korr (direct, unverified)', ...RF_KORR_DIRECT_RAM_READ,
@@ -619,8 +624,11 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
                 every: LAMBDA_SLOW_LANE_EVERY, provides: ['rfMapIntegratorDirect'] },
             // Three debug bytes and `tetv`, which is tuning — so this stays in production, and the
             // three ride in free. It also carries the truth gate, which is not a channel at all.
-            { ...block(19, LAMBDA_SLOW_LANE_EVERY),
-                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
+            { ...block(19), productionEvery: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
+                    'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
+                    'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
+                    'injectionReadTime', 'injectionReadMs'] },
             // Ambient pressure, its two diagnostic bytes, the DME's altitude, intake air
             // temperature and the DME's own modelled charge temperature — sixteen bytes, one
             // telegram, on the same slow lane. This is what separates a real VE error from a
@@ -677,8 +685,11 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // in production it must record the same channel set. Narrowing this changes nothing — both
         // blocks carry tuning channels — which is the point of stating it rather than assuming it.
         fallback: [
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
-            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'baseInjectionMs'] },
+            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
+                'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
+                'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
+                'injectionReadTime', 'injectionReadMs'] },
         ],
         // The lambda trim is the whole input, and PATCH is what stops the DME hiding the error the
         // trim is supposed to reveal: k_rf_cfg turns MAP compensation off and K_LAA_TMOT_MIN stops

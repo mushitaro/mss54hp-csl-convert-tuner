@@ -99,8 +99,10 @@ import { AlertCircle, Download, FileCode, FileSpreadsheet, Zap, Play, Cpu, Trash
 import { PROJECT_REPO_URL } from '@/config/links';
 import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { isFieldPresent } from '@/lib/field-registry/registry';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
+import { readDmeCalibration } from '@/lib/ve-calculator/dmeResponse';
+import { comparisonOnlyOutputMessage } from '@/lib/ve-calculator/comparisonOutput';
 import { operatingCalibrationHold } from '@/lib/ve-calculator/operatingPolicy';
 import { OperatingEvidenceNotice } from '@/components/OperatingEvidenceNotice';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
@@ -176,7 +178,8 @@ const SPLIT_ONLY_GROW = '[@media(max-width:899px)_and_(max-height:560px)]:flex-1
 
 export default function Home() {
   /** The manifest's explanations follow the reader; its control names never do. See manifest-text. */
-  const manifestText = MANIFEST_TEXT[useDialogLang()];
+  const displayLang = useDialogLang();
+  const manifestText = MANIFEST_TEXT[displayLang];
   const binaryFileState = useBinaryFile();
   const logFileState = useLogFile();
   const veCalc = useVeCalculation();
@@ -635,6 +638,7 @@ export default function Home() {
     veCorrectionPolicy: config.veCorrectionPolicy,
     veLearningRate: config.veLearningRate,
     steadyCalibrationHold: operatingCalibrationHold(recordedBase),
+    dmeCalibration: readDmeCalibration(recordedBase),
     steadyLambdaLimits: recordedBase ? new BinaryParser(recordedBase).readLambdaLimits() : null,
     steadyFilterConfig: config,
     steadyLoadTable: recordedLoadTable,
@@ -648,7 +652,7 @@ export default function Home() {
     // new table and writing it are one decision. `write` is a parameter rather than read from
     // state here for the same reason `config` is: the archived-session handlers run in a render
     // scope whose state is one step behind what they just asked to load.
-    writeRfKorr: write && config.veCorrectionPolicy !== 'steady-retain',
+    writeRfKorr: write && !isVeComparisonPolicy(config.veCorrectionPolicy),
     // The evidence gate, and the rf_korr tuner's own. Both travel in the filter config so a session
     // replays under the thresholds it was built with rather than under today's defaults.
     //
@@ -674,7 +678,7 @@ export default function Home() {
     // `curves`, not the memo. Reopening a session calls this with the curves read from THAT
     // session's BASE while the memo still describes whatever is loaded now — the same trap the
     // note at the reopen call site describes for egtTables and the stored config.
-    normaliseTo: config.veCorrectionPolicy !== 'steady-retain' && config.normaliseChargeTemp ? curves : null,
+    normaliseTo: !isVeComparisonPolicy(config.veCorrectionPolicy) && config.normaliseChargeTemp ? curves : null,
     // Always passed, unlike the normalisation: measuring rf_korr honestly is not an option the
     // operator turns on. Without it the calculation falls back to the trim alone.
     rfKorrAir: { curves, assumedPressureMbar: config.assumedAmbientPressure },
@@ -1052,7 +1056,7 @@ export default function Home() {
    *  Four conditions, all of which have to hold at once, which is why this lives here rather than
    *  in the panel: the panel can see the config and nothing else. */
   const canTuneRfKorr = !!(
-    filterConfig.veCorrectionPolicy !== 'steady-retain'
+    !isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
     && egtTables                                // the binary's tables decoded
     && tunedRfKorr?.acceptable                  // the back-calculation met its own thresholds
     && !tunedRfKorr.report.sensorMissing        // the log carried an exhaust temperature
@@ -1323,9 +1327,9 @@ export default function Home() {
   }, [logFileState.rawLogData, binaryFileState.binaryBuffer]);
   /** Set only when something is wrong — so `!!storeLockReason` IS the "hold the write" decision,
    *  and the row that explains it and the toggle that obeys it cannot come apart. */
-  const storeLockReason = ((pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'
-    || filterConfig.veCorrectionPolicy === 'steady-retain')
-    ? 'STEADY: comparison only — validate the resulting RF KORR gate and independent thermal-state logs before writing.'
+  const storeLockReason = (isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)
+    || isVeComparisonPolicy(filterConfig.veCorrectionPolicy))
+    ? comparisonOnlyOutputMessage(displayLang)
     : storeNeutrality.verdict === 'learned'
     ? manifestText.trimLearned(storeNeutrality.worst.toFixed(4))
     : undefined;
@@ -2016,8 +2020,8 @@ export default function Home() {
    * a new field through three call sites and forgetting the fourth is the failure this replaces.
    */
   const writeExtras = useMemo<PatchExtras>(() => ({
-    comparisonOnly: (pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'
-      || filterConfig.veCorrectionPolicy === 'steady-retain',
+    comparisonOnly: isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)
+      || isVeComparisonPolicy(filterConfig.veCorrectionPolicy),
     tunedRfKorr: rfKorrWrite,
     tunedShape: shapeWrite,
     // The idle proposal, feature-gated like the calibration edits below it and for the same reason:
@@ -2686,7 +2690,7 @@ export default function Home() {
     // A comparison must still keep the drive and its analysis settings. BIN refusal belongs to
     // artifact output, not to recording observations; this branch precedes even manual edits so
     // an armed edit or a previously computed map cannot route a log through the BIN builder.
-    if (filterConfig.veCorrectionPolicy === 'steady-retain' || newMap?.calibrationStatus === 'comparison-only') {
+    if (isVeComparisonPolicy(filterConfig.veCorrectionPolicy) || newMap?.calibrationStatus === 'comparison-only') {
       const raw = logFileState.rawLogData;
       if (!raw?.length) return;
       const prior = currentSession;
@@ -2712,7 +2716,8 @@ export default function Home() {
         sessionId: target.id, process: logProcess, log: raw,
         tuneSettings: {
           ...buildSettings(),
-          filterConfig: { ...filterConfig, veCorrectionPolicy: 'steady-retain' },
+          filterConfig: { ...filterConfig, veCorrectionPolicy: isVeComparisonPolicy(filterConfig.veCorrectionPolicy)
+            ? filterConfig.veCorrectionPolicy : 'steady-retain' },
           writeVe: false, writeWarmup: false, writeRfKorr: false, writeIdle: false, writeLls: false,
         },
       });
@@ -3058,6 +3063,20 @@ export default function Home() {
           standardReadTime: sample.standardReadTime,
           standardReadMs: sample.standardReadMs,
           lambdaReadSource: sample.lambdaReadSource,
+          baseInjectionMs: sample.baseInjectionMs,
+          injection1Ms: sample.injection1Ms,
+          injection2Ms: sample.injection2Ms,
+          injection3Ms: sample.injection3Ms,
+          injection4Ms: sample.injection4Ms,
+          injection5Ms: sample.injection5Ms,
+          injection6Ms: sample.injection6Ms,
+          injectionBlankActual: sample.injectionBlankActual,
+          injectionBlankTarget: sample.injectionBlankTarget,
+          injectionStft1: sample.injectionStft1,
+          injectionStft2: sample.injectionStft2,
+          injectionReadTime: sample.injectionReadTime,
+          injectionReadMs: sample.injectionReadMs,
+          injectionReadSource: sample.injectionReadSource,
           wdk1: sample.wdk1,
           // Carried into the log rather than only shown live: whether purge was active is a property
           // of the RUN, and it is the thing you want to check when two logs of the same road
@@ -5047,8 +5066,8 @@ export default function Home() {
         ['startup', 'current', 'lambda', 'new', 'diff', 'log'].includes(activeTab) &&
         <OperatingEvidenceNotice raw={logFileState.rawLogData} map={currentMap} base={binaryBuffer}
           logging={dmeLink.state === 'tuning'}
-          options={veCalcOptions} active={(pendingConfig ?? filterConfig).veCorrectionPolicy === 'steady-retain'}
-          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'steady-retain' })} />}
+          options={veCalcOptions} active={isVeComparisonPolicy((pendingConfig ?? filterConfig).veCorrectionPolicy)}
+          readOnly={isArchived} onEnable={() => handleConfigChange({ ...(pendingConfig ?? filterConfig), veCorrectionPolicy: 'dme-response' })} />}
       {/* App Header - Ultra Minimal */}
       {/* min-[900px] on the blur — see globals.css § backdrop-filter. */}
       <header className="relative px-6 py-3 flex justify-between items-center bg-slate-950/80 min-[900px]:backdrop-blur-md z-10 shrink-0 h-[48px]">

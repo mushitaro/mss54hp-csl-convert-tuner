@@ -11,6 +11,7 @@ import type { LogDataPoint } from '@/lib/types';
  * the DME. It is rendered as a fixed computed column by LogDataTable rather than a toggleable field.
  */
 export type FieldKey =
+    | 'baseInjectionMs' | 'injection1Ms' | 'injection2Ms' | 'injection3Ms' | 'injection4Ms' | 'injection5Ms' | 'injection6Ms' | 'injectionBlankActual' | 'injectionBlankTarget' | 'injectionStft1' | 'injectionStft2' | 'injectionReadTime' | 'injectionReadMs'
     | 'o2Precat1Mv' | 'o2Precat2Mv' | 'lambdaState1' | 'lambdaState2'
     | 'lambdaPSteps1' | 'lambdaPSteps2' | 'baFTi'
     | 'lambdaReadTime' | 'lambdaReadMs' | 'standardReadTime' | 'standardReadMs'
@@ -70,6 +71,8 @@ export interface FieldMeta {
      *  and so the cost of having it is visible: fields sharing a selection are free once one of them
      *  is being read, and a new selection is a whole extra round trip. */
     source: FieldSource;
+    /** The same ECU symbol captured in a different exchange must keep its own value key. */
+    capture?: 'injection';
     unit: string;
     format: (value: number) => string;
     /**
@@ -116,14 +119,67 @@ export function describeField(meta: FieldMeta): string {
 }
 
 export function fieldValueKey(meta: FieldMeta): string {
-    return meta.source === 'derived'
+    const key = meta.source === 'derived'
         ? `calc:${meta.symbol}`
         : 'segment' in meta.source
         ? `ram:${meta.source.segment.toString(16)}:${meta.source.address.toString(16)}:${meta.symbol}`
         : `${meta.source.selection.toString(16).toUpperCase().padStart(2, '0')}:${meta.symbol}`;
+    return meta.capture ? `${key}:${meta.capture}` : key;
 }
 
 export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
+    baseInjectionMs: {
+        key: 'baseInjectionMs', symbol: 'tl', name: 'Base load time before slave fuel factors; not TI_VORST',
+        source: { selection: 3, offset: 6 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection1Ms: {
+        key: 'injection1Ms', symbol: 'ti1', name: 'Cylinder 1 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 6 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection2Ms: {
+        key: 'injection2Ms', symbol: 'ti2', name: 'Cylinder 2 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 8 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection3Ms: {
+        key: 'injection3Ms', symbol: 'ti3', name: 'Cylinder 3 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 10 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection4Ms: {
+        key: 'injection4Ms', symbol: 'ti4', name: 'Cylinder 4 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 12 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection5Ms: {
+        key: 'injection5Ms', symbol: 'ti5', name: 'Cylinder 5 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 14 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injection6Ms: {
+        key: 'injection6Ms', symbol: 'ti6', name: 'Cylinder 6 injection command before dead time; unverified on car',
+        source: { selection: 19, offset: 16 }, unit: 'ms', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injectionBlankActual: {
+        key: 'injectionBlankActual', symbol: 'ti_ausblend_ist', name: 'Injection blanking actual',
+        source: { selection: 19, offset: 4 }, unit: '', format: v => v.toFixed(0), relevance: 'debug',
+    },
+    injectionBlankTarget: {
+        key: 'injectionBlankTarget', symbol: 'ti_ausblend_soll', name: 'Injection blanking target',
+        source: { selection: 19, offset: 5 }, unit: '', format: v => v.toFixed(0), relevance: 'debug',
+    },
+    injectionStft1: {
+        key: 'injectionStft1', symbol: 'la_f_regler1', name: 'Block 19 trim from the same response as TI; separate from the RAM trim',
+        source: { selection: 19, offset: 40 }, capture: 'injection', unit: '', format: v => v.toFixed(4), relevance: 'debug',
+    },
+    injectionStft2: {
+        key: 'injectionStft2', symbol: 'la_f_regler2', name: 'Block 19 trim from the same response as TI; separate from the RAM trim',
+        source: { selection: 19, offset: 42 }, capture: 'injection', unit: '', format: v => v.toFixed(4), relevance: 'debug',
+    },
+    injectionReadTime: {
+        key: 'injectionReadTime', symbol: 'Injection read time', name: 'Host block 19 midpoint, not an ECU snapshot',
+        source: 'derived', unit: 's', format: v => v.toFixed(3), relevance: 'debug',
+    },
+    injectionReadMs: {
+        key: 'injectionReadMs', symbol: 'Injection read span', name: 'Complete block 19 exchange duration',
+        source: 'derived', unit: 'ms', format: v => v.toFixed(1), relevance: 'debug',
+    },
     o2Precat1Mv: {
         key: 'o2Precat1Mv', symbol: 'usv1', name: 'Precat O2 bank 1 (unverified RAM); narrowband voltage, not AFR',
         source: { segment: 1, address: 0xff80be, unverified: true }, unit: 'mV', format: v => v.toFixed(0), relevance: 'debug',
@@ -686,6 +742,7 @@ export const CORE_ONLY_VISIBILITY: Record<FieldKey, boolean> = (() => {
 })();
 
 export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
+    baseInjectionMs: false, injection1Ms: false, injection2Ms: false, injection3Ms: false, injection4Ms: false, injection5Ms: false, injection6Ms: false, injectionBlankActual: false, injectionBlankTarget: false, injectionStft1: false, injectionStft2: false, injectionReadTime: false, injectionReadMs: false,
     o2Precat1Mv: false, o2Precat2Mv: false, lambdaState1: false, lambdaState2: false, lambdaPSteps1: false, lambdaPSteps2: false, baFTi: false, lambdaReadTime: false, lambdaReadMs: false, standardReadTime: false, standardReadMs: false,
     rfKorrDirect: false, rfSollDirect: false, rfMapIntegratorDirect: false, rfKorrDirectTime: false, rfSollDirectTime: false, rfMapIntegratorDirectTime: false, rfKorrDirectReadMs: false, rfSollDirectReadMs: false, rfMapIntegratorDirectReadMs: false, veSteadySeconds: false,
     rpm: true, rawLoad: true, correctedLoad: true, stft1: true, stft2: true, coolantTemp: true,

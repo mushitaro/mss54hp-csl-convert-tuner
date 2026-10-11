@@ -2,9 +2,10 @@ import { useMemo } from 'react';
 import type { LogDataPoint } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { APP_CONFIG } from '@/config/constants';
-import { timeScaleSeconds } from '@/lib/log-engine/filter';
+import { timeScaleSeconds, interpolateFactor } from '@/lib/log-engine/filter';
 import { downloadBlob, MIME_JSON } from '@/lib/download';
 import { readResponseCalibration, summarizeRfResponse } from '@/lib/ve-calculator/rfResponseEvidence';
+import { annotateDmeResponse, readDmeCalibration, summarizeDmeResponse } from '@/lib/ve-calculator/dmeResponse';
 
 /** Mounted only in the open, stopped-log dialog. No full-log work on the live poll path. */
 export function RfResponseSummary({ raw, base, options, ja }: {
@@ -15,6 +16,17 @@ export function RfResponseSummary({ raw, base, options, ja }: {
         correctLoad: !!options.steadyFilterConfig?.enableCorrection,
         loadTable: options.steadyLoadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE,
     }), [raw, base, options]);
+    const dme = useMemo(() => {
+        const table = options.steadyLoadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
+        const points = annotateDmeResponse(raw.map(p => ({ ...p,
+            correctedLoad: p.rawLoad / (options.steadyFilterConfig?.enableCorrection ? interpolateFactor(p.rpm, table) : 1),
+        })), { calibration: readDmeCalibration(base), secondsPerTimeUnit: timeScaleSeconds(raw),
+            excludeTimeRanges: options.steadyFilterConfig?.excludeTimeRanges,
+            minCoolantTemp: Math.max(65, options.steadyFilterConfig?.enableMinTemp ? options.steadyFilterConfig.minTemp : 65) });
+        const focus = points.filter(p => p.rpm>=2200 && p.rpm<=2700 && p.correctedLoad!>=7.5 && p.correctedLoad!<=10);
+        return { ...summarizeDmeResponse(points), focus: summarizeDmeResponse(focus),
+            points: points.map((p,index)=>({ index, time:p.time, ...p.dmeResponse })) };
+    }, [raw, base, options]);
     const c = report.coverage;
     const fixed = (v: number | null, digits = 0) => v === null ? '—' : v.toFixed(digits);
     const pair = (v: [number | null, number | null]) => v.map(x => fixed(x, 3)).join(' / ');
@@ -31,6 +43,18 @@ export function RfResponseSummary({ raw, base, options, ja }: {
             <dt>{ja ? '標本間隔・中央値' : 'Median sample interval'}</dt><dd className="font-mono">{fixed(report.medianSampleMs)} ms</dd>
             <dt>{ja ? '必要読出しの時間幅・最大' : 'Largest acquisition span'}</dt><dd className="font-mono">{fixed(report.maxCaptureSpanMs)} ms</dd>
         </dl>
+        <div data-testid="dme-response-summary" className="space-y-2 border-t border-slate-800 pt-2">
+            <p className="font-semibold text-slate-200">{ja ? 'DMEの補正履歴による比較' : 'Comparison from DME response history'}</p>
+            <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-1">
+                <dt>{ja ? '加減速補正の停止条件と制御OFFが一致' : 'BA shutdown condition with controller OFF'}</dt><dd className="font-mono">{dme.reasons['ba-shutdown'] ?? 0}</dd>
+                <dt>{ja ? '対象域・減量応答中' : 'Target band: rich-side integral response'}</dt><dd className="font-mono">{dme.focus.reasons['integrating-rich'] ?? 0} / {dme.focus.total}</dd>
+                <dt>{ja ? '対象域・比較候補' : 'Target band: comparison candidates'}</dt><dd className="font-mono">{dme.focus.candidates}</dd>
+                <dt>{ja ? 'ログ全体・比較候補' : 'Whole log: comparison candidates'}</dt><dd className="font-mono">{dme.candidates}</dd>
+            </dl>
+            <p className="text-slate-400">{ja
+                ? '固定秒数では採用せず、両バンクの2往復と補正平均を比較します。候補0は補正量が未確定という意味です。候補があっても較正条件と再現性の検証が必要です。'
+                : 'Compares two cycles and their mean corrections in both banks; elapsed seconds do not qualify a point. Zero candidates means the correction remains unresolved. Candidates still need calibration and repeatability validation.'}</p>
+        </div>
         {!c.wideReads && <p className="text-slate-300" data-testid="rf-response-missing">{ja
             ? '追加信号は未収録です。旧ログや通常版・代替プロファイルのログでは、O₂応答を検証できません。'
             : 'Extended signals were not recorded. Older, production or fallback logs cannot establish O₂ response.'}</p>}
@@ -54,7 +78,7 @@ export function RfResponseSummary({ raw, base, options, ja }: {
             </div>
         </details>
         <button type="button" data-testid="rf-response-export"
-            onClick={() => downloadBlob(JSON.stringify(report, null, 2), 'rf-response-analysis-v1.json', MIME_JSON)}
+            onClick={() => downloadBlob(JSON.stringify({ ...report, dmeResponse: dme }, null, 2), 'rf-response-analysis-v2.json', MIME_JSON)}
             className="min-h-10 px-3 rounded border border-slate-600 text-slate-200">
             {ja ? '解析JSONを保存' : 'Save analysis JSON'}
         </button>

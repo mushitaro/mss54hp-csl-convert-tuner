@@ -74,8 +74,8 @@ console.log('\n[what a sample costs, from the exchanges it is made of]');
     check('the three diagnostic reads cost 110.9 ms/sample in the declared wire model',
         Math.abs(sampleMs(direct) - 110.8984375) < 1e-8, sampleMs(direct).toFixed(4));
     const withoutDirect = LOG_PROFILES.VE.exchanges.filter(x => !direct.includes(x));
-    check('the former WORKS profile still beats the fallback when direct diagnostics are removed',
-        expectedHz(withoutDirect) > veSlow);
+    check('the injection response is budgeted once per WORKS sample',
+        withoutDirect.find(x => x.selection === 19)?.every === undefined);
     check('the displayed WORKS rate includes the diagnostic cost',
         Math.abs(1000 / ve - sampleMs(withoutDirect) - sampleMs(direct)) < 1e-8);
     // ...and it must still be slower than dropping the trim altogether, or something is wrong with
@@ -92,8 +92,9 @@ console.log('\n[what a sample costs, from the exchanges it is made of]');
     check('a 1/8 lane costs an eighth of its exchange',
         Math.abs(sampleMs(only(b3, slow)) - (exchangeMs(b3) + exchangeMs(b19) / 8)) < 1e-9);
     check('every: 1 is the same as no every', sampleMs(only({ ...b19, every: 1 })) === sampleMs(only(b19)));
-    check('the VE profile puts block 19 on the slow lane',
-        LOG_PROFILES.VE.exchanges.some(x => x.kind === 'block' && x.selection === 19 && x.every === LAMBDA_SLOW_LANE_EVERY));
+    check('production keeps the block 19 slow lane, WORKS reads injection every sample',
+        productionExchanges(LOG_PROFILES.VE.exchanges).some(x => x.kind === 'block' && x.selection === 19 && x.every === LAMBDA_SLOW_LANE_EVERY)
+        && LOG_PROFILES.VE.exchanges.some(x => x.kind === 'block' && x.selection === 19 && (x.every ?? 1) === 1));
     // The fallback is what a VE log has always been, and it must claim nothing.
     check('the fallback reads both blocks every sample',
         blocksOf(LOG_PROFILES.VE.fallback).join() === '3,19'

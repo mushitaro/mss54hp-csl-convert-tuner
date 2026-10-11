@@ -5,6 +5,8 @@
     "private": true,
     "license": "MIT",
     "scripts": {
+        "verify:dme-response": "node scripts/verify-dme-response.mjs",
+        "analyze:dme-response": "node scripts/analyze-dme-response.mjs",
         "verify:rf-response": "node scripts/verify-rf-response.mjs",
         "analyze:rf-response": "node scripts/analyze-rf-response.mjs",
         "dev": "next dev -p 5054",

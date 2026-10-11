@@ -37,6 +37,8 @@ export interface LogDataPoint extends ResponseCaptureChannels {
     /** Additional calibration evidence, evaluated over the complete chronological raw log. */
     veEvidenceEligible?: boolean;
     veEvidenceReason?: string;
+    /** Derived from intact raw history. Never stored as a measured channel or reused on replay. */
+    dmeResponse?: import('./ve-calculator/dmeResponse').DmeEvidence;
     veSteadySeconds?: number;
     /**
      * The operating point had moved within `transientSettleSec` of this sample.
@@ -561,7 +563,7 @@ export interface LogFilterConfig {
      */
     rfKorrSettleSec?: number;
     /** Explicit opt-in. Absence keeps archived calculations on their original path. */
-    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain';
+    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain' | 'dme-response';
     /** Exponent of the COMPLETE operating correction, not of rf_korr alone. */
     veLearningRate?: number;
     /**
@@ -746,4 +748,9 @@ export function resolveTransientWindow(
 export interface InterpolationPoint {
     rpm: number;
     factor: number;
+}
+
+/** Comparison policies cannot produce a flashable calibration, including via manual overrides. */
+export function isVeComparisonPolicy(policy: LogFilterConfig['veCorrectionPolicy']): boolean {
+    return policy === 'steady-retain' || policy === 'dme-response';
 }

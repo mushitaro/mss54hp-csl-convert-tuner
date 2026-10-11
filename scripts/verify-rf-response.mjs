@@ -9,6 +9,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const bundle = await build({ stdin: { contents: `
 export * from './src/lib/dme-link/ramMap';
 export * from './src/lib/dme-link/responseCapture';
+export * from './src/lib/dme-link/liveValueBlocks';
 export * from './src/lib/log-engine/logProfile';
 export * from './src/lib/log-engine/parser';
 export * from './src/lib/log-engine/serializer';
@@ -30,6 +31,27 @@ bytes.set(word(32768), 12); bytes.set(word(30000), 14);
 bytes.set(word(32768), 16); bytes.set(word(32768), 18);
 bytes[24] = 255; bytes[25] = 0; bytes.set(word(1088), 30);
 const decoded = m.decodeLambdaResponse(bytes, 1, 0xff80be, 1100, 1180, 1000);
+const injectionBytes = new Uint8Array(90);
+injectionBytes[4] = 2; injectionBytes[5] = 3;
+for (let cyl = 1; cyl <= 6; cyl++) injectionBytes.set(word(cyl * 1000), 4 + cyl * 2);
+injectionBytes.set(word(29491), 40); injectionBytes.set(word(31130), 42);
+const injection = m.decodeInjectionResponse(injectionBytes, 1200, 1400, 1000);
+await check('TI words have literal offsets/units, and cannot masquerade as measured fuel or stale data', () => {
+    for (let cyl = 1; cyl <= 6; cyl++) assert.equal(injection[`injection${cyl}Ms`], cyl);
+    assert.equal(injection.injectionBlankActual, 2); assert.equal(injection.injectionBlankTarget, 3);
+    close(injection.injectionStft1, 29491 / 32768); close(injection.injectionStft2, 31130 / 32768);
+    close(injection.injectionReadTime, .3); close(injection.injectionReadMs, 200);
+    assert.equal(injection.injectionReadSource, 'block19-0401-unverified');
+    assert.deepEqual(m.decodeInjectionResponse(injectionBytes.slice(0, 17), 1200, 1400, 1000), {});
+    assert.deepEqual(m.decodeInjectionResponse(injectionBytes.slice(0, 43), 1200, 1400, 1000), {});
+    assert.deepEqual(m.decodeInjectionResponse(injectionBytes.slice(0, 44), 1200, 1400, 1000), injection);
+    assert.deepEqual(m.decodeInjectionResponse(injectionBytes, 1400, 1200, 1000), {});
+    assert.deepEqual(m.decodeInjectionResponse(injectionBytes, NaN, 1400, 1000), {});
+    const zero = m.decodeInjectionResponse(new Uint8Array(90), 1200, 1400, 1000);
+    assert.equal(zero.injection1Ms, 0, 'zero is a reading, never a missing read');
+    const std = new Uint8Array(35); std.set(word(1234), 6);
+    close(m.decodeStandardMeasurementBlock(std).baseInjectionMs, 1.234);
+});
 
 await check('addresses match the primary 0401 RAM graph and neutral factor encoding', () => {
     const graph = JSON.parse(fs.readFileSync(path.join(root, 'public/data/calibration-graph.json')));
@@ -73,6 +95,9 @@ await check('WORKS adds 24 bytes without another exchange; production retains it
     assert.deepEqual(trim.provides, ['stft1', 'stft2', 'ltft1', 'ltft2']);
     close(m.exchangeMs(extended) - m.exchangeMs({ ...extended, count: 8 }), 27.5);
     assert(m.expectedHz(production) > 4.5 && m.expectedHz(production) < 4.6);
+    assert.equal(works.find(x => x.selection === 19).every ?? 1, 1);
+    assert.equal(production.find(x => x.selection === 19).every, 8);
+    assert(m.expectedHz(works) > 1.8 && m.expectedHz(works) < 1.9);
 });
 
 const link = new m.WebSerialDmeLink({ transport: {} });
@@ -126,6 +151,28 @@ await check('block fallback timestamps only its actual STFT read and cannot inve
     const p = await link.pollLiveMeasurementInner();
     assert.equal(p.lambdaReadSource, 'block19'); assert.equal(p.stft1, 1);
     assert.equal(p.o2Precat1Mv, undefined); assert.equal(p.lambdaState1, undefined);
+});
+await check('real injection poll separates block trim, never holds missed reads, and survives failure', async () => {
+    link.liveSampleIndex = 0;
+    link.setLiveExchanges([{ kind: 'block', selection: 3 },
+        { kind: 'ram', name: 'response', ...wide }, { kind: 'block', selection: 19, every: 2 }]);
+    link.pollRamChunk = async () => bytes;
+    link.exchange = async () => ({ payload: injectionBytes, controlOrStatus: 0xa0 });
+    const first = await link.pollLiveMeasurementInner();
+    assert.equal(first.injection6Ms, 6); assert.equal(first.stft1, 1);
+    assert.equal(first.injectionStft1, 29491 / 32768);
+    assert(first.lambdaReadTime <= first.injectionReadTime && first.injectionReadTime <= first.time);
+    assert(!('injection1Ms' in link.lastSlowLane));
+    const skipped = await link.pollLiveMeasurementInner();
+    assert.equal(skipped.injection1Ms, undefined); assert.equal(skipped.injectionReadTime, undefined);
+    link.exchange = async () => { throw new Error('missing injection frame'); };
+    const failed = await link.pollLiveMeasurementInner();
+    assert.equal(failed.injection1Ms, undefined); assert.equal(failed.injectionReadSource, undefined);
+    link.setLiveExchanges([{ kind: 'block', selection: 3 }, { kind: 'block', selection: 19 }]);
+    link.exchange = async () => ({ payload: injectionBytes.slice(0, 17), controlOrStatus: 0xa0 });
+    assert.equal((await link.pollLiveMeasurementInner()).injection1Ms, undefined);
+    link.exchange = async () => ({ payload: injectionBytes, controlOrStatus: 0xa0 });
+    assert.equal((await link.pollLiveMeasurementInner()).injection1Ms, 1);
 });
 
 const calibration = { richMv: 510, leanMv: 400, trimMin: 22938 / 32768, trimMax: 42598 / 32768 };
@@ -185,13 +232,14 @@ await check('old logs remain explicitly unmeasured, and missing load correction 
     assert.equal(m.summarizeRfResponse(trace, { calibration, correctLoad: true, loadTable: [{ rpm: 2400, factor: 2 }] }).passes.length, 0);
 });
 await check('CSV and gzip/SYNC/restore retain numbers, native units, sources and genuine gaps', async () => {
-    const raw = [point(1, { o2Precat1Mv: 0, lambdaState1: 0, lambdaPSteps2: 0,
+    const raw = [point(1, { ...injection, baseInjectionMs: 1.234, o2Precat1Mv: 0, lambdaState1: 0, lambdaPSteps2: 0,
         rfSollDirect: .8, rfSollDirectTime: .99, rfSollDirectReadMs: 10, rfMapIntegratorDirect: -.02 }),
         { time: 2, rpm: 2000, rawLoad: 7, stft1: 1, rf: 80 }];
     const csv = m.serializeLogFile(raw);
     const restored = m.parseLogFile(csv);
     for (const [key, value] of Object.entries(raw[0])) assert.equal(restored[0][key], value, key);
     for (const key of ['o2Precat1Mv', 'lambdaState1', 'lambdaReadTime', 'lambdaReadSource', 'rfKorrDirect']) assert.equal(restored[1][key], undefined);
+    for (const key of Object.keys(injection)) assert.equal(restored[1][key], undefined, key);
     assert.equal(m.parseLogFile(csv.replace('ram-response-0401-unverified', 'invented-source'))[0].lambdaReadSource, undefined);
     const record = { sessionId: 'synthetic', data: raw };
     const wire = await m.gunzipJson(await m.gzipJson(record));

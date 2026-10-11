@@ -112,8 +112,8 @@ export function OperatingEvidenceNotice({ raw, map, base, options, active, readO
                     </section>
                 </div>
                 <div className="shrink-0 pt-3 flex flex-wrap justify-end gap-2">
-                    {!active && <button type="button" disabled={readOnly} onClick={() => { onEnable(); close.current?.focus(); }} data-testid="rf-acquisition-enable"
-                        className="min-h-10 rounded px-3 bg-amber-500 text-slate-950 font-semibold text-xs disabled:opacity-50">{ja ? '観測専用に切り替える' : 'Use observation mode'}</button>}
+                    {options.veCorrectionPolicy !== 'dme-response' && <button type="button" disabled={readOnly} onClick={() => { onEnable(); close.current?.focus(); }} data-testid="rf-acquisition-enable"
+                        className="min-h-10 rounded px-3 bg-amber-500 text-slate-950 font-semibold text-xs disabled:opacity-50">{ja ? 'DME応答の比較に切り替える' : 'Use DME response comparison'}</button>}
                     <button ref={close} type="button" onClick={() => setOpen(false)} className="min-h-10 rounded border border-slate-600 px-3 text-xs text-slate-200">{ja ? '閉じる' : 'Close'}</button>
                 </div>
             </DialogFrame>

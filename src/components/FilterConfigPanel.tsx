@@ -9,7 +9,7 @@ import { MAX_SAMPLE_SD } from '@/lib/ve-calculator/veScatter';
 import { useFeatureEnabled } from '@/lib/build-variant';
 import {
     LogFilterConfig, RfKorrSource, resolveRfKorr, resolveTransientWindow,
-    TRANSIENT_SETTLE_SEC_DEFAULT,
+    TRANSIENT_SETTLE_SEC_DEFAULT, isVeComparisonPolicy,
 } from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
 import { COVERAGE_OK_DEFAULT } from './MapEditor';
@@ -516,7 +516,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
         : settleSamples === undefined
             ? `${settleSec.toFixed(1)} s`
             : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`;
-    const steadyPolicy = localConfig.veCorrectionPolicy === 'steady-retain';
+    const steadyPolicy = isVeComparisonPolicy(localConfig.veCorrectionPolicy);
     const veMethod: VeMethod = steadyPolicy ? 'direct' : localConfig.veMethod ?? VE_METHOD_DEFAULT;
     const directMethod = veMethod === 'direct';
     const veAuthority = Math.round(100 * (localConfig.directAuthority ?? DIRECT_AUTHORITY_DEFAULT));
@@ -641,7 +641,11 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                         onChange={e => handleChange('veCorrectionPolicy', e.target.value)}>
                                         <option value="legacy-nominal">{lang === 'ja' ? '従来の掛け戻し（保存ログの再現）' : 'Legacy multiply-back (replay)'}</option>
                                         <option value="steady-retain">{lang === 'ja' ? '観測専用・現行 RF KORR 維持（検証中）' : 'Observation only · retain RF KORR (experimental)'}</option>
+                                        <option value="dme-response">{lang === 'ja' ? 'DME応答で比較・現行 RF KORR 維持' : 'DME response comparison · retain RF KORR'}</option>
                                     </select>
+                                    {localConfig.veCorrectionPolicy === 'dme-response' && <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
+                                        ? 'DMEの実測補正と停止・再開を追い、両バンクで2往復の応答を比較します。固定の待ち時間や運転点保持は採用条件にしません。補正中・信号不足は未確定として残します。現在は比較専用で、BIN出力は保留します。'
+                                        : 'Tracks measured DME correction and controller resets; compares two cycles in both banks. No fixed settling time or held operating point. Unfinished or missing responses stay unresolved. Comparison only; BIN output remains held.'}</p>}
                                     {localConfig.veCorrectionPolicy === 'steady-retain' && <>
                                         <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
                                             ? '過去5秒の定常性を確認し、パージ作動・トリム上限/下限近傍・欠測を除外します。記録時のBASEでMAP補正停止と学習停止を確認できなければ観測のみです。現行RF KORRを維持する比較専用の計算です。別の熱状態での検証が必要なため、このモードではBIN出力を保留します。'

@@ -13,7 +13,7 @@ import {
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
 import { decodeRfDirect, isRfDirectRead, type RfDirectChannels } from './rfDirect';
-import { decodeLambdaResponse, readWindow, type ResponseCaptureChannels } from './responseCapture';
+import { decodeInjectionResponse, decodeLambdaResponse, readWindow, type ResponseCaptureChannels } from './responseCapture';
 import {
     INERTIA_RAM_READ, LAMBDA_TRIM_RAM_READ, LAMBDA_RESPONSE_RAM_READ, RAM_PROBE_READS,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
@@ -2581,10 +2581,10 @@ export class WebSerialDmeLink implements DmeLink {
      *
      * ## The slow lane
      *
-     * `every: 8` on block 19 means it is fetched on samples 0, 8, 16… and its channels are carried
-     * forward in between. Four channels live nowhere else (`tetv`, `tefc_ll_st`, `tefc_ed`,
-     * `la_freeze_flag`), two of them in slave RAM this calibration will not serve at all; all four
-     * are slow latching state, so 1.6 s of resolution loses nothing. The carry-forward happens here
+     * Production uses `every: 8` on block 19 (samples 0, 8, 16…), while WORKS now reads it every
+     * sample for injection. Only the existing purge/diagnostic state is carried in between;
+     * injection commands, their trim pair and timestamps are NEVER carried. The interval depends
+     * on the measured rate, and a held purge value cannot resolve events between reads. Carry happens here
      * rather than downstream so `LogDataPoint`, the CSV, the filters and verify:incremental never
      * learn that a channel has two rates.
      */
@@ -2722,9 +2722,11 @@ export class WebSerialDmeLink implements DmeLink {
             try {
                 const start = performance.now();
                 const frame = await this.exchange(Ds2Control.READ_IO_STATUS, new Uint8Array([exchange.selection]));
-                const window = readWindow(start, performance.now(), this.startTime);
+                const end = performance.now();
+                const window = readWindow(start, end, this.startTime);
                 if (!isPositiveResponse(frame)) continue;
                 if (exchange.selection !== OPERATING_MEASUREMENTS_BLOCK.selection) continue;
+                response = { ...response, ...decodeInjectionResponse(frame.payload, start, end, this.startTime) };
                 const op = decodeOperatingMeasurementsBlock(frame.payload);
                 const block19Trim = op.stft1 ?? undefined;
                 slowLane = {
@@ -2784,6 +2786,7 @@ export class WebSerialDmeLink implements DmeLink {
             // reason coolantTemp is: decodeField returns null on a short block, and a null there
             // must stay distinguishable from a genuine 0 °C / 0 % reading.
             rf: std.rf ?? undefined,
+            baseInjectionMs: std.baseInjectionMs ?? undefined,
             exhaustTemp: std.exhaustTemp ?? undefined,
             wdk1: std.wdk1 ?? undefined,
             ...this.lastSlowLane,

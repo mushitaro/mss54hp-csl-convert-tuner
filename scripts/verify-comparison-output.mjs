@@ -8,6 +8,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { useBinaryFile, writeClaimsTune } from '../src/hooks/useBinaryFile.ts';
 import { isComparisonOnlyOutput, comparisonOnlyOutputMessage } from '../src/lib/ve-calculator/comparisonOutput.ts';
+import { isVeComparisonPolicy } from '../src/lib/types.ts';
 
 let passed = 0;
 const check = (name, test) => { test(); passed++; console.log(`PASS ${name}`); };
@@ -34,12 +35,15 @@ check('the page holds BIN output across either direction of a pending policy cha
         ts.forEachChild(node, visit);
     };
     visit(tree); assert.ok(expression);
-    const held = new Function('filterConfig', 'pendingConfig', `return (${expression});`);
+    const evaluate = new Function('filterConfig', 'pendingConfig', 'isVeComparisonPolicy', `return (${expression});`);
+    const held = (filterConfig, pendingConfig) => evaluate(filterConfig, pendingConfig, isVeComparisonPolicy);
     const legacy = { veCorrectionPolicy: 'legacy-nominal' }, observation = { veCorrectionPolicy: 'steady-retain' };
     assert.equal(held(legacy, observation), true);
     assert.equal(held(observation, legacy), true);
     assert.equal(held(observation, null), true);
     assert.equal(held(legacy, null), false);
+    const dme = { veCorrectionPolicy: 'dme-response' };
+    assert.equal(held(legacy, dme), true); assert.equal(held(dme, legacy), true); assert.equal(held(dme, null), true);
 });
 
 check('map metadata and current-policy state each independently forbid output', () => {

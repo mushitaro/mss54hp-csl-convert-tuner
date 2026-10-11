@@ -47,6 +47,9 @@ export const STANDARD_MEASUREMENT_BLOCK = {
 
         /** RF, the DME's final relative filling — rf_soll AFTER rf_korr. `puVar5[0xb..0xc] = RF`. */
         rf: { symbol: 'rf', offset: 8, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+        /** TL before the slave's fuel factors. This is not TI_VORST or final injection time.
+         * Master 030b84 case 0x1c, response bytes 9..10; catalog unit is ms. */
+        baseInjectionMs: { symbol: 'tl', offset: 6, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
         /** TABG. The DME emits `puVar5[0x11] = (char)(TABG >> 4)` — a SIGNED byte carrying degC/16,
          *  so the channel resolves 16 degC and spans the sensor's -55..1250 degC range. `int7` is
          *  this decoder's signed-byte format (see blockDecoder.ts). */
@@ -99,6 +102,18 @@ export const OPERATING_MEASUREMENTS_BLOCK = {
     selection: 19,
     expectedLength: 90,
     fields: {
+        // Slave 030936..0309D8 fills the slots the master leaves empty. TI1..TI6
+        // include the fuel factors, additive adaptation, cylinder factor and clamps,
+        // but PRECEDE KL_TI_UB dead time and the TPU output (slave 01b0e2).
+        // These are commands, not measured injector flow or measured AFR.
+        injectionBlankActual: { symbol: 'ti_ausblend_ist', offset: 4, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        injectionBlankTarget: { symbol: 'ti_ausblend_soll', offset: 5, format: 'uint8', scale: 1, add: 0 } as FieldDef,
+        injection1Ms: { symbol: 'ti1', offset: 6, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
+        injection2Ms: { symbol: 'ti2', offset: 8, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
+        injection3Ms: { symbol: 'ti3', offset: 10, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
+        injection4Ms: { symbol: 'ti4', offset: 12, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
+        injection5Ms: { symbol: 'ti5', offset: 14, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
+        injection6Ms: { symbol: 'ti6', offset: 16, format: 'uint16', scale: 0.001, add: 0 } as FieldDef,
         stft1: { symbol: 'la_f_regler1', offset: 40, format: 'uint16', scale: 3.0517578125e-05, add: 0 } as FieldDef,
         stft2: { symbol: 'la_f_regler2', offset: 42, format: 'uint16', scale: 3.0517578125e-05, add: 0 } as FieldDef,
 
@@ -244,6 +259,7 @@ export function decodeStandardMeasurementBlock(payload: Uint8Array) {
         coolantTemp: decodeField(payload, f.coolantTemp),
         rawLoad: decodeField(payload, f.rawLoad),
         rf: decodeField(payload, f.rf),
+        baseInjectionMs: decodeField(payload, f.baseInjectionMs),
         exhaustTemp: decodeField(payload, f.exhaustTemp),
         wdk1: decodeField(payload, f.wdk1),
     };
@@ -252,6 +268,14 @@ export function decodeStandardMeasurementBlock(payload: Uint8Array) {
 export function decodeOperatingMeasurementsBlock(payload: Uint8Array) {
     const f = OPERATING_MEASUREMENTS_BLOCK.fields;
     return {
+        injectionBlankActual: decodeField(payload, f.injectionBlankActual),
+        injectionBlankTarget: decodeField(payload, f.injectionBlankTarget),
+        injection1Ms: decodeField(payload, f.injection1Ms),
+        injection2Ms: decodeField(payload, f.injection2Ms),
+        injection3Ms: decodeField(payload, f.injection3Ms),
+        injection4Ms: decodeField(payload, f.injection4Ms),
+        injection5Ms: decodeField(payload, f.injection5Ms),
+        injection6Ms: decodeField(payload, f.injection6Ms),
         llsTv: decodeField(payload, f.llsTv),
         mdLlri: decodeField(payload, f.mdLlri),
         frRegler: decodeField(payload, f.frRegler),

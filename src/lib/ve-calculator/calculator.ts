@@ -1,4 +1,5 @@
-import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr } from '@/lib/types';
+import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
+import { DME_RESPONSE_VERSION, type DmeCalibration } from './dmeResponse';
 import type { LogFilterConfig } from '@/lib/types';
 import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import type { OperatingHold } from './operatingPolicy';
@@ -486,6 +487,7 @@ export interface VeCalcOptions {
     veLearningRate?: number;
     /** null = BASE passed. undefined is unknown and must not authorize a correction. */
     steadyCalibrationHold?: OperatingHold | null;
+    dmeCalibration?: DmeCalibration | null;
     steadyLambdaLimits?: LambdaLimits | null;
     steadyFilterConfig?: LogFilterConfig;
     steadyLoadTable?: { rpm: number; factor: number }[];
@@ -640,9 +642,9 @@ export class VECalculator {
         for (const point of logData) this.accumulatePoint(
             grid, point, plan, tuned, options.normaliseTo, options.rfKorrSettleSec, options);
 
-        const result = this.finalizeGrid(currentMap, grid, options.veCorrectionPolicy === 'steady-retain'
+        const result = this.finalizeGrid(currentMap, grid, isVeComparisonPolicy(options.veCorrectionPolicy)
             ? { ...options, veMethod: 'direct', directAuthority: 1 } : options);
-        if (options.veCorrectionPolicy === 'steady-retain' && result.newMap) {
+        if (isVeComparisonPolicy(options.veCorrectionPolicy) && result.newMap) {
             result.newMap = { ...result.newMap, calibrationStatus: 'comparison-only' };
         }
         return result;
@@ -702,6 +704,22 @@ export class VECalculator {
         operating?: VeCalcOptions,
     ): void {
         {
+            if (operating?.veCorrectionPolicy === 'dme-response') {
+                const e = point.dmeResponse;
+                if (operating.steadyCalibrationHold !== null || operating.writeRfKorr
+                    || e?.version !== DME_RESPONSE_VERSION || e.reason !== 'cycle-candidate'
+                    || point.veEvidenceEligible !== true || e.meanRpm === undefined || e.meanLoad === undefined) return;
+                const rpmInfo = this.findBoundingIndices(e.meanRpm, this.rpmAxis);
+                const loadInfo = this.findBoundingIndices(e.meanLoad, this.loadAxis);
+                const correction = deriveOperatingCorrection({ trim: e.trim,
+                    kApplied: e.kApplied, kPlanned: e.kApplied, learningRate: operating.veLearningRate ?? 1 });
+                if (!rpmInfo || !loadInfo || correction === undefined) return;
+                // One vote per new pair of cycles, at its mean trajectory, not the last raw STFT
+                // or every later row. Keeping the RF table is explicit; changed-table writes are held.
+                this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
+                    correction, e.kApplied, undefined, point.time);
+                return;
+            }
             // Use Corrected Load if available, else Raw Load
             const loadVal = point.correctedLoad ?? point.rawLoad;
             const rpmVal = point.rpm;

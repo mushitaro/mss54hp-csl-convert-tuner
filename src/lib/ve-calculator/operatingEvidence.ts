@@ -4,6 +4,7 @@ import { APP_CONFIG } from '@/config/constants';
 import { VECalculator, type VeCalcOptions } from './calculator';
 import { annotateSteadyEvidence, type SteadyEvidenceOptions } from './steadyEvidence';
 import { RfKorrLatch } from './egtTables';
+import { annotateDmeResponse } from './dmeResponse';
 
 /** Shared batch/live pass. Discarding raw rows before this pass would erase gate transitions. */
 export function prepareOperatingTimeline(
@@ -17,6 +18,11 @@ export function prepareOperatingTimeline(
     });
     const calc = new VECalculator();
     const scale = timeScaleSeconds(timeline);
+    if (options.veCorrectionPolicy === 'dme-response') {
+        return annotateDmeResponse(timeline, { calibration: options.dmeCalibration ?? null,
+            secondsPerTimeUnit: scale, excludeTimeRanges: cfg?.excludeTimeRanges,
+            minCoolantTemp: Math.max(65, cfg?.enableMinTemp ? cfg.minTemp : 65) });
+    }
     let latch = new RfKorrLatch();
     let previousTime = -Infinity;
     // Index-aligned replay, never a timestamp Map: a reset clock may repeat an earlier time.
@@ -55,7 +61,7 @@ export function prepareOperatingEvidence(
         const i = p.rawSampleIndex;
         const match = i === undefined ? undefined : evidence[i];
         return match?.time === p.time ? match : {
-            ...p, veEvidenceEligible: false, veEvidenceReason: 'history-missing', veSteadySeconds: 0,
+            ...p, dmeResponse: undefined, veEvidenceEligible: false, veEvidenceReason: 'history-missing', veSteadySeconds: 0,
         };
     });
 }

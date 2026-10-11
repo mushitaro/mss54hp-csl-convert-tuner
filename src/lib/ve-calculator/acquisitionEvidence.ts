@@ -17,7 +17,8 @@ const reasons = (points: LogDataPoint[]) => {
 /** Observation-only summary of the COMPLETE acquisition. Counterfactual purge bypass
  * never returns samples to the calculator, nor makes a calibration eligible. */
 export function summarizeAcquisition(map: VEMap, raw: LogDataPoint[], options: VeCalcOptions) {
-    const timeline = prepareOperatingTimeline(map, raw, options);
+    // This deliberately remains the separately labelled OLD five-second diagnostic.
+    const timeline = prepareOperatingTimeline(map, raw, { ...options, veCorrectionPolicy: 'steady-retain' });
     const withoutPurge = annotateSteadyEvidence(timeline, {
         ...operatingEvidenceOptions(options, timeScaleSeconds(timeline)),
         purgeMaxMs: Number.MAX_VALUE,

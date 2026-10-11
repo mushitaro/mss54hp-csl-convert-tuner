@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import { researchSessionUpdate } from '../src/lib/db/sessionRepository.ts';
 import { sessionFingerprint, needsSync, gzipJson, gunzipJson } from '../src/lib/session-sync/client.ts';
+import { isVeComparisonPolicy } from '../src/lib/types.ts';
 
 const source = fs.readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8');
 const parsed = ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -46,6 +47,7 @@ function harness({ target = draft, map = candidate, policy = 'steady-retain', lo
     const calls = [], base = new Uint8Array([1, 2, 3, 4]).buffer;
     const newDraft = { ...draft, id: 'comparison-draft', baseOrigin: null, baseSha256: undefined, hasLog: false, logPointCount: 0 };
     const dependencies = {
+        isVeComparisonPolicy,
         pendingConfigRef: { current: null },
         filterConfig: { ...settings.filterConfig, veCorrectionPolicy: policy }, newMap: map,
         currentSession: target,
@@ -86,6 +88,13 @@ await check('comparison SAVE stores raw and settings whether a candidate or manu
         assert.equal(h.dependencies.liveRun.runIdRef.current, null);
         assert.ok(h.calls.findIndex(c => c[0] === 'saveResearch') < h.calls.findIndex(c => c[0] === 'discardRecovery'));
     }
+});
+
+await check('DME response policy survives SAVE and keeps every output toggle off', async () => {
+    const h = harness({ policy: 'dme-response', map: null }); await h.invoke();
+    const save = h.calls.find(c => c[0] === 'saveResearch')?.[1];
+    assert.equal(save.tuneSettings.filterConfig.veCorrectionPolicy, 'dme-response');
+    assert.equal(save.tuneSettings.writeVe, false); assert.equal(save.tuneSettings.writeRfKorr, false);
 });
 
 await check('a tagged candidate still saves observations after a UI policy change', async () => {

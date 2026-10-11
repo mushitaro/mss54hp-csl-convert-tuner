@@ -4,7 +4,7 @@ import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } fro
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { summariseChargeTemp, type ChargeTempInfo } from '@/lib/ve-calculator/chargeTemp';
 import { RfKorrLatch } from '@/lib/ve-calculator/egtTables';
-import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
+import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
 import { MAP_DIMENSIONS, APP_CONFIG } from '@/config/constants';
 import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { detectDriveSplit, type DriveSplit } from '@/lib/log-engine/driveSplit';
@@ -120,7 +120,7 @@ export function useVeCalculation() {
     // `processed.rawData` as the latch source, not `processed.data`. The rf_korr latch is a DME
     // state machine and it advanced on every sample the car took, including the ones the filters
     // below removed — see ProcessedLog.rawData and RfKorrLatch.
-    const annotated = options.veCorrectionPolicy === 'steady-retain'
+    const annotated = isVeComparisonPolicy(options.veCorrectionPolicy)
       ? prepareOperatingEvidence(map, processed, options)
       : calc.annotateRfKorr(map, processed.data, options.egt, options.rfKorrAir, processed.rawData);
     // Between the two: the tuner reads the annotated log and the VE calculation may go on to
@@ -161,7 +161,7 @@ export function useVeCalculation() {
     // Counted off the ANNOTATED log, because that is where the refusal happens: a sample with no
     // air data comes back without an rfKorr and the calculation falls back to the trim alone.
     const candidates = annotated.filter(p => p.rf !== undefined).length;
-    const normaliseTo = options.veCorrectionPolicy === 'steady-retain' ? null : options.normaliseTo ?? null;
+    const normaliseTo = isVeComparisonPolicy(options.veCorrectionPolicy) ? null : options.normaliseTo ?? null;
     setChargeTempInfo({
       ...summariseChargeTemp(processed.data, normaliseTo, !!normaliseTo),
       rfKorrMeasured: annotated.filter(p => p.rfKorr !== undefined).length,
@@ -239,7 +239,7 @@ export function useVeCalculation() {
    * the app. Live is allowed to be an approximation; the artefact is not.
    */
   const appendCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
-    if (options.veCorrectionPolicy === 'steady-retain') {
+    if (isVeComparisonPolicy(options.veCorrectionPolicy)) {
       // Causal whole-history replay first: the new policy must agree at LIVE and STOP.
       // The original incremental accumulator is kept solely for archived policy replay.
       liveRef.current = null;

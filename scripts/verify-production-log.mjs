@@ -64,7 +64,10 @@ console.log('\n[the production channel set, as a literal]');
     const ridingAlong = recorded.filter(k => rel(k) === 'debug');
     check('debug channels riding along on a kept exchange',
         JSON.stringify(ridingAlong) === JSON.stringify(
-            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1'].sort()),
+            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1', 'baseInjectionMs',
+                'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
+                'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
+                'injectionReadTime', 'injectionReadMs'].sort()),
         ridingAlong.join(', '));
 
     /*
@@ -110,7 +113,8 @@ console.log('\n[the exchanges a production run drops]');
     check('WORKS lambda response narrows to the original production trim read',
         expanded?.count === 32 && narrowed?.count === 8
         && JSON.stringify(narrowed?.provides) === JSON.stringify(['stft1', 'stft2', 'ltft1', 'ltft2']));
-    const gone = full.filter(x => x !== expanded && !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
+    const gone = full.filter(x => x !== expanded && x.productionEvery === undefined && !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
+    check('injection capture does not slow production', prod.find(x => x.selection === 19)?.every === 8);
     // Every exchange whose `provides` is debug THROUGHOUT. The slew-limiter pair joined the list
     // on 2026-08-30: MD_DYN_ST and the four torque words answer whether KF_MD_LS_KOMF ever bound,
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named
