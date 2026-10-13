@@ -31,8 +31,6 @@ interface FrameProps {
     title: string;
     /** Localized `aria-label` for the close button. */
     closeLabel: string;
-    /** A caller may enlarge the dismiss target without changing existing dialog geometry. */
-    closeButtonClassName?: string;
     /**
      * Omit to render no dismiss affordance at all — no X, no backdrop click. That is what the
      * point-of-no-return phases pass: once the DME has acknowledged an erase there is no honest way
@@ -52,7 +50,7 @@ interface FrameProps {
     children: React.ReactNode;
 }
 
-export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, closeButtonClassName = '', onClose, autoHeight, children }) => (
+export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, onClose, autoHeight, children }) => (
     <>
         <div
             className="fixed inset-0 z-[100] bg-slate-950/70 min-[900px]:backdrop-blur-sm"
@@ -65,7 +63,7 @@ export const DialogFrame: React.FC<FrameProps> = ({ icon, title, closeLabel, clo
                     {title}
                 </h3>
                 {onClose && (
-                    <button onClick={onClose} aria-label={closeLabel} className={`text-slate-500 hover:text-slate-300 ${closeButtonClassName}`}>
+                    <button onClick={onClose} aria-label={closeLabel} className="text-slate-500 hover:text-slate-300">
                         <X className="w-4 h-4" />
                     </button>
                 )}

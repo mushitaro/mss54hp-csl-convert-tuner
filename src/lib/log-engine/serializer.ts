@@ -1,7 +1,6 @@
 import Papa from 'papaparse';
 import { APP_CONFIG } from '@/config/constants';
 import type { LogDataPoint } from '@/lib/types';
-import { DIAGNOSTIC_NUMERIC_COLUMNS, DIAGNOSTIC_SOURCE_COLUMNS } from './diagnosticColumns';
 import { PRESSURE_DECODE_TOLERANCE_MBAR } from '@/lib/dme-link/slowLane';
 
 /**
@@ -19,8 +18,6 @@ import { PRESSURE_DECODE_TOLERANCE_MBAR } from '@/lib/dme-link/slowLane';
  */
 export const serializeLogFile = (points: LogDataPoint[]): string => {
     const M = APP_CONFIG.CSV_MAPPING;
-    const diagnostics = [...DIAGNOSTIC_NUMERIC_COLUMNS, ...DIAGNOSTIC_SOURCE_COLUMNS]
-        .filter(key => points.some(p => p[key] !== undefined));
 
     const hasBank1 = points.some(p => p.stft1 !== undefined);
     const hasBank2 = points.some(p => p.stft2 !== undefined);
@@ -98,7 +95,6 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasMdLsDelta) row[M.MD_LS_DELTA] = p.mdLsDelta ?? '';
         if (hasMdDpDelta) row[M.MD_DP_DELTA] = p.mdDpDelta ?? '';
         if (hasDecodeGap) row[M.PRESSURE_DECODE_GAP] = p.pressureDecodeDisagreesMbar ?? '';
-        for (const key of diagnostics) row[key] = p[key] ?? '';
         return row;
     });
 

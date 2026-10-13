@@ -11,15 +11,16 @@ import {
 } from '@/lib/ve-calculator/rfKorrView';
 import { useDialogLang } from '@/hooks/useDialogLang';
 
-/** Why a cell was left alone, in the reader's language. Kept short — this lands in a tooltip. */
-const REASON_TEXT: Record<RejectReason, { en: string; ja: string }> = {
+/** Why a cell was left alone — or, for `extrapolated`, how a written cell got its value — in the
+ *  reader's language. Kept short — this lands in a tooltip. */
+const REASON_TEXT: Record<RejectReason | 'extrapolated', { en: string; ja: string }> = {
     'no-evidence': {
         en: 'no samples reached this rpm at this exhaust delta',
         ja: 'この回転数・Δ にサンプルが来ていない',
     },
     'thin-count': {
-        en: 'too few samples to divide by',
-        ja: 'サンプル数が足りない（除算の分母には不足）',
+        en: 'too few samples to stand for this cell',
+        ja: 'サンプル数が足りない',
     },
     'thin-weight': {
         en: 'samples sat too far from this breakpoint to carry it',
@@ -45,6 +46,10 @@ const REASON_TEXT: Record<RejectReason, { en: string; ja: string }> = {
         en: 'the samples sat too far from this delta to speak for it — extrapolation, not measurement',
         ja: 'サンプルがこの Δ から離れすぎ（測定ではなく外挿になる）',
     },
+    'extrapolated': {
+        en: 'no post-ramp data reaches this row — filled with the shrink ratio of the highest measured row',
+        ja: '減量後のデータが届かない行。測れた最上段の縮め率で埋めた',
+    },
 };
 
 const TEXT = {
@@ -53,10 +58,7 @@ const TEXT = {
         axes: 'Rows = model EGT minus measured, °C · Columns = rpm',
         updated: (n: number) => `${n} of 72 cells updated`,
         largest: (v: number) => `largest change ${v >= 0 ? '+' : ''}${v.toFixed(3)}`,
-        anchors: (n: number) => `${n} anchor samples`,
-        ratios: (n: number) => `${n} ratio samples`,
-        veCells: (n: number) => `${n} VE cells anchored`,
-        noAnchor: (n: number) => `${n} samples had no anchor in their own VE cell`,
+        used: (n: number) => `${n} samples used`,
         hysteresis: (n: number) => `${n} dropped in the hysteresis band`,
         gateShut: (n: number) => `${n} below the filling floor (correction not running)`,
         notSettled: (n: number) => `${n} with RF or EGT still moving`,
@@ -64,8 +66,13 @@ const TEXT = {
             + 'long enough to measure it, so nothing here was derived from the log. rf_korr only '
             + 'runs above 55-80 % filling and above 20 km/h — it needs sustained load, held for '
             + 'seconds, not throttle stabs.',
+        kHeld: 'K HOLD was on for this drive, so rf_korr never engaged and there is nothing to '
+            + 'derive the table from. Turn K HOLD off and drive again.',
+        veNotAnchored: 'The trim where rf_korr was off is not near 1.000, so the VE cannot anchor '
+            + 'this table yet. Run VE with K HOLD first.',
         thin: 'Nothing here is written unless a cell had samples from at least two VE cells that '
-            + 'agreed to within 15 %. Everything else keeps its stock value byte for byte.',
+            + 'agreed to within 15 %, or sits above the highest such row and follows its shrink. '
+            + 'Everything else keeps its stock value byte for byte.',
         provisional: 'PROVISIONAL — too few cells moved to be worth writing',
         ecu: 'ECU PARAMETERS',
         close: 'Close',
@@ -75,18 +82,19 @@ const TEXT = {
         axes: '行 = モデル排気温 − 実測, °C ／ 列 = 回転数',
         updated: (n: number) => `72 セル中 ${n} セルを更新`,
         largest: (v: number) => `最大変化 ${v >= 0 ? '+' : ''}${v.toFixed(3)}`,
-        anchors: (n: number) => `アンカー ${n} サンプル`,
-        ratios: (n: number) => `比 ${n} サンプル`,
-        veCells: (n: number) => `アンカーの立った VE セル ${n} 個`,
-        noAnchor: (n: number) => `自セルにアンカーが無く使えなかったサンプル ${n} 個`,
+        used: (n: number) => `使ったサンプル ${n} 個`,
         hysteresis: (n: number) => `ヒステリシス帯で除外 ${n} 個`,
         gateShut: (n: number) => `充填率下限未満で除外 ${n} 個（補正が動いていない領域）`,
         notSettled: (n: number) => `RF / 排気温が整定しておらず除外 ${n} 個`,
         noGateOpen: 'この走行では補正の充填率下限を十分な時間超えていないため、'
             + 'ログからは何も導出していません。rf_korr は充填率 55〜80 % 以上かつ 20 km/h 以上でしか'
             + '作動しません。数秒間持続する高負荷が必要で、短いアクセル煽りでは測定できません。',
-        thin: '2 つ以上の VE セルから来たサンプルが 15 % 以内で一致したセルだけを書き換えます。'
-            + 'それ以外は純正値のままバイト単位で不変です。',
+        kHeld: 'この走行は K HOLD 中で rf_korr が一度も掛かっていないため、表を導出できません。'
+            + 'K HOLD を切って走ってください。',
+        veNotAnchored: 'rf_korr の掛かっていない区間のトリムが 1.000 から外れていて、VE がまだ'
+            + 'この表のアンカーになりません。先に K HOLD で VE を詰めてください。',
+        thin: '2 つ以上の VE セルから来たサンプルが 15 % 以内で一致したセルと、その最上段より上で'
+            + '縮め率に従うセルだけを書き換えます。それ以外は純正値のままバイト単位で不変です。',
         provisional: 'PROVISIONAL — 書き込むには更新セルが少なすぎます',
         ecu: 'ECU パラメータ',
         close: '閉じる',
@@ -128,6 +136,12 @@ export const RfKorrTable: React.FC<{
         const parts: string[] = [];
         if (result.updated[r][c]) {
             parts.push(`stock ${result.stock[r][c].toFixed(3)} -> tuned ${result.tuned[r][c].toFixed(3)}`);
+            // Written without evidence of its own, so the measured/spread pair below would describe
+            // samples that did not decide it — or none at all.
+            if (result.extrapolated[r][c]) {
+                parts.push(REASON_TEXT.extrapolated[lang]);
+                return parts.join('\n');
+            }
             if (Math.abs(result.measuredMap[r][c] - result.tuned[r][c]) > 0.0005) {
                 // The clamp bit here. Saying so is the difference between "the log said this" and
                 // "this is what will be written", and they are not the same number.
@@ -169,7 +183,9 @@ export const RfKorrTable: React.FC<{
                 <span className="text-[10px] text-slate-300 ml-auto">
                     {t.updated(report.gridCellsUpdated)} · {t.largest(report.largestChange)}
                 </span>
-                {!result.acceptable && (
+                {/* Not on a refusal: nothing there is provisional, it was declined, and the footer
+                    says why. */}
+                {!result.acceptable && !report.refused && (
                     <span className="text-[10px] font-bold text-amber-400">{t.provisional}</span>
                 )}
                 {/* The calibration this table was derived FROM, at the right end of the row that
@@ -225,18 +241,18 @@ export const RfKorrTable: React.FC<{
 
             <div className="px-3 py-2 border-t border-slate-800 text-[9px] text-slate-500 space-y-1">
                 <div className="flex gap-3 flex-wrap font-mono">
-                    <span>{t.anchors(report.anchorSamples)}</span>
-                    <span>{t.ratios(report.ratioSamples)}</span>
-                    <span>{t.veCells(report.veCellsWithAnchor)}</span>
-                    {report.samplesNoAnchor > 0 && <span>{t.noAnchor(report.samplesNoAnchor)}</span>}
+                    <span>{t.used(report.samplesUsed)}</span>
                     {report.samplesHysteresis > 0 && <span>{t.hysteresis(report.samplesHysteresis)}</span>}
                     {report.samplesGateShut > 0 && <span>{t.gateShut(report.samplesGateShut)}</span>}
                     {report.samplesNotSettled > 0 && <span>{t.notSettled(report.samplesNotSettled)}</span>}
                 </div>
                 {/* The one thing a reader needs told rather than counted. Every other line here is
                     an "of which"; this is the case where the drive did not contain the experiment
-                    at all, and a grid of untouched cells does not say so on its own. */}
-                {report.ratioSamples === 0 && (
+                    at all, and a grid of untouched cells does not say so on its own. A refusal
+                    comes first: it is the reason nothing was measured, and it names the run to do. */}
+                {report.refused ? (
+                    <p className="text-amber-400/90">{t[report.refused]}</p>
+                ) : report.samplesUsed === 0 && (
                     <p className="text-amber-400/90">{t.noGateOpen}</p>
                 )}
                 <p>{t.thin}</p>

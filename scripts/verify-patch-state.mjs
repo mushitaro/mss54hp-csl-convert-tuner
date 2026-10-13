@@ -15,6 +15,9 @@
  *   2. `armedPatchesFromHistory` can answer "what is armed" for the sessions `tuneSettings` cannot
  *      describe: a BASE flashed patch-on before the first log, and a research run.
  *
+ * And one the K HOLD patch added: the rf_korr floor `readEgtTables` reads off the as-run bytes is
+ * the held one when K HOLD was armed, so a held drive is not replayed through BMW's gate.
+ *
  * Run against the real community partial BIN, not a synthetic one: the thresholds being tested are
  * calibration, and a fabricated table would be testing the fabrication.
  */
@@ -22,6 +25,7 @@ import { readFileSync } from 'node:fs';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
 import { BinaryPatcher, bytesAsRun } from '../src/lib/binary-engine/patcher.ts';
 import { isFullLoad } from '../src/lib/log-engine/lambdaGates.ts';
+import { readEgtTables } from '../src/lib/ve-calculator/egtTables.ts';
 import { armedPatchesFromHistory } from '../src/lib/db/flashState.ts';
 
 let fails = 0;
@@ -83,6 +87,26 @@ console.log('\n[the patched view is the one WRITE PATCH-ON actually produces]');
     check('and so do the controller stops', written.fMax === asRun.fMax && written.fMin === asRun.fMin);
 }
 
+console.log('\n[the rf_korr floor the log is replayed through follows K HOLD]');
+{
+    // The same trap as the full-load gate, on the other gate this app reads back: readEgtTables
+    // builds the rf_korr floor from these bytes, and every gate-open verdict decides from it. A
+    // drive recorded held and replayed against the stock floor would be read as one the DME was
+    // correcting all along.
+    const stockT = readEgtTables(bytesAsRun(BASE, NONE));
+    const heldT = readEgtTables(bytesAsRun(BASE, { ...NONE, applyPatch: true, applyRfKorrHold: true }));
+    check('the BASE replays on its own floor', !!stockT && stockT.rfKorrMin.values.every(v => v < 1),
+        JSON.stringify(stockT?.rfKorrMin.values));
+    check('armed with K HOLD, the replay floor is 2.000 in all six',
+        !!heldT && heldT.rfKorrMin.values.every(v => Math.abs(v - 2) < 1e-9), JSON.stringify(heldT?.rfKorrMin.values));
+    // And the write path agrees, so the floor described is the one a car was given.
+    const p = new BinaryPatcher(BASE);
+    p.disableMapCorrection();
+    p.setRfKorrGateFloor('hold');
+    check('the held replay matches the write path',
+        JSON.stringify(readEgtTables(p.getBuffer())?.rfKorrMin) === JSON.stringify(heldT?.rfKorrMin));
+}
+
 console.log('\n[a session with no tuneSettings can still say what is in the car]');
 {
     const flash = (over = {}) => ({
@@ -99,17 +123,25 @@ console.log('\n[a session with no tuneSettings can still say what is in the car]
     const armed = armedPatchesFromHistory({
         flashHistory: [flash({ settings: {
             applyPatch: true, applyWotDisable: true, applyTankVentDisable: true,
-            applyRfKorrGateDrop: true,
+            applyRfKorrHold: true,
         } })],
     });
-    check('a patch-on flash re-arms all four',
+    check('a patch-on flash re-arms all four, K HOLD included',
         armed.applyPatch && armed.applyWotDisable && armed.applyTankVentDisable
-        && armed.applyRfKorrGateDrop, JSON.stringify(armed));
+        && armed.applyRfKorrHold, JSON.stringify(armed));
     // Tune CONTENT must not be re-armed from a flash record: warmup/WOT inject derived tables, and
-    // a reopened workspace has not derived them.
+    // a reopened workspace has not derived them. The retired drop rides along as the record has it
+    // — absent here — because the replay of a drive recorded on it must see it.
     check('and re-arms nothing else',
-        Object.keys(armed).sort().join(',') === 'applyPatch,applyRfKorrGateDrop,applyTankVentDisable,applyWotDisable',
+        Object.keys(armed).sort().join(',')
+        === 'applyPatch,applyRfKorrGateDrop,applyRfKorrHold,applyTankVentDisable,applyWotDisable',
         Object.keys(armed).join(','));
+    check('a record without the retired drop leaves it undefined', armed.applyRfKorrGateDrop === undefined);
+    const legacyDrop = armedPatchesFromHistory({
+        flashHistory: [flash({ settings: { applyPatch: true, applyRfKorrGateDrop: true } })],
+    });
+    check('a record written with RF GATE still says so, for the replay',
+        legacyDrop.applyRfKorrGateDrop === true && legacyDrop.applyRfKorrHold === undefined, JSON.stringify(legacyDrop));
 
     // The LAST flash is the state of the car — finalising has to take the patch back off.
     const after = armedPatchesFromHistory({

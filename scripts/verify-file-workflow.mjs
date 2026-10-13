@@ -1,11 +1,11 @@
 /**
- * Historical file replay, pinned to the bytes the app handed back.
+ * The file workflow, pinned to the bytes the app hands back.
  *
  * README "A. File workflow": UPLOAD BIN (a partial BIN), TESTO CSV (a drive log), DOWNLOAD TUNED.
- * This pins the legacy calculation used on 2026-09-30 and checks the tuned BIN against a
+ * This runs that path headlessly under a first load's defaults and checks the tuned BIN against a
  * golden SHA-256 that was measured from the APP — the production build in headless Chrome, the
  * fixture files set on the two upload inputs and the Download Tuned blob hashed — not from this
- * script. The two agreeing is what makes the hash mean "what the legacy replay produces" rather than "what
+ * script. The two agreeing is what makes the hash mean "what the app produces" rather than "what
  * this script produces".
  *
  * Why it exists: the next step is the same computation outside the browser (a tool an LLM can call
@@ -16,18 +16,18 @@
  *
  * Every function the bytes pass through is the app's own, imported from src/: parseLogFile,
  * processLogData, the VECalculator, tuneRfKorrTable, writtenVeGrid, the BinaryPatcher and the
- * checksum. Filter defaults come from the app, with the historical legacy policy explicit.
- * New work defaults to moving-response and is tested by verify-tune-policy-workflow and the
- * verify-moving-response-* checks. This fixture must not redefine the new-work default merely
- * to reproduce an old golden. The ORDER is re-composed, because the app composes
+ * checksum. The defaults are the app's too (DEFAULT_FILTER_CONFIG, moved out of useLogFile into
+ * lib/log-engine/filterDefaults.ts for this). The ORDER is re-composed, because the app composes
  * inside React hooks this cannot call:
  *
- *     useBinaryFile.uploadBinary        toggles detected from the bytes (useBinaryFile.ts ~255)
- *     page.tsx lambdaLimits memo        read from bytesAsRun(BASE, toggles)          (page.tsx ~722)
+ *     useBinaryFile.uploadBinary        toggles detected from the bytes (useBinaryFile.ts ~290)
+ *     page.tsx asRunBuffer memo         bytesAsRun(BASE, toggles) — both readers below (page.tsx ~723)
+ *     page.tsx egtTables / lambdaLimits read from that as-run image                   (page.tsx ~743)
  *     useLogFile.parseAndSetLog         parseLogFile → processLogData                (useLogFile.ts ~164)
- *     page.tsx veCalcOptionsFor         the options object                            (page.tsx ~633)
- *     useVeCalculation.runCalculation   annotate → tune rf_korr → calculateNewVEMap   (useVeCalculation.ts ~115)
- *     useBinaryFile.buildPatchedBuffer  VE grid, logic patches both ways, checksum    (useBinaryFile.ts ~291)
+ *     page.tsx veCalcOptionsFor         the options object                            (page.tsx ~655)
+ *     useVeCalculation.runCalculation   K HOLD check → annotate → tune rf_korr → calculateNewVEMap
+ *                                                                                     (useVeCalculation.ts ~158)
+ *     useBinaryFile.buildPatchedBuffer  VE grid, logic patches both ways, checksum    (useBinaryFile.ts ~324)
  *
  * So a change INSIDE any of those functions moves the hash here, and a change to the composition
  * in the hooks does not — until that composition moves into one pure function the app and a
@@ -69,11 +69,20 @@ const CSV = path.join(root, 'scripts', 'fixtures', 'practice-drive.testo.csv');
 
 /**
  * SHA-256 of the TUNED BIN the production build's DOWNLOAD TUNED returned for BIN + CSV above.
- * Measured 2026-09-30 from `npm run build` served statically, in headless Chrome 140. When a
- * change is MEANT to move the tuned bytes, measure it again from the app — never paste this
+ * When a change is MEANT to move the tuned bytes, measure it again from the app — never paste this
  * script's own output here, which would turn the check into "the script agrees with itself".
+ *
+ * Re-measured 2026-10-13 from `next build` served statically, in headless Chromium 1179, through
+ * UPLOAD BIN, TESTO CSV and DOWNLOAD TUNED. The same harness on the previous tree returned the
+ * previous golden (bb6214a8…) first, so the two numbers are measured the same way. It moved on
+ * purpose: the latch now reads a raw sample's rf_soll at its CORRECTED load (it had read the raw
+ * opening, below 2400 rpm too low), so this drive's low-rpm cruise sits in the hysteresis hold band
+ * and its gate-open samples rise from 320 to 944; the k-ramp rule then keeps the mid-ramp ones out
+ * of the VE write, where the old 1-s settle wrote them. 15 cells change: five at 1100/1300 rpm,
+ * RO 2.4-7.5 %, by +0.001; and at RO 30-65 %, 1600-3100 rpm, two land on a different value while
+ * eight stay at BASE, refused as thin-count / thin-weight / k-ramp.
  */
-const GOLDEN = 'bb6214a8823d94e599b8b5d7bc12dba3243620db94de738d5d60323da1d1302d';
+const GOLDEN = 'e8309ff00f024b27b1b0c3d1c7cd593d1cde190e6e5a08abd5c11097f570cf50';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -83,49 +92,62 @@ const baseBytes = fs.readFileSync(BIN);
 const base = baseBytes.buffer.slice(baseBytes.byteOffset, baseBytes.byteOffset + baseBytes.byteLength);
 const map = new M.BinaryParser(base).getVETable();
 // What uploadBinary arms from the bytes on a fresh load; the rest of its toggles default off, and
-// writeVe on (useBinaryFile.ts ~255-272).
+// writeVe on (useBinaryFile.ts ~285-300). `readLogicPatches` reports the floor both ways, as
+// patchStatus does: held seeds K HOLD, and a dropped floor rides into the as-run image unarmed.
 const toggles = M.readLogicPatches(base);
-const egt = M.readEgtTables(base);
+// The as-run image, and both of its readers — the EGT tables (the rf_korr floor is one of them)
+// and the full-load gate. The curves come off the BASE: no patch touches them.
+const asRun = M.bytesAsRun(base, toggles);
+const egtAsRun = M.readEgtTables(asRun);
 const curves = M.readRfPtKorrCurves(base);
-const lambdaLimits = new M.BinaryParser(M.bytesAsRun(base, toggles)).readLambdaLimits();
+const lambdaLimits = new M.BinaryParser(asRun).readLambdaLimits();
 
 // --- TESTO CSV -----------------------------------------------------------------------------------
-check('new work defaults to history Tune, independently of this legacy replay',
-    M.DEFAULT_FILTER_CONFIG.veCorrectionPolicy === 'moving-response');
-const cfg = { ...M.DEFAULT_FILTER_CONFIG, veCorrectionPolicy: 'legacy-nominal' };
+const cfg = M.DEFAULT_FILTER_CONFIG;
 const raw = M.parseLogFile(fs.readFileSync(CSV, 'utf8'));
 const processed = M.processLogData(raw, path.basename(CSV), cfg, M.APP_CONFIG.MSS54HP.INTERPOLATION_TABLE, lambdaLimits);
 
-// veCalcOptionsFor(cfg, egt, writeRfKorr = false, curves), field for field.
+// veCalcOptionsFor(cfg, egtTables, curves, interpolationTable, highDeltaGuard = null), field for
+// field. A fresh workspace has no session behind it, so no ancestor guard either.
+const table = M.APP_CONFIG.MSS54HP.INTERPOLATION_TABLE;
 const options = {
-    veCorrectionPolicy: cfg.veCorrectionPolicy,
     rfKorrSource: cfg.rfKorrSource,
     rfKorrMode: cfg.rfKorrMode,
     applyRfKorr: cfg.applyRfKorr,
-    writeRfKorr: false,
     veMethod: cfg.veMethod,
     directAuthority: cfg.directAuthority,
-    rfKorrSettleSec: cfg.rfKorrSettleSec,
     ...(cfg.enableVeCellGate === false
         ? { minCellSamples: 1, minCellWeight: 0 }
         : { minCellSamples: cfg.minVeCellSamples, minCellWeight: cfg.minVeCellWeight }),
     normaliseTo: cfg.normaliseChargeTemp ? curves : null,
-    rfKorrAir: { curves, assumedPressureMbar: cfg.assumedAmbientPressure },
-    rfKorrThresholds: cfg.enableRfKorrCellGate === false
-        ? { minCellSamples: 1, minCellWeight: 0 }
-        : { minCellSamples: cfg.rfKorrMinCellSamples, minCellWeight: cfg.rfKorrMinCellWeight },
-    egt,
+    rfKorrAir: {
+        curves, assumedPressureMbar: cfg.assumedAmbientPressure,
+        loadTable: cfg.enableCorrection === false ? null : table,
+    },
+    rfKorrThresholds: {
+        ...(cfg.enableRfKorrCellGate === false
+            ? { minCellSamples: 1, minCellWeight: 0 }
+            : { minCellSamples: cfg.rfKorrMinCellSamples, minCellWeight: cfg.rfKorrMinCellWeight }),
+        highDeltaGuard: null,
+    },
+    egt: egtAsRun,
 };
 
-// runCalculation, in its order.
+// runCalculation, in its order: the K HOLD check first, then everything on the tables it settles.
 const calc = new M.VECalculator();
-const annotated = calc.annotateRfKorr(map, processed.data, options.egt, options.rfKorrAir, processed.rawData);
-const annotatedForRfKorr = calc.annotateRfKorr(map, processed.rfKorrData, options.egt, options.rfKorrAir, processed.rawData);
-const rfKorr = options.egt
-    ? M.tuneRfKorrTable(map, annotatedForRfKorr, options.egt,
+const hold = options.egt
+    ? calc.resolveKHold(map, options.egt, options.rfKorrAir, processed.rawData) : null;
+const egt = hold ? hold.egt : (options.egt ?? null);
+const annotated = calc.annotateRfKorr(map, processed.data, egt, options.rfKorrAir, processed.rawData);
+const annotatedForRfKorr = calc.annotateRfKorr(map, processed.rfKorrData, egt, options.rfKorrAir, processed.rawData);
+const rfKorr = egt
+    ? M.tuneRfKorrTable(map, annotatedForRfKorr, egt,
         { rpm: M.APP_CONFIG.MSS54HP.AXIS_RPM, load: M.APP_CONFIG.MSS54HP.AXIS_LOAD }, options.rfKorrThresholds ?? {})
     : null;
-const result = calc.calculateNewVEMap(map, annotated, { ...options, tunedRfKorr: rfKorr });
+// The table is derived and, on a first load, not armed (writeRfKorr defaults off) — so it is
+// computed for parity with the hook and goes nowhere, as in the app.
+void rfKorr;
+const result = calc.calculateNewVEMap(map, annotated, { ...options, egt });
 const newMap = result.newMap;
 
 // --- DOWNLOAD TUNED: buildPatchedBuffer(newMap, no overrides, extras all null) -----------------
@@ -135,7 +157,8 @@ if (written) patcher.setVETableData(written);
 if (toggles.applyPatch) patcher.disableMapCorrection(); else patcher.enableMapCorrection();
 patcher.setWOTThreshold(toggles.applyWotDisable);
 patcher.setTankVentDisable(toggles.applyTankVentDisable);
-patcher.setRfKorrGateFloor(!!toggles.applyRfKorrGateDrop);
+// K HOLD or stock — never the retired drop, which no build writes (buildPatchedBuffer ~431).
+patcher.setRfKorrGateFloor(toggles.applyRfKorrHold ? 'hold' : 'stock');
 patcher.applyChecksumCorrection();
 const tuned = new Uint8Array(patcher.getBuffer());
 const hash = crypto.createHash('sha256').update(tuned).digest('hex');
@@ -177,7 +200,7 @@ if (GOLDEN === null) {
     console.log('  NOT PINNED — measure the golden from the app and write it into GOLDEN.');
     process.exit(2);
 }
-check('legacy replay remains byte-for-byte the historical app download', hash === GOLDEN, `got ${hash}, the app gave ${GOLDEN}`);
+check('the tuned BIN is byte-for-byte what the app downloads', hash === GOLDEN, `got ${hash}, the app gave ${GOLDEN}`);
 
 console.log(fails ? `\n${fails} FAIL` : '\nall PASS');
 process.exit(fails ? 1 : 0);

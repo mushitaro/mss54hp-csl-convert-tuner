@@ -39,10 +39,12 @@ const SHEET_TEXT = {
 
 export type NewFromWhich = 'tuned' | 'base';
 
-/** Any of the three logic patches on. The three are one state everywhere they are read — a BIN
- *  with only TANK VENT shut is not stock either. */
+/** Any of the logic patches on. They are one state everywhere they are read — a BIN with only
+ *  TANK VENT shut is not stock either, and neither is one whose rf_korr floor is held or carries
+ *  the retired drop. */
 const anyPatch = (p: Partial<LogicPatches>): boolean =>
-    !!(p.applyPatch || p.applyWotDisable || p.applyTankVentDisable || p.applyRfKorrGateDrop);
+    !!(p.applyPatch || p.applyWotDisable || p.applyTankVentDisable || p.applyRfKorrHold
+        || p.applyRfKorrGateDrop);
 
 interface Props {
     sessions: TuningSession[];
@@ -232,7 +234,9 @@ function describeFlashHistory(history: FlashRecord[]): string {
             f.settings.applyPatch ? 'PATCH ON' : 'PATCH OFF',
             f.settings.applyWotDisable ? 'WOT TH ON' : null,
             f.settings.applyTankVentDisable ? 'TANK VENT SHUT' : null,
-            f.settings.applyRfKorrGateDrop ? 'RF GATE 0.400' : null,
+            f.settings.applyRfKorrHold ? 'K HOLD' : null,
+            // The retired RF GATE drop is not named: the patch is gone from the app, and an old
+            // record that carried it still keeps (FINAL) off its line through `isRoadState`.
         ].filter(Boolean).join(' · ');
         // PRACTICE first and in full caps, because it changes what every other word on the line
         // means: none of these bytes reached an ECU. `undefined` is not `false` here — a record
@@ -399,12 +403,12 @@ const Contents: React.FC<{ session: TuningSession }> = ({ session }) => {
     // flashState already trusts them.
     const patches = session.tuneSettings ?? armedPatchesFromHistory(session) ?? {};
     const patched = !!(patches.applyPatch || patches.applyWotDisable || patches.applyTankVentDisable
-        || patches.applyRfKorrGateDrop);
+        || patches.applyRfKorrHold || patches.applyRfKorrGateDrop);
     const { practice } = flashCounts(session);
     return (
         <span className="inline-flex items-center gap-1.5 text-[9px] font-mono leading-none whitespace-nowrap">
             <Token on={!!session.baseOrigin} title="BASE bytes are stored for this session">BASE</Token>
-            <Token on={patched} title="The logic patches are in effect for this session (PATCH / WOT TH / TEV)">PATCH</Token>
+            <Token on={patched} title="The logic patches are in effect for this session (PATCH / WOT TH / TEV / K HOLD)">PATCH</Token>
             <Token on={session.hasLog} title="A drive was recorded into this session">LOG</Token>
             <Token on={wroteTune(session)} title="This session wrote a tune to the ECU">TUNED</Token>
             {/* Still in the ECU, as opposed to written at some point and since patched over. The
@@ -1109,7 +1113,7 @@ export const SessionList: React.FC<Props> = ({
                                                                         wrotePatchOn.applyPatch ? 'PATCH' : null,
                                                                         wrotePatchOn.applyWotDisable ? 'WOT TH' : null,
                                                                         wrotePatchOn.applyTankVentDisable ? 'TEV' : null,
-                                                                        wrotePatchOn.applyRfKorrGateDrop ? 'RFGATE' : null,
+                                                                        wrotePatchOn.applyRfKorrHold ? 'K HOLD' : null,
                                                                     ].filter(Boolean).join(' · ')}
                                                                 </span>
                                                             </button>

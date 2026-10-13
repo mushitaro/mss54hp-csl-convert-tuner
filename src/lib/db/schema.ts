@@ -7,7 +7,7 @@ import type { AdaptationSnapshot } from '@/lib/dme-link/adaptationBlocks';
 import type { EgasMeasurement, InertiaSample, IdleSample } from '@/lib/dme-link/types';
 import type { LlsSample } from '@/lib/lls/fromLog';
 import type { CalEdit } from '@/lib/calibration/edits';
-import type { RecordingCalibration } from './recordingCalibration';
+import type { HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
 
 export const DB_NAME = 'mss54hp-tuner-db';
 // 3: adds `seq`. Existing rows have no number, and the lineage badges are built on it, so the
@@ -53,15 +53,26 @@ export interface TuneSettings {
      */
     applyTankVentDisable?: boolean;
     /**
-     * `kl_rf_korr_rf_min` dropped to 0.400 — the rf_korr gate floor.
+     * K HOLD — `kl_rf_korr_rf_min` held at 2.000, so the DME ran rf_korr ≡ 1.000.
      *
      * Recorded for the same reason `applyTankVentDisable` is, and more sharply: this curve is what
      * `readEgtTables` builds `EgtTables.rfKorrMin` from, so it decides which samples of a drive the
-     * app believes the DME was correcting. A log taken with the floor dropped and one taken without
-     * are not comparable, and the replay reads the BASE plus these flags to find out which it has.
+     * app believes the DME was correcting. A log taken held and one taken on the stock floor are not
+     * comparable — one carries no rf_korr step at all — and the replay reads the BASE plus these
+     * flags to find out which it has.
      *
      * Optional, and absent means the stock floor: no session saved before this field existed could
-     * have carried the patch, because nothing could write it.
+     * have carried the hold, because nothing could write it. No DB_VERSION bump, like every
+     * additive optional field here.
+     */
+    applyRfKorrHold?: boolean;
+    /**
+     * The retired RF GATE drop — `kl_rf_korr_rf_min` at 0.400.
+     *
+     * No longer written: the toggle is gone, and no build puts the drop into a BIN. Kept so the
+     * records that were written with it still parse, still say so in the flash history, and still
+     * replay their drive through the floor it actually ran (`bytesAsRun` honours it). Absent means
+     * the stock floor, as it always did.
      */
     applyRfKorrGateDrop?: boolean;
     writeWarmup: boolean;
@@ -138,13 +149,24 @@ export interface TuneSettings {
      * Optional properties need no DB_VERSION bump — see the note on it above.
      */
     calibrationEdits?: CalEdit[];
+    /**
+     * What a K HOLD drive says about the 300 / 400 rows of KF_RF_KORR_DRREL (highDeltaGuard.ts):
+     * how many samples reached Δ* >= 300 with the loop running, and whether any of them had both
+     * banks lean-locked. Stored here because the DRREL is tuned on a LATER drive, with K HOLD off,
+     * which cannot measure it — that session reads its nearest ancestor's guard. Derived from this
+     * session's own log, so a rebuild recomputes the same value.
+     *
+     * Absent on every session that did not run held — the guard only exists for a held floor, and
+     * a hold the car did not apply reads as not held. Optional, so no DB_VERSION bump.
+     */
+    highDeltaGuard?: HighDeltaGuard;
 }
 
 export interface FlashRecord {
     at: number;
     sha256: string;
     settings: Pick<TuneSettings, 'applyPatch' | 'applyWotDisable' | 'applyTankVentDisable'
-        | 'applyRfKorrGateDrop' | 'writeWarmup' | 'writeWot' | 'restoreWotFuel'>;
+        | 'applyRfKorrHold' | 'applyRfKorrGateDrop' | 'writeWarmup' | 'writeWot' | 'restoreWotFuel'>;
     /** Did these bytes carry a derived map, or only the patches? `settings` cannot answer that — a
      *  patch-armed BASE and a patch-armed tune record identically — and the flash count is now a mix
      *  of both, so the history has to say which each one was.
@@ -310,8 +332,6 @@ export interface TuningSession {
 export interface SessionLogRecord {
     sessionId: string;
     data: LogDataPoint[];
-    /** Immutable calibration reference checked at START, separate from future write settings. */
-    recordingCalibration?: RecordingCalibration;
 
     /**
      * The raw samples of an inertia run, stored unprojected.

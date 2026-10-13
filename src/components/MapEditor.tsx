@@ -5,16 +5,12 @@ import { VEMap } from '@/lib/types';
 import clsx from 'clsx'; // Install clsx if not already
 import { Info } from 'lucide-react';
 import { useDialogLang } from '@/hooks/useDialogLang';
-import type { MovingLiveCoverage } from '@/lib/ve-calculator/movingResponseLive';
-import { MOVING_LIVE_FOOTER, MOVING_LIVE_LABEL, MOVING_LIVE_MARK, MOVING_LIVE_STATES, MOVING_LIVE_STYLE, movingLiveCellText } from './MovingAcquisitionSummary';
 
 interface Props {
     mapData: VEMap;
     diffData?: number[][]; // Percentage diff
     hitData?: number[][]; // Hit counts
     weightData?: number[][]; // [NEW] Cell Weights
-    /** Preliminary acquisition, never a claim that this cell has an accepted VE correction. */
-    liveAcquisition?: MovingLiveCoverage;
     className?: string;
     /**
      * Pixels of scroll room to keep BELOW the last row, for whatever overlays the foot of this box.
@@ -228,7 +224,7 @@ const LEGEND = {
  * state change in the page rebuilt the whole grid twice over.
  */
 export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
-    mapData, diffData, hitData, weightData, liveAcquisition, className, bottomInset, zoom = 1,
+    mapData, diffData, hitData, weightData, className, bottomInset, zoom = 1,
     rowLabel = 'RO %', colLabel = 'RPM', valueLabel = 'RF %',
     rowFormat = (v: number) => v.toFixed(2),
     valueFormat = (v: number) => v.toFixed(3),
@@ -244,8 +240,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
     const padHead = `${Math.round(PAD_HEAD * zoom)}px`;
     const padCell = `${Math.round(PAD_CELL * zoom)}px`;
 
-    const language = useDialogLang();
-    const lg = LEGEND[language];
+    const lg = LEGEND[useDialogLang()];
     const [legendOpen, setLegendOpen] = React.useState(false);
     /**
      * The bands this particular grid can actually show, in the order a reader meets them.
@@ -256,15 +251,6 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
      */
     const { bands, footer } = React.useMemo(() => {
         const swatch = (rgb: string, a: number) => `rgba(${rgb}, ${a})`;
-        if (liveAcquisition) {
-            return {
-                bands: MOVING_LIVE_STATES.map(state => ({
-                    fill: MOVING_LIVE_STYLE[state].backgroundColor ?? 'transparent',
-                    label: `${MOVING_LIVE_MARK[state]} ${MOVING_LIVE_LABEL[language][state]}`,
-                })),
-                footer: MOVING_LIVE_FOOTER[language],
-            };
-        }
         if (diffData) {
             return {
                 bands: [
@@ -290,7 +276,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
             };
         }
         return { bands: [], footer: lg.plain };
-    }, [liveAcquisition, language, diffData, hitData, acceptedData, coverageThin, coverageOk, lg]);
+    }, [diffData, hitData, acceptedData, coverageThin, coverageOk, lg]);
 
     // The rows to draw, as indices into the full map. Clamped rather than validated: a range that
     // runs off the end of a shorter table should show what there is, not throw in a render.
@@ -387,16 +373,15 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
                                 const diff = diffData ? diffData[rowIdx][colIdx] : 0;
                                 const hits = hitData ? hitData[rowIdx][colIdx] : 0;
                                 const weight = weightData ? weightData[rowIdx][colIdx] : 0;
-                                const acquisition = liveAcquisition?.cells[rowIdx]?.[colIdx];
 
                                 let textColor = 'text-slate-400';
-                                let style: React.CSSProperties = {};
+                                let style = {};
 
                                 // If hits exist and no diff (or low diff logic), apply heat map
                                 // User asked to prioritize seeing hits by color
-                                const hasHits = acquisition ? acquisition.recorded > 0 : hits > 0;
+                                const hasHits = hits > 0;
 
-                                if (hasHits && !diffData && !liveAcquisition) {
+                                if (hasHits && (!diffData)) {
                                     // Ice blue (#8FD8F2) = "the log actually visited this cell", the same
                                     // OK/present role emerald-* now carries. Safe to share the blue family
                                     // with the lean-diff fill below: the guard above means a cell can never
@@ -422,7 +407,7 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
 
                                 // If diff exists, colorize (Overrides hit map or combines?)
                                 // Diff is usually more critical for Tuning, so let's keep Diff priority if it exists
-                                if (diffData && !liveAcquisition) {
+                                if (diffData) {
                                     // DiffData is passed as Percentage Difference (e.g. -9.5, +5.0) from page.tsx
                                     // So deviation is simply the value itself.
                                     const deviation = diff;
@@ -450,49 +435,27 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
                                     }
                                 }
 
-                                if (acquisition) {
-                                    style = MOVING_LIVE_STYLE[acquisition.state];
-                                    textColor = acquisition.state === 'unvisited' ? 'text-slate-400' : 'text-slate-200';
-                                }
-
-                                const muted = !liveAcquisition && (mutedCells?.[rowIdx]?.[colIdx] ?? false);
+                                const muted = mutedCells?.[rowIdx]?.[colIdx] ?? false;
                                 const note = cellNote?.(rowIdx, colIdx);
                                 // Last word on the text colour, after the coverage and diff rules
                                 // have had theirs — a caller supplying this knows something about
                                 // the cell the grid cannot see in the number.
                                 const tint = cellTint?.(rowIdx, colIdx);
-                                if (tint && !liveAcquisition) textColor = tint;
+                                if (tint) textColor = tint;
                                 const isSelected = selected?.row === rowIdx && selected?.col === colIdx;
-                                const description = `${colLabel}: ${mapData.xAxis[colIdx]}, ${rowLabel}: ${load}\n`
-                                    + `${valueLabel}: ${val}\n`
-                                    + (acquisition ? movingLiveCellText(acquisition, language)
-                                        : `Hits: ${hits}\nWeight: ${weight.toFixed(2)}` + (note ? `\n${note}` : ''));
 
                                 return (
                                     <td
                                         key={colIdx}
-                                        data-acquisition-state={acquisition?.state}
-                                        data-map-row={rowIdx}
-                                        data-map-col={colIdx}
                                         style={{
                                             ...style,
                                             padding: padCell,
                                             // An inset shadow rather than a ring or an outline: the
                                             // table is `border-collapse`, so a ring lands under the
                                             // neighbouring cell's border on two of the four sides.
-                                            ...(isSelected ? { boxShadow: `inset 0 0 0 2px ${liveAcquisition ? '#F2F2F5' : '#26AEE4'}` } : {}),
+                                            ...(isSelected ? { boxShadow: 'inset 0 0 0 2px #26AEE4' } : {}),
                                         }}
                                         onClick={onCellSelect ? () => onCellSelect(rowIdx, colIdx) : undefined}
-                                        onKeyDown={onCellSelect ? event => {
-                                            if (event.key === 'Enter' || event.key === ' ') {
-                                                event.preventDefault();
-                                                onCellSelect(rowIdx, colIdx);
-                                            }
-                                        } : undefined}
-                                        role={onCellSelect ? 'button' : undefined}
-                                        tabIndex={onCellSelect ? 0 : undefined}
-                                        aria-pressed={onCellSelect ? isSelected : undefined}
-                                        aria-label={onCellSelect ? description : undefined}
                                         className={clsx(
                                             'border border-slate-800 font-mono transition-colors relative group',
                                             hasHits ? 'font-bold' : 'opacity-80',
@@ -500,19 +463,20 @@ export const MapEditor: React.FC<Props> = React.memo(function MapEditor({
                                             // the tune declined to use still has to be readable —
                                             // that is what tells you WHY it was declined.
                                             muted && 'opacity-40',
-                                            onCellSelect && 'cursor-pointer focus-visible:outline-2 focus-visible:outline-blue-400 focus-visible:outline-offset-[-2px]',
+                                            onCellSelect && 'cursor-pointer',
                                             // Selection wins over the muted dimming: you selected it
                                             // BECAUSE it was refused, and reading it at 40 % while
                                             // the detail strip talks about it is the wrong way round.
                                             isSelected && 'opacity-100'
                                         )}
-                                        title={description}
+                                        title={`${colLabel}: ${mapData.xAxis[colIdx]}, ${rowLabel}: ${load}\n`
+                                            + `${valueLabel}: ${val}\nHits: ${hits}\nWeight: ${weight.toFixed(2)}`
+                                            + (note ? `\n${note}` : '')}
                                     >
-                                        {acquisition && <span aria-hidden="true" className="absolute top-0 left-0.5 text-[8px] leading-none text-indigo-300">{MOVING_LIVE_MARK[acquisition.state]}</span>}
                                         <span className={textColor}>
-                                            {diffData && !liveAcquisition ? `${val > 0 ? '+' : ''}${val.toFixed(1)}%` : valueFormat(val)}
+                                            {diffData ? `${val > 0 ? '+' : ''}${val.toFixed(1)}%` : valueFormat(val)}
                                         </span>
-                                        {!liveAcquisition && diff !== 0 && Math.abs(val - diff) > 0.001 && (!diffData) && ( /* Only show small diff tag if val != diff (i.e. not in Diff View) */
+                                        {diff !== 0 && Math.abs(val - diff) > 0.001 && (!diffData) && ( /* Only show small diff tag if val != diff (i.e. not in Diff View) */
                                             <span className="absolute bottom-0 right-0 text-[8px] opacity-70 px-0.5">
                                                 {diff.toFixed(1)}%
                                             </span>

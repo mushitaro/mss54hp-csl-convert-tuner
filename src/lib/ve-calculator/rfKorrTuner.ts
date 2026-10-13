@@ -4,72 +4,60 @@ import { axisBracket, type AxisBracket } from '@/lib/log-engine/axisBracket';
 // `import type` for the interface: Node's type stripping cannot tell a type-only named import from
 // a value one, so a harness that loads this module directly fails on the missing export.
 import type { EgtTables } from './egtTables';
-import { gateOpen, rfKorrActive, tabgModelAt } from './egtTables';
+import { gateOpen, isRfKorrFloorHeld, rfKorrActive, tabgModelAt } from './egtTables';
+import type { HighDeltaGuard } from './highDeltaGuard';
+import { CSL_STOCK_RF_KORR_DRREL } from '@/config/constants';
 
 /**
- * Back-calculates KF_RF_KORR_DRREL from a data log.
+ * Back-calculates KF_RF_KORR_DRREL from a data log, anchored on the VE the drive ran on.
  *
- * ## What is being solved
+ * ## The formula
  *
- * The DME injects on RF = rf_soll x rf_korr, and the closed loop moves STFT until lambda is 1.
- * At convergence, for one VE cell (one rf_soll):
+ *     trim   = mean(STFT1, STFT2) x mean(LTFT1, LTFT2)       the VE write's own trim
+ *     D_i    = rfKorr_i x trim_i                            gate open, and the lambda loop has
+ *                                                           taken the last K step back (!kRamp)
+ *     DRREL(N, Δ) <- Σ w·D_i / Σ w                          bilinear on the table's (N, Δ) lattice,
+ *                                                           -0.05 / +0.10 per log, [1.000, 1.40]
  *
- *     rf_soll x k_applied(i) x STFT(i) = A(delta_i)
+ * Why D is what the table should hold. Stage 1 converges the VE under K HOLD, where the DME applies
+ * K = 1.000 (the Δ 30 row) everywhere, so the map ends at rf_soll = VE_true · A(Δ_held), A being the
+ * air the cylinder really takes at that exhaust state. On a drive with the gate open, once the loop
+ * has settled on the trim that cancels whatever K the DME applied, the fuel matches the air:
  *
- * where A is the air the cylinder actually got. Take the ratio of a cold-exhaust sample to a
- * warm-exhaust one in the SAME cell and rf_soll cancels:
+ *     rf_soll · K_i · trim_i = VE_true · A(Δ_i)   ->   D_i = K_i · trim_i = A(Δ_i) / A(Δ_held)
  *
- *     A(delta) / A(0) = k_applied(delta) x STFT(delta) / STFT(0)
+ * rf_soll cancels, and so does the K the DME happened to apply. What is left is the correction this
+ * Δ needs relative to the drive the VE was converged on. With α ≈ 0 — the post-switch seam slope is
+ * β = -1.09 [-1.36, -0.75], the trim takes back all of K — A(Δ_held) is A(30) to within a few
+ * percent, and D runs toward 1.000: the table comes down, by at most 0.05 a log.
  *
- * The left side is what KF_RF_KORR_DRREL should hold. Two consequences follow, and both matter:
+ * Mid-ramp samples say nothing: there the trim is ramping at the controller's fixed I slope and
+ * `trim x K` reads K (1 - 0.0406 t), the time since the step (rampState.ts). They are counted
+ * (`samplesKRamp`) and skipped.
  *
- * 1. **The VE table need not be converged.** Its error is common to both samples and divides out.
- *    There is no "tune VE first, then the table" ordering.
- * 2. **The answer does not depend on what k the DME actually applied.** `k_applied` is measured
- *    (RF / rf_soll), so whether the correction's gate was open, shut, or holding a stale value
- *    through the hysteresis band, the equation is the same.
+ * ## Two refusals, each a table of nothing rather than a weak one
  *
- *    That algebra still holds, but the sentence that used to follow it — "this is why nothing here
- *    tries to evaluate the road-speed half of the gate, which DS2 selection 3 cannot report anyway"
- *    — was doing damage two ways. `V` has been on the RAM read since 2026-08-30, so the premise
- *    expired; and §"Where the gate DOES matter" below is the counter-argument to the conclusion. A
- *    shut gate does not break the equation, it breaks the EXPERIMENT: k = 1.000 then means "the DME
- *    was not correcting", not "this Δ needs no correction". The input pass now evaluates both
- *    halves, and `annotateRfKorrPoint` pins `rfKorr` to 1.000 outside them, so the `k_applied` read
- *    here is what the DME applied rather than what the ratio happened to read.
+ * - `kHeld` — the drive ran K HOLD, so the gate never opened and there is no K to measure.
+ * - `veNotAnchored` — the gate-SHUT post-ramp samples of the same drive, where K is 1.000 and the
+ *   trim is the VE's own error, have a median trim outside 1 ± `anchorTrimTolerance`. The formula
+ *   above assumes the VE is converged; skip stage 1 and its error lands in every D.
  *
- * ## Where the gate DOES matter
+ * ## Rows above the highest measured one
  *
- * Identifying the anchor. `k_applied = 1.000` has three different causes — a genuinely warm
- * exhaust, a shut gate, and the identity rpm columns — and only the first is a nominal condition.
- * Using "k is about 1" as a proxy for "the exhaust is warm" lets a shut-gate sample at
- * delta = 300 degC into the anchor, which inflates it by the true density effect and pulls every
- * derived table entry DOWN. Understating this table leans the mixture under load at 2200-3500 rpm,
- * which is the one direction docs/ecu-logic/20-egt-correction.md says not to go.
+ *     s_c         = (k_new(r_top, c) - 1) / (k_stock(r_top, c) - 1)     r_top: highest written row
+ *     k_new(r, c) = 1 + s_c · (k_stock(r, c) - 1)                       r > r_top, same step, range
  *
- * So the anchor is chosen on the SENSOR's delta, never on k. That is the whole reason the tuned
- * mode requires an exhaust-temperature channel.
+ * k_stock is BMW's table (`CSL_STOCK_RF_KORR_DRREL`), the step is taken from the loaded one.
+ *
+ * Post-ramp samples reach about Δ 200 and no further, WOT TH or not (highDeltaGuard.ts has the
+ * numbers). So 300/400 cannot be measured; they follow the shrink of the highest measured row in
+ * their column, and only when a K HOLD drive's guard saw no lean lock at Δ* >= 300. Without one
+ * they stay stock, the rich side. The cells filled this way are flagged in `extrapolated`.
  *
  * See docs/ecu-logic/60-tuning-logic.md section 6.5 for the derivation and its conditions.
-  *
- * ## Why this has produced nothing yet (2026-08-22, measured)
- *
- * The anchor — a gate-open sample with Δ ≤ 30 °C — is structurally unreachable in road pulls.
- * Δ decays with the EXHAUST SYSTEM's thermal mass (τ ≈ 148 s, fitted on a 29.8 s pull; the DME's
- * own TABG filter is 0.2 s and irrelevant), so a WOT pull would need ~279 s continuous to enter
- * the band. Every Δ ≤ 30 sample in the logs (2,281 of them) sits at LOW load, gate shut: the two
- * anchor conditions are anti-correlated by pipe thermodynamics. A higher sample rate (CAN) does
- * not move this at all — the bottleneck is heat, not data. The one road-feasible recipe is
- * heat-then-hold: pull to ~500 °C, then hold ~65 % filling near 2600 rpm for ~90-120 s so TABG
- * relaxes toward the model value while the gate stays open. See
- * docs/ecu-logic/60-tuning-logic.md §6.1.6 for the fit, the simulation and the two redesign
- * options if that recipe proves undrivable.
  */
 
 export interface RfKorrTuneOptions {
-    /** Δ at or below which a sample counts as nominal — the table's first Y breakpoint, where
-     *  every rpm column reads 1.000. Above it the DME is already correcting. */
-    anchorDeltaMax: number;
     /** Widens the filling floor to skip the hysteresis band, where rf_korr is holding a value
      *  computed at a different operating point and so no longer corresponds to this sample's Δ. */
     gateMargin: number;
@@ -97,19 +85,27 @@ export interface RfKorrTuneOptions {
      */
     maxEgtRatePerSec: number;
 
-    /** Evidence a VE cell needs before its anchor may be used as a DENOMINATOR. Far above the
-     *  `weightSum > 0.1` the VE map itself runs on: that threshold is adequate for a mean, and a
-     *  divisor built from one sample would propagate its noise into every entry it feeds. */
-    minAnchorSamples: number;
-    minAnchorWeight: number;
+    /**
+     * How far the median trim of the gate-shut post-ramp samples may sit from 1.000 before the VE
+     * is not an anchor. 0.02 is the plan's ±2 %: the band's VE error that α ≈ 0 already leaves
+     * (0-8 % rich at α 0-0.3) is the next thing down, and a VE that is out by more than this would
+     * put more error into D than the correction it is measuring at the low rows.
+     */
+    anchorTrimTolerance: number;
+    /**
+     * Gate-shut post-ramp samples the anchor check needs before it can pass. The limit cycle swings
+     * the trim ±0.02-0.03; over 20 samples the median's standard error is ~0.004, a fifth of the
+     * tolerance. Fewer, and "the VE is converged" would rest on a handful of readings.
+     */
+    anchorCheckMinSamples: number;
 
     /** Evidence a (rpm, Δ) grid cell needs before its value is written. */
     minCellSamples: number;
     minCellWeight: number;
-    /** Distinct VE cells that must have contributed. One bad anchor must not become a table
-     *  entry on its own — with two, a bad anchor has to be agreed with to survive. */
+    /** Distinct VE cells that must have contributed. One VE cell's residual error must not become a
+     *  table entry on its own — with two, it has to be agreed with to survive. */
     minDistinctVeCells: number;
-    /** max−min of the ratios binned into one grid cell. The derivation assumes the air really
+    /** max−min of the D values binned into one grid cell. The derivation assumes the air really
      *  does factor as g(rpm, load) x D(rpm, Δ); samples from different VE cells that disagree by
      *  more than this are saying it does not, here. */
     maxSpread: number;
@@ -152,27 +148,32 @@ export interface RfKorrTuneOptions {
      *  interpolation segment beside it. The measurement is still reported. */
     writeIdentityColumns: boolean;
     /** A column flatter than this across Δ is an identity column. Same number as the inverter's
-     *  minSpan, and for the same reason. */
+     *  minSpan, and for the same reason. Also the least stock excess over 1.000 a measured row may
+     *  have for its shrink ratio to be taken — below it `s` divides by a rounding error. */
     identitySpan: number;
     /**
      * Write the identity Δ ROW as well — the row every rpm column pins at 1.000, which is the
-     * baseline the whole table is measured against. Off, and separately from the columns, because
-     * the failure mode is different: pass 2 skips anchors, but a sample at Δ = 35 still lands part
-     * of its bilinear weight on the Δ = 30 row, so that row collects evidence from samples the
-     * anchor logic deliberately excluded. On a real log this wrote 1.009 into the 2200 rpm cell —
-     * a 0.9 % enrichment at zero delta, which shifts what every other row is relative to.
+     * baseline the whole table is measured against. Off, and separately from the columns: a sample
+     * at Δ = 35 still lands part of its bilinear weight on the Δ = 30 row, and on a real log that
+     * wrote 1.009 into the 2200 rpm cell — a 0.9 % enrichment at zero delta, which shifts what every
+     * other row is relative to. It is also the row K HOLD runs on, so it is the VE's own reference.
      */
     writeIdentityRow: boolean;
+
+    /**
+     * The high-Δ guard from the nearest K HOLD drive (highDeltaGuard.ts). `ok` lets the rows above
+     * the highest measured one follow its shrink ratio; null, absent, or not ok leaves them stock.
+     */
+    highDeltaGuard?: HighDeltaGuard | null;
 }
 
 export const RF_KORR_TUNE_DEFAULTS: RfKorrTuneOptions = {
-    anchorDeltaMax: 30,
     gateMargin: 0.05,
     settleSec: 3.0,
     maxRfDrift: 5.0,
     maxEgtRatePerSec: 8.0,
-    minAnchorSamples: 5,
-    minAnchorWeight: 3.0,
+    anchorTrimTolerance: 0.02,
+    anchorCheckMinSamples: 20,
     minCellSamples: 10,
     minCellWeight: 5.0,
     minDistinctVeCells: 2,
@@ -224,6 +225,9 @@ export type RejectReason =
     | 'identity-row'
     | 'off-breakpoint';
 
+/** Why the whole table was declined — see the header. Null on a drive the tuner could read. */
+export type RfKorrRefusal = 'kHeld' | 'veNotAnchored';
+
 export interface RfKorrTuneReport {
     samplesTotal: number;
     /** Carried neither `rf` nor a usable rf_soll — nothing was measured. */
@@ -231,13 +235,18 @@ export interface RfKorrTuneReport {
     /** No exhaust-temperature channel on the row, so no Δ. */
     samplesNoDelta: number;
     /**
-     * Below the filling floor, so the DME's gate was SHUT and it applied 1.000 no matter what the
-     * exhaust was doing. These samples carry no information about this table, and on a normal road
-     * log they are almost all of them — 1173 of 1176 on the drive this counter was added for.
+     * The DME's latch was SHUT, so it applied 1.000 no matter what the exhaust was doing. These
+     * samples carry no information about this table, and on a normal road log they are almost all
+     * of them — 1173 of 1176 on the drive this counter was added for. Their trims are what the
+     * anchor check reads.
      */
     samplesGateShut: number;
-    /** Inside the hysteresis band: the applied correction belongs to another operating point. */
+    /** Latched, but inside the hysteresis band (or within `gateMargin` of the floor): the applied
+     *  correction belongs to another operating point. */
     samplesHysteresis: number;
+    /** Gate open, and the lambda loop still taking the last K step back (`kRamp`): the trim is the
+     *  time since the step, not a measurement. */
+    samplesKRamp: number;
     /** RF or TABG was still moving, so Δ is sensor lag rather than a density signal. */
     samplesNotSettled: number;
     /** The operating point had moved within the log filter's Settle Time — `settleUnsteady`.
@@ -246,32 +255,30 @@ export interface RfKorrTuneReport {
     /**
      * Carried no lambda trim on either bank, so the closed loop's residual is unknown.
      *
-     * The derivation is `A(Δ)/A(0) = k_applied × STFT(Δ) / STFT(0)`. `k_applied` says what the DME
-     * DID; only STFT says whether it was RIGHT. Drop the trim and the ratio collapses to
-     * `k_applied(Δ)/k_applied(0)` — which is the table already in the ECU, handed back as though the
-     * drive had derived it.
-     *
-     * This counter exists because that used to happen silently: an absent trim was read as `1`, the
-     * exact fabrication the VE calculator was fixed for. An EGT-profile log has no trim on any row,
-     * so the whole of one lands here — see `trimMissing`.
+     * `D = rfKorr x trim`, and `rfKorr` says what the DME DID; only the trim says whether it was
+     * RIGHT. Drop the trim and D collapses to `rfKorr` — the table already in the ECU, handed back as
+     * though the drive had derived it. An EGT-profile log has no trim on any row, so the whole of
+     * one lands here — see `trimMissing`.
      */
     samplesNoTrim: number;
     /**
-     * Qualified as nominal and went into an anchor.
+     * Gate open, post-ramp, settled, with a trim: the samples the table is built from.
      *
-     * Counted by `rfKorrCensus`, which is what makes it true on a live run. It used to be counted in
-     * `tuneRfKorrTable`'s own passes — which the live path never calls — so the two figures a driver
-     * reads mid-drive were structurally pinned at zero and the panel said "anchors 0, hold a steadier
-     * load" for the whole of every run, including the runs that were going perfectly.
+     * Counted by `rfKorrCensus`, which is what makes it true on a live run — the live path never
+     * calls `tuneRfKorrTable`, and a figure counted only there would sit at zero for the whole of
+     * every drive, including the ones that were going perfectly.
      */
-    anchorSamples: number;
-    /** Carried a Δ above the anchor threshold and found an anchor to divide by. Same source, same
-     *  reason — see `anchorSamples`. */
-    ratioSamples: number;
-    /** Had a Δ but no usable anchor in their own VE cell, so said nothing. */
-    samplesNoAnchor: number;
-    veCellsWithAnchor: number;
+    samplesUsed: number;
+    /** The anchor check: gate-shut post-ramp samples with a trim, and their median trim (null
+     *  with none). See `anchorTrimTolerance`. */
+    anchorTrimSamples: number;
+    anchorTrimMedian: number | null;
+    /** The table declined as a whole, and why. Decided here, so the live census and the final
+     *  table say the same thing. */
+    refused: RfKorrRefusal | null;
     gridCellsUpdated: number;
+    /** Of `gridCellsUpdated`, the cells written by the shrink ratio rather than by measurement. */
+    extrapolatedCells: number;
     rejectedByReason: Record<RejectReason, number>;
     /**
      * No log row carried an exhaust temperature. Without one nothing here can run.
@@ -299,20 +306,19 @@ export interface RfKorrTuneResult {
     countMap: number[][];
     weightMap: number[][];
     spreadMap: number[][];
-    /** The raw weighted-mean ratio per grid cell, before any clamp. Shown so the difference
-     *  between "the log said this" and "this is what will be written" stays visible. */
+    /** The raw weighted-mean D per grid cell, before any clamp. Shown so the difference between
+     *  "the log said this" and "this is what will be written" stays visible. */
     measuredMap: number[][];
     updated: boolean[][];
     rejected: (RejectReason | null)[][];
-    /** Per VE cell (load x rpm, matching the VE grid), the anchor and the weight behind it. */
-    anchorMap: number[][];
-    anchorWeightMap: number[][];
+    /** Written by the shrink ratio of the highest measured row in its column, not by evidence of
+     *  its own. Always also `updated`. */
+    extrapolated: boolean[][];
     /** Enough of the table moved to be worth writing. */
     acceptable: boolean;
     report: RfKorrTuneReport;
 }
 
-interface AnchorCell { sumQw: number; weight: number; count: number }
 interface GridBin {
     sumDw: number; weight: number; count: number;
     min: number; max: number; veCells: Set<number>;
@@ -323,6 +329,24 @@ interface GridBin {
 
 const zeros = (rows: number, cols: number) =>
     Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+const flags = (rows: number, cols: number) =>
+    Array.from({ length: rows }, () => new Array<boolean>(cols).fill(false));
+
+/**
+ * The trim the VE write uses, for the same sample — `calculator.ts accumulatePoint`, term for term.
+ *
+ * Whichever STFT banks are present, averaged over those alone; undefined with none. It used to read
+ * `(p.stft1 ?? p.stft2 ?? 1)`, so a row with no trim at all silently became 1.000 — and then
+ * `D = rfKorr x 1` is the table already in the ECU, returned as a derivation of it. The long-term
+ * store multiplies in as it does there, and reads 1.0 where the log does not carry it.
+ */
+function trimOf(p: LogDataPoint): number | undefined {
+    const stft = [p.stft1, p.stft2].filter((v): v is number => v !== undefined);
+    if (!stft.length) return undefined;
+    const ltft = [p.ltft1, p.ltft2].filter((v): v is number => v !== undefined);
+    const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+    return mean(stft) * (ltft.length ? mean(ltft) : 1);
+}
 
 /**
  * Per sample: had RF been still, and TABG stopped chasing it, for `settleSec` beforehand?
@@ -392,61 +416,47 @@ function corners(
 /** Everything one accepted sample contributes, computed once. */
 export interface RfKorrPrepared {
     rpm: number;
-    q: number;                                   // k_applied x STFT
+    /** `rfKorr x trim` — what the table should hold at this sample's Δ. */
+    d: number;
     delta: number;
-    veCorners: Array<{ r: number; c: number; w: number }>;
     /** Index of the VE cell this sample sits closest to, used only to count how many distinct
      *  cells agreed on a grid entry. */
     veKey: number;
-    isAnchor: boolean;
-    /**
-     * `q / anchor` for a non-anchor sample, once the anchor map exists — undefined when this sample
-     * had no anchor to divide by, and always undefined for an anchor sample.
-     *
-     * Computed in the census rather than in the binning pass, so the number the live panel reports
-     * and the number the table is built from are one number. They used to be two, and only one of
-     * them was ever non-zero.
-     */
-    ratio?: number;
-    /** How much of the anchor this sample's ratio actually stands on, so a sample sitting mostly
-     *  over VE cells with no anchor counts for correspondingly less. */
-    confidence?: number;
 }
 
 /**
  * Which samples of a log can contribute to the correction table, and why the rest cannot.
  *
  * Split out of `tuneRfKorrTable` so a run can show this WHILE IT IS HAPPENING, by calling the same
- * function the final verdict calls. That is the whole point and it is not tidying: two runs have now
- * been driven to completion and thrown away, and in both cases the number that would have saved them
- * — anchors, zero — existed only after the drive was over. The inertia side already learned this
- * (see lib/inertia/liveCoverage.ts); this is the same lesson on the side that needed it more.
+ * function the final verdict calls. Two runs were once driven to completion and thrown away because
+ * the number that would have saved them existed only after the drive was over; the inertia side
+ * learned the same lesson (see lib/inertia/liveCoverage.ts).
  *
  * A second implementation would drift, and the drift would be invisible until someone had already
  * driven. So there is one implementation, and the live display and the table are both downstream of
- * it.
+ * it — including the two refusals, which are decided here for that reason.
  *
  * Cheap enough to call on a throttle: O(n) over the log, n a few thousand, no allocation per cell.
- * It does NOT build the table — that stays in `tuneRfKorrTable`, because a table that changed
- * mid-run would feed back into the VE binning and make the grid a mixture of two calibrations.
+ * It does NOT build the table — that stays in `tuneRfKorrTable`.
  */
 export function rfKorrCensus(
     annotatedLog: LogDataPoint[],
     egt: EgtTables,
     veAxes: { rpm: number[]; load: number[] },
     opts: Partial<RfKorrTuneOptions> = {},
-): { report: RfKorrTuneReport; prepared: RfKorrPrepared[]; anchorMap: number[][]; anchorWeightMap: number[][] } {
+): { report: RfKorrTuneReport; prepared: RfKorrPrepared[] } {
     const o: RfKorrTuneOptions = withDefaults(opts);
     const veCols = veAxes.rpm.length;
-    const veRows = veAxes.load.length;
 
     const report: RfKorrTuneReport = {
         samplesTotal: annotatedLog.length,
         samplesNoMeasurement: 0, samplesNoDelta: 0,
-        samplesGateShut: 0, samplesHysteresis: 0, samplesNotSettled: 0, samplesNoTrim: 0,
-        samplesUnsettledPoint: 0,
-        anchorSamples: 0, ratioSamples: 0, samplesNoAnchor: 0,
-        veCellsWithAnchor: 0, gridCellsUpdated: 0,
+        samplesGateShut: 0, samplesHysteresis: 0, samplesKRamp: 0, samplesNotSettled: 0,
+        samplesNoTrim: 0, samplesUnsettledPoint: 0,
+        samplesUsed: 0,
+        anchorTrimSamples: 0, anchorTrimMedian: null,
+        refused: null,
+        gridCellsUpdated: 0, extrapolatedCells: 0,
         rejectedByReason: {
             'no-evidence': 0, 'thin-weight': 0, 'thin-count': 0,
             'single-ve-cell': 0, 'spread': 0, 'identity-column': 0, 'identity-row': 0,
@@ -469,8 +479,8 @@ export function rfKorrCensus(
 
     // Which samples have had RF still and TABG caught up for long enough that Δ describes this
     // operating point. Precomputed over the whole array rather than tested inline, so the window
-    // can reach backwards past samples pass 0 is about to reject: a sample is settled or not by what
-    // the car was doing beforehand, not by what else survived this function.
+    // can reach backwards past samples the loop is about to reject: a sample is settled or not by
+    // what the car was doing beforehand, not by what else survived this function.
     //
     // It cannot see rows the LOG FILTER already removed (coolant, idle, cat-protection). The window
     // is bounded on timestamps rather than on indices, so a removal longer than settleSec falls out
@@ -480,11 +490,8 @@ export function rfKorrCensus(
     // array to defend against.
     const settled = settledFlags(annotatedLog, o);
 
-    // --- Pass 0: everything each sample contributes, computed once -----------------------------
-    // Held rather than recomputed because pass 2 needs the same Δ, the same q and the same VE
-    // corners pass 1 used. Deriving them twice is how the anchor and the ratio end up disagreeing
-    // about which cell a sample belongs to.
     const prepared: RfKorrPrepared[] = [];
+    const anchorTrims: number[] = [];
 
     for (let i = 0; i < annotatedLog.length; i++) {
         const p = annotatedLog[i];
@@ -502,38 +509,41 @@ export function rfKorrCensus(
             report.samplesNoMeasurement++;
             continue;
         }
+        const trim = trimOf(p);
+
+        // The DME's latch, as walked over the raw log. Shut means rf_korr = 1.000 whatever the
+        // exhaust was doing, so the sample says nothing about THIS table — but with K = 1 and the
+        // loop settled, its trim is the VE's own error, which is exactly what the anchor check
+        // needs. `kRamp === false` keeps out the climb back after the gate shuts on a stepped K:
+        // the exit is a K drop, and the tracker holds the bank until the rich switch that ends it
+        // (rampState.ts). The VE write takes those samples regardless — its exclusion is gate-open
+        // only — so this is the one reader they are kept from.
+        if (p.rfKorrGateOpen !== true) {
+            report.samplesGateShut++;
+            if (p.rfKorrGateOpen === false && p.kRamp === false && trim !== undefined && trim > 0) {
+                anchorTrims.push(trim);
+            }
+            continue;
+        }
         if (p.exhaustTemp === undefined || p.rf === undefined) {
             report.samplesNoDelta++;
             continue;
         }
-        // The gate itself. Below kl_rf_korr_rf_min the DME applies rf_korr = 1.000 whatever the
-        // exhaust is doing, so the sample says nothing about THIS table — it is a measurement of a
-        // correction that was not running.
-        //
-        // The header above argues the derivation survives a shut gate because k_applied is measured
-        // rather than assumed. That is true of the arithmetic and false of the experiment. Every
-        // cell of KF_RF_KORR_DRREL is READ by the DME only above 55-80 % filling; deriving those
-        // cells from samples taken at 13 % filling extrapolates a high-load density effect from
-        // light-cruise data, and the answer it gives is "no effect" — which then clamps the stock
-        // 1.019-1.161 down to 1.000, i.e. LEAN, at exactly the condition BMW chose to enrich.
-        //
-        // Ordered before the hysteresis test because it is the strictly stronger statement: shut is
-        // shut, whereas the band below is about a value that is real but belongs to another point.
-        //
-        // BOTH halves, since 2026-09-09. The load half alone let a sample taken at 15 km/h through
-        // to derive a cell of KF_RF_KORR_DRREL from a `k_applied` that was 1.000 because of the
-        // SPEED floor — the same "no effect, so clamp to 1.000" failure this comment describes,
-        // arriving by the other door.
-        if (!rfKorrActive(egt, p.rpm, rfSoll, p.vehicleSpeed)) {
-            report.samplesGateShut++;
+
+        // Latched but not at the entry condition — the hysteresis band, where the DME holds a value
+        // computed at another operating point and stops reading the table — or within `gateMargin`
+        // above the floor. Both halves of the entry test (`rfKorrActive`), then the margin.
+        // Excluded as a data-quality matter, not a safety one.
+        if (!rfKorrActive(egt, p.rpm, rfSoll, p.vehicleSpeed)
+            || !gateOpen(egt, p.rpm, rfSoll, o.gateMargin)) {
+            report.samplesHysteresis++;
             continue;
         }
 
-        // The hysteresis band. The measurement of what was applied is still exact here — it is
-        // the correspondence with THIS sample's Δ that is broken, because the held value was
-        // computed somewhere else. Excluded as a data-quality matter, not a safety one.
-        if (!gateOpen(egt, p.rpm, rfSoll, o.gateMargin)) {
-            report.samplesHysteresis++;
+        // The loop still taking the last K step back. Undefined counts as a ramp, as it does for
+        // the VE write (`isKRampExcluded`): the alternative credits the time since the step.
+        if (p.kRamp !== false) {
+            report.samplesKRamp++;
             continue;
         }
 
@@ -544,99 +554,45 @@ export function rfKorrCensus(
             continue;
         }
 
+        if (trim === undefined) { report.samplesNoTrim++; continue; }
+        if (!(trim > 0)) { report.samplesNoMeasurement++; continue; }
+
         // annotateRfKorr already computed this against the same tables; taking its value rather
         // than recomputing is what keeps the tuner and the VE calculation on the same Δ.
         const delta = p.tabgDelta
             ?? Math.max(0, tabgModelAt(egt, p.rpm, p.rf / 100) - p.exhaustTemp);
-        // Whichever banks are present, averaged over those alone. It used to read
-        // `(p.stft1 ?? p.stft2 ?? 1)`, so a row with no trim at all silently became 1.000 — the same
-        // fabrication the VE calculator was fixed for, still live here.
-        //
-        // It is not a harmless default. `q = k_applied × STFT`, and STFT is the only term that says
-        // whether the correction the DME applied was CORRECT. Pin it at 1 and every ratio becomes
-        // `k_applied(Δ)/k_applied(0)`: the table already in the ECU, returned as a derivation of it.
-        // A run would report a confident tuned table that is just the stock one plus interpolation
-        // noise, and `largestChange` would say it barely moved — reading as agreement rather than as
-        // the tautology it is.
-        const banks: number[] = [];
-        if (p.stft1 !== undefined) banks.push(p.stft1);
-        if (p.stft2 !== undefined) banks.push(p.stft2);
-        if (!banks.length) { report.samplesNoTrim++; continue; }
-        const stft = banks.reduce((a, b) => a + b, 0) / banks.length;
-        if (!(stft > 0)) { report.samplesNoMeasurement++; continue; }
 
         const load = p.correctedLoad ?? p.rawLoad;
         const veCorners = corners(axisBracket(veAxes.rpm, p.rpm), axisBracket(veAxes.load, load));
         if (veCorners.length === 0) { report.samplesNoMeasurement++; continue; }
-
         const dominant = veCorners.reduce((best, c) => (c.w > best.w ? c : best));
-        prepared.push({
-            rpm: p.rpm,
-            q: rfKorr * stft,
-            delta,
-            veCorners,
-            veKey: dominant.r * veCols + dominant.c,
-            isAnchor: delta <= o.anchorDeltaMax,
-        });
+
+        prepared.push({ rpm: p.rpm, d: rfKorr * trim, delta, veKey: dominant.r * veCols + dominant.c });
+        report.samplesUsed++;
     }
 
-    // --- Pass 1: the anchors, per VE cell ------------------------------------------------------
-    //
-    // Here rather than in `tuneRfKorrTable`, because the two counters a driver reads mid-drive come
-    // out of it and the live path only ever calls this function. It is also what makes the live
-    // figures and the built table's figures the same figures: the table now reuses this map instead
-    // of building a second one from the same samples.
-    const anchors: AnchorCell[][] = Array.from({ length: veRows }, () =>
-        Array.from({ length: veCols }, () => ({ sumQw: 0, weight: 0, count: 0 })));
-    for (const s of prepared) {
-        if (!s.isAnchor) continue;
-        report.anchorSamples++;
-        for (const c of s.veCorners) {
-            const cell = anchors[c.r][c.c];
-            cell.sumQw += s.q * c.w;
-            cell.weight += c.w;
-            cell.count++;
-        }
+    // The anchor check, over the same drive. A median rather than a mean: the population is every
+    // settled gate-shut sample from light cruise up to the floor, and a mean would let one stretch
+    // near a trim clamp decide whether the whole map is converged.
+    report.anchorTrimSamples = anchorTrims.length;
+    if (anchorTrims.length) {
+        const sorted = [...anchorTrims].sort((a, b) => a - b);
+        const m = sorted.length >> 1;
+        report.anchorTrimMedian = sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
     }
 
-    const anchorMap = zeros(veRows, veCols);
-    const anchorWeightMap = zeros(veRows, veCols);
-    for (let r = 0; r < veRows; r++) for (let c = 0; c < veCols; c++) {
-        const a = anchors[r][c];
-        anchorWeightMap[r][c] = a.weight;
-        if (a.count >= o.minAnchorSamples && a.weight >= o.minAnchorWeight && a.sumQw > 0) {
-            anchorMap[r][c] = a.sumQw / a.weight;
-            report.veCellsWithAnchor++;
-        }
+    // K HOLD first: under it every sample is gate-shut, the anchor check would pass on a converged
+    // VE, and "nothing was measured" would be the true but useless thing to say. The tables are the
+    // EFFECTIVE ones the hook resolves, so a hold that did not take has the stock floor back here
+    // and is tuned as the stock-gate drive it was.
+    if (isRfKorrFloorHeld(egt)) {
+        report.refused = 'kHeld';
+    } else if (anchorTrims.length < o.anchorCheckMinSamples
+        || Math.abs((report.anchorTrimMedian ?? 0) - 1) > o.anchorTrimTolerance) {
+        report.refused = 'veNotAnchored';
     }
 
-    // --- The ratio each non-anchor sample stands for -------------------------------------------
-    // Only the ratio, not the binning: a table that changed mid-run would feed back into the VE
-    // binning and make the grid a mixture of two calibrations, which is why the grid stays in
-    // `tuneRfKorrTable`. The COUNT is what the live panel needs, and it is exact here.
-    for (const s of prepared) {
-        if (s.isAnchor) continue;
-
-        // The anchor for THIS sample's operating point, blended over the same VE corners it was
-        // binned into. Using a single nearest cell would step the anchor discontinuously across a
-        // cell boundary and put that step straight into the derived table.
-        let anchorSum = 0, anchorW = 0;
-        for (const c of s.veCorners) {
-            const a = anchorMap[c.r][c.c];
-            if (a > 0) { anchorSum += a * c.w; anchorW += c.w; }
-        }
-        if (!(anchorW > 0)) { report.samplesNoAnchor++; continue; }
-        const anchor = anchorSum / anchorW;
-        if (!(anchor > 0)) { report.samplesNoAnchor++; continue; }
-
-        const ratio = s.q / anchor;
-        if (!Number.isFinite(ratio) || ratio <= 0) { report.samplesNoAnchor++; continue; }
-        s.ratio = ratio;
-        s.confidence = anchorW;
-        report.ratioSamples++;
-    }
-
-    return { report, prepared, anchorMap, anchorWeightMap };
+    return { report, prepared };
 }
 
 export function tuneRfKorrTable(
@@ -652,7 +608,7 @@ export function tuneRfKorrTable(
     const deltaAxis = egt.rfKorr.delta;
     const rows = deltaAxis.length, cols = rpmAxis.length;
 
-    const { report, prepared, anchorMap, anchorWeightMap } = rfKorrCensus(annotatedLog, egt, veAxes, o);
+    const { report, prepared } = rfKorrCensus(annotatedLog, egt, veAxes, o);
 
     // Both are "this log cannot answer the question", and both return nothing rather than something
     // weak: the caller shows a table when it gets one, and a table is a thing that gets flashed.
@@ -661,10 +617,30 @@ export function tuneRfKorrTable(
     // is not a reason to refuse to say why.
     if (report.sensorMissing || report.trimMissing) return null;
 
-    // The anchors were computed by the census — see there. Reused rather than rebuilt, so the
-    // figures a driver read during the run and the figures behind the table are the same figures.
+    const stock = egt.rfKorr.values.map(row => [...row]);
+    const tuned = egt.rfKorr.values.map(row => [...row]);
+    const countMap = zeros(rows, cols);
+    const weightMap = zeros(rows, cols);
+    const spreadMap = zeros(rows, cols);
+    const measuredMap = zeros(rows, cols);
+    const updated = flags(rows, cols);
+    const extrapolated = flags(rows, cols);
+    const rejected: (RejectReason | null)[][] =
+        Array.from({ length: rows }, () => new Array<RejectReason | null>(cols).fill(null));
 
-    // --- Pass 2: the ratios, binned on the correction's own grid --------------------------------
+    // A refusal is a table, not a null, so the tab can carry the reason: the stock values, nothing
+    // written, nothing measured — the D of an unanchored VE is not shown as though it meant
+    // something — and `acceptable` false, so no write path can pick it up.
+    if (report.refused) {
+        return {
+            rpm: [...rpmAxis], delta: [...deltaAxis],
+            stock, tuned, countMap, weightMap, spreadMap, measuredMap, updated, rejected, extrapolated,
+            acceptable: false,
+            report,
+        };
+    }
+
+    // --- Bin D on the correction's own grid -----------------------------------------------------
     const bins: GridBin[][] = Array.from({ length: rows }, () =>
         Array.from({ length: cols }, () => ({
             sumDw: 0, weight: 0, count: 0,
@@ -673,35 +649,17 @@ export function tuneRfKorrTable(
         })));
 
     for (const s of prepared) {
-        // Anchors are pinned at 1.000 by the table itself, so they carry no Δ information; a sample
-        // with no `ratio` had no anchor to divide by, and the census has already counted it.
-        if (s.isAnchor || s.ratio === undefined) continue;
-        const ratio = s.ratio;
-        const confidence = s.confidence ?? 0;
-
         for (const g of corners(axisBracket(rpmAxis, s.rpm), axisBracket(deltaAxis, s.delta))) {
             const bin = bins[g.r][g.c];
-            const w = g.w * confidence;
-            bin.sumDw += ratio * w;
-            bin.sumDeltaW += s.delta * w;
-            bin.weight += w;
+            bin.sumDw += s.d * g.w;
+            bin.sumDeltaW += s.delta * g.w;
+            bin.weight += g.w;
             bin.count++;
-            if (ratio < bin.min) bin.min = ratio;
-            if (ratio > bin.max) bin.max = ratio;
+            if (s.d < bin.min) bin.min = s.d;
+            if (s.d > bin.max) bin.max = s.d;
             bin.veCells.add(s.veKey);
         }
     }
-
-    // --- Pass 3: decide each grid cell ----------------------------------------------------------
-    const stock = egt.rfKorr.values.map(row => [...row]);
-    const tuned = egt.rfKorr.values.map(row => [...row]);
-    const countMap = zeros(rows, cols);
-    const weightMap = zeros(rows, cols);
-    const spreadMap = zeros(rows, cols);
-    const measuredMap = zeros(rows, cols);
-    const updated = Array.from({ length: rows }, () => new Array<boolean>(cols).fill(false));
-    const rejected: (RejectReason | null)[][] =
-        Array.from({ length: rows }, () => new Array<RejectReason | null>(cols).fill(null));
 
     // A column BMW pinned at 1.000 across every Δ. Detected from the loaded bytes rather than by
     // rpm value, so a binary with a different calibration is judged on what it actually contains.
@@ -736,6 +694,13 @@ export function tuneRfKorrTable(
         return Math.max(Math.min(...gaps) * o.maxDeltaOffsetFrac, o.minDeltaTolerance);
     });
 
+    /** The loaded value moved toward `target` by at most one log's step, inside [floor, ceiling]. */
+    const limited = (r: number, c: number, target: number) => {
+        const stepped = Math.min(stock[r][c] + o.maxStepUp, Math.max(stock[r][c] - o.maxStepDown, target));
+        return Math.min(o.ceiling, Math.max(o.floor, stepped));
+    };
+
+    // --- Decide each grid cell from its own evidence ---------------------------------------------
     for (let c = 0; c < cols; c++) {
         const identity = isIdentityColumn(c);
         for (let r = 0; r < rows; r++) {
@@ -750,37 +715,72 @@ export function tuneRfKorrTable(
 
             const reason = rejectionFor(
                 bin, identity, identityRow, deltaAxis[r], deltaTolerance[r], o);
-            if (reason) { rejected[r][c] = reason; report.rejectedByReason[reason]++; continue; }
+            if (reason) { rejected[r][c] = reason; continue; }
 
-            const raw = bin.sumDw / bin.weight;
-            const stepped = Math.min(stock[r][c] + o.maxStepUp,
-                Math.max(stock[r][c] - o.maxStepDown, raw));
-            const value = Math.min(o.ceiling, Math.max(o.floor, stepped));
-
-            tuned[r][c] = value;
+            tuned[r][c] = limited(r, c, bin.sumDw / bin.weight);
             updated[r][c] = true;
-            report.gridCellsUpdated++;
-            report.largestChange = Math.max(report.largestChange, Math.abs(value - stock[r][c]));
         }
+    }
+
+    // --- Rows above the highest measured one: the shrink ratio, when the guard allows -------------
+    //
+    // Per column, from the highest row this log WROTE — its new value as a fraction of BMW's excess
+    // over 1.000 there, applied to BMW's excess in each row above (`CSL_STOCK_RF_KORR_DRREL`, whose
+    // doc says why not the loaded table's). Each row still steps from its LOADED value. Capped at 1
+    // because the formula is a shrink: a top row that went up says the low Δ wanted more, which says
+    // nothing about how much more 300/400 want, and an extrapolated increase would be the one write
+    // here nothing measured at all. Not taken from a row whose stock excess is under `identitySpan`,
+    // where `s` would divide by the table's own rounding. Identity columns are skipped by
+    // construction: nothing in them is written.
+    if (o.highDeltaGuard?.ok === true) {
+        const base = shrinkBase(rpmAxis, deltaAxis) ?? stock;
+        for (let c = 0; c < cols; c++) {
+            let top = -1;
+            for (let r = 0; r < rows; r++) if (updated[r][c]) top = r;
+            if (top < 0) continue;
+            const excess = base[top][c] - 1;
+            if (!(excess >= o.identitySpan)) continue;
+            const s = Math.min(1, Math.max(0, (tuned[top][c] - 1) / excess));
+            for (let r = top + 1; r < rows; r++) {
+                const value = limited(r, c, 1 + s * (base[r][c] - 1));
+                if (Math.abs(value - stock[r][c]) < 1e-12) continue;
+                tuned[r][c] = value;
+                updated[r][c] = true;
+                extrapolated[r][c] = true;
+                rejected[r][c] = null;
+            }
+        }
+    }
+
+    // Counted off the FINAL maps, so a cell refused on its own evidence and then filled by the
+    // shrink is reported once, as written.
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        const reason = rejected[r][c];
+        if (reason) report.rejectedByReason[reason]++;
+        if (!updated[r][c]) continue;
+        report.gridCellsUpdated++;
+        if (extrapolated[r][c]) report.extrapolatedCells++;
+        report.largestChange = Math.max(report.largestChange, Math.abs(tuned[r][c] - stock[r][c]));
     }
 
     return {
         rpm: [...rpmAxis], delta: [...deltaAxis],
-        stock, tuned, countMap, weightMap, spreadMap, measuredMap, updated, rejected,
-        anchorMap, anchorWeightMap,
+        stock, tuned, countMap, weightMap, spreadMap, measuredMap, updated, rejected, extrapolated,
         // One updated cell is a curiosity, not a calibration. Requiring a handful keeps a log that
-        // happened to clip one corner of the grid from presenting itself as a tune.
-        //
-        // The two evidence terms are very nearly implied by the first now that pass 0 refuses shut
-        // gates — no ratios means no bins means no updates. They are stated anyway because the
-        // implication runs through three passes and one of them is a bilinear spread: this used to
-        // return `acceptable: true` off a log that contained not one sample where the correction was
-        // running, and the invariant that says why it cannot belongs where it is read.
-        acceptable: report.gridCellsUpdated >= 3
-            && report.ratioSamples > 0
-            && report.veCellsWithAnchor > 0,
+        // happened to clip one corner of the grid from presenting itself as a tune — and they are
+        // MEASURED cells: the shrink only follows a measurement, so it cannot stand in for one.
+        acceptable: report.gridCellsUpdated - report.extrapolatedCells >= 3
+            && report.samplesUsed > 0,
         report,
     };
+}
+
+/** BMW's DRREL as physical values when the loaded table is on its axes, else null. */
+function shrinkBase(rpmAxis: number[], deltaAxis: number[]): number[][] | null {
+    const ref = CSL_STOCK_RF_KORR_DRREL;
+    const same = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+    if (!same(rpmAxis, ref.RPM) || !same(deltaAxis, ref.DELTA)) return null;
+    return ref.RAW.map(row => row.map(v => v / 1024));
 }
 
 function rejectionFor(

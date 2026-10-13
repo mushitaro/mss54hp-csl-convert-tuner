@@ -4,7 +4,8 @@
  * It got two things wrong at once, and each hid the other. It never asked whether the flash carried
  * a tune, so arming a bare BASE with the toggles off badged a session that had never tuned anything;
  * and it never asked about TANK VENT, so a tune flashed with the evaporative system held shut was
- * reported as road state. The second is the one with a legal dimension.
+ * reported as road state. The second is the one with a legal dimension. K HOLD joins TANK VENT on
+ * that list: a held rf_korr floor is a measurement state, and FINAL must not be said over one.
  *
  * These are cheap questions with an expensive wrong answer, which is why they are asked of a pure
  * module rather than of a React tree.
@@ -14,12 +15,13 @@ import { isRoadState, isTuneOnTheRoad, flashCounts, armedPatchesFromHistory, pat
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + d)); if (!c) fails++; };
 
-/** A flash record. `settings` defaults to everything off, i.e. road state. */
+/** A flash record. `settings` defaults to everything off, i.e. road state — K HOLD written out as
+ *  `false` the way every record since it existed carries it. */
 const flash = (over = {}) => ({
     at: 1, sha256: 'deadbeef', verifyMode: 'quick',
     ...over,
     settings: {
-        applyPatch: false, applyWotDisable: false, applyTankVentDisable: false,
+        applyPatch: false, applyWotDisable: false, applyTankVentDisable: false, applyRfKorrHold: false,
         writeWarmup: false, writeWot: false,
         ...(over.settings ?? {}),
     },
@@ -34,6 +36,12 @@ console.log('\n[road state is every tuning-only patch, not two of them]');
     // The regression this file exists for.
     check('TANK VENT shut is NOT road state',
         !isRoadState(flash({ settings: { applyTankVentDisable: true } })));
+    // K HOLD leaves the DME without its cold-exhaust enrichment — the same kind of switch, and the
+    // one FINALIZE exists to take back out.
+    check('K HOLD is NOT road state', !isRoadState(flash({ settings: { applyRfKorrHold: true } })));
+    // Retired, but a record that flashed it described a car that was not in its road state then.
+    check('a legacy RF GATE record is not road state either',
+        !isRoadState(flash({ settings: { applyRfKorrGateDrop: true } })));
     // Tune content, not a diagnostic switch — these must not withhold FINAL.
     check('WRITE WARMUP does not make it un-roadworthy', isRoadState(flash({ settings: { writeWarmup: true } })));
     check('WRITE WOT does not either', isRoadState(flash({ settings: { writeWot: true } })));
@@ -65,6 +73,8 @@ console.log('\n[the LAST flash, not any of them]');
         !isTuneOnTheRoad(session(armed, tune, done, flash({ at: 4, tuned: false, settings: { applyPatch: true } }))));
     check('a tune flashed with TANK VENT still shut is not final',
         !isTuneOnTheRoad(session(tune, flash({ at: 3, tuned: true, settings: { applyTankVentDisable: true } }))));
+    check('a tune flashed with K HOLD still in is not final',
+        !isTuneOnTheRoad(session(tune, flash({ at: 3, tuned: true, settings: { applyRfKorrHold: true } }))));
 }
 
 console.log('\n[a PRACTICE write moved no bytes and answers no question about a car]');
@@ -168,6 +178,19 @@ console.log('\n[the PATCH-ON image a session actually wrote]');
         patchOnFlash(session(flash({ settings: { applyPatch: true } })))?.applyPatch === true);
     check('TANK VENT alone counts — it is a patch like the others',
         patchOnFlash(session(flash({ settings: { applyTankVentDisable: true } })))?.applyTankVentDisable === true);
+    check('K HOLD counts, and is carried into the image',
+        patchOnFlash(session(flash({ settings: { applyPatch: true, applyRfKorrHold: true } })))?.applyRfKorrHold === true);
+    // The rebuilt image never carries the retired drop, so a record whose ONLY patch was the drop
+    // would rebuild as the BASE under a second name — not an image to offer.
+    check('a legacy drop-only record is not a PATCH-ON image',
+        patchOnFlash(session(flash({ settings: { applyRfKorrGateDrop: true } }))) === null);
+    check('...and the search goes past it to the image before',
+        patchOnFlash(session(
+            flash({ at: 1, settings: { applyPatch: true } }),
+            flash({ at: 2, settings: { applyRfKorrGateDrop: true } }),
+        ))?.applyPatch === true);
+    check('the drop is not part of what the image is said to carry',
+        !('applyRfKorrGateDrop' in (patchOnFlash(session(flash({ settings: { applyPatch: true, applyRfKorrGateDrop: true } }))) ?? {})));
     check('a PRACTICE write wrote nothing',
         patchOnFlash(session(flash({ practice: true, settings: { applyPatch: true } }))) === null);
     // The LAST one: if the patches changed between runs, the file offered is the most recent thing
@@ -202,6 +225,11 @@ console.log('\n[the last real flash is what the car holds, whatever the tune was
         armedPatchesFromHistory(patchOffOnly)?.applyTankVentDisable === false);
     check('a PRACTICE patch-off does not move the car',
         armedPatchesFromHistory(session(flash({ settings: on }), flash({ practice: true })))?.applyTankVentDisable === true);
+    // K HOLD follows the same tail: armed with PATCH, taken out by FINALIZE.
+    const held = { applyPatch: true, applyRfKorrHold: true };
+    check('a held flash re-arms K HOLD', armedPatchesFromHistory(session(flash({ settings: held })))?.applyRfKorrHold === true);
+    check('...and FINALIZE takes it out',
+        armedPatchesFromHistory(session(flash({ at: 1, settings: held }), flash({ at: 2, tuned: true })))?.applyRfKorrHold === false);
 }
 
 console.log(fails === 0 ? '\nALL PASS' : '\n' + fails + ' FAILURE(S)');

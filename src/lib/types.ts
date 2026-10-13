@@ -3,28 +3,11 @@
 import type { DropCensus } from '@/lib/log-engine/lambdaGates';
 import type { FilterResume } from '@/lib/log-engine/filter';
 import type { VeMethod } from '@/lib/ve-calculator/calculator';
-import type { ResponseCaptureChannels } from '@/lib/dme-link/responseCapture';
 
 export interface VEMap {
-    /** Candidate calculated for diagnosis; must never be serialized into a flashable BIN. */
-    calibrationStatus?: 'comparison-only' | 'moving-validated';
-    /** Persisted with veMapSnapshot; qualification belongs to this exact computed map. */
-    movingResponseAudit?: MovingResponseAudit;
     xAxis: number[]; // RPM
     yAxis: number[]; // Load
     data: number[][]; // VE Values
-}
-
-export interface MovingResponseAudit {
-    version: 1;
-    maxStepPercent: number;
-    acceptedCells: number;
-    evidenceRows: number;
-    validationPasses: number;
-    maxCommandConeViolation: number;
-    modelNames: string[];
-    beforeLoss: number;
-    afterLoss: number;
 }
 
 export interface BinaryConfig {
@@ -32,28 +15,7 @@ export interface BinaryConfig {
     tempLimit: number; // K_LAA_TMOT_MIN
 }
 
-export interface LogDataPoint extends ResponseCaptureChannels {
-    /** Index in ProcessedLog.rawData, assigned by the filter, not a persisted sensor channel. */
-    rawSampleIndex?: number;
-    /** Fresh 0401 RAM observations; diagnostic only until checked on the actual ECU. */
-    rfKorrDirect?: number;
-    rfSollDirect?: number;
-    /** Signed MAP integrator /64000, not necessarily the RF term applied by rf_calc. */
-    rfMapIntegratorDirect?: number;
-    /** Midpoint of each RAM exchange, seconds since the run began. Never sample-held. */
-    rfKorrDirectTime?: number;
-    rfSollDirectTime?: number;
-    rfMapIntegratorDirectTime?: number;
-    rfKorrDirectReadMs?: number;
-    rfSollDirectReadMs?: number;
-    rfMapIntegratorDirectReadMs?: number;
-    rfDirectSource?: 'ram-0401-unverified';
-    /** Additional calibration evidence, evaluated over the complete chronological raw log. */
-    veEvidenceEligible?: boolean;
-    veEvidenceReason?: string;
-    /** Derived from intact raw history. Never stored as a measured channel or reused on replay. */
-    dmeResponse?: import('./ve-calculator/dmeResponse').DmeEvidence;
-    veSteadySeconds?: number;
+export interface LogDataPoint {
     /**
      * The operating point had moved within `transientSettleSec` of this sample.
      *
@@ -283,26 +245,26 @@ export interface LogDataPoint extends ResponseCaptureChannels {
     rfKorrGateOpen?: boolean;
 
     /**
-     * Seconds since the DME's rf_korr correction engaged. Present only while it is engaged.
+     * The lambda loop is still taking back a step in rf_korr at this sample — see rampState.ts.
      *
-     * The DME steps the fuel by `rf_korr` the instant the latch closes, and the lambda loop cannot
-     * see that for about a second — transport delay, sensor response, and a two-point controller
-     * running at 1-2 Hz. Inside that window `trim` still reads the mixture from BEFORE the step, so
-     * `trim x rf_korr` is inflated by nearly the whole of rf_korr.
+     * Set by `annotateRfKorr` from a walk over the RAW log, matched by timestamp like
+     * `rfKorrGateOpen`, and only where the binary's EGT tables could be read. True from a K step
+     * (the gate opening or shutting, or K moving >= 0.02 while it is open) or a loop restart until
+     * each bank's trim has made the switch that ends the ramp — the lean-switch jump after a rise
+     * or a restart, the rich-switch drop after K FELL by 0.04 or more, the gate shutting on a
+     * stepped K included; true while a trim sits on its clamp.
      *
-     * Measured over #941-#946, mean written factor against this field, alongside a control of
-     * gate-shut cells at load >= 5 which sits at -0.11 %:
+     * Why it matters: until that jump the trim is ramping at the controller's fixed I slope, so
+     * `trim x rf_korr` reads `K (1 - 0.0406 t)` — the time since the step, not the VE error. The VE
+     * write skips gate-open samples where this is true (`isKRampExcluded`), and so does the
+     * rf_korr tuner. A gate-SHUT sample carries it too: the VE write takes that sample whatever it
+     * says (the exclusion is gate-open only, so the climb back after an exit is written as trim),
+     * and the rf_korr tuner's anchor check reads a gate-shut trim only where it is false.
      *
-     *     0-0.5 s +9.93 % | 0.5-1 s +9.15 % | 1-1.5 s +7.44 % | 1.5-2 s +4.78 %
-     *     2-3 s   +1.69 % | 3-5 s   -2.06 % | 5+ s    -4.94 % | pooled  +2.18 %
-     *
-     * Same cells, same enrichment, sign decided by the clock. `RF_KORR_SETTLE_SEC_DEFAULT` is what
-     * `accumulatePoint` does about it.
-     *
-     * Undefined on a gate-open sample means the latch source did not cover it, which
-     * `accumulatePoint` treats as unsettled — the direction that does not inflate.
+     * Undefined on a gate-open sample means the walk did not cover it, and `isKRampExcluded` reads
+     * that as a ramp — the direction that does not credit the step.
      */
-    rfKorrDwellSec?: number;
+    kRamp?: boolean;
 }
 
 export interface ProcessedLog {
@@ -564,23 +526,6 @@ export interface LogFilterConfig {
      */
     minVeCellWeight?: number;
     /**
-     * Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is trusted.
-     *
-     * Default 1.0 (`RF_KORR_SETTLE_SEC_DEFAULT`). A sample younger than this is written with the
-     * lambda trim ALONE — not dropped: the enriched population lives entirely in the high-load
-     * cells, so removing it would delete the region the setting exists to fix.
-     *
-     * Distinct from `transientSettleSec`, which gates on the THROTTLE and is 0 by deliberate
-     * operator choice. This clock starts when the DME's own correction engages, which is a
-     * different event. Travels in the config so a reopened session re-derives under the number it
-     * was built with.
-     */
-    rfKorrSettleSec?: number;
-    /** Explicit opt-in. Absence keeps archived calculations on their original path. */
-    veCorrectionPolicy?: 'legacy-nominal' | 'steady-retain' | 'dme-response' | 'moving-response';
-    /** Exponent of the COMPLETE operating correction, not of rf_korr alone. */
-    veLearningRate?: number;
-    /**
      * @deprecated The lower heatmap band is the VE gate's own sample count now, not a separate
      * number. Independent, the two could contradict each other — a cell above the gate and below
      * this was rewritten and still painted as barely visited. Kept on the type because sessions
@@ -762,14 +707,4 @@ export function resolveTransientWindow(
 export interface InterpolationPoint {
     rpm: number;
     factor: number;
-}
-
-/** Comparison policies cannot produce a flashable calibration, including via manual overrides. */
-export function isVeComparisonPolicy(policy: LogFilterConfig['veCorrectionPolicy']): boolean {
-    return policy === 'steady-retain' || policy === 'dme-response';
-}
-
-/** History estimators require the immutable recording reference and intact RAW chronology. */
-export function isVeHistoryPolicy(policy: LogFilterConfig['veCorrectionPolicy']): boolean {
-    return isVeComparisonPolicy(policy) || policy === 'moving-response';
 }

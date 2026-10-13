@@ -9,8 +9,6 @@ import type { LogDataPoint } from '@/lib/types';
 import type { LogExchange } from '@/lib/log-engine/logProfile';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
 import { appendLiveChunk, beginLiveRun, endLiveRun } from '@/lib/db/liveRunRepository';
-import type { LiveCalculationSnapshot } from '@/lib/db/liveRunRepository';
-import type { RecordingCalibration } from '@/lib/db/recordingCalibration';
 
 /** Live Hz readout tuning. 24 samples is ~3 s of history on the cable and ~0.5 s under PRACTICE —
  *  long enough to ride out one retried exchange either way. Publishing at 4 Hz keeps the digits
@@ -168,7 +166,6 @@ export function useLiveRun(input: {
      * schedules another 500 ms later, and a flush already in flight is about to show the same answer.
      */
     const flushBusyRef = useRef(false);
-    const flushGenerationRef = useRef(0);
 
     /**
      * Runs the UI flush WITHOUT blocking the DS2 poll loop.
@@ -190,9 +187,7 @@ export function useLiveRun(input: {
         if (flushBusyRef.current) return;
         if (Date.now() - lastFlushRef.current < FLUSH_INTERVAL_MS) return;
         flushBusyRef.current = true;
-        const generation = flushGenerationRef.current;
         const run = () => {
-            if (generation !== flushGenerationRef.current) return;
             try { runFlush(true); } finally { flushBusyRef.current = false; }
         };
         const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void })
@@ -254,10 +249,8 @@ export function useLiveRun(input: {
      * first samples must not wait on IndexedDB. They queue up regardless — `persist` no-ops until the
      * id lands, and the queue is what it reads from, so nothing is dropped.
      */
-    const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[];
-        recordingCalibration?: RecordingCalibration; calculationSnapshot?: LiveCalculationSnapshot }) => {
+    const start = useCallback((run: { sessionId: string | null; mock: boolean; exchanges: LogExchange[] }) => {
         samplesRef.current = [];
-        flushGenerationRef.current++;
         exchangesRef.current = run.exchanges;
         lastFlushRef.current = 0;
         flushBusyRef.current = false;
@@ -272,8 +265,7 @@ export function useLiveRun(input: {
         highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
         publishReadout(EMPTY_READOUT);
         if (run.sessionId) {
-            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock, recordingCalibration: run.recordingCalibration,
-                calculationSnapshot: run.calculationSnapshot })
+            void beginLiveRun({ sessionId: run.sessionId, mock: run.mock })
                 .then(id => { runIdRef.current = id; })
                 .catch(() => { /* no recovery record; the run itself is unaffected */ });
         }
@@ -287,10 +279,6 @@ export function useLiveRun(input: {
      * the window in which the result is read and a decision made.
      */
     const finish = useCallback(async () => {
-        // A queued LIVE flush must not arrive after STOP and replace/cancel the
-        // full-history result while its Worker is still running.
-        flushGenerationRef.current++;
-        flushBusyRef.current = false;
         // Authoritative: the run is over, and everything downstream — the stored TUNED, the bytes a
         // WRITE sends — comes from this pass rather than from the live approximation.
         const flushed = runFlush(true, true);
@@ -304,8 +292,6 @@ export function useLiveRun(input: {
     /** Drops the buffered run without touching the recovery store — for the paths that replace the
      *  workspace rather than end a drive (a new session, a CSV import, a discard). */
     const reset = useCallback(() => {
-        flushGenerationRef.current++;
-        flushBusyRef.current = false;
         samplesRef.current = [];
         exchangesRef.current = null;
         queueRef.current = [];

@@ -36,19 +36,37 @@ export class BinaryParser {
         return this.getUint8(TANK_VENT_GAIN.ADDRESS) === TANK_VENT_GAIN.DISABLED_RAW;
     }
 
+    /** The six words of `kl_rf_korr_rf_min`'s Y block, raw. */
+    private rfKorrGateFloorRaw(): number[] {
+        const addr = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
+        return Array.from({ length: RF_KORR_GATE_FLOOR.POINTS }, (_, i) => this.getUint16(addr + i * 2));
+    }
+
     /**
-     * Whether this binary has the rf_korr filling floor dropped to the measurement value.
+     * Whether this binary carries the retired RF GATE drop of the rf_korr filling floor.
      *
      * ALL six points, not the first one. The curve is per-rpm and BMW's own points differ by 0.25
      * between 1600 and 4000 rpm, so a single-point test would call a binary patched because its
      * 1600 rpm entry is 0.55 — which is stock. `RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW` sits below
      * every stock point for the same reason `getWOTThresholdStatus` tests above every stock cell.
+     *
+     * Still asked although nothing writes the drop any more: a BIN that arrives carrying it has to
+     * say so, because the next write returns it to stock and that is a change the hub must show.
      */
     public getRfKorrGateFloorDropped(): boolean {
-        const addr = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
-        return Array.from({ length: RF_KORR_GATE_FLOOR.POINTS },
-            (_, i) => this.getUint16(addr + i * 2))
-            .every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
+        return this.rfKorrGateFloorRaw().every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
+    }
+
+    /**
+     * Whether this binary has K HOLD in: the floor at `RF_KORR_GATE_FLOOR.HELD_RAW` in all six.
+     *
+     * EXACT equality, unlike the drop test above, and the asymmetry is deliberate. The drop's bound
+     * sits in a gap no stock calibration reaches; "held" has no such gap above it, and any threshold
+     * would also claim a synthetic test image or a hand-raised floor at 1.5 — bytes this app did not
+     * write and whose restore must therefore keep them rather than replace them with STOCK_RAW.
+     */
+    public getRfKorrGateFloorHeld(): boolean {
+        return this.rfKorrGateFloorRaw().every(v => v === RF_KORR_GATE_FLOOR.HELD_RAW);
     }
 
     /**

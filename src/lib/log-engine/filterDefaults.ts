@@ -1,5 +1,5 @@
 import { TRANSIENT_SETTLE_SEC_DEFAULT, type LogFilterConfig } from '@/lib/types';
-import { VE_MIN_WEIGHT_DEFAULT, RF_KORR_SETTLE_SEC_DEFAULT } from '@/lib/ve-calculator/calculator';
+import { VE_MIN_WEIGHT_DEFAULT } from '@/lib/ve-calculator/calculator';
 
 /**
  * The filter configuration a first load gets.
@@ -10,9 +10,6 @@ import { VE_MIN_WEIGHT_DEFAULT, RF_KORR_SETTLE_SEC_DEFAULT } from '@/lib/ve-calc
  * starting state and nothing else.
  */
 export const DEFAULT_FILTER_CONFIG: LogFilterConfig = {
-  // Fresh work uses the validated history estimator. Stored logs resolve their
-  // original policy separately; a missing field there still means legacy replay.
-  veCorrectionPolicy: 'moving-response',
   enableCorrection: true,
   enableMinTemp: true,
   minTemp: 65,
@@ -27,9 +24,6 @@ export const DEFAULT_FILTER_CONFIG: LogFilterConfig = {
   // Stated, and it was not: absent used to mean 0 and now means 2.5, so a session saved without it
   // re-derives under a bar it was never built with. New sessions carry the value they used.
   minVeCellWeight: VE_MIN_WEIGHT_DEFAULT,
-  // Stated for the same reason: absent means 1.0 today, and a session saved without it would
-  // re-derive under whatever the default becomes. See RF_KORR_SETTLE_SEC_DEFAULT.
-  rfKorrSettleSec: RF_KORR_SETTLE_SEC_DEFAULT,
   // OFF by default, and the reason is that the premise did not survive measurement.
   //
   // The wait was justified by rf_korr STEPPING when filling crosses the EGT-correction floor while

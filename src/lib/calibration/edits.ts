@@ -202,7 +202,7 @@ export function managedSpans(): RunSpan[] {
         { address: TANK_VENT_GAIN.ADDRESS, length: 1, owner: 'TANK VENT' },                // K_TE_TVTE_GA
         { address: EXPERIMENTAL_CONFIG.ADDRESS_WOT_THRESHOLD_MAP, length: 16 * 2, owner: 'WOT LIMIT' }, // KF_BZ_WDK_VL z
         { address: RF_KORR_GATE_FLOOR.VALUES_ADDRESS, length: RF_KORR_GATE_FLOOR.POINTS * 2,
-          owner: 'RF GATE' },                                                          // kl_rf_korr_rf_min y
+          owner: 'K HOLD' },                                                           // kl_rf_korr_rf_min y
     ];
 }
 

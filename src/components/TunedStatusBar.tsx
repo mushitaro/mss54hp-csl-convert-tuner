@@ -73,6 +73,7 @@ const TEXT = {
         trimOnly: '吸気温か気圧が無いため rf_korr を測れず、λ トリムだけでマップを作っています。'
             + '差は最大で 13 % に達します。',
         trimPartial: (m: number, c: number) => `rf_korr を測れたのは ${c} サンプル中 ${m} です。`,
+        kHoldNotInEffect: 'K HOLD が実車で効いていなかったので、純正ゲートとして読んだ。',
         census: 'CELLS',
         split: 'DRIVE SPLIT',
     },
@@ -108,6 +109,7 @@ const TEXT = {
         trimOnly: 'Without intake temperature or pressure this log cannot measure rf_korr, so the '
             + 'map is built from the lambda trim alone. The difference reaches 13 %.',
         trimPartial: (m: number, c: number) => `rf_korr measured on ${m} of ${c} samples.`,
+        kHoldNotInEffect: 'K HOLD was not in effect on the car, so this drive was read with the stock gate.',
         census: 'CELLS',
         split: 'DRIVE SPLIT',
     },
@@ -137,12 +139,19 @@ export const TunedStatusBar: React.FC<{
     split: DriveSplit | null;
     excludedSpan: DriveSpan | null;
     originSec: number;
+    /**
+     * The as-run binary said K HOLD and the drive said otherwise — the car applied rf_korr — so
+     * the calculation read it with the stock floor (`VECalculator.resolveKHold`). One line in the
+     * notes below, because the map is right either way; what it reports is that the bytes in the
+     * car were not the ones this session believes were flashed.
+     */
+    kHoldNotInEffect?: boolean;
     readOnly?: boolean;
     onExclude: () => void;
     onRestore: () => void;
 }> = ({
     coverage, census, chargeTempInfo, gate, split, excludedSpan, originSec,
-    readOnly = false, onExclude, onRestore,
+    kHoldNotInEffect = false, readOnly = false, onExclude, onRestore,
 }) => {
     const lang = useDialogLang();
     const t = TEXT[lang];
@@ -194,12 +203,17 @@ export const TunedStatusBar: React.FC<{
                         {excluded ? <Scissors className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
                     </button>
                 )}
+                {/* Amber while the panel holds the K HOLD warning — the split icon's tone, not a
+                    badge — so the one line a held drive's pass check reads is seen without opening
+                    the panel on every drive to look for it. */}
                 <button
                     type="button"
                     onClick={() => toggle('info')}
                     aria-expanded={open === 'info'}
                     aria-label="How this map was built"
-                    className={`p-1.5 -mr-1.5 rounded transition-colors ${open === 'info' ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}
+                    className={`p-1.5 -mr-1.5 rounded transition-colors ${open === 'info' ? 'text-blue-400'
+                        : kHoldNotInEffect ? 'text-amber-400 hover:text-amber-300'
+                            : 'text-slate-600 hover:text-slate-400'}`}
                 >
                     <Info className="w-3.5 h-3.5" />
                 </button>
@@ -289,10 +303,11 @@ export const TunedStatusBar: React.FC<{
                         </div>
                     )}
 
-                    {(substituted || trimOnly || trimPartial) && (
+                    {(substituted || trimOnly || trimPartial || kHoldNotInEffect) && (
                         <div className="space-y-1 border-t border-slate-800 pt-2">
                             {substituted && <p className="text-red-400 font-sans">{t.substituted}</p>}
                             {trimOnly && <p className="text-red-400 font-sans">{t.trimOnly}</p>}
+                            {kHoldNotInEffect && <p className="text-amber-400 font-sans">{t.kHoldNotInEffect}</p>}
                             {trimPartial && (
                                 <p className="text-slate-500 font-sans">
                                     {t.trimPartial(air!.rfKorrMeasured, air!.rfKorrCandidates)}

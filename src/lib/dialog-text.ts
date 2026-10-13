@@ -54,11 +54,9 @@ const KEY_CYCLE_EN =
 /**
  * Which campaign shape a write belongs to, in one line at the top of the confirm.
  *
- * Only route B gets a warning, and it is the one worth having: B divides the VE map by k_new, which
- * docs/ecu-logic/60 §9 records as never checked on a car. A costs one more flash slot and depends
- * on nothing of the kind, so the dialog says which of those is about to happen while there is still
- * a Cancel button. `verify:route` asserts that B is the only route carrying that dependency, so the
- * warning cannot drift away from the arithmetic it describes.
+ * There is no route B any more — the VE map and the correction table in one flash, the VE divided
+ * by k_new. The two are never armed together now (one drive's VE error would land in both), so a
+ * table write is A1 whatever run measured it, and nothing divides. `verify:route` pins that.
  */
 const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
     ja: {
@@ -67,10 +65,6 @@ const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
         A1: 'ROUTE A · 第1段 — EGT 補正表 (KF_RF_KORR_DRREL) だけを書きます。VE マップは含まれません。\n'
             + '  この後は「Use as base → TUNED」で新しいセッションを作り、そこで VE を測ってください。\n\n',
         A2: 'ROUTE A · 第2段 — VE マップを書きます。補正表はこのキャンペーンで既に書き換え済みです。\n\n',
-        B: 'ROUTE B — VE マップと EGT 補正表を同時に書きます。\n'
-            + '  ⚠ VE マップは k_new で割ってあります。この割り算は実車で未検証です。\n'
-            + '    ROUTE A（表と VE を別々に書く）なら、フラッシュ1回分多く使う代わりに\n'
-            + '    この未検証の式に依存しません。\n\n',
     },
     en: {
         NONE: '',
@@ -78,9 +72,6 @@ const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
         A1: 'ROUTE A step 1 — the EGT correction table (KF_RF_KORR_DRREL) alone. No VE map.\n'
             + '  Continue with "Use as base → TUNED" and measure VE in that new session.\n\n',
         A2: 'ROUTE A step 2 — the VE map. The correction table was already replaced by this campaign.\n\n',
-        B: 'ROUTE B — the VE map and the EGT correction table, together.\n'
-            + '  ⚠ The VE map has been divided by k_new. That division has never been checked on a car.\n'
-            + '    ROUTE A writes them separately: one more flash slot, and no dependency on it.\n\n',
     },
 };
 
@@ -162,7 +153,7 @@ const JA = {
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
 
     // --- flashing the DME ---
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; rfGateDropped: boolean; route: RouteId }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
         'DMEへ書き込みます。\n\n' +
         ROUTE_TEXT.ja[a.route] +
         `書き込む内容: ${a.tuned
@@ -192,13 +183,10 @@ const JA = {
             + '  ログを取り終えたら TANK VENT を OEM に戻してもう一度書き込んでください。\n'
             + '  ファイル名に _TEVOFF が付き、セッションにも記録されます。\n'
             : '') +
-        (a.rfGateDropped
-            ? `\n⚠ RF GATE: 0.400 — rf_korr の作動下限を下げたまま書き込みます。\n`
-            + '  目的は KF_RF_KORR_DRREL のアンカー（ゲート開 かつ Δ≈0）を 1 本の走行で取ることです。\n'
-            + '  この BIN では DME が純正よりはるかに広い負荷域で増量します（Δ=200〜300 行、+5〜28 %）。\n'
-            + '  RF もそのぶん上がるので、点火とトルクモデルがそれを読みます。走り続ける BIN ではありません。\n'
-            + '  測定が済んだら RF GATE を OEM に戻してもう一度書き込んでください。\n'
-            + '  ファイル名に _RFGATE40 が付き、セッションにも記録されます。\n'
+        // K HOLD が入った BIN を書くときだけ。走り続ける BIN ではないことを、消去の前に言う。
+        (a.kHold
+            ? `\n⚠ K HOLD: 1.000 — 冷えた排気の増量が切れ、2400–3000 rpm の部分負荷で点火が最大 2.3° 進む。\n`
+            + '  計測用の BIN で、FINALIZE で純正に戻る。\n'
             : '') +
         (a.drift.length ? `\n⚠ 保存時と異なるオプションで書き込みます:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ エンジンが停止していること(キーOFF → 再度イグニッションON)を確認してください。\n' +
@@ -423,7 +411,7 @@ const EN: NativeDialogText = {
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
 
-    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; rfGateDropped: boolean; route: RouteId }) =>
+    writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +
         ROUTE_TEXT.en[a.route] +
         `What will be written: ${a.tuned
@@ -453,14 +441,10 @@ const EN: NativeDialogText = {
             + '  When the logging is done, set TANK VENT back to OEM and write once more.\n'
             + '  The filename carries _TEVOFF, and the session records it.\n'
             : '') +
-        (a.rfGateDropped
-            ? `\n⚠ RF GATE: 0.400 — writing with the rf_korr filling floor dropped.\n`
-            + '  This is to earn a KF_RF_KORR_DRREL anchor — gate open with delta near zero — which\n'
-            + '  no drive at the stock floor has ever reached. It is not a BIN to keep driving.\n'
-            + '  The DME enriches across a far wider part of the map than BMW allowed (the delta\n'
-            + '  200-300 rows, +5 to 28 %), RF rises with it, and ignition and the torque model\n'
-            + '  follow. When the measuring run is done, set RF GATE back to OEM and write once more.\n'
-            + '  The filename carries _RFGATE40, and the session records it.\n'
+        // Only for a BIN carrying K HOLD: said before the erase, because it is not a BIN to keep.
+        (a.kHold
+            ? `\n⚠ K HOLD: 1.000 — cold-exhaust enrichment is off, and part-load ignition at 2400–3000 rpm advances by up to 2.3°.\n`
+            + '  This BIN is for measuring; FINALIZE puts the stock values back.\n'
             : '') +
         (a.drift.length ? `\n⚠ Writing with different options than were saved:\n  ${a.drift.join('\n  ')}\n` : '') +
         '\n⚠ Confirm the engine is stopped (key OFF → ignition back ON).\n' +

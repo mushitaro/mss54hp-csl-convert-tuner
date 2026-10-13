@@ -119,6 +119,13 @@ const REMEDY: Record<string, { en: string; ja: string }> = {
     'trim-rigid': { en: 'the lambda loop was not correcting — check it was closed', ja: 'λ ループが閉じていたか確認する' },
     'no-ti-factor': { en: 'KF_TI_N_RF could not be read from this binary', ja: 'この BIN から KF_TI_N_RF を読めなかった' },
     'ti-branch-unproven': { en: 'log LLS_ST to settle which branch runs', ja: 'LLS_ST をログに入れて分岐を確定する' },
+    // Every sample here was taken while the lambda loop was still taking back an rf_korr step, so
+    // none could be written. Holding the state past the lean switch makes post-ramp samples; K HOLD
+    // removes the step altogether.
+    'k-ramp': {
+        en: 'hold the throttle still for longer once it stops, or run with K HOLD',
+        ja: 'スロットルを止めてから長めに保つか、K HOLD で走る',
+    },
 };
 
 export function coverageRemedy(reason: string | null, lang: 'en' | 'ja'): string | undefined {
@@ -164,22 +171,23 @@ export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
         const row: CellCoverage[] = [];
         for (let c = 0; c < cols; c++) {
             const samples = hitMap?.[r]?.[c] ?? 0;
-            // Only an explicit null verdict means accepted. No calculation yet
-            // must not turn an untouched grid into 480 "no change" decisions.
-            const verdict = rejectMap?.[r]?.[c];
-            const reason = verdict === undefined ? 'no-evidence' : verdict;
+            const reason = rejectMap?.[r]?.[c] ?? null;
             const correction = correctionMap?.[r]?.[c] ?? 1;
+            // 'k-ramp' is the one refusal with no written sample behind it: the cell WAS driven, and
+            // every sample was mid-ramp. Calling it unvisited — or below the engine's reach — would
+            // send the reader to drive a state they already drove.
+            const driven = samples > 0 || reason === 'k-ramp';
             row.push({
                 row: r, col: c, samples,
                 weight: weightMap?.[r]?.[c],
                 correction, reason,
-                belowReach: samples === 0 && Number.isFinite(floorRow) && r < floorRow,
+                belowReach: !driven && r < floorRow,
                 // A written cell whose correction came out 1.000 IS the "nothing to change"
                 // answer, and saying so is worth more than colouring it as a change of zero. The
                 // cell is written either way, so the distinction has to be read off the number.
                 state: reason === null
                     ? (correction === 1 ? 'settled' : 'written')
-                    : samples === 0 ? 'unvisited' : 'refused',
+                    : driven ? 'refused' : 'unvisited',
             });
         }
         out.push(row);

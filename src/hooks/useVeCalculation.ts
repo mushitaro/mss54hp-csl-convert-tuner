@@ -1,34 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
-import { VECalculator, VeCalcOptions, type VeReject } from '@/lib/ve-calculator/calculator';
+import { useRef, useState } from 'react';
+import {
+  VECalculator, VeCalcOptions, type VeReject, type KHoldNotInEffect, type RfKorrStep,
+} from '@/lib/ve-calculator/calculator';
 import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } from '@/lib/ve-calculator/rfKorrTuner';
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { summariseChargeTemp, type ChargeTempInfo } from '@/lib/ve-calculator/chargeTemp';
-import { RfKorrLatch } from '@/lib/ve-calculator/egtTables';
-import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr, isVeComparisonPolicy, isVeHistoryPolicy } from '@/lib/types';
+import type { EgtTables } from '@/lib/ve-calculator/egtTables';
+import { isKRampExcluded } from '@/lib/ve-calculator/rampState';
+import { computeHighDeltaGuard, type HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
+import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import { MAP_DIMENSIONS, APP_CONFIG } from '@/config/constants';
-import { interpolateFactor, timeScaleSeconds } from '@/lib/log-engine/filter';
+import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { detectDriveSplit, type DriveSplit } from '@/lib/log-engine/driveSplit';
-import { prepareOperatingEvidence } from '@/lib/ve-calculator/operatingEvidence';
-import { startMovingResponseWorker, type MovingResponseJob } from '@/lib/ve-calculator/movingResponseWorker';
-import { createMovingLiveAccumulator, appendMovingLive, type MovingLiveAccumulator, type MovingLiveCoverage } from '@/lib/ve-calculator/movingResponseLive';
-
-/** Acquisition depends on the recorded calibration and source filters, never on
- * a display threshold or on how many legacy-filtered rows remain. */
-function movingLiveKey(options: VeCalcOptions): string {
-  return JSON.stringify([options.movingCalibration, !!options.egt, options.steadyCalibrationHold, options.steadyLambdaLimits,
-    options.writeRfKorr, options.steadyLoadTable, options.steadyFilterConfig?.enableCorrection,
-    options.steadyFilterConfig?.minTemp, options.steadyFilterConfig?.excludeTimeRanges]);
-}
 
 export function useVeCalculation() {
-  const calculationEpoch = useRef(0);
-  const movingJob = useRef<MovingResponseJob | null>(null);
-  const [isCalculating, setIsCalculating] = useState(false);
-  const [movingError, setMovingError] = useState<string | null>(null);
-  const [liveAcquisition, setLiveAcquisition] = useState<MovingLiveCoverage | null>(null);
-  const movingLiveRef = useRef<{ map: VEMap; key: string; first: LogDataPoint | undefined;
-    consumed: number; accumulator: MovingLiveAccumulator } | null>(null);
-  useEffect(() => () => { calculationEpoch.current++; movingJob.current?.cancel(); }, []);
   /**
    * The live accumulator: the grid so far, the annotated samples so far, and how many of the
    * filtered log they account for.
@@ -43,20 +28,32 @@ export function useVeCalculation() {
     consumed: number;
     annotated: LogDataPoint[];
     /**
-     * The rf_korr latch, and how far it has been walked along the RAW log.
+     * The rf_korr walk — latch and k-ramp tracker — and how far it has been walked along the RAW log.
      *
      * Held across flushes for the same reason the grid is: it is state the drive accumulates, and
-     * rebuilding it each flush would restart the DME's state machine from "reset" twice a second.
-     * It walks `rawData`, not `data`, because the car's latch advanced on samples the filters drop —
-     * and it must, or the live map and the STOP map would disagree by the 0.29 % of samples where a
-     * filtered walk gives a different verdict. `verify:incremental` pins that they do not.
+     * rebuilding it each flush would restart the DME's state machines from "reset" twice a second.
+     * It walks `rawData`, not `data`, because the car's latch and lambda integrator advanced on
+     * samples the filters drop — and it must, or the live map and the STOP map would disagree.
+     * `verify:incremental` pins that they do not. Null without EGT tables: nothing to walk.
      */
-    latch: RfKorrLatch;
+    walk: { step(point: LogDataPoint): RfKorrStep } | null;
     consumedRaw: number;
-    gateTrack: Map<number, { open: boolean; dwellSec: number }>;
+    gateTrack: Map<number, RfKorrStep>;
+    /** The tables the walk runs on — the as-run ones, or the stock floor when the K HOLD check
+     *  said the hold was not in effect. What the annotation and the census are given too. */
+    egt: EgtTables | null;
+    /** The tables the CALLER passed, by identity — so a change of binary (or of what it ran with)
+     *  restarts the walk instead of carrying a latch built on other bytes. */
+    egtIn: EgtTables | null;
+    /** The K HOLD check, fed the same raw samples; null when the tables are not held. Its verdict
+     *  flipping is the one thing that rebuilds a live run mid-drive. */
+    kHold: { step(point: LogDataPoint): void; verdict(): KHoldNotInEffect | null } | null;
+    kHoldNotInEffect: KHoldNotInEffect | null;
+    /** Gate-open `data` samples the write skipped as mid-ramp — `isKRampExcluded`, counted as they
+     *  are binned so the number is the grid's own. */
+    kRampCount: number;
   } | null>(null);
   const [newMap, setNewMap] = useState<VEMap | null>(null);
-  const [movingPending, setMovingPending] = useState(false);
   const [mapData, setMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
   const [hitMap, setHitMap] = useState<number[][] | null>(null);
   const [correctionMap, setCorrectionMap] = useState<number[][] | null>(null);
@@ -132,45 +129,49 @@ export function useVeCalculation() {
 
   const [coverage, setCoverage] = useState<{ withEvidence: number; withAnyData: number; total: number } | null>(null);
 
-  const runCalculation = async (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
-    const moving = options.veCorrectionPolicy === 'moving-response';
-    // Clear the preceding writable result before awaiting a worker. A reset or
-    // another session/calculation invalidates its reply, including late failures.
-    if (moving) {
-      reset();
-      // STOP/reopen recomputes the acquisition view from intact RAW once. Keep
-      // it visible while the worker runs and if no writable correction results.
-      setLiveAcquisition(appendMovingLive(createMovingLiveAccumulator(map, options), processed.rawData));
-    } else {
-      movingJob.current?.cancel(); movingJob.current = null;
-      movingLiveRef.current = null; setLiveAcquisition(null);
-    }
-    const epoch = ++calculationEpoch.current;
-    setIsCalculating(moving);
-    setMovingError(null);
-    setMovingPending(false);
+  /**
+   * Samples of `data` the VE write skipped because the lambda loop was still taking back an
+   * rf_korr step — the census's `rfKorrRamp` (see `withRfKorrRamp`). Counted with
+   * `isKRampExcluded`, the predicate the write itself uses, on the batch pass and on every live
+   * flush, so VALID minus this is what the map was actually built from.
+   */
+  const [kRampCount, setKRampCount] = useState<number>(0);
+
+  /**
+   * Set when the as-run binary says K HOLD and the drive says otherwise: the median RF / rf_soll
+   * over the samples the STOCK floor would have enriched came out at 1.05 or more, so the car was
+   * applying rf_korr. The whole calculation has then been read with the stock floor instead (see
+   * `VECalculator.resolveKHold`), and this is what the one-line note on the VE result reports.
+   * Null when the binary is not held, when the hold checks out, or before enough samples reached
+   * the stock floor to tell.
+   */
+  const [kHoldNotInEffect, setKHoldNotInEffect] = useState<KHoldNotInEffect | null>(null);
+
+  /**
+   * What this drive says about the 300 / 400 rows of KF_RF_KORR_DRREL — `computeHighDeltaGuard`
+   * over the raw log, on the EFFECTIVE tables, so it is null unless the drive really ran held (a
+   * hold the K HOLD check found hollow is read on the stock floor and has none). Nothing here reads
+   * it: page.tsx stores it with the session, and a later DRREL drive's tuner is handed it from
+   * there. Batch path only — it is a whole-drive verdict, and only the STOP pass is saved.
+   */
+  const [highDeltaGuard, setHighDeltaGuard] = useState<HighDeltaGuard | null>(null);
+
+  const runCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
     const calc = new VECalculator();
-    // All RAW rows reach the history estimator, including OFF/cut/acceleration.
-    // A filter may suppress an O2 observation; it cannot erase the earlier fuel history.
-    const movingRaw = moving ? processed.rawData.map((p, rawSampleIndex) => {
-      const factor = options.steadyFilterConfig?.enableCorrection
-        ? interpolateFactor(p.rpm, options.steadyLoadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE) : 1;
-      return { ...p, rawSampleIndex, correctedLoad: factor > 0 ? p.rawLoad / factor : NaN };
-    }) : null;
+    // Which floor the drive really ran against, decided ONCE for every consumer below. A held
+    // binary whose hold did not take is read with the stock floor — by the annotation (which would
+    // reach the same verdict on its own), and by the tuner and its census, which are handed the
+    // tables directly and must not see a gate the car did not have.
+    const hold = options.egt
+      ? calc.resolveKHold(map, options.egt, options.rfKorrAir, processed.rawData) : null;
+    const egt = hold ? hold.egt : (options.egt ?? null);
     // Measure rf_korr first: the calculation reads point.rfKorr, and the UI shows the same numbers,
     // so both have to come from one pass rather than being derived twice with a chance to diverge.
     // `processed.rawData` as the latch source, not `processed.data`. The rf_korr latch is a DME
     // state machine and it advanced on every sample the car took, including the ones the filters
-    // below removed — see ProcessedLog.rawData and RfKorrLatch.
-    const annotated = movingRaw ? processed.data.map(p => {
-      const candidate = p.rawSampleIndex === undefined ? undefined : movingRaw[p.rawSampleIndex];
-      return candidate?.time === p.time ? candidate : { ...p, veEvidenceEligible: false, veEvidenceReason: 'history-missing' };
-    }) : isVeComparisonPolicy(options.veCorrectionPolicy)
-      ? prepareOperatingEvidence(map, processed, options)
-      : calc.annotateRfKorr(map, processed.data, options.egt, options.rfKorrAir, processed.rawData);
-    // Between the two: the tuner reads the annotated log and the VE calculation may go on to
-    // consume the tuner's output, so this is the only order in which one pass can serve all three.
-    //
+    // below removed — see ProcessedLog.rawData and RfKorrLatch. The same walk marks `kRamp`.
+    const annotated = calc.annotateRfKorr(
+      map, processed.data, egt, options.rfKorrAir, processed.rawData);
     // The tuner gets a DIFFERENT set of samples — rfKorrData, which skips the transient test. The
     // correction only runs above 55-80 % filling, which on this engine only happens while the car
     // is accelerating, so the VE map's steady-state requirement removes essentially all of it: on
@@ -178,38 +179,19 @@ export function useVeCalculation() {
     // re-filtering the annotated log, because `annotated` must stay index-aligned with
     // processed.data for the log table and chart.
     const annotatedForRfKorr = calc.annotateRfKorr(
-      map, processed.rfKorrData, options.egt, options.rfKorrAir, processed.rawData);
-    const rfKorr = options.egt
-      ? tuneRfKorrTable(map, annotatedForRfKorr, options.egt,
+      map, processed.rfKorrData, egt, options.rfKorrAir, processed.rawData);
+    const rfKorr = egt
+      ? tuneRfKorrTable(map, annotatedForRfKorr, egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
         // The tuner has always had proper thresholds and no way to reach them — this was the only
         // production call site and it passed nothing. Only the two the panel exposes are forwarded;
         // the other seventeen keep their defaults, which is the point of having defaults.
         options.rfKorrThresholds ?? {})
       : null;
-    // The tuned table comes from THIS run, not from the caller. It is derived from the same log
-    // the map is about to be built from, so passing it in would mean the caller had to run the
-    // tuner first and the two could describe different drives.
-    let result: ReturnType<VECalculator['calculateNewVEMap']>;
-    if (movingRaw) {
-      setAnnotatedLog(annotated);
-      try {
-        const job = startMovingResponseWorker({ map, raw: movingRaw, options });
-        movingJob.current = job;
-        const reply = await job.result;
-        if (epoch !== calculationEpoch.current) return;
-        movingJob.current = null;
-        setIsCalculating(false);
-        if (!reply) return;
-        result = reply;
-      } catch (error) {
-        if (epoch !== calculationEpoch.current) return;
-        movingJob.current = null;
-        setIsCalculating(false);
-        setMovingError(error instanceof Error ? error.message : String(error));
-        return;
-      }
-    } else result = calc.calculateNewVEMap(map, annotated, { ...options, tunedRfKorr: rfKorr });
+    // The VE derivation no longer reads the tuner's table: a VE and a DRREL are never written into
+    // one BIN, so there is no k_new to divide by (see VeCalcOptions.writeRfKorr). The table is still
+    // derived above, for the RF KORR tab and the WRITE RF KORR path.
+    const result = calc.calculateNewVEMap(map, annotated, { ...options, egt });
 
     /*
      * What restating this log would do to it: measured always, applied inside the calculator.
@@ -225,9 +207,8 @@ export function useVeCalculation() {
     // Counted off the ANNOTATED log, because that is where the refusal happens: a sample with no
     // air data comes back without an rfKorr and the calculation falls back to the trim alone.
     const candidates = annotated.filter(p => p.rf !== undefined).length;
-    const normaliseTo = isVeHistoryPolicy(options.veCorrectionPolicy) ? null : options.normaliseTo ?? null;
     setChargeTempInfo({
-      ...summariseChargeTemp(processed.data, normaliseTo, !!normaliseTo),
+      ...summariseChargeTemp(processed.data, options.normaliseTo ?? null, !!options.normaliseTo),
       rfKorrMeasured: annotated.filter(p => p.rfKorr !== undefined).length,
       rfKorrCandidates: candidates,
     });
@@ -241,6 +222,9 @@ export function useVeCalculation() {
       { rpm: map.xAxis, load: map.yAxis },
       { secondsPerUnit: timeScaleSeconds(processed.data) }));
     setTunedRfKorr(rfKorr);
+    setKRampCount(annotated.filter(isKRampExcluded).length);
+    setKHoldNotInEffect(hold?.kHoldNotInEffect ?? null);
+    setHighDeltaGuard(egt ? computeHighDeltaGuard(processed.rawData, egt) : null);
     // The census, from the batch path too.
     //
     // It used to be set only by `appendCalculation`, so the panel that says WHY the correction table
@@ -248,12 +232,12 @@ export function useVeCalculation() {
     // reopened — exactly the three moments somebody sits and reads it. The tuner already computes
     // this census internally; recomputing it here costs one more O(n) pass over a few thousand rows
     // and removes the case where the numbers exist and are not shown.
-    setRfKorrLive(options.egt
-      ? rfKorrCensus(annotatedForRfKorr, options.egt,
+    setRfKorrLive(egt
+      ? rfKorrCensus(annotatedForRfKorr, egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
         options.rfKorrThresholds ?? {}).report
       : null);
-    setRouteAgreement(rfKorrRouteAgreement(annotatedForRfKorr, options.egt));
+    setRouteAgreement(rfKorrRouteAgreement(annotatedForRfKorr, egt));
     setNewMap(out.newMap);
     setMapData(out.diffMap); // Use mapData for diffMap
     setHitMap(out.hitMap);
@@ -293,80 +277,77 @@ export function useVeCalculation() {
    *
    * TWO things are deliberately NOT done here, and both are done at STOP instead:
    *
-   *  - **The rf_korr tuner.** It reads the whole log by nature, and its output feeds back into the
-   *    binning per sample — so a table that changed mid-run would make the grid a mixture of two
-   *    calibrations with no way to unpick it. Live binning therefore uses the nominal correction.
+   *  - **The rf_korr tuner.** It reads the whole log by nature. Its census IS built live (below);
+   *    the table is not, and nothing in the VE binning reads it any more.
    *  - **Route agreement.** A whole-log statistic; nothing reads it during a run.
    *
-   * So the map on screen during a run is the nominal one. The map that gets SAVED or WRITTEN is not
-   * this one: finishLog runs the full runCalculation once, and that is the pass whose output leaves
-   * the app. Live is allowed to be an approximation; the artefact is not.
+   * The map that gets SAVED or WRITTEN is not this one: finishLog runs the full runCalculation once,
+   * and that is the pass whose output leaves the app. The two agree sample for sample — the same
+   * walk, the same predicate, the same binning — except where the K HOLD check's verdict is still
+   * moving, which a live run settles by rebuilding (below) and STOP settles over the whole drive.
    */
-  const appendCalculation = (map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}) => {
-    if (options.veCorrectionPolicy === 'moving-response') {
-      // Only new RAW rows update the measurement grid. A measurement is never
-      // published as an accepted correction; the multi-model solve stays at STOP.
-      const key = movingLiveKey(options);
-      let live = movingLiveRef.current;
-      if (!live || live.map !== map || live.key !== key || live.first !== processed.rawData[0]
-        || live.consumed > processed.rawData.length) {
-        reset();
-        live = { map, key, first: processed.rawData[0], consumed: 0,
-          accumulator: createMovingLiveAccumulator(map, options) };
-        movingLiveRef.current = live;
-      }
-      setLiveAcquisition(appendMovingLive(live.accumulator, processed.rawData));
-      live.consumed = processed.rawData.length;
-      setMovingPending(true);
-      setAnnotatedLog(processed.data);
-      return;
-    }
-    if (isVeComparisonPolicy(options.veCorrectionPolicy)) {
-      // Causal whole-history replay first: the new policy must agree at LIVE and STOP.
-      // The original incremental accumulator is kept solely for archived policy replay.
-      liveRef.current = null;
-      runCalculation(map, processed, options);
-      return;
-    }
+  const appendCalculation = (
+    map: VEMap, processed: ProcessedLog, options: VeCalcOptions = {}, rebuilt = false,
+  ): void => {
     const calc = new VECalculator();
     const st = liveRef.current;
     // A new log, a new map, or a reprocess that shortened the valid set: start over. Cheap to
     // detect and the only way a stale grid could survive into a different drive.
-    if (!st || st.map !== map || processed.data.length < st.consumed) {
+    //
+    // And new tables. `options.egt` is a memo over the bytes, so its identity moves only when the
+    // binary (or the patch set it was run with) does — and then every verdict so far was walked on
+    // the other tables. The previous arrangement kept walking the old latch on the new tables.
+    if (!st || st.map !== map || processed.data.length < st.consumed || st.egtIn !== (options.egt ?? null)) {
+      // The K HOLD verdict over what has arrived so far, decided before anything is walked: the
+      // walk has to run on the floor the drive really had. On a fresh run that is the first flush's
+      // handful of samples; it costs a whole prefix only on a rebuild.
+      const hold = options.egt
+        ? calc.resolveKHold(map, options.egt, options.rfKorrAir, processed.rawData) : null;
+      const egt = hold ? hold.egt : null;
       liveRef.current = {
         map, grid: calc.createGrid(), consumed: 0, annotated: [],
-        latch: new RfKorrLatch(), consumedRaw: 0, gateTrack: new Map(),
+        walk: egt ? calc.rfKorrWalk(map, egt, options.rfKorrAir) : null,
+        consumedRaw: 0, gateTrack: new Map(), egt, egtIn: options.egt ?? null,
+        kHold: options.egt ? calc.kHoldCheck(map, options.egt, options.rfKorrAir) : null,
+        kHoldNotInEffect: hold?.kHoldNotInEffect ?? null,
+        kRampCount: 0,
       };
     }
     const live = liveRef.current!;
     const plan = resolveRfKorr(options);
-    // Advance the latch over the raw samples that arrived, BEFORE annotating any of them: a sample
-    // the VE filter dropped still moved the DME's state machine, and one of the commonest drops —
-    // fuel cut — is exactly the condition that resets it.
-    if (options.egt) {
-      // The unit question is settled from the RAW log, once. Deciding it per flush would let a
-      // stalled first second read as a milliseconds log and divide every dwell by a thousand.
-      const perSecond = timeScaleSeconds(processed.rawData);
-      for (let i = live.consumedRaw; i < processed.rawData.length; i++) {
-        const p = processed.rawData[i];
-        live.gateTrack.set(p.time, calc.stepRfKorrLatch(
-          live.latch, map, p, options.egt, perSecond, options.rfKorrAir));
-      }
-      live.consumedRaw = processed.rawData.length;
+    // Advance the walk over the raw samples that arrived, BEFORE annotating any of them: a sample
+    // the VE filter dropped still moved the DME's state machines, and one of the commonest drops —
+    // fuel cut — is exactly the condition that resets the latch and restarts the lambda loop.
+    for (let i = live.consumedRaw; i < processed.rawData.length; i++) {
+      const p = processed.rawData[i];
+      live.kHold?.step(p);
+      if (live.walk) live.gateTrack.set(p.time, live.walk.step(p));
     }
+    live.consumedRaw = processed.rawData.length;
+    // The hold check's verdict can only be known from the drive, so it can change as the drive
+    // grows. When it does, every sample so far was read on the wrong floor: rebuild once, from the
+    // start, under the verdict the whole prefix gives — which is the one the check just reached,
+    // so the rebuild cannot flip it back. `rebuilt` is the belt to that braces.
+    const verdict = live.kHold?.verdict() ?? null;
+    if (!rebuilt && (verdict === null) !== (live.kHoldNotInEffect === null)) {
+      liveRef.current = null;
+      appendCalculation(map, processed, options, true);
+      return;
+    }
+    if (verdict) live.kHoldNotInEffect = verdict;
     for (let i = live.consumed; i < processed.data.length; i++) {
       const src = processed.data[i];
       const t = live.gateTrack.get(src.time);
       const annotated = calc.annotateRfKorrPoint(
-        map, src, options.egt, options.rfKorrAir, t ? t.open : null);
-      const point = annotated.rfKorrGateOpen && t
-        ? { ...annotated, rfKorrDwellSec: t.dwellSec } : annotated;
+        map, src, live.egt, options.rfKorrAir, t ? t.open : null);
+      // Same rule as the batch `annotateRfKorr`: the ramp state only where a gate verdict exists.
+      const point = t && annotated.rfKorrGateOpen !== undefined
+        ? { ...annotated, kRamp: t.kRamp } : annotated;
       live.annotated.push(point);
-      // `null`, not options.tunedRfKorr — see the note above about mixing two calibrations.
+      if (isKRampExcluded(point)) live.kRampCount++;
       // Same reference as the batch path, or a live flush and the STOP pass would build
       // different maps from one drive. verify:incremental asserts they agree.
-      calc.accumulatePoint(
-        live.grid, point, plan, null, options.normaliseTo, options.rfKorrSettleSec);
+      calc.accumulatePoint(live.grid, point, plan, options.normaliseTo);
     }
     live.consumed = processed.data.length;
 
@@ -378,7 +359,7 @@ export function useVeCalculation() {
       rfKorrCandidates: live.annotated.filter(p => p.rf !== undefined).length,
     });
 
-    const result = calc.finalizeGrid(map, live.grid, { ...options, tunedRfKorr: null });
+    const result = calc.finalizeGrid(map, live.grid, options);
     // A fresh array, not the accumulator itself. Handing back the same object every flush would
     // make React see no change, and any memoised child keyed on it would stop updating mid-run.
     // It is a copy of references, not of samples — cheap next to the work it protects.
@@ -394,6 +375,8 @@ export function useVeCalculation() {
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
     setCoverage(result.coverage);
+    setKRampCount(live.kRampCount);
+    setKHoldNotInEffect(live.kHoldNotInEffect);
 
     // The census, not the table. `rfKorrData` is the tuner's own sample set (it skips the transient
     // test the VE map needs), so it has to be annotated separately — and re-annotated whole, which
@@ -401,29 +384,24 @@ export function useVeCalculation() {
     // beside what it prevents: driving for seven minutes to be told afterwards that none of it
     // counted. The same argument the inertia side already made for recomputing rather than
     // accumulating, and the same conclusion.
-    if (options.egt) {
+    //
+    // `options.rfKorrAir` is passed, and it was not. Without the air `annotateRfKorr` measures no
+    // rf_korr at all — no gate verdict, no ramp — so the live census was counting a drive with the
+    // gate shut throughout, whatever the car did. The tables are the walk's, for the same reason.
+    if (live.egt) {
       const annR = calc.annotateRfKorr(
-        map, processed.rfKorrData, options.egt, undefined, processed.rawData);
-      setRfKorrLive(rfKorrCensus(annR, options.egt,
+        map, processed.rfKorrData, live.egt, options.rfKorrAir, processed.rawData);
+      setRfKorrLive(rfKorrCensus(annR, live.egt,
         { rpm: APP_CONFIG.MSS54HP.AXIS_RPM, load: APP_CONFIG.MSS54HP.AXIS_LOAD },
         options.rfKorrThresholds ?? {}).report);
     }
   };
 
   const reset = () => {
-    calculationEpoch.current++;
-    movingJob.current?.cancel();
-    movingJob.current = null;
-    setIsCalculating(false);
-    setMovingError(null);
     liveRef.current = null;
-    movingLiveRef.current = null;
-    setLiveAcquisition(null);
-    setMovingPending(false);
     // With the log, so a new workspace cannot inherit the last drive's verdict.
     setDriveSplit(null);
     setNewMap(null);
-    setMapData(Array.from({ length: MAP_DIMENSIONS.rows }, () => Array(MAP_DIMENSIONS.cols).fill(100)));
     setWeightMap(null);
     setAcceptedMap(null);
     // Both were missing here. A stale rejectMap only mislabels a cleared map; a stale demandMap
@@ -439,14 +417,13 @@ export function useVeCalculation() {
     setRouteAgreement(undefined);
     setCoverage(null);
     setRfKorrLive(null);
+    setKRampCount(0);
+    setKHoldNotInEffect(null);
+    setHighDeltaGuard(null);
   };
 
   return {
     newMap,
-    liveAcquisition,
-    movingPending,
-    isCalculating,
-    movingError,
     mapData,
     hitMap,
     correctionMap,
@@ -457,6 +434,9 @@ export function useVeCalculation() {
     rfKorrMap,
     rfKorrSpreadMap,
     coverage,
+    kRampCount,
+    kHoldNotInEffect,
+    highDeltaGuard,
     rfKorrLive,
     chargeTempInfo,
     annotatedLog,

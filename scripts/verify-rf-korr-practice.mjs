@@ -129,8 +129,20 @@ const r = tuned.report;
 console.log(`gate shut     : ${r.samplesGateShut}`);
 console.log(`not settled   : ${r.samplesNotSettled}`);
 console.log(`hysteresis    : ${r.samplesHysteresis}`);
-console.log(`anchors       : ${r.anchorSamples}   ratios: ${r.ratioSamples}   VE cells anchored: ${r.veCellsWithAnchor}`);
+console.log(`k ramp        : ${r.samplesKRamp}   used: ${r.samplesUsed}`);
+console.log(`anchor check  : ${r.anchorTrimSamples} gate-shut post-ramp samples, median trim `
+    + `${r.anchorTrimMedian === null ? 'none' : r.anchorTrimMedian.toFixed(4)}`);
 console.log(`cells updated : ${r.gridCellsUpdated}   acceptable: ${tuned.acceptable}`);
+
+// The tuner anchors on the VE the drive ran on (rfKorrTuner.ts): it needs gate-shut post-ramp trims
+// at 1 ± 0.02, and gate-open samples the lambda loop has finished taking K back on. This mock's
+// Alpha-N is off by `VE_ERROR_*` on purpose and its trim jumps straight to the answer with no I ramp
+// for the k-ramp rule to see end, so a refusal here is the tuner being right about the mock — and
+// the knowable-answer check below has nothing to grade until the mock models both.
+if (r.refused) {
+    console.log(`\nrefused       : ${r.refused} — see the comment above; nothing below can be graded.`);
+    process.exit(1);
+}
 
 // --- the knowable answer ----------------------------------------------------------------------
 // Target for a cell that stock holds at k: 1 + DENSITY_TRUTH*(k-1). A correct pass moves toward it

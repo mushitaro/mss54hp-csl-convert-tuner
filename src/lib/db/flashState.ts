@@ -17,6 +17,10 @@ import type { FlashRecord, TuningSession } from './schema';
  * counted as road state — the one patch with a legal dimension, silently exempted. A patch missing
  * from this list is a patch the FINAL badge will lie about.
  *
+ * K HOLD is on it for the reason TANK VENT is: a BIN with the rf_korr floor held has no cold-exhaust
+ * enrichment and more part-load advance, and FINALIZE is what puts it back. The retired RF GATE drop
+ * stays on it too — nothing writes it now, but a record that flashed it was not a road state then.
+ *
  * `writeWarmup` / `writeWot` are deliberately NOT here. Those are tune CONTENT — tables derived from
  * the log and meant to stay in the car — not diagnostic switches to be taken back out.
  */
@@ -24,6 +28,7 @@ export function isRoadState(flash: FlashRecord): boolean {
     return !flash.settings.applyPatch
         && !flash.settings.applyWotDisable
         && !flash.settings.applyTankVentDisable
+        && !flash.settings.applyRfKorrHold
         && !flash.settings.applyRfKorrGateDrop;
 }
 
@@ -105,12 +110,15 @@ export function wroteTune(session: Pick<TuningSession, 'flashHistory'>): boolean
     return realFlashes(session).some(f => f.tuned ?? true);
 }
 
-/** The three logic patches, as a load's toggle overrides. Not a `ToggleOverrides` import — this
- *  module is under lib/db and must not depend on a hook's types. */
+/** The logic patches, as a load's toggle overrides. Not a `ToggleOverrides` import — this module
+ *  is under lib/db and must not depend on a hook's types. */
 export interface ArmedPatches {
     applyPatch?: boolean;
     applyWotDisable?: boolean;
     applyTankVentDisable?: boolean;
+    applyRfKorrHold?: boolean;
+    /** The retired RF GATE drop, as an old record has it. No toggle reads it; the log replay does
+     *  (`bytesAsRun` via `rfKorrFloorMode`), because a drive recorded on it ran through that floor. */
     applyRfKorrGateDrop?: boolean;
 }
 
@@ -126,14 +134,19 @@ export interface ArmedPatches {
  * The LAST such flash rather than the first: if the patches changed between runs, the file this
  * offers should be the most recent thing the car was given. PRACTICE writes are excluded here as
  * everywhere else in this file — they moved no bytes, so they wrote no image.
+ *
+ * Only the patches `patchOnImage` can rebuild, so the retired RF GATE drop is not among them: that
+ * image is rebuilt with the floor at stock. A record whose only patch was the drop is therefore no
+ * PATCH-ON image at all — rebuilt, it would be the BASE under a second name — and the search goes
+ * on past it, exactly as it does past a patch-off flash.
  */
 export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): ArmedPatches | null {
     for (let i = session.flashHistory.length - 1; i >= 0; i--) {
         const f = session.flashHistory[i];
         if (f.practice) continue;
-        const { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop } = f.settings;
-        if (applyPatch || applyWotDisable || applyTankVentDisable || applyRfKorrGateDrop) {
-            return { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrGateDrop };
+        const { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold } = f.settings;
+        if (applyPatch || applyWotDisable || applyTankVentDisable || applyRfKorrHold) {
+            return { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold };
         }
     }
     return null;
@@ -155,9 +168,10 @@ export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): Arme
  * for the FINAL badge; this reads the same tail for the same reason — the LAST flash is the state of
  * the car, and re-flashing patch-on after a finalize has to move it back.
  *
- * Only the three logic patches. `writeWarmup` / `writeWot` are tune CONTENT rather than switches
- * (the same distinction `isRoadState` makes), and re-arming them from a flash record would inject
- * derived tables into a workspace that has not derived them.
+ * Only the logic patches. `writeWarmup` / `writeWot` are tune CONTENT rather than switches (the
+ * same distinction `isRoadState` makes), and re-arming them from a flash record would inject
+ * derived tables into a workspace that has not derived them. The retired drop is carried as the
+ * record has it: no toggle takes it, but the replay of a drive recorded on it must.
  *
  * A field absent from an older record stays `undefined` rather than becoming `false`, so the load
  * falls back to detection for that one toggle instead of asserting an answer the record never had.
@@ -174,6 +188,7 @@ export function armedPatchesFromHistory(
         applyPatch: last.settings.applyPatch,
         applyWotDisable: last.settings.applyWotDisable,
         applyTankVentDisable: last.settings.applyTankVentDisable,
+        applyRfKorrHold: last.settings.applyRfKorrHold,
         applyRfKorrGateDrop: last.settings.applyRfKorrGateDrop,
     };
 }

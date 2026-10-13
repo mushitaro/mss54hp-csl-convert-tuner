@@ -9,7 +9,7 @@ import { MAX_SAMPLE_SD } from '@/lib/ve-calculator/veScatter';
 import { useFeatureEnabled } from '@/lib/build-variant';
 import {
     LogFilterConfig, RfKorrSource, resolveRfKorr, resolveTransientWindow,
-    TRANSIENT_SETTLE_SEC_DEFAULT, isVeHistoryPolicy,
+    TRANSIENT_SETTLE_SEC_DEFAULT,
 } from '@/lib/types';
 import { RfKorrSourceControl } from './RfKorrSourceControl';
 import { COVERAGE_OK_DEFAULT } from './MapEditor';
@@ -330,8 +330,6 @@ interface Props {
      *  compared. The one check the app has on a DS2 offset nobody has confirmed on a car. */
     routeGap?: number;
     routeSamples?: number;
-    /** Read-only RF evidence, colocated with VE settings rather than the app header. */
-    diagnostics?: React.ReactNode;
 }
 
 
@@ -378,7 +376,7 @@ const VE_METHODS: { id: VeMethod; label: string }[] = [
 
 export const FilterConfigPanel: React.FC<Props> = ({
     config, onConfigChange, readOnly = false, openUp, scope = 've', channels = NO_CHANNELS, measuredHz,
-    routeGap, routeSamples, diagnostics,
+    routeGap, routeSamples,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
     /** Which stream this tab is reading — see the `scope` prop. Named so the JSX reads as a claim
@@ -386,8 +384,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
     const onVe = scope === 've';
     const onRfKorr = scope === 'rfkorr';
     const [localConfig, setLocalConfig] = useState<LogFilterConfig>(config);
-    const lang = useDialogLang();
-    const t = TEXT[lang];
+    const t = TEXT[useDialogLang()];
 
     /** Which explanations are open. A Set rather than one at a time: these are read against each
      *  other — Min Temp and Cat Protect are the same mechanism — and a panel that shuts the last one
@@ -518,10 +515,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
         : settleSamples === undefined
             ? `${settleSec.toFixed(1)} s`
             : `${settleSec.toFixed(1)} s ≈ ${settleSamples}`;
-    const steadyPolicy = isVeHistoryPolicy(localConfig.veCorrectionPolicy);
-    const movingPolicy = localConfig.veCorrectionPolicy === 'moving-response';
-    const legacyPolicy = !localConfig.veCorrectionPolicy || localConfig.veCorrectionPolicy === 'legacy-nominal';
-    const veMethod: VeMethod = steadyPolicy ? 'direct' : localConfig.veMethod ?? VE_METHOD_DEFAULT;
+    const veMethod: VeMethod = localConfig.veMethod ?? VE_METHOD_DEFAULT;
     const directMethod = veMethod === 'direct';
     const veAuthority = Math.round(100 * (localConfig.directAuthority ?? DIRECT_AUTHORITY_DEFAULT));
     /**
@@ -556,13 +550,10 @@ export const FilterConfigPanel: React.FC<Props> = ({
         <div className="relative">
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className={`inline-flex items-center gap-2 p-2 rounded text-slate-400 hover:text-blue-400 transition-colors ${isOpen ? 'text-blue-400 bg-slate-800' : 'hover:bg-slate-800'}`}
+                className={`p-2 rounded text-slate-400 hover:text-blue-400 transition-colors ${isOpen ? 'text-blue-400 bg-slate-800' : 'hover:bg-slate-800'}`}
                 title={t.settings}
             >
                 <Filter className="w-4 h-4" />
-                {onVe && !movingPolicy && <span className="text-[10px] text-indigo-300" data-testid="ve-replay-mode">{legacyPolicy
-                    ? (lang === 'ja' ? '保存方式を再現中' : 'Saved method replay')
-                    : (lang === 'ja' ? '比較・診断中' : 'Comparison / diagnosis')}</span>}
             </button>
 
             {isOpen && (
@@ -590,8 +581,6 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 {t.locked}
                             </p>
                         )}
-
-                        {onVe && diagnostics && <div className="mb-3">{diagnostics}</div>}
 
                         <div className={`space-y-12 ${readOnly ? 'opacity-60 pointer-events-none select-none' : ''}`}>
                             {/* ORDER, top to bottom: what the map SHOWS, then what it WRITES, then which
@@ -639,66 +628,6 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 every one is on the tab it belongs to, which is the difference between
                                 scoping a control and hiding a setting that is still running. */}
 
-                            {onVe && (
-                                <section className="space-y-3">
-                                    <p className="text-xs text-slate-200">{movingPolicy
-                                        ? (lang === 'ja' ? '走行履歴Tune' : 'Driving-history Tune')
-                                        : legacyPolicy
-                                            ? (lang === 'ja' ? '保存方式：従来の掛け戻し' : 'Saved method: legacy multiply-back')
-                                            : (lang === 'ja' ? '比較・診断用の計算' : 'Calculation for comparison / diagnosis')}</p>
-                                    {movingPolicy && <>
-                                        <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
-                                            ? 'ログ停止後に履歴を解析し、噴射量・ラムダ応答・運転点の移動を記録時のBINと照合して、独立区間で検証します。回転数やROの保持は不要です。採用セルを1回最大5%まで補正し、情報不足のセルはBASEを維持します。'
-                                            : 'After logging stops, analyzes injection, lambda response and the moving operating point against the recording BIN, validated on independent passages. No held RPM or RO is required. Accepted cells change by at most 5% per update; unresolved cells retain BASE.'}</p>
-                                        <SubField label={lang === 'ja' ? '今回の補正率 η' : 'Correction rate for this update η'}
-                                            value={`${Math.round((localConfig.veLearningRate ?? 1) * 100)} %`}>
-                                            <Slider min={10} max={100} step={10}
-                                                value={Math.round((localConfig.veLearningRate ?? 1) * 100)}
-                                                onChange={v => handleChange('veLearningRate', v / 100)} />
-                                        </SubField>
-                                    </>}
-                                    {!movingPolicy && <>
-                                        <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
-                                            ? '現在はこのログの計算設定を再現しています。走行履歴Tuneへ切り替えると、読み込んだログを新方式で再計算します。'
-                                            : 'The loaded log is using its selected calculation settings. Switch to Driving-history Tune to recalculate it with the current method.'}</p>
-                                        <button type="button" disabled={readOnly}
-                                            onClick={() => handleChange('veCorrectionPolicy', 'moving-response')}
-                                            data-testid="ve-moving-recalculate"
-                                            className="min-h-10 text-left text-xs text-blue-300 hover:text-blue-200 disabled:text-slate-500 disabled:cursor-not-allowed">
-                                            {lang === 'ja' ? '走行履歴Tuneで再計算' : 'Recalculate with Driving-history Tune'}
-                                        </button>
-                                    </>}
-                                    <details>
-                                        <summary className="cursor-pointer min-h-10 py-2 text-[10px] text-slate-400">{lang === 'ja' ? '保存ログの再現・診断' : 'Saved-log replay and diagnosis'}</summary>
-                                        <div className="space-y-3 pt-1">
-                                            <label htmlFor="ve-correction-policy" className="block text-[10px] text-slate-400">{lang === 'ja' ? '再現する計算方式' : 'Calculation method to replay'}</label>
-                                            <select id="ve-correction-policy" disabled={readOnly}
-                                                className="w-full bg-slate-800 border border-slate-700 p-2 text-xs"
-                                                value={localConfig.veCorrectionPolicy ?? 'legacy-nominal'}
-                                                onChange={e => handleChange('veCorrectionPolicy', e.target.value)}>
-                                                <option value="moving-response">{lang === 'ja' ? '走行履歴Tune（標準）' : 'Driving-history Tune (standard)'}</option>
-                                                <option value="legacy-nominal">{lang === 'ja' ? '従来の掛け戻し（保存ログ再現）' : 'Legacy multiply-back (replay)'}</option>
-                                                <option value="steady-retain">{lang === 'ja' ? '定常区間の比較（観測専用）' : 'Steady-window comparison (observation only)'}</option>
-                                                <option value="dme-response">{lang === 'ja' ? 'DME応答の比較（観測専用）' : 'DME response comparison (observation only)'}</option>
-                                            </select>
-                                    {localConfig.veCorrectionPolicy === 'dme-response' && <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
-                                        ? 'DMEの実測補正と停止・再開を追い、両バンクで2往復の応答を比較します。固定の待ち時間や運転点保持は採用条件にしません。補正中・信号不足は未確定として残します。現在は比較専用で、BIN出力は保留します。'
-                                        : 'Tracks measured DME correction and controller resets; compares two cycles in both banks. No fixed settling time or held operating point. Unfinished or missing responses stay unresolved. Comparison only; BIN output remains held.'}</p>}
-                                    {localConfig.veCorrectionPolicy === 'steady-retain' && <>
-                                        <p className="text-xs text-slate-400 leading-relaxed">{lang === 'ja'
-                                            ? '過去5秒の定常性を確認し、パージ作動・トリム上限/下限近傍・欠測を除外します。記録時のBASEでMAP補正停止と学習停止を確認できなければ観測のみです。現行RF KORRを維持する比較専用の計算です。別の熱状態での検証が必要なため、このモードではBIN出力を保留します。'
-                                            : 'Uses stable 5-second windows; excludes purge, trim clamp proximity and missing data. Observation only unless the recording BASE confirms MAP compensation and learning disabled. Retains RF KORR for comparison; BIN output is held pending validation at other thermal states.'}</p>
-                                        <SubField label={lang === 'ja' ? '総合補正の学習率 η' : 'Whole-correction learning rate η'}
-                                            value={`${Math.round((localConfig.veLearningRate ?? 1) * 100)} %`}>
-                                            <Slider min={10} max={100} step={10}
-                                                value={Math.round((localConfig.veLearningRate ?? 1) * 100)}
-                                                onChange={v => handleChange('veLearningRate', v / 100)} />
-                                        </SubField>
-                                    </>}
-                                        </div>
-                                    </details>
-                                </section>
-                            )}
                             {onVe && (<section className="space-y-4">
                             <Row
                                 {...row('bands')}
@@ -717,7 +646,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                             </section>)}
 
                             <section className="space-y-4">
-                            {onVe && !movingPolicy && (
+                            {onVe && (
                             <Row
                                 {...row('veGate')}
                                 label={t.covVe}
@@ -732,7 +661,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                         gate off while four of its six tests kept running. */}
                                     <div className="flex gap-1">
                                         {VE_METHODS.map(m => (
-                                            <button key={m.id} type="button" disabled={readOnly || steadyPolicy}
+                                            <button key={m.id} type="button" disabled={readOnly}
                                                 onClick={() => handleChange('veMethod', m.id)}
                                                 className={`flex-1 min-h-10 px-1 text-[9px] font-bold tracking-wider rounded ${veMethod === m.id
                                                     ? 'bg-blue-600 text-white'
@@ -761,7 +690,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                             onChange={v => handleChange('minVeCellWeight', v)} />
                                     </SubField>
 
-                                    {steadyPolicy ? null : directMethod ? (
+                                    {directMethod ? (
                                         <>
                                             <SubField label={t.subAuthority} value={`${veAuthority} %`}>
                                                 <Slider min={10} max={100} step={5} value={veAuthority}
@@ -809,7 +738,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                             </Row>
                             )}
 
-                                    {onVe && !movingPolicy && (<>
+                                    {onVe && (<>
                                     {/* TRANSIENT FILTER, and what is left of it is the whole of it.
                                         Two thresholds, one question — is the operating point moving —
                                         and both are read against the sample Settle Time picks out.
@@ -886,13 +815,14 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 multiplies the trim by it. That is the VE correction itself, and it happens
                                 whether or not the table is ever written. So SOURCE stays everywhere.
 
-                                THE GATE reaches the VE map by exactly one route: it shapes `tunedRfKorr`,
-                                which the calculator consults only behind `options.writeRfKorr &&
-                                tunedRfKorr.acceptable` — and page.tsx ANDs that flag with
-                                featureEnabled('rfKorr'). A build that cannot write the table cannot arm it,
-                                so the two sliders move nothing there. verify:ve-divisor proves it by running
-                                two tuned tables that disagree everywhere through the real calculator: with
-                                the write off they give the same map, with it on they do not.
+                                THE GATE reaches the VE map by no route at all. It shapes only `tunedRfKorr`,
+                                the DRREL table WRITE RF KORR puts in the BIN, and the VE map never reads that
+                                table: VE and DRREL are never armed together (the hub locks each against the
+                                other), so a tuned table is never the K a VE write divides by. verify:ve-divisor
+                                proves it by running two tuned tables that disagree everywhere through the real
+                                calculator: with the write off AND on they give the same map. The sliders still
+                                matter wherever the table can be written — page.tsx ANDs WRITE RF KORR with
+                                featureEnabled('rfKorr') — and move nothing in a build that cannot.
 
                                 A control that changes nothing is worse than an absent one — the reader
                                 concludes the derivation is broken rather than that this build has no table.
@@ -903,7 +833,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                 {/* RF KORR — not a filter, but it belongs to "how this log becomes a
                                     map" and has to travel with the session for the tune to be
                                     reproducible, which is why it is in this panel at all. */}
-                                {!steadyPolicy && <RfKorrSourceControl
+                                <RfKorrSourceControl
                                     {...row('rfKorrSource')}
                                     source={rfKorrSource}
                                     onChange={setRfKorrSource}
@@ -912,7 +842,7 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                     readOnly={readOnly}
                                     routeGap={routeGap}
                                     routeSamples={routeSamples}
-                                />}
+                                />
 
                                 {/* The charge-temperature normalisation used to be offered here.
                                     It was measured on session #917 — 31 degC of intake-air span,

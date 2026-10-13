@@ -29,10 +29,11 @@
 
 import type { DialogLang } from '@/lib/dialog-text';
 
-/** Which condition is stopping RF KORR, in the order they are usually missing. */
+/** Which condition is stopping RF KORR, in the order they are usually missing. `kHeld` and
+ *  `veNotAnchored` are the tuner's own refusals (`RfKorrRefusal`), passed through by name. */
 export type RfKorrBlock =
     | 'noEgtTables' | 'needsPatch' | 'needsLog' | 'allDropped'
-    | 'noEgt' | 'noTrim' | 'tooFewCells';
+    | 'noEgt' | 'noTrim' | 'kHeld' | 'veNotAnchored' | 'tooFewCells';
 
 interface ManifestCopy {
     /** Accessible name for every row's ⓘ. */
@@ -56,6 +57,11 @@ interface ManifestCopy {
     shapeReady: string;
 
     rfKorr: Record<RfKorrBlock, string>;
+
+    /** ALPHA-N and RF KORR are never armed together — one drive's VE error would land in both
+     *  tables. Each names the switch to turn off. */
+    alphaNLockedByRfKorr: string;
+    rfKorrLockedByAlphaN: string;
 
     /** TRIM STORE, the readout that licenses the two rows above it. */
     trimNeutral: string;
@@ -90,7 +96,9 @@ interface ManifestCopy {
 
     needBinary: string;
     tankVentNote: string;
-    rfGateNote: string;
+    /** K HOLD. It needs PATCH, because PATCH is what keeps LAA from learning the band's error. */
+    kHoldNeedsPatch: string;
+    kHoldNote: string;
 
     /** CALIBRATION tab edits riding the WRITE group. `owner` is the armed writer's row label. */
     calLockedByWriter: (owner: string) => string;
@@ -139,9 +147,16 @@ const EN: ManifestCopy = {
             + 'has no other non-circular source.',
         noTrim: 'This log carries no lambda trim (la_f_regler). The record shows how much the DME '
             + 'corrected, but only the trim shows whether that correction was right.',
+        kHeld: 'Drive with K HOLD off. With it on, rf_korr never engaged, so there is nothing to '
+            + 'derive the table from.',
+        veNotAnchored: 'Run VE with K HOLD first. The trim where rf_korr was off is not near 1.000, '
+            + 'so the VE cannot anchor this table yet.',
         tooFewCells: 'Too few cells cleared their evidence thresholds to be worth writing — see '
             + 'the RF KORR tab for the per-cell reasons.',
     },
+
+    alphaNLockedByRfKorr: 'Turn WRITE RF KORR off to apply VE.',
+    rfKorrLockedByAlphaN: 'Turn ALPHA-N off to write RF KORR.',
 
     trimNeutral: 'LAA_F is bit-exact 1.0000 and the K_LAA_TMOT window in this binary is empty, so '
         + 'neither long-term store can have learned. The short-term trim is the whole standing '
@@ -210,16 +225,9 @@ const EN: ManifestCopy = {
         + 'it — and that trim is the only input the VE correction has. TUNING ONLY: the canister '
         + 'saturates, and DTC 24 is the code for a valve that will not open. Turn PATCH off and '
         + 'write once more before driving the tune. The filename carries _TEVOFF while it is armed.',
-    rfGateNote: 'Drops the rf_korr filling floor to 0.400 at all six rpm points '
-        + '(kl_rf_korr_rf_min, master 0xE90C; stock 0.70/0.55/0.65/0.65/0.65/0.80). It exists to '
-        + 'earn the one thing KF_RF_KORR_DRREL cannot be derived without: a gate-open sample at '
-        + 'delta near zero. Over six drives none was reachable at the stock floor - 3,063 gate-open '
-        + 'samples, smallest delta 46 C - because the gate needs 55-80 % filling and the exhaust '
-        + 'cannot warm to the model there inside a road pull. Replaying the same drives at 0.400 '
-        + 'gives 319 anchors and 13 usable cells. TUNING ONLY: while it is in the car the DME '
-        + 'enriches across a far wider part of the map, RF rises with it, and ignition and the '
-        + 'torque model follow. Drive it once with ALPHA-N off, then write it back out. The '
-        + 'filename carries _RFGATE40 while it is armed.',
+    kHoldNeedsPatch: 'Arm PATCH first.',
+    kHoldNote: 'Holds rf_korr at 1.000, so the rf_korr ramp-down cannot contaminate the VE log. '
+        + 'Turn it off for the drives that tune DRREL and full-load VE.',
 
     calLockedByWriter: owner => `${owner} is armed on these same bytes and writes the whole run. `
         + 'Disarm it, or revert this edit — writing both into one flash is not a request with an answer.',
@@ -269,9 +277,16 @@ const JA: ManifestCopy = {
             + 'これ以外に循環しない情報源がありません。',
         noTrim: 'このログにはラムダトリム（la_f_regler）がありません。記録は DME がどれだけ補正したかを'
             + '示しますが、その補正が正しかったかを示すのはトリムだけです。',
+        kHeld: 'K HOLD を切って走ってください。入ったままでは rf_korr が一度も掛からず、'
+            + '表を導出する材料がありません。',
+        veNotAnchored: '先に K HOLD で VE を詰めてください。rf_korr の掛かっていない区間のトリムが '
+            + '1.000 から外れていて、VE がまだこの表のアンカーになりません。',
         tooFewCells: '証拠のしきい値を越えたセルが、書き込むに値するほどありません — '
             + 'セルごとの理由は RF KORR タブにあります。',
     },
+
+    alphaNLockedByRfKorr: 'VE を書くなら WRITE RF KORR を切ってください。',
+    rfKorrLockedByAlphaN: 'RF KORR を書くなら ALPHA-N を切ってください。',
 
     trimNeutral: 'LAA_F はビット完全に 1.0000 で、このバイナリの K_LAA_TMOT 窓は空です。つまり'
         + '長期学習はどちらも動けません。定常誤差は短期トリムがすべて背負っているので、'
@@ -344,16 +359,9 @@ const JA: ManifestCopy = {
         + 'チューニング専用: キャニスターは飽和し、DTC 24 は「バルブが開かない」のコードです。'
         + 'チューンで走る前に PATCH を切ってもう一度書き込んでください。arm されている間、'
         + 'ファイル名に _TEVOFF が付きます。',
-    rfGateNote: 'rf_korr の作動下限を 6 点すべて 0.400 に下げます'
-        + '（kl_rf_korr_rf_min、master 0xE90C。純正は 0.70/0.55/0.65/0.65/0.65/0.80）。'
-        + 'KF_RF_KORR_DRREL の導出にどうしても要る「ゲート開かつ Δ≈0 のサンプル」を'
-        + '取りに行くための patch です。純正の下限では 6 走行 3,063 サンプルで最小 Δ が 46 °C、'
-        + '1 つも届きませんでした — ゲートは充填 55〜80 % を要求し、そこでは排気が'
-        + '公道の引きの間にモデル温度まで温まらないからです。同じ 6 走行を 0.400 で再生すると'
-        + 'アンカー 319 点、使えるセル 13 個になります。チューニング専用: 車に入っている間、'
-        + 'DME はマップのはるかに広い範囲で増量し、RF もそれに従って上がり、点火とトルクモデルが'
-        + 'それを読みます。ALPHA-N を切って 1 本走り、書き戻してください。'
-        + 'arm されている間、ファイル名に _RFGATE40 が付きます。',
+    kHoldNeedsPatch: '先に PATCH を arm してください。',
+    kHoldNote: 'rf_korr を 1.000 に固定し、VE のログを rf_korr の減量で汚さない。'
+        + 'DRREL と全開 VE を詰める走行では切る。',
 
     calLockedByWriter: owner => `${owner} が同じバイトに arm されていて、ラン全体を書きます。`
         + 'あちらを外すか、この編集を revert してください — 両方を1回のフラッシュに書く、という'

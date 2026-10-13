@@ -10,11 +10,9 @@ import { applyCalibrationEdits } from '@/lib/calibration/apply';
 import type { CalEdit, RunSpan } from '@/lib/calibration/edits';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
 import { VECalculator } from '@/lib/ve-calculator/calculator';
-import { isComparisonOnlyOutput, comparisonOnlyOutputMessage } from '@/lib/ve-calculator/comparisonOutput';
-import { movingResponseOutputHold } from '@/lib/ve-calculator/movingResponseOutput';
 import type { VEMap } from '@/lib/types';
 import { MAP_DIMENSIONS } from '@/config/constants';
-import { dialogText, detectDialogLang } from '@/lib/dialog-text';
+import { dialogText } from '@/lib/dialog-text';
 import { downloadBlob, MIME_BIN } from '@/lib/download';
 
 function getFormattedDate() {
@@ -33,7 +31,8 @@ export type ToggleOverrides = {
   applyPatch?: boolean;
   applyWotDisable?: boolean;
   applyTankVentDisable?: boolean;
-  applyRfKorrGateDrop?: boolean;
+  /** K HOLD — `kl_rf_korr_rf_min` at 2.000. Omitted falls back to detection, like the patches above. */
+  applyRfKorrHold?: boolean;
   writeWarmup?: boolean;
   /** @deprecated Retired with generateWOTMap. Read nowhere; see restoreWotFuel. */
   writeWot?: boolean;
@@ -46,6 +45,29 @@ export type ToggleOverrides = {
   writeVe?: boolean;
   writeShape?: boolean;
 };
+
+/**
+ * The name a downloaded BIN was derived from, with everything `buildFileName` adds taken back off.
+ *
+ * Every marker the function writes has to be in the strip, or re-deriving a name it wrote nests
+ * them: `_RFGATE40` was missing, so `X_PatchON_RFGATE40.bin` re-downloaded as
+ * `X_PatchON_RFGATE40_PatchON_RFGATE40.bin` — the outer markers right, the inner ones a claim about
+ * bytes that may no longer carry it. Repeated until nothing changes, so a name that already nested
+ * under the old strip comes back clean in one download rather than one per layer. `_RFGATE40`
+ * stays in the pattern although nothing writes it any more, for exactly those files.
+ */
+export function derivedBaseName(name: string): string {
+  let prev: string;
+  let out = name;
+  do {
+    prev = out;
+    // Both prefixes, or re-downloading a file this function already named would nest them
+    // ("Tune_..._Base_...") and the outer prefix would win while the inner one lingers.
+    out = out.replace(/^(?:Tune|Base)_\d{12}_/, '');
+    out = out.replace(/(_PatchON|_PatchOFF|_LTFT&MAPOFFPached)(_TEVOFF)?(_KHOLD|_RFGATE40)?$/, '');
+  } while (out !== prev);
+  return out;
+}
 
 /** Tables that are not derived from the VE map and so cannot be rebuilt from it. */
 /**
@@ -71,7 +93,6 @@ export function writeClaimsTune(
   writeVe: boolean,
   extras?: PatchExtras,
 ): boolean {
-  if (isComparisonOnlyOutput(newMap, extras)) return false;
   return (writeVe && !!newMap)
     || !!extras?.tunedRfKorr
     || !!extras?.tunedShape
@@ -81,9 +102,6 @@ export function writeClaimsTune(
 }
 
 export type PatchExtras = {
-  /** The active policy has not been validated for binary output, including while its previous
-   *  map is still on screen. Independent of map metadata so a recalculation delay cannot bypass it. */
-  comparisonOnly?: boolean;
   /** The back-calculated KF_RF_KORR_DRREL, 6 x 12 physical values. Null writes nothing. */
   tunedRfKorr?: number[][] | null;
   /** The idle valve duty proposal, `KF_LLS_TV` as 13 x 10 physical per cent. Null writes nothing.
@@ -114,8 +132,6 @@ export type PatchExtras = {
    * in the manifest's row locks (see lib/calibration/apply.ts).
    */
   calibrationEdits?: { edits: CalEdit[]; conflictSpans: RunSpan[] } | null;
-  /** Required at the final byte boundary for a validated moving-history VE write. */
-  movingReference?: ArrayBuffer | null;
 };
 
 /**
@@ -159,7 +175,12 @@ export function useBinaryFile() {
   // What the LOADED BYTES say, as opposed to what the toggles are asking for. Keeping wotDisabled
   // here — it used to be computed in uploadBinary and thrown away after seeding the toggle — is what
   // lets the hub compare the two and offer a write when they disagree.
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; rfKorrGateDropped: boolean } | null>(null);
+  //
+  // The floor is reported both ways. `rfKorrHeld` is K HOLD as the bytes have it, the twin of the
+  // toggle below. `rfKorrGateDropped` has no toggle any more — RF GATE is retired — and is kept
+  // because a BIN that arrives carrying the drop will be written back to stock, which is a change
+  // the hub has to be able to name.
+  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; rfKorrHeld: boolean; rfKorrGateDropped: boolean } | null>(null);
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
   // [EXPERIMENTAL] UI Controls
@@ -167,10 +188,11 @@ export function useBinaryFile() {
   /** Tank ventilation held shut. Default OFF — this is an emissions device, and the only reason to
    *  touch it is a tuning run that has to be put back afterwards. */
   const [applyTankVentDisable, setApplyTankVentDisable] = useState<boolean>(false);
-  /** `kl_rf_korr_rf_min` dropped to 0.400, so the rf_korr gate opens at 40 % filling instead of
-   *  55-80 %. Default OFF — it is a measurement patch that widens where the DME enriches, and it
-   *  comes back out after the drive. See BinaryPatcher.setRfKorrGateFloor. */
-  const [applyRfKorrGateDrop, setApplyRfKorrGateDrop] = useState<boolean>(false);
+  /** K HOLD: `kl_rf_korr_rf_min` at 2.000, so the rf_korr gate never opens and the DME runs
+   *  rf_korr ≡ 1.000 — a VE log that the lambda loop's ramp after a K step cannot contaminate.
+   *  Default OFF and seeded from the bytes on load, like TANK VENT; the hub arms it with PATCH.
+   *  Every OFF is a real restore to stock — see BinaryPatcher.setRfKorrGateFloor. */
+  const [applyRfKorrHold, setApplyRfKorrHold] = useState<boolean>(false);
   const [writeWarmup, setWriteWarmup] = useState<boolean>(false); // Default OFF
   /** Put `KF_TI_N_RF_VL` back to the community reference. Default OFF like every other write —
    *  but unlike the others this one only ever RESTORES, so arming it cannot invent a calibration. */
@@ -245,8 +267,10 @@ export function useBinaryFile() {
       const isTankVentDisabled = parser.getTankVentDisabled();
       // Detectable the same way, and it has to be: this curve is an INPUT to every later
       // derivation (readEgtTables -> EgtTables.rfKorrMin -> gateOpen / RfKorrLatch / rfKorrCensus),
-      // so a BASE that arrives with the floor already dropped must say so rather than let the app
-      // interpret its own drives through a gate the car was not running.
+      // so a BASE that arrives held — the post-write reload, a TUNED built held — must say so
+      // rather than let the app interpret its own drives through a gate the car was not running.
+      const isRfKorrHeld = parser.getRfKorrGateFloorHeld();
+      // The retired drop: detected, never re-armed. The next write returns it to stock.
       const isRfKorrGateDropped = parser.getRfKorrGateFloorDropped();
 
       setPatchStatus({
@@ -254,6 +278,7 @@ export function useBinaryFile() {
         tempLimit: isTempHigh,
         wotDisabled: isWotDisabled,
         tankVentDisabled: isTankVentDisabled,
+        rfKorrHeld: isRfKorrHeld,
         rfKorrGateDropped: isRfKorrGateDropped,
       });
 
@@ -263,7 +288,7 @@ export function useBinaryFile() {
       setApplyPatch(overrides?.applyPatch ?? (isMapOff && isTempHigh));
       setApplyWotDisable(overrides?.applyWotDisable ?? isWotDisabled);
       setApplyTankVentDisable(overrides?.applyTankVentDisable ?? isTankVentDisabled);
-      setApplyRfKorrGateDrop(overrides?.applyRfKorrGateDrop ?? isRfKorrGateDropped);
+      setApplyRfKorrHold(overrides?.applyRfKorrHold ?? isRfKorrHeld);
       // These two leave no detectable trace in the bytes, so there is nothing to fall back on:
       // default them OFF on every load. Otherwise they persist from the previous session and
       // silently inject derived warmup/WOT tables into an unrelated binary.
@@ -301,18 +326,12 @@ export function useBinaryFile() {
     settings?: ToggleOverrides,
     extras?: PatchExtras,
   ): ArrayBuffer | null => {
-    // Before the buffer check, toggle overrides, SHAPE composition, WARMUP, generic edits, or any
-    // patcher: every artifact path shares this boundary, regardless of which UI rows are armed.
-    if (isComparisonOnlyOutput(newMap, extras)) {
-      alert(comparisonOnlyOutputMessage(detectDialogLang()));
-      return null;
-    }
     if (!binaryBuffer) return null;
 
     const usePatch = settings?.applyPatch ?? applyPatch;
     const useWotDisable = settings?.applyWotDisable ?? applyWotDisable;
     const useTankVentDisable = settings?.applyTankVentDisable ?? applyTankVentDisable;
-    const useRfKorrGateDrop = settings?.applyRfKorrGateDrop ?? applyRfKorrGateDrop;
+    const useRfKorrHold = settings?.applyRfKorrHold ?? applyRfKorrHold;
     const useWarmup = settings?.writeWarmup ?? writeWarmup;
     const useRestoreWot = settings?.restoreWotFuel ?? restoreWotFuel;
     const useRestoreVe = settings?.restoreVe ?? restoreVe;
@@ -403,20 +422,20 @@ export function useBinaryFile() {
     // deliver it. Before applyChecksumCorrection, with everything else.
     patcher.setTankVentDisable(useTankVentDisable);
 
-    // The rf_korr gate floor. Both directions like the two above, and for a reason this one owns:
-    // the app READS this curve back to decide which of a drive's samples the DME was correcting, so
-    // leaving a stale drop in place would silently re-interpret every later log. Off restores the
-    // six the binary was loaded with.
-    patcher.setRfKorrGateFloor(useRfKorrGateDrop);
+    // The rf_korr gate floor — K HOLD or stock. Both directions like the two above, and for a
+    // reason this one owns: the app READS this curve back to decide which of a drive's samples the
+    // DME was correcting, so a stale hold left in place would silently re-interpret every later log
+    // and ship in the release BIN. Off restores the six the binary was loaded with, or STOCK_RAW
+    // when those six were held or carry the retired drop. Never 'drop': that patch is retired, so
+    // no build writes it, whatever a stored record says.
+    patcher.setRfKorrGateFloor(useRfKorrHold ? 'hold' : 'stock');
 
     // The back-calculated EGT correction. Threaded in explicitly rather than read off hook state
     // for the same reason `settings` is: a caller that rebuilds inside one handler would otherwise
     // hash a value the render has not caught up with.
     //
-    // Not optional relative to the VE map it was built with. The 'tuned' VE mode divides by this
-    // table, so a map written without it would be read by the DME through the OLD one and come out
-    // lean by k_new/k_old — up to 27 % at the stock peak. page.tsx derives both from a single
-    // value so the pair cannot come apart.
+    // Never together with a derived VE map: page.tsx arms one or the other (see rfKorrArmed), because
+    // the table is anchored on the VE the drive ran on and one drive's VE error would land in both.
     if (extras?.tunedRfKorr) {
       const def = findEcuItem('KF_RF_KORR_DRREL');
       if (def?.kind === 'map') {
@@ -471,10 +490,8 @@ export function useBinaryFile() {
 
     // Recalculate checksum last, after all other patches have been applied
     patcher.applyChecksumCorrection();
-    const output = patcher.getBuffer();
-    const hold = useWriteVe ? movingResponseOutputHold(newMap, extras?.movingReference, output, detectDialogLang()) : null;
-    if (hold) { alert(hold); return null; }
-    return output;
+
+    return patcher.getBuffer();
   };
 
   /** `newMap` is required, not optional, so that adding a caller cannot silently default to
@@ -483,11 +500,9 @@ export function useBinaryFile() {
     const dateStr = getFormattedDate();
     let baseName = binaryFile?.name.replace(/\.bin$/i, '') || 'tune';
 
-    // Clean up existing prefixes/suffixes to avoid duplication like "Tune_..._Tune_...". Both
-    // prefixes have to be stripped, or re-downloading a file this function already named would
-    // nest them ("Tune_..._Base_...") and the outer prefix would win while the inner one lingers.
-    baseName = baseName.replace(/^(?:Tune|Base)_\d{12}_/, '');
-    baseName = baseName.replace(/(_PatchON|_PatchOFF|_LTFT&MAPOFFPached)(_TEVOFF)?$/, '');
+    // Clean up existing prefixes/suffixes to avoid duplication like "Tune_..._Tune_..." — see
+    // derivedBaseName for every marker it takes back off.
+    baseName = derivedBaseName(baseName);
 
     // PATCH or WOT TH: both rewrite DME logic in place, so either one alone means these bytes are
     // patched and the name has to say so. This is the same expression that decides whether the
@@ -501,10 +516,10 @@ export function useBinaryFile() {
     // switched off. A file that gets emailed around, or found on a disk a year later, should say so
     // in the one piece of metadata that always travels with it.
     const tevSuffix = applyTankVentDisable ? '_TEVOFF' : '';
-    // Its own marker too, and for the sharper version of the same argument: a BIN carrying this is
-    // one the DME enriches on across a far wider part of the map than BMW allowed. A file that
+    // Its own marker too, and for the sharper version of the same argument: a BIN carrying K HOLD
+    // has no cold-exhaust enrichment at all and more ignition advance at part load. A file that
     // turns up later with no way to tell is a file that gets flashed for a normal drive.
-    const gateSuffix = applyRfKorrGateDrop ? '_RFGATE40' : '';
+    const holdSuffix = applyRfKorrHold ? '_KHOLD' : '';
     // `Tune_` iff a derived table actually went into the bytes — which is the manifest's answer,
     // not the derivation's. A map that exists but whose WRITE VE toggle is off contributes nothing
     // and must not name the file; an RF KORR or SHAPE grid alone contributes plenty and used to
@@ -513,7 +528,7 @@ export function useBinaryFile() {
     // run), but not a tune.
     const claimsTune = writeClaimsTune(newMap, writeVe, extras);
     const prefix = claimsTune ? 'Tune' : 'Base';
-    return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}${gateSuffix}.bin`;
+    return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}${holdSuffix}.bin`;
   };
 
   const downloadBin = (newMap: VEMap | null, extras?: PatchExtras) => {
@@ -553,7 +568,7 @@ export function useBinaryFile() {
     // built with the previous session's patches" failure the two lists exist to prevent. One
     // omission here already shipped once (`_TEVOFF` on an unrelated binary).
     setApplyTankVentDisable(false);
-    setApplyRfKorrGateDrop(false);
+    setApplyRfKorrHold(false);
     setWriteRfKorr(false);
     // Back to the DEFAULT, not to false — this list exists so the next BASE starts where a fresh
     // load would, and a fresh load arms VE. Resetting it to false here would make the second
@@ -574,8 +589,8 @@ export function useBinaryFile() {
     applyWotDisable,
     applyTankVentDisable,
     setApplyTankVentDisable,
-    applyRfKorrGateDrop,
-    setApplyRfKorrGateDrop,
+    applyRfKorrHold,
+    setApplyRfKorrHold,
     setApplyWotDisable,
     writeWarmup,
     setWriteWarmup,

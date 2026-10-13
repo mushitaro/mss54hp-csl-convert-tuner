@@ -17,7 +17,7 @@
  */
 import { BinaryPatcher, patchOnImage, readLogicPatches } from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, CSL_STOCK_WOT_THRESHOLD_MAP } from '../src/config/constants.ts';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, CSL_STOCK_WOT_THRESHOLD_MAP, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
 import { analyzeDataChecksum } from '../src/lib/checksum/dmeDataChecksum.ts';
 
 let fails = 0;
@@ -142,6 +142,57 @@ console.log('\n[tank vent: a half-gain calibration is not "sort of disabled"]');
     p.setTankVentDisable(false);
     const after = new Uint8Array(p.getBuffer());
     check('a shut valve falls back to stock gain', after[TANK_VENT_GAIN.ADDRESS] === TANK_VENT_GAIN.STOCK_RAW);
+}
+
+console.log('\n[rf_korr floor: twelve bytes, same rule — and HOLD is the patch\'s own work]');
+{
+    const Y = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
+    const N = RF_KORR_GATE_FLOOR.POINTS;
+    // This car's own floor — none of it BMW's reference, the hold or the drop. No word shares a
+    // byte with 2000 (0x07D0), so "twelve moved" is a count of the hold's writes, not of luck.
+    const OWN = [710, 560, 640, 660, 640, 780];
+    const words = (ws) => Object.fromEntries(ws.flatMap((w, i) => [[Y + i * 2, w >> 8], [Y + i * 2 + 1, w & 0xFF]]));
+    const floor = (b) => Array.from({ length: N }, (_, i) => u16(b, Y + i * 2));
+    const after = (bytes, mode) => { const p = patcherOn(bytes); p.setRfKorrGateFloor(mode); return new Uint8Array(p.getBuffer()); };
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+    const before = fresh(words(OWN));
+    const held = after(before, 'hold');
+    check('hold writes 2000 into all six', floor(held).every(v => v === RF_KORR_GATE_FLOOR.HELD_RAW), JSON.stringify(floor(held)));
+    check('exactly twelve bytes moved, all of them the Y block',
+        diff(before, held).length === 12 && diff(before, held).every(i => i >= Y && i < Y + N * 2),
+        JSON.stringify(diff(before, held)));
+    check('parser calls it held', new BinaryParser(held.buffer).getRfKorrGateFloorHeld() === true);
+
+    check("an unpatched floor keeps this car's six", diff(before, after(before, 'stock')).length === 0,
+        JSON.stringify(floor(after(before, 'stock'))));
+    {
+        const p = patcherOn(before);
+        p.setRfKorrGateFloor('hold');
+        p.setRfKorrGateFloor('stock');
+        check('hold then stock is a round trip', diff(before, new Uint8Array(p.getBuffer())).length === 0);
+    }
+    // Arrived held: OFF has nothing true to go back to, and writing the 2000s back would ship the
+    // hold. Same for the retired drop.
+    check('a held floor falls back to STOCK_RAW',
+        same(floor(after(fresh(words(Array(N).fill(RF_KORR_GATE_FLOOR.HELD_RAW))), 'stock')), [...RF_KORR_GATE_FLOOR.STOCK_RAW]));
+    check('a dropped floor falls back to STOCK_RAW',
+        same(floor(after(fresh(words(Array(N).fill(RF_KORR_GATE_FLOOR.DROPPED_RAW))), 'stock')), [...RF_KORR_GATE_FLOOR.STOCK_RAW]));
+    // One point short of the hold is not the hold, so it is not this app's work to undo.
+    const almost = [2000, 2000, 2000, 2000, 2000, 1999];
+    check('five at 2000 and one at 1999 is not held, and survives a restore',
+        !new BinaryParser(fresh(words(almost)).buffer).getRfKorrGateFloorHeld()
+        && same(floor(after(fresh(words(almost)), 'stock')), almost));
+
+    // The PATCH-ON image carries it, and says so.
+    const buf = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+    const on = new Uint8Array(patchOnImage(buf(before), {
+        applyPatch: true, applyWotDisable: false, applyTankVentDisable: false, applyRfKorrHold: true,
+    }));
+    check('the PATCH-ON image with K HOLD validates', analyzeDataChecksum(on).every(x => x.isValid));
+    const back = readLogicPatches(buf(on));
+    check('...and reads back as held, not dropped', back.applyRfKorrHold === true && back.applyRfKorrGateDrop === false,
+        JSON.stringify(back));
 }
 
 console.log('\n[the writers refuse what DataView would have mangled]');

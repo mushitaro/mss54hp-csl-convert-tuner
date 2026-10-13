@@ -1,23 +1,26 @@
 /**
- * The tuned VE derivation: does it divide by a correction the DME will actually apply?
+ * The VE derivation's rf_korr term: what it multiplies in, and what it no longer divides out.
  *
- * `New = Old × STFT × rf_korr ÷ k_new` (docs/ecu-logic/60 §6.4). The division exists so that a VE
- * map flashed alongside a rewritten KF_RF_KORR_DRREL is not corrected twice — the DME multiplies
- * k_new back in on the road, and the table must hold the nominal-temperature filling.
+ *     c_i = trim(t) x rf_korr(t)      where the DME's gate was open and the loop had answered
+ *     c_i = trim(t)                   where the gate was shut (the DME applied 1.000)
  *
- * That is only true where the DME reads the table at all. The correction is gated on filling:
- * `rf_soll > kl_rf_korr_rf_min(N)`, and below the floor rf_korr is 0x400 = 1.000 no matter how cold
- * the exhaust is (docs/ecu-logic/20 §1, master 0x021A70). Dividing a gate-shut sample by a table
- * value leaves `1/k_new` in the map with nothing to cancel it — and because the table's floor is
- * 1.000 and Δ is clipped at 0, that residual can only ever be LEAN.
+ * The gate is `rf_soll > kl_rf_korr_rf_min(N)` AND `V > k_rf_korr_v_min` with a hysteresis hold
+ * (docs/ecu-logic/20 §1, master 0x021A70). This file pins that the multiply follows it exactly,
+ * that nothing is DIVIDED any more, and that the 1-second settle is gone.
  *
- * Measured on session #904 before the fix: 12.3 % of samples had the gate open, and 39.9 % were
- * gate-shut with a divisor above 1 (median 1.023, max 1.242).
+ * WHAT WAS RETIRED, and the checks that now say so. The TUNED form `trim x rf_korr / k_new` existed
+ * for a VE map flashed together with a rewritten KF_RF_KORR_DRREL. The two are never written into
+ * one BIN now — the same drive's VE error would land in both — so `writeRfKorr` and a tuned table
+ * must change nothing. The settle (`trim` alone for the first 1.0 s of an enrichment) had no fixed
+ * point on the band; samples the loop has not answered are now NOT WRITTEN instead (`kRamp`, see
+ * verify:k-ramp for the rule itself). Every sample below is built post-ramp (`kRamp: false`)
+ * unless the check is about the ramp.
  *
  * Everything here runs the real VECalculator against a real-shaped stock table, so the assertions
  * are about the shipped arithmetic and not a restatement of it.
  */
-import { VECalculator, RF_TRUNCATION_MEAN_PERCENT, RF_KORR_SETTLE_SEC_DEFAULT } from '../src/lib/ve-calculator/calculator.ts';
+import * as Calculator from '../src/lib/ve-calculator/calculator.ts';
+import { VECalculator, RF_TRUNCATION_MEAN_PERCENT } from '../src/lib/ve-calculator/calculator.ts';
 import { RfKorrLatch } from '../src/lib/ve-calculator/egtTables.ts';
 import { APP_CONFIG } from '../src/config/constants.ts';
 
@@ -57,11 +60,11 @@ const inAir = (sample) => ({
     // written into thirty call sites, because "was the car moving" is not what most of these
     // checks are about; the ones that ARE override it.
     //
-    // SETTLED by default, for the same reason. A gate-open sample younger than
-    // `RF_KORR_SETTLE_SEC_DEFAULT` (1.0 s) is written with the trim alone, because the lambda loop
-    // has not answered the enrichment yet. Every check below is about the DIVISOR rather than the
-    // clock, so they say 30 s and the one section that IS about the clock overrides it.
-    intakeTemp: 20, ambientPressure: 960.5, vehicleSpeed: 80, rfKorrDwellSec: 30, ...sample,
+    // POST-RAMP by default, for the same reason. A gate-open sample the lambda loop has not answered
+    // yet is not written at all (`isKRampExcluded`). Every check below is about the multiply rather
+    // than the ramp, so they say `kRamp: false` and the one section that IS about the ramp
+    // overrides it.
+    intakeTemp: 20, ambientPressure: 960.5, vehicleSpeed: 80, kRamp: false, ...sample,
     ...(sample.rf === undefined ? {} : { rf: sample.rf - RF_TRUNCATION_MEAN_PERCENT }),
 });
 
@@ -88,6 +91,8 @@ const egt = {
     hys: 0.1,
     vMin: 20,
 };
+/** A tuned DRREL result as the tuner returns one — handed to the calculator below only to prove it
+ *  is ignored now. */
 const tuned = {
     rpm: KORR_RPM, delta: DELTA_AXIS, stock: KORR, tuned: KORR,
     countMap: [], weightMap: [], spreadMap: [], measuredMap: [], updated: [], rejected: [],
@@ -99,7 +104,8 @@ const calc = new VECalculator();
 // that number rather than by hunting for a cell.
 const mapOf = (v) => ({ xAxis: RPM, yAxis: LOAD, data: LOAD.map(() => RPM.map(() => v)) });
 
-/** One sample through the real path; returns the cell's nominal and tuned corrections. */
+/** One sample through the real path; returns the cell's correction. `writeRfKorr` and `tunedTable`
+ *  are passed the way the app used to pass them, and must not matter. */
 function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tunedTable = tuned, gate = null } = {}) {
     // `gate` is the latch's verdict, and it is passed EXPLICITLY on every call. null means "no
     // history — decide from the entry condition alone", which is what a lone synthetic sample can
@@ -108,20 +114,23 @@ function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tu
     const point = calc.annotateRfKorrPoint(map, inAir(sample), egt, air, gate);
     const grid = calc.createGrid();
     // Enough copies to clear the evidence gate, which is 10 samples and weight 5.
-    for (let i = 0; i < 40; i++) calc.accumulatePoint(grid, point, { source: 'rf-ratio', apply }, writeRfKorr ? tunedTable : null);
-    const out = calc.finalizeGrid(map, grid, { minCellSamples: 1, minCellWeight: 0.01, tunedRfKorr: writeRfKorr ? tunedTable : null, writeRfKorr });
+    for (let i = 0; i < 40; i++) calc.accumulatePoint(grid, point, { source: 'rf-ratio', apply });
+    const out = calc.finalizeGrid(map, grid, {
+        minCellSamples: 1, minCellWeight: 0.01, tunedRfKorr: writeRfKorr ? tunedTable : null, writeRfKorr,
+    });
     let best = null;
     for (let r = 0; r < LOAD.length; r++) for (let c = 0; c < RPM.length; c++) {
         if (out.hitMap[r][c] > 0 && (!best || out.weightMap[r][c] > best.w)) {
-            // `demandMap`, not `correctionMap`: this file is about WHICH rf_korr is divided out,
+            // `demandMap`, not `correctionMap`: this file is about WHICH rf_korr is multiplied in,
             // and correctionMap carries the significance shrinkage on top of that. The demand is
-            // the divisor arithmetic alone, and it is defined even where the cell was refused —
-            // which matters here, because a gate-shut sample legitimately demands exactly 1.000
-            // and a cell demanding no change is (correctly) not written.
-            best = { w: out.weightMap[r][c], correction: out.demandMap[r][c], usedTuned: out.tunedUsedMap[r][c], written: out.correctionMap[r][c] };
+            // the arithmetic alone, and it is defined even where the cell was refused — which
+            // matters here, because a gate-shut sample legitimately demands exactly 1.000 and a
+            // cell demanding no change is (correctly) not written.
+            best = { w: out.weightMap[r][c], correction: out.demandMap[r][c] };
         }
     }
-    return { point, ...best };
+    const kRampCell = out.rejectMap.some(row => row.some(v => v === 'k-ramp'));
+    return { point, ...best, written: best !== null, kRampCell, out };
 }
 
 // rf_soll 0.30 -> below the 0.55 floor -> gate SHUT. rf is a percentage, so rf = 30 * rfKorr.
@@ -251,53 +260,41 @@ console.log('\n[the HOLD branch — the third outcome, which no per-sample test 
         near(held.point.rfKorrUngated, cold.point.rfKorrUngated, 1e-12));
 }
 
-console.log('\n[the settle clock — an enrichment the loop has not answered is not evidence]');
+console.log('\n[same time, and only once the loop has answered — the settle clock is gone]');
 {
     /*
-     * The DME steps the fuel by rf_korr the instant its latch closes; the lambda loop cannot see
-     * that for about a second. Inside the window `trim` still reads the mixture from BEFORE the
-     * step, so `trim x rf_korr` credits the cell with the whole of rf_korr and measures nothing.
-     *
-     * Measured over #941-#946 by seconds since the latch closed, against a control of gate-shut
-     * cells at load >= 5 sitting at -0.11 %:
-     *
-     *     0-0.5 s +9.93 %  |  1-1.5 s +7.44 %  |  2-3 s +1.69 %  |  5+ s -4.94 %  |  pooled +2.18 %
-     *
-     * Replacing everything under N with the trim alone lands the pooled figure at -0.76 % for
-     * N = 1.0 and overshoots to -4.66 % by N = 3, because by then the loop HAS responded.
-     *
-     * The sample below is the same sample four times, differing only in its clock.
+     * The 1.0 s settle wrote `trim` alone for the first second of an enrichment and `trim x K`
+     * after it. Neither half had a fixed point on the band: the trim ramps at a fixed 0.0406/s
+     * until the lean switch, so `trim x K` there is the time since the step. What replaced it is
+     * one same-time product, written only where the walk says the loop has answered.
      */
+    check('RF_KORR_SETTLE_SEC_DEFAULT is gone from the calculator',
+        !('RF_KORR_SETTLE_SEC_DEFAULT' in Calculator));
     const s = { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 };
-    const at = (dwell) => run(OPEN, { ...s, rfKorrDwellSec: dwell }, { writeRfKorr: false });
+    const post = run(OPEN, { ...s, kRamp: false }, { writeRfKorr: false });
+    check('post-ramp: the correction is trim x rf_korr at the same instant', near(post.correction, 1.1, 1e-9),
+        String(post.correction));
+    // A sample that still carries the old dwell clock: it is not read any more.
+    const oldClock = run(OPEN, { ...s, kRamp: false, rfKorrDwellSec: 0 }, { writeRfKorr: false });
+    check('an old dwell of 0 s changes nothing — the clock is not read', near(oldClock.correction, 1.1, 1e-9),
+        String(oldClock.correction));
 
-    check('the default is one second', RF_KORR_SETTLE_SEC_DEFAULT === 1.0,
-        String(RF_KORR_SETTLE_SEC_DEFAULT));
-    check('settled: the correction carries rf_korr', near(at(30).correction, 1.1, 1e-9),
-        String(at(30).correction));
-    check('just over the threshold: still carried', near(at(1.0).correction, 1.1, 1e-9),
-        String(at(1.0).correction));
-    check('just under it: the trim alone', near(at(0.99).correction, 1.0, 1e-9),
-        String(at(0.99).correction));
-    check('the instant it engaged: the trim alone', near(at(0).correction, 1.0, 1e-9),
-        String(at(0).correction));
+    const ramp = run(OPEN, { ...s, kRamp: true }, { writeRfKorr: false });
+    check('mid-ramp: the sample is NOT written', !ramp.written);
+    check('...and its cell says why: k-ramp', ramp.kRampCell);
+    check('...while the measurement on the sample is untouched', near(ramp.point.rfKorr, 1.1, 1e-9),
+        String(ramp.point.rfKorr));
 
-    // NOT dropped. The whole objection to a settle FILTER on this path is that the enriched
-    // population lives in the high-load cells, so removing it deletes the region being fixed.
-    check('an unsettled sample still reaches its cell', at(0).w > 0, String(at(0).w));
-    check('...with the same weight a settled one carries', near(at(0).w, at(30).w, 1e-12));
-    // And the measurement itself is untouched — only what is DONE with it changes.
-    check('rf_korr is still recorded on the sample', near(at(0).point.rfKorr, 1.1, 1e-9),
-        String(at(0).point.rfKorr));
-
-    // A gate-open sample with no clock at all cannot be shown to have settled.
-    const noClock = run(OPEN, { ...s, rfKorrDwellSec: undefined }, { writeRfKorr: false, gate: true });
-    check('no clock on a gate-open sample reads as unsettled',
-        near(noClock.correction, 1.0, 1e-9), String(noClock.correction));
-    // A gate-SHUT sample has no step to wait for, so the clock must not gate it.
-    const shutNoClock = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, rfKorrDwellSec: undefined }, { writeRfKorr: false });
-    check('a gate-shut sample is never held back by the clock',
-        near(shutNoClock.correction, 0.9, 1e-9), String(shutNoClock.correction));
+    // A gate-open sample the walk never covered cannot be shown to be post-ramp.
+    const unknown = run(OPEN, { ...s, kRamp: undefined }, { writeRfKorr: false, gate: true });
+    check('no ramp state on a gate-open sample reads as a ramp — not written', !unknown.written);
+    // A gate-SHUT sample has no step to take back, so the ramp flag must not gate it.
+    const shutRamp = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, kRamp: true }, { writeRfKorr: false });
+    check('a gate-shut sample is written whatever its ramp flag says',
+        shutRamp.written && near(shutRamp.correction, 0.9, 1e-9), String(shutRamp.correction));
+    const shutNone = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, kRamp: undefined }, { writeRfKorr: false });
+    check('...and with no ramp state at all', shutNone.written && near(shutNone.correction, 0.9, 1e-9),
+        String(shutNone.correction));
 }
 
 console.log('\n[gate SHUT: the DME applies 1.000, so nothing may be divided out]');
@@ -307,41 +304,22 @@ console.log('\n[gate SHUT: the DME applies 1.000, so nothing may be divided out]
     const r = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 30, exhaustTemp: 100 });
     check('correction is the trim itself', near(r.correction, 1.0, 1e-6),
         `got ${r.correction} — a divisor leaked in on a gate-shut sample`);
-    check('the sample still carries its weight', r.usedTuned === true,
+    check('the sample still carries its weight', r.written && r.w > 0,
         'a shut gate is a definite statement about the cell, not missing evidence');
 }
 
-console.log('\n[gate OPEN: the divisor is the table value at this Δ]');
+console.log('\n[gate OPEN: the tuned table is never divided out — not even with the write armed]');
 {
     // rf_soll 0.70, rf 77.0 -> measured rf_korr 1.10. TABG 300 against a 400 model is Δ = 100,
-    // where the table reads 1.120.
+    // where the table reads 1.120. The retired TUNED form would have written 1.1 / 1.12.
     const r = run(OPEN, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 300 });
     check('measured rf_korr is RF ÷ rf_soll', near(r.point.rfKorr, 1.1, 1e-9));
-    check('correction is STFT × rf_korr ÷ k_new', near(r.correction, 1.0 * 1.1 / 1.120, 1e-6),
-        `got ${r.correction}, expected ${1.1 / 1.12}`);
-    check('and the cell says it used the tuned path', r.usedTuned === true);
-}
-
-console.log('\n[the 15 % guard, stated rather than discovered]');
-{
-    // TUNED_VS_NOMINAL_MAX compares the tuned candidate against the nominal one, and the candidate
-    // IS the nominal divided by k_new — so the test reduces to |1/k_new − 1| ≤ 0.15, i.e. it can
-    // only ever pass for k_new ≤ 1.176. A cell whose samples sit where the correction is largest
-    // therefore always falls back to the undivided value. That is safe (it under-corrects rather
-    // than over-corrects) but it is not what the comment above it describes, and the stock table
-    // peaks at 1.371 — so this is pinned here to be revisited deliberately, not rediscovered.
-    const r = run(OPEN, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 });
-    check('Δ = 300 is a divisor the guard must reject', KORR[DELTA_AXIS.indexOf(300)][0] > 1 / (1 - 0.15));
-    check('the cell falls back to the undivided correction', near(r.correction, 1.1, 1e-6),
-        `got ${r.correction}`);
-    check('and says so rather than pretending', r.usedTuned === false);
-}
-
-console.log('\n[gate OPEN at Δ ≤ 30: the table is 1.000, so the division is a no-op]');
-{
-    // TABG 380 against a 400 model is Δ = 20, which clamps to the pinned Δ=30 row.
-    const r = run(OPEN, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 70, exhaustTemp: 380 });
-    check('divisor is exactly 1.000', near(r.correction, 1.0, 1e-6), `got ${r.correction}`);
+    check('correction is STFT × rf_korr, nothing divided', near(r.correction, 1.1, 1e-6),
+        `got ${r.correction}, the tuned form would be ${1.1 / 1.12}`);
+    // Δ = 300 (TABG 100) is where the table peaks; a divisor there would have been the largest.
+    const hot = run(OPEN, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 });
+    check('...at every Δ', near(hot.correction, 1.1, 1e-6), String(hot.correction));
+    check('the calculator no longer reports a tuned path', !('tunedUsedMap' in r.out));
 }
 
 console.log('\n[the error only ever went one way]');
@@ -362,7 +340,6 @@ console.log('\n[apply = false: no half of the identity]');
     // which is neither documented derivation and is lean by the whole size of the correction.
     const r = run(OPEN, { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 100 }, { apply: false });
     check('correction is the trim alone', near(r.correction, 1.0, 1e-6), `got ${r.correction}`);
-    check('and no tuned value was taken', r.usedTuned === false);
 }
 
 console.log('\n[writeRfKorr off: the conservative route never divides]');
@@ -495,38 +472,31 @@ console.log('\n[the step the DME truncates away]');
 }
 
 
-console.log('\n' + '[the tuned table, and its cell gate, are inert when the write is not armed]');
+console.log('\n' + '[the tuned table, and its cell gate, are inert on the VE map — armed or not]');
 {
-    // What licenses hiding the RF KORR CELL GATE from a build that cannot write the table.
+    // The RF KORR cell gate's sliders shape `tunedRfKorr`. That table used to reach the VE map as a
+    // divisor behind `writeRfKorr`; it reaches it by no route now, because a VE and a DRREL are
+    // never written into one BIN. Tested by CHANGING THE TABLE: two tables that disagree everywhere
+    // must give the same map with the write off AND on.
     //
-    // The gate's two sliders reach the VE map by exactly one route: they shape `tunedRfKorr`, which
-    // calculator.ts consults only behind `options.writeRfKorr && tunedRfKorr.acceptable`. And
-    // page.tsx ANDs that flag with featureEnabled('rfKorr', ...), so a production build cannot arm
-    // it. If that chain holds, the sliders are dead there and a control that changes nothing is
-    // worse than an absent one -- the user concludes the derivation is broken.
-    //
-    // Tested by CHANGING THE TABLE rather than by reading the condition: two tables that disagree
-    // everywhere must give the same map when the write is off, and different maps when it is on.
-    // The second half is what stops this passing for the wrong reason.
-    // The same map and sample the gate-OPEN section above uses, because that one is known to reach
-    // the divisor: rf_soll 0.70, rf 77.0, TABG 300 against a 400 model -> the table is read at
-    // delta = 100. A sample that never opens the gate would make both halves of this pass for the
-    // wrong reason.
+    // The teeth are the last check: the same harness DOES see a change in the one input that should
+    // move the map (rf_korr itself), so "nothing moved" above is not the harness failing to look.
     const other = { ...tuned, tuned: KORR.map(row => row.map(v => v * 1.5)) };
     const s = { time: 0, rpm: 2200, rawLoad: 30, stft1: 1.0, stft2: 1.0, rf: 77, exhaustTemp: 300 };
 
     const offA = run(OPEN, s, { writeRfKorr: false });
     const offB = run(OPEN, s, { writeRfKorr: false, tunedTable: other });
     check('write OFF: a different tuned table changes nothing',
-        Math.abs(offA.correction - offB.correction) < 1e-12,
-        offA.correction + ' vs ' + offB.correction);
-    check('write OFF: the tuned divisor is never marked as used', offA.usedTuned !== true);
-
+        Math.abs(offA.correction - offB.correction) < 1e-12, offA.correction + ' vs ' + offB.correction);
     const onA = run(OPEN, s, { writeRfKorr: true });
     const onB = run(OPEN, s, { writeRfKorr: true, tunedTable: other });
-    check('write ON: the same two tables DO give different maps -- so the test has teeth',
-        Math.abs(onA.correction - onB.correction) > 1e-9,
-        onA.correction + ' vs ' + onB.correction);
+    check('write ON: a different tuned table changes nothing either',
+        Math.abs(onA.correction - onB.correction) < 1e-12, onA.correction + ' vs ' + onB.correction);
+    check('write ON and OFF build the same correction',
+        Math.abs(onA.correction - offA.correction) < 1e-12, onA.correction + ' vs ' + offA.correction);
+    const moreK = run(OPEN, { ...s, rf: 84 }, { writeRfKorr: true });
+    check('...while the harness does see rf_korr move it -- so the checks above have teeth',
+        Math.abs(moreK.correction - onA.correction) > 0.05, moreK.correction + ' vs ' + onA.correction);
 }
 
 console.log(fails === 0 ? '\nAll checks passed.\n' : `\n${fails} check(s) FAILED.\n`);

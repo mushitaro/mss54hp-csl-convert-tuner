@@ -1,6 +1,8 @@
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
 import type { EcuItemDef, EcuMapDef, EcuCurveDef, EcuConstantDef } from '@/lib/ecu-items/types';
+import { RF_KORR_GATE_FLOOR } from '@/config/constants';
+import { readLambdaRampParams, type LambdaRampParams } from './rampState';
 
 /**
  * The DME tables behind the EGT fuel correction, decoded out of a loaded binary.
@@ -27,6 +29,17 @@ export interface EgtTables {
      *  evaluates it. Measured on six drives: of the eight samples that drove one cell up 11.5 %,
      *  five were taken at 13-15 km/h. It was never the harmless half. */
     vMin: number;
+    /**
+     * The lambda controller's P jumps and clamps, out of the same bytes — what `KRampTracker` needs
+     * to see the loop take a K step back (rampState.ts).
+     *
+     * Here rather than in a reader of its own because it has to describe the binary the log was
+     * RUN against, exactly as the five tables above do, and every caller that reads those from the
+     * as-run bytes then gets these from the same bytes without a second thing to wire. Optional and
+     * NOT part of the all-or-nothing decode: absent or null, the tracker uses the 0401 band values,
+     * which is what every hand-built table set in the verify scripts relies on.
+     */
+    lambda?: LambdaRampParams | null;
 }
 
 /** Inversion behaviour. Every one of these is a named export so it can be relaxed against real
@@ -217,37 +230,6 @@ export function rfKorrActive(
  */
 export class RfKorrLatch {
     private latched = false;
-    private openedAt: number | undefined;
-
-    /**
-     * Advance, and also report how long the correction has been engaged.
-     *
-     * The clock lives here rather than in the callers because it IS latch state — it restarts on
-     * every reset, and there are two callers (the batch walk and the live run) that must not be
-     * able to disagree about when a correction started.
-     *
-     * Why anything needs it: the DME steps the fuel by k the instant it engages, and the lambda
-     * loop cannot see that for a second or so — transport delay, sensor, and a two-point controller
-     * running at 1-2 Hz. Read the trim inside that window and it has not responded yet, so
-     * `trim x k` is inflated by nearly the whole of k. Measured over #941-#946, by dwell:
-     *
-     *     0-0.5 s  +9.93 %   |  1-1.5 s  +7.44 %  |  2-3 s  +1.69 %  |  5+ s  -4.94 %
-     *
-     * against a control (gate-shut cells at load >= 5) of -0.11 %. The same cells, the same
-     * enrichment, and the answer flips sign with nothing but the clock.
-     *
-     * `perSecond` converts the log's own timestamps — 1 for a seconds log, 0.001 for the
-     * milliseconds a Testo CSV carries. See `timeScaleSeconds`.
-     */
-    stepTimed(
-        t: EgtTables, rpm: number, rfSoll: number | undefined, vehicleSpeed: number | undefined,
-        time: number, perSecond: number,
-    ): { open: boolean; dwellSec: number } {
-        const open = this.step(t, rpm, rfSoll, vehicleSpeed);
-        if (!open) this.openedAt = undefined;
-        else if (this.openedAt === undefined) this.openedAt = time;
-        return { open, dwellSec: open ? (time - this.openedAt!) * perSecond : 0 };
-    }
 
     /** Advance one sample and return whether the DME was applying a correction at it. */
     step(
@@ -267,6 +249,40 @@ export class RfKorrLatch {
         else if (!(rfSoll >= floor - t.hys && vehicleSpeed >= t.vMin)) this.latched = false;
         return this.latched;
     }
+}
+
+/**
+ * Is the floor at K HOLD — `RF_KORR_GATE_FLOOR.HELD_RAW` (2.000 RF) in all six points?
+ *
+ * EXACT equality on every word, never a threshold. The entry compare is unsigned and the hold
+ * threshold is 2.000 - 0.100 = 1.900, so anything above ~1.2 is already unreachable for rf_soll —
+ * and a threshold test would call a hand-built verify table "held" because it happened to be high.
+ * Only this app writes 2000 x 6, so only that pattern is the patch.
+ *
+ * Read off the decoded values (raw / 1000, which round-trips exactly) rather than the bytes, so it
+ * answers for whatever tables a caller holds — including the as-run ones a page builds.
+ */
+export function isRfKorrFloorHeld(t: EgtTables): boolean {
+    const held = RF_KORR_GATE_FLOOR.HELD_RAW;
+    return t.rfKorrMin.values.length === RF_KORR_GATE_FLOOR.POINTS
+        && t.rfKorrMin.values.every(v => Math.round(v * 1000) === held);
+}
+
+/**
+ * The same tables with BMW's floor put back: `STOCK_RAW` on the binary's own rpm breakpoints.
+ *
+ * For one question only — "what would the DME have done with the stock gate?" — which the K HOLD
+ * check asks of a drive that was supposed to be held (calculator.ts `resolveKHold`). The rpm axis
+ * is the binary's, because K HOLD never touches 0xE900; only the Y block is replaced.
+ */
+export function withStockRfKorrFloor(t: EgtTables): EgtTables {
+    return {
+        ...t,
+        rfKorrMin: {
+            rpm: [...t.rfKorrMin.rpm],
+            values: RF_KORR_GATE_FLOOR.STOCK_RAW.map(v => v / 1000),
+        },
+    };
 }
 
 /**
@@ -406,6 +422,7 @@ export function readEgtTables(buffer: ArrayBuffer): EgtTables | null {
             rfKorrMin: { rpm: min.x, values: min.values },
             hys: hys.value,
             vMin: vMin.value,
+            lambda: readLambdaRampParams(buffer),
         };
         return isPlausible(tables) ? tables : null;
     } catch {

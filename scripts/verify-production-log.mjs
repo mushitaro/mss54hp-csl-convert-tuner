@@ -13,7 +13,6 @@
 import { LOG_PROFILES, productionExchanges, expectedHz, describeExchanges } from '../src/lib/log-engine/logProfile.ts';
 import { LOG_FIELD_REGISTRY, fieldGroupsFor } from '../src/lib/field-registry/registry.ts';
 import { FEATURES } from '../src/lib/features.ts';
-import { LAMBDA_RESPONSE_RAM_READ, LAMBDA_TRIM_RAM_READ } from '../src/lib/dme-link/ramMap.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -64,10 +63,7 @@ console.log('\n[the production channel set, as a literal]');
     const ridingAlong = recorded.filter(k => rel(k) === 'debug');
     check('debug channels riding along on a kept exchange',
         JSON.stringify(ridingAlong) === JSON.stringify(
-            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1', 'baseInjectionMs',
-                'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
-                'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
-                'injectionReadTime', 'injectionReadMs'].sort()),
+            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1'].sort()),
         ridingAlong.join(', '));
 
     /*
@@ -108,27 +104,19 @@ console.log('\n[the exchanges a production run drops]');
 {
     const full = LOG_PROFILES.VE.exchanges;
     const prod = productionExchanges(full);
-    const expanded = full.find(x => x.kind === 'ram' && x.address === LAMBDA_RESPONSE_RAM_READ.address);
-    const narrowed = prod.find(x => x.kind === 'ram' && x.address === LAMBDA_TRIM_RAM_READ.address);
-    check('WORKS lambda response narrows to the original production trim read',
-        expanded?.count === 32 && narrowed?.count === 8
-        && JSON.stringify(narrowed?.provides) === JSON.stringify(['stft1', 'stft2', 'ltft1', 'ltft2']));
-    const gone = full.filter(x => x !== expanded && x.productionEvery === undefined && !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
-    check('injection capture does not slow production', prod.find(x => x.selection === 19)?.every === 8);
+    const gone = full.filter(x => !prod.includes(x)).map(x => x.name ?? `block ${x.selection}`);
     // Every exchange whose `provides` is debug THROUGHOUT. The slew-limiter pair joined the list
     // on 2026-08-30: MD_DYN_ST and the four torque words answer whether KF_MD_LS_KOMF ever bound,
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named
     // one by one rather than counted, so adding an exchange has to state which side it is on.
-    // Direct RF RAM is still unverified on this car and belongs to WORKS only.
-    check('exactly the seven debug-only exchanges',
+    check('exactly the four debug-only exchanges',
         JSON.stringify(gone.sort()) === JSON.stringify(
-            ['LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M',
-                'rf_korr (direct, unverified)', 'rf_soll (direct, unverified)',
-                'rf_p_saug_i (store, unverified)'].sort()),
+            ['LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M'].sort()),
         gone.join(', '));
     console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);
-    // Production retains its rate even when WORKS adds diagnostic-only reads.
+    // The rate is not the argument — 2.31 % would not justify removing a channel anyone reads.
+    // Pinned only so that a future exchange added to the debug lane cannot make it one.
     check('production is not SLOWER than preview', expectedHz(prod) >= expectedHz(full));
 }
 

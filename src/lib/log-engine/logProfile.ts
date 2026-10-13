@@ -42,9 +42,8 @@
  */
 
 import {
-    LAMBDA_TRIM_RAM_READ, LAMBDA_RESPONSE_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
+    LAMBDA_TRIM_RAM_READ, INERTIA_RAM_READ, AMBIENT_CHARGE_RAM_READ,
     AMBIENT_TEMP_RAM_READ,
-    RF_KORR_DIRECT_RAM_READ, RF_SOLL_DIRECT_RAM_READ, RF_MAP_INTEGRATOR_DIRECT_RAM_READ,
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
@@ -170,7 +169,7 @@ export const BLOCK_COST: Record<number, BlockCost> = {
  * the annotation is complete on the profile production can actually run.
  */
 export type LogExchange =
-    | { kind: 'block'; selection: number; every?: number; productionEvery?: number; provides?: readonly FieldKey[] }
+    | { kind: 'block'; selection: number; every?: number; provides?: readonly FieldKey[] }
     | {
         kind: 'ram';
         /** For the event log and the diagnostics record — a numeric address in a trace is unreadable. */
@@ -203,13 +202,7 @@ export type LogExchange =
  * channels a tune is read from and not twelve more that only make sense with the disassembly open.
  */
 export function productionExchanges(exchanges: readonly LogExchange[]): LogExchange[] {
-    return exchanges.map(x => x.kind === 'ram' && x.segment === LAMBDA_RESPONSE_RAM_READ.segment
-        && x.address === LAMBDA_RESPONSE_RAM_READ.address && x.count === LAMBDA_RESPONSE_RAM_READ.count
-        ? { ...x, ...LAMBDA_TRIM_RAM_READ, name: 'LA_F_REGLER1/2',
-            provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] as FieldKey[] }
-        : x.kind === 'block' && x.productionEvery !== undefined
-        ? { ...x, every: x.productionEvery }
-        : x).filter(x => !x.provides?.length
+    return exchanges.filter(x => !x.provides?.length
         || x.provides.some(key => LOG_FIELD_REGISTRY[key].relevance !== 'debug'));
 }
 
@@ -257,7 +250,7 @@ export function describeExchanges(exchanges: readonly LogExchange[]): string {
 }
 
 /** A block read, spelled out. */
-const block = (selection: number, every?: number): Extract<LogExchange, { kind: 'block' }> =>
+const block = (selection: number, every?: number): LogExchange =>
     every === undefined ? { kind: 'block', selection } : { kind: 'block', selection, every };
 
 /**
@@ -589,46 +582,25 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
     },
     VE: {
         id: 'VE', label: 'VE',
-        // Block 3 for rpm/load/RF/TABG, RAM for trim and response diagnostics, and
-        // block 19 every sample in WORKS for TI1..TI6 and a contemporaneous trim pair.
-        // Production keeps the existing 1/8 purge/trim-cross-check cadence.
+        // Block 3 for rpm, load, rf and tabg; four bytes of RAM for the lambda trim that used to
+        // cost a 90-byte block; block 19 every eighth sample for the purge and freeze channels that
+        // exist nowhere else — and, in the same breath, for the check that the four bytes are what
+        // they are claimed to be.
         exchanges: [
             // `provides` from here down is what `productionExchanges` narrows on. It names the LOG
             // channels an exchange puts in the file — not every byte it decodes: `ambientPressure-
             // Substituted`, `ambientTempFromCan` and `pressureDecodeDisagreesMbar` ride along on
             // these same reads as qualifiers on a channel rather than columns of their own, so they
             // have no registry entry to name and cannot keep an exchange alive by themselves.
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'baseInjectionMs'] },
-            // WORKS expands the existing trim read by 24 bytes (~27.5 ms at 9600 8E1).
-            // Production explicitly narrows it back to eight bytes above.
-            { kind: 'ram', name: 'Lambda response (0401, unverified)', ...LAMBDA_RESPONSE_RAM_READ,
-                provides: ['stft1', 'stft2', 'ltft1', 'ltft2', 'o2Precat1Mv', 'o2Precat2Mv',
-                    'lambdaState1', 'lambdaState2', 'lambdaPSteps1', 'lambdaPSteps2', 'baFTi',
-                    'lambdaReadTime', 'lambdaReadMs'] },
-            // WORKS diagnostics: separate, timestamped, unverified 0401 RAM words.
-            // k and the filtered target change at the gate, so both are read every
-            // sample. The MAP store is surveyed at 1/8 and is never carried forward.
-            // All three are debug-only and productionExchanges removes them there.
-            // At 9600 8E1 and the existing 35 ms RAM turnaround model this costs
-            // 110.9 ms/sample, plus 27.5 ms for the wide lambda read above:
-            // Before the full-rate injection response this was ~2.74 Hz in the model.
-            // Block 19 below now adds ~171.9 ms/sample: ~1.86 Hz. This is a model,
-            // not an on-car promise; production stays ~4.56 Hz.
-            // A 52-byte k/MAP cluster every sample would cost ~50.8 ms more per
-            // sample than these separate reads. Rates still need an on-car check.
-            { kind: 'ram', name: 'rf_korr (direct, unverified)', ...RF_KORR_DIRECT_RAM_READ,
-                provides: ['rfKorrDirect'] },
-            { kind: 'ram', name: 'rf_soll (direct, unverified)', ...RF_SOLL_DIRECT_RAM_READ,
-                provides: ['rfSollDirect'] },
-            { kind: 'ram', name: 'rf_p_saug_i (store, unverified)', ...RF_MAP_INTEGRATOR_DIRECT_RAM_READ,
-                every: LAMBDA_SLOW_LANE_EVERY, provides: ['rfMapIntegratorDirect'] },
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            // Eight bytes: the short-term pair the correction is read from, and the long-term
+            // stores its mean is learned into. All four are tuning — this read never narrows.
+            { kind: 'ram', name: 'LA_F_REGLER1/2', ...LAMBDA_TRIM_RAM_READ,
+                provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] },
             // Three debug bytes and `tetv`, which is tuning — so this stays in production, and the
             // three ride in free. It also carries the truth gate, which is not a channel at all.
-            { ...block(19), productionEvery: LAMBDA_SLOW_LANE_EVERY,
-                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
-                    'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
-                    'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
-                    'injectionReadTime', 'injectionReadMs'] },
+            { ...block(19, LAMBDA_SLOW_LANE_EVERY),
+                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
             // Ambient pressure, its two diagnostic bytes, the DME's altitude, intake air
             // temperature and the DME's own modelled charge temperature — sixteen bytes, one
             // telegram, on the same slow lane. This is what separates a real VE error from a
@@ -685,11 +657,8 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // in production it must record the same channel set. Narrowing this changes nothing — both
         // blocks carry tuning channels — which is the point of stating it rather than assuming it.
         fallback: [
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'baseInjectionMs'] },
-            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
-                'injection1Ms', 'injection2Ms', 'injection3Ms', 'injection4Ms', 'injection5Ms', 'injection6Ms',
-                'injectionBlankActual', 'injectionBlankTarget', 'injectionStft1', 'injectionStft2',
-                'injectionReadTime', 'injectionReadMs'] },
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
         ],
         // The lambda trim is the whole input, and PATCH is what stops the DME hiding the error the
         // trim is supposed to reveal: k_rf_cfg turns MAP compensation off and K_LAA_TMOT_MIN stops
@@ -850,11 +819,15 @@ export function missingPatches(profile: LogProfile, armed: ArmedPatches): Requir
  *                 workflow there is, and the one that needs no EGT run at all.
  *   A1            The correction table alone, no VE map. First half of the sequential campaign.
  *   A2            VE map only, on a BASE whose table this campaign already replaced. Second half.
- *   B             Both together, with the VE map divided by k_new. One flash slot instead of two,
- *                 at the cost of depending on a division that no car has yet checked.
  *   NONE          Nothing has been derived, so there is nothing to write.
+ *
+ * There was a B — both in one flash, the VE map divided by k_new — and it is gone with the division.
+ * The tuner now anchors on the VE the drive ran on (`D = rf_korr x trim`) and the VE write reads
+ * `trim x rf_korr` off the same samples, so one drive's VE error would land in both tables and be
+ * corrected twice. The hub never arms the two together, so an armed table is A1 whichever run
+ * measured it: a VE log driven with ALPHA-N off is exactly route A's first half.
  */
-export type RouteId = 'CONSERVATIVE' | 'A1' | 'A2' | 'B' | 'NONE';
+export type RouteId = 'CONSERVATIVE' | 'A1' | 'A2' | 'NONE';
 
 export function deriveRoute(input: {
     process: ProcessId;
@@ -867,13 +840,7 @@ export function deriveRoute(input: {
 }): RouteId {
     const { process, writeRfKorr, hasVeMap, parentProcess } = input;
     if (process === 'INERTIA') return 'NONE';
-    if (process === 'EGT') return writeRfKorr ? 'A1' : 'NONE';
-    if (!hasVeMap) return 'NONE';
-    if (writeRfKorr) return 'B';
+    if (writeRfKorr) return 'A1';
+    if (process === 'EGT' || !hasVeMap) return 'NONE';
     return parentProcess === 'EGT' ? 'A2' : 'CONSERVATIVE';
-}
-
-/** Does this route rest on the k_new division that has never been checked on a car? */
-export function routeNeedsUnverifiedDivision(route: RouteId): boolean {
-    return route === 'B';
 }

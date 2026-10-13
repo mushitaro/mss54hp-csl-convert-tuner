@@ -1,21 +1,18 @@
-import { type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, resolveRfKorr, isVeComparisonPolicy } from '@/lib/types';
-import { DME_RESPONSE_VERSION, type DmeCalibration } from './dmeResponse';
-import type { MovingResponseCalibration } from './movingResponseInputs';
-import type { LogFilterConfig } from '@/lib/types';
-import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
-import type { OperatingHold } from './operatingPolicy';
-import { deriveOperatingCorrection } from './steadyEvidence';
+import {
+    type LogDataPoint, type VEMap, type RfKorrMode, type RfKorrSource, type InterpolationPoint, resolveRfKorr,
+} from '@/lib/types';
 import { APP_CONFIG, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP, CSL_STOCK_WARMUP_RPM, CSL_STOCK_WARMUP_LOAD } from '@/config/constants';
 import { chargeTempFactor, rfPtKorrFor, type RfPtKorrCurves } from './chargeTemp';
 import {
-    type EgtTables, EGT_INVERSION_DEFAULTS, interpMap2d, invertRfKorrProfile, RfKorrLatch,
-    rfKorrActive, rfKorrAt,
+    type EgtTables, EGT_INVERSION_DEFAULTS, invertRfKorrProfile, RfKorrLatch,
+    rfKorrActive, rfKorrAt, isRfKorrFloorHeld, withStockRfKorrFloor,
     rfKorrProfileAt, tabgModelAt,
 } from './egtTables';
-import type { RfKorrTuneResult, RfKorrTuneOptions } from './rfKorrTuner';
+import { KRampTracker, isKRampExcluded } from './rampState';
+import type { RfKorrTuneOptions } from './rfKorrTuner';
 import { MAX_SAMPLE_SD } from './veScatter';
 import { axisBracket } from '@/lib/log-engine/axisBracket';
-import { timeScaleSeconds } from '@/lib/log-engine/filter';
+import { interpolateFactor } from '@/lib/log-engine/filter';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -31,11 +28,13 @@ interface GridCell {
     minRfKorr: number;
     maxRfKorr: number;
 
-    // The 'tuned' correction, accumulated alongside rather than instead of the nominal one. Both
-    // are needed at the same time: the guard below compares them, and a cell that fails it falls
-    // back to the nominal value, which has to still be there to fall back to.
-    sumTunedWeighted: number;
-    weightSumTuned: number;
+    /**
+     * Gate-open samples that would have landed here and were NOT written, because the lambda loop
+     * was still taking back an rf_korr step (`isKRampExcluded`). Counted per corner the way
+     * `rawCount` is, so a cell whose only evidence was mid-ramp is refused as 'k-ramp' rather than
+     * reported as never driven.
+     */
+    kRampCount: number;
 
     /**
      * Sum(Weight^2), which with `weightSum` gives the cell's SELF-SHARE, `Sum(w^2)/Sum(w)`.
@@ -92,12 +91,6 @@ interface GridCell {
      */
     minCorrectionNear: number;
     maxCorrectionNear: number;
-    /** The same bounds for the TUNED correction. Separate because the clamp has to bound the
-     *  quantity that is actually written: the tuned value is the nominal one divided by k_new, so
-     *  the two ranges can be 20 % apart and clamping one against the other would drag a tuned cell
-     *  back onto the nominal answer while `tunedUsedMap` still claimed the tuned path. */
-    minTunedNear: number;
-    maxTunedNear: number;
 }
 
 /**
@@ -245,58 +238,6 @@ export const VE_METHOD_DEFAULT: VeMethod = 'direct';
 export const DIRECT_AUTHORITY_DEFAULT = 1.0;
 
 /**
- * Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is evidence.
- *
- * ## The mechanism
- *
- * The DME steps the fuel by `rf_korr` the instant its latch closes. The lambda loop cannot see that
- * for about a second — exhaust transport delay, sensor response, and a two-point controller running
- * at 1-2 Hz. Inside that window the trim still reads the mixture from BEFORE the step, so
- * `trim x rf_korr` credits the cell with the whole of rf_korr and nothing has actually been measured.
- *
- * The response is visible directly. Over #941-#946, mean written factor by seconds since the latch
- * closed, against a control of gate-shut cells at load >= 5 which sits at -0.11 %:
- *
- *     0-0.5 s +9.93 %   0.5-1 s +9.15 %   1-1.5 s +7.44 %   1.5-2 s +4.78 %
- *     2-3 s   +1.69 %   3-5 s   -2.06 %   5+ s    -4.94 %   pooled  +2.18 %
- *
- * The enrichment is about +10.4 % (k = 1.11), so those numbers read as the fraction of it the loop
- * has taken back: nothing at 0.25 s, ~30 % at 1.25 s, ~85 % at 2.5 s, complete by 5. A first-order
- * lag of roughly 1.5 s.
- *
- * ## Why 1.0 and not the zero crossing
- *
- * The raw curve crosses zero at 2.5-3 s, and that is the wrong number to take. Below the threshold
- * the sample is written with `trim` alone — which is right only while the loop has NOT responded.
- * By 1.5-3 s it has responded 30-85 %, so forcing k = 1 there over-corrects. Measured, replacing
- * everything under N with trim alone:
- *
- *     N      pooled factor on enriched samples     (control: -0.11 %)
- *     0                        +2.18 %   <- today
- *     1.0                      -0.76 %   <- lands on the control
- *     1.5                      -1.94 %
- *     2.0                      -2.95 %
- *     3.0                      -4.66 %
- *     5.0                      -6.49 %
- *
- * At 1.0 s the enriched cells stop having a standing bias relative to comparable unenriched ones,
- * which is the whole objective. Past it the loop starts pulling them lean instead.
- *
- * ## What it does NOT do
- *
- * Drop anything. The enriched population is 3,169 samples over six drives and it lives entirely in
- * the high-load cells — 96.8 % of samples at the 25 % opening row carry an enrichment, 99.4 % at
- * 30 %, and 22 cells are at 100 %. A settle filter that REMOVED them would delete the region it
- * exists to fix, which is the objection that has (correctly) killed two previous filter proposals
- * on this path. This changes what an unsettled sample says, not whether it speaks.
- *
- * Nor is it `transientSettleSec`, which is 0 by deliberate operator choice and gates on the
- * THROTTLE. This clock starts when the DME's own correction engages, which is a different event —
- * measured, the two coincide on very little.
- */
-export const RF_KORR_SETTLE_SEC_DEFAULT = 1.0;
-
-/**
  * Samples a cell needs before DIRECT will write it.
  *
  * Three, the fewest that can carry a mean and a scatter at all. It is NOT a precision bar —
@@ -396,22 +337,10 @@ export function tCritical95(dof: number): number {
 const CLAMP_MIN_WEIGHT = 0.25;
 
 /**
- * How far the 'tuned' correction may sit from the 'nominal' one before a cell gives up and takes
- * the nominal value.
- *
- * This is the load-bearing bound on the new path. 'nominal' is the behaviour that has shipped and
- * is known to fail rich; dividing by a measured quantity is new, and a cell whose k_new came from
- * thin evidence could otherwise move the map a long way on very little. 15 % means the tuned path
- * can refine the map but can never take it somewhere the existing path would not go.
- */
-const TUNED_VS_NOMINAL_MAX = 0.15;
-
-/**
- * Absolute bounds on any per-cell correction, either path.
+ * Absolute bounds on any per-cell correction.
  *
  * A catastrophe net rather than a tuning parameter: outside this range the lambda integrator is
- * pinned at its own clamp and the samples are not describing mixture any more. Nothing before this
- * commit could reach it — but nothing before this commit divided.
+ * pinned at its own clamp and the samples are not describing mixture any more.
  */
 const CORRECTION_MIN = 0.5;
 const CORRECTION_MAX = 2.0;
@@ -444,7 +373,14 @@ export type VeReject =
     /** The corrections scatter more than one condition can explain. */
     | 'scatter'
     /** One condition, but the mean is not pinned to a writable step yet. */
-    | 'imprecise';
+    | 'imprecise'
+    /**
+     * Samples landed here, and every one of them was taken while the lambda loop was still taking
+     * back an rf_korr step — so none could be written (`isKRampExcluded`, rampState.ts). Distinct
+     * from 'no-evidence' because the remedy is not "drive here": it is "hold the throttle past the
+     * lean switch", or run with K HOLD so there is no step to take back.
+     */
+    | 'k-ramp';
 
 /**
  * What `annotateRfKorrPoint` needs to measure rf_korr honestly.
@@ -480,27 +416,76 @@ export interface RfKorrAirInput {
     curves: RfPtKorrCurves | null;
     /** Ambient pressure for logs recorded before the channel existed, mbar. Operator-supplied. */
     assumedPressureMbar?: number;
+    /**
+     * The opening-to-`aq_rel_rf` table the log filter corrected the load with — the session's
+     * interpolation table — or `null` when the filter's correction is off (a CSV that is already
+     * corrected). Undefined means the app's default table, which is what the filter uses then too.
+     *
+     * Needed because the latch walks the RAW log, and raw samples never went through the filter:
+     * they carry `rawLoad` and no `correctedLoad`. Looking the map up at the raw opening read
+     * rf_soll LOW wherever the factor is under 1 — below 2400 rpm on the stock table, 0.95 at 2100
+     * and 0.70 at idle — so the latch saw a gate shut that the DME had open. See `loadFor`.
+     */
+    loadTable?: InterpolationPoint[] | null;
+}
+
+/**
+ * The K HOLD check's verdict when it FAILS: the as-run floor said held, and the car disagreed.
+ *
+ * `medianRatio` is the median `RF / rf_soll` over the `n` samples where the STOCK floor would have
+ * had the gate open. With the hold in force those read 1.00 (the DME applied 1.000); a drive where
+ * they read 1.05 or more was enriched, so the bytes in the car were not the bytes this app thinks
+ * were flashed. See `resolveKHold`.
+ */
+export interface KHoldNotInEffect {
+    medianRatio: number;
+    n: number;
+}
+
+/**
+ * Above this median `RF / rf_soll`, a supposedly held drive was being enriched after all.
+ *
+ * Where the hold works the stock-open samples should read 1.00: the DME applied 1.000, and what is
+ * left is the ratio's own error, whose median against the DME's RAM `rf_korr` was -0.003 to +0.004
+ * on each of #964-#970. Where it does not, they read the enrichment: replayed as if held, those six
+ * stock-gate drives give medians of 1.092 to 1.196. 1.05 sits in the empty space between.
+ */
+export const K_HOLD_IN_EFFECT_MAX_RATIO = 1.05;
+
+/** Stock-open samples the check needs before it says anything. A median of three does not tell a
+ *  transient from an enrichment, and a verdict that flickers at the start of a run is ignored. */
+export const K_HOLD_CHECK_MIN_SAMPLES = 5;
+
+/** One raw sample's worth of the DME's rf_korr state: the latch, and whether the loop was still
+ *  taking back a K step. */
+export interface RfKorrStep {
+    open: boolean;
+    kRamp: boolean;
 }
 
 export interface VeCalcOptions {
-    /** Opt-in comparison with the existing rf_korr table retained; no BIN output. */
-    veCorrectionPolicy?: LogFilterConfig['veCorrectionPolicy'];
-    veLearningRate?: number;
-    /** null = BASE passed. undefined is unknown and must not authorize a correction. */
-    steadyCalibrationHold?: OperatingHold | null;
-    dmeCalibration?: DmeCalibration | null;
-    movingCalibration?: MovingResponseCalibration | null;
-    steadyLambdaLimits?: LambdaLimits | null;
-    steadyFilterConfig?: LogFilterConfig;
-    steadyLoadTable?: { rpm: number; factor: number }[];
     /**
-     * Legacy nominal replay: New = Old * trim * rf_korr (before any planned-table division).
-     * Kept for archived sessions. This is a hypothesis about the reference condition, not proof
-     * that multiplying back is the correct next write while the same rf_korr remains active.
-     * At unchanged conditions the multiplicative model instead gives trim * k_applied/k_planned.
-     * Neither formula identifies nominal VE from a single thermal state with unknown additive
-     * terms. The opt-in steady-retain path bypasses this flag and stays comparison-only.
-     * See docs/ve-steady-evidence.md for assumptions and validation still required.
+     * Fold the measured rf_korr into the correction: New = Old * STFT * rf_korr.
+     * This is karter16's "Option 2", and the caller should normally pass it TRUE.
+     *
+     * What it decides is what kf_rf_soll is FOR, and the two answers differ by up to 37 % where
+     * KF_RF_KORR_DRREL peaks:
+     *
+     *   ON  — the table holds filling at NOMINAL exhaust temperature; rf_korr adds the
+     *         cold-exhaust enrichment on top. A map tuned on a cold-exhaust drive is still right
+     *         once the exhaust heats up and rf_korr falls back to 1.0.
+     *   OFF — the table holds filling at whatever rf_korr the log was taken under. Self-consistent
+     *         at that condition, and correct at every condition IF BMW's density model exactly
+     *         matches this engine — because then rf_korr cancels out of the derivation.
+     *
+     * They fail in opposite directions, and that is the whole argument: OFF, on a log taken with a
+     * cold exhaust, writes a table that goes LEAN under load once things warm up. ON is rich-safe.
+     * On an S54 that asymmetry is not a close call, which is why the config default is on.
+     *
+     * Whether the model actually matches cannot be settled from one log. It needs the same cell
+     * sampled at different tabg_delta, and then STFT read against rf_korr: flat means the model
+     * matches, sloped means it does not. `rfKorrMap` / `rfKorrSpreadMap` are what make that
+     * comparison possible — see docs/ecu-logic/60-tuning-logic.md §6.3.
      */
     applyRfKorr?: boolean;
 
@@ -552,10 +537,6 @@ export interface VeCalcOptions {
     directAuthority?: number;
     minCellSamples?: number;
     minCellWeight?: number;
-    /** Seconds an rf_korr enrichment must have been engaged before `trim x rf_korr` is evidence.
-     *  Absent means `RF_KORR_SETTLE_SEC_DEFAULT`. See it for the measurement that chose the number
-     *  and for why this changes what an unsettled sample SAYS rather than dropping it. */
-    rfKorrSettleSec?: number;
 
     /**
      * Overrides for the rf_korr tuner's own grid thresholds, forwarded untouched.
@@ -583,18 +564,15 @@ export interface VeCalcOptions {
     rfKorrSource?: RfKorrSource;
 
     /**
-     * Whether the back-calculated KF_RF_KORR_DRREL is being written into the binary — and therefore
-     * whether the VE derivation must divide by it.
-     *
-     * The same flag drives both because they are one decision. `TuneSettings.writeRfKorr` is where
-     * it is stored, alongside writeWarmup and writeWot.
+     * @deprecated IGNORED. This used to make the VE derivation divide by the back-calculated
+     * KF_RF_KORR_DRREL (`VE x trim x K / k_new`), for a VE map flashed together with a new DRREL.
+     * The two are never written into one BIN any more: the same drive's VE error would land in
+     * both — `trim x K` in the VE and `K x trim` in the DRREL anchor — and be corrected twice. So
+     * the VE is always the same-time nominal form and there is nothing left to divide by. The app
+     * no longer passes it — the hub decides which of the two is armed — and it stays on the type
+     * only so verify:ve-divisor can pin that setting it changes nothing.
      */
     writeRfKorr?: boolean;
-
-    /** The back-calculated correction table. Required when `writeRfKorr` is set and ignored
-     *  otherwise. Absent or not acceptable leaves the divisor out per cell — the caller is expected
-     *  to have disabled the toggle, and a calculation is not where to raise that. */
-    tunedRfKorr?: RfKorrTuneResult | null;
 }
 
 export class VECalculator {
@@ -620,39 +598,20 @@ export class VECalculator {
     ): {
         newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
-        tunedUsedMap: boolean[][]; acceptedMap: boolean[][]; realisedMap: number[][];
+        acceptedMap: boolean[][]; realisedMap: number[][];
         demandMap: number[][];
         rejectMap: (VeReject | null)[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
     } {
-        if (options.veCorrectionPolicy === 'moving-response') {
-            throw new Error('Moving-response Tune requires calculateMovingResponseTune with intact RAW history');
-        }
         // Defaults to RF ÷ rf_soll — the route that needs no sensor. A caller that forgets to pass
         // options lands on the same arithmetic the app has always done.
         const plan = resolveRfKorr(options);
-        // Writing the derived table and dividing by it are one decision: a VE map built for k_new
-        // while the DME still applies k_old leaves the residual k_new/k_old, which reaches -27 % at
-        // the stock peak (2200-2350 rpm) and goes LEAN. So this reads the WRITE flag, not a mode.
-        //
-        // The table still has to have been derived and passed its own evidence thresholds. Without
-        // one it degrades per cell to "no divisor" rather than failing — the UI gates the toggle
-        // separately, and a calculation is not where to raise that.
-        const tuned = options.writeRfKorr && options.tunedRfKorr?.acceptable
-            ? options.tunedRfKorr : null;
-
         const grid = this.createGrid();
 
         // 1. Binning / Aggregation (Weighted)
-        for (const point of logData) this.accumulatePoint(
-            grid, point, plan, tuned, options.normaliseTo, options.rfKorrSettleSec, options);
+        for (const point of logData) this.accumulatePoint(grid, point, plan, options.normaliseTo);
 
-        const result = this.finalizeGrid(currentMap, grid, isVeComparisonPolicy(options.veCorrectionPolicy)
-            ? { ...options, veMethod: 'direct', directAuthority: 1 } : options);
-        if (isVeComparisonPolicy(options.veCorrectionPolicy) && result.newMap) {
-            result.newMap = { ...result.newMap, calibrationStatus: 'comparison-only' };
-        }
-        return result;
+        return this.finalizeGrid(currentMap, grid, options);
     }
 
     /**
@@ -673,12 +632,11 @@ export class VECalculator {
                         sumStftWeighted: 0, weightSum: 0, rawCount: 0,
                         sumRfKorrWeighted: 0, weightSumRfKorr: 0,
                         minRfKorr: Infinity, maxRfKorr: -Infinity,
-                        sumTunedWeighted: 0, weightSumTuned: 0,
+                        kRampCount: 0,
                         sumWeightSq: 0, sumStftSqWeighted: 0,
                         substantialCount: 0, lagPairs: 0, sumLagAB: 0, sumLagA: 0, sumLagB: 0,
                         sumLagA2: 0, sumLagB2: 0, prevVal: null, prevTime: null,
                         minCorrectionNear: Infinity, maxCorrectionNear: -Infinity,
-                        minTunedNear: Infinity, maxTunedNear: -Infinity,
                     }))
             );
     }
@@ -690,44 +648,20 @@ export class VECalculator {
      * at a time and get the same answer as a batch pass over all of them. That is not a coincidence
      * to rely on quietly — `verify:incremental` asserts the two agree cell for cell on a real drive.
      *
-     * `tuned` is the one input that is not per-sample: it comes from the rf_korr tuner, which reads
-     * the whole log. A live caller must therefore either hold it fixed or rebuild the grid when it
-     * changes; see IncrementalRun for which of those it does and why.
+     * Every input is per sample now. The one that was not — the rf_korr tuner's table, which the
+     * retired TUNED divisor read off the whole log — is gone, so a live grid and a batch grid over
+     * the same annotated samples are the same grid by construction.
      */
     public accumulatePoint(
         grid: GridCell[][], point: LogDataPoint,
-        plan: ReturnType<typeof resolveRfKorr>, tuned: RfKorrTuneResult | null,
+        plan: ReturnType<typeof resolveRfKorr>,
         /** The BASE's own RF_PT_KORR curves, to state each sample at the air the table is
          *  defined for. Null/undefined = leave it as the day's air gave it. Threaded in rather than
          *  read from a field so the live and batch paths cannot disagree about it — see
          *  `verify:incremental`. */
         normaliseTo?: RfPtKorrCurves | null,
-        /** Seconds an enrichment must have been engaged before `trim x rf_korr` means anything.
-         *  Absent means `RF_KORR_SETTLE_SEC_DEFAULT`. Threaded in for the same reason
-         *  `normaliseTo` is: a live flush and the STOP pass must not use different numbers. */
-        settleSec?: number,
-        operating?: VeCalcOptions,
     ): void {
-        if (operating?.veCorrectionPolicy === 'moving-response') {
-            throw new Error('Moving-response Tune cannot accumulate isolated samples');
-        }
         {
-            if (operating?.veCorrectionPolicy === 'dme-response') {
-                const e = point.dmeResponse;
-                if (operating.steadyCalibrationHold !== null || operating.writeRfKorr
-                    || e?.version !== DME_RESPONSE_VERSION || e.reason !== 'cycle-candidate'
-                    || point.veEvidenceEligible !== true || e.meanRpm === undefined || e.meanLoad === undefined) return;
-                const rpmInfo = this.findBoundingIndices(e.meanRpm, this.rpmAxis);
-                const loadInfo = this.findBoundingIndices(e.meanLoad, this.loadAxis);
-                const correction = deriveOperatingCorrection({ trim: e.trim,
-                    kApplied: e.kApplied, kPlanned: e.kApplied, learningRate: operating.veLearningRate ?? 1 });
-                if (!rpmInfo || !loadInfo || correction === undefined) return;
-                // One vote per new pair of cycles, at its mean trajectory, not the last raw STFT
-                // or every later row. Keeping the RF table is explicit; changed-table writes are held.
-                this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
-                    correction, e.kApplied, undefined, point.time);
-                return;
-            }
             // Use Corrected Load if available, else Raw Load
             const loadVal = point.correctedLoad ?? point.rawLoad;
             const rpmVal = point.rpm;
@@ -772,23 +706,6 @@ export class VECalculator {
 
             if (!rpmInfo || !loadInfo) return;
 
-            if (operating?.veCorrectionPolicy === 'steady-retain') {
-                // No nominal-VE claim and no fallback to old arithmetic on missing evidence.
-                // RAM probes remain diagnostic. The same planned/applied factor cancels only
-                // under this local, unchanged-table hypothesis; another thermal state must test it.
-                if (operating.steadyCalibrationHold !== null || operating.writeRfKorr
-                    || point.veEvidenceEligible !== true || point.ltft1 !== 1 || point.ltft2 !== 1
-                    || point.rfKorrGateOpen === undefined) return;
-                const correction = deriveOperatingCorrection({
-                    trim, kApplied: point.rfKorr, kPlanned: point.rfKorr,
-                    learningRate: operating.veLearningRate ?? 1,
-                });
-                if (correction === undefined) return;
-                this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
-                    correction, point.rfKorr, undefined, point.time);
-                return;
-            }
-
             // The chosen route. Both annotated in the same pass by annotateRfKorr, so switching
             // between them re-derives from the same log without re-reading anything.
             //   'rf-ratio'    RF ÷ rf_soll        — what the DME applied, from its own output
@@ -808,7 +725,8 @@ export class VECalculator {
             //
             // So the ONLY question is which rf_korr' the table is written for, and each shipped
             // path is one answer: rf_korr' = rf_korr gives `trim` alone (the retired 'as-logged'),
-            // rf_korr' = 1.000 gives this line, rf_korr' = k_new gives `tunedCorrection` below.
+            // rf_korr' = 1.000 gives this line, and rf_korr' = k_new was the TUNED divisor, retired
+            // because a VE and a DRREL are never written into one BIN (see VeCalcOptions.writeRfKorr).
             // This line therefore declares a MODE — write the table for the state in which the
             // EGT correction is inactive — and not, as it was once justified, a fuel argument.
             //
@@ -833,23 +751,41 @@ export class VECalculator {
             // apart, p95 12.2 %, worst 30.3 % (session #917, 100 % opening at 2200 rpm, where the
             // exhaust was coldest). The multiply is not a rounding detail at high load.
             /*
-             * THE SETTLE RULE. An enrichment the loop has not answered yet is not evidence.
+             * SAME TIME, AND ONLY ONCE THE LOOP HAS ANSWERED.
              *
-             * `rfKorrDwellSec` is seconds since the DME's correction engaged. Inside the first
-             * second the trim still reads the mixture from before the step, so `trim x rf_korr`
-             * credits the cell with the whole of rf_korr and nothing has been measured. Below the
-             * threshold the sample is written with `trim` alone — which is exactly the pre-step
-             * trim, i.e. that cell's own standing error, which IS evidence.
+             *     c_i = trim(t) x K(t)                          K = rf_korr the DME applied at t
+             *     written only where the gate is shut, or the trim has reversed since K last moved
              *
-             * NO SAMPLE IS DROPPED. That is the point: the enriched population is 3,169 samples
-             * across six drives and lives entirely in the high-load cells, so a filter that removed
-             * them would delete the region it is trying to fix. See RF_KORR_SETTLE_SEC_DEFAULT for
-             * why the threshold is where it is, and what each candidate cost.
+             * The DME applies K to every injection (`rf_calc`, 120 deg CA), re-reading
+             * `KF_RF_KORR_DRREL(N, tabg_delta)` each background pass, so the trim at t is an error
+             * on `rf_soll x K(t)` and `trim(t) x K(t)` is the error on `rf_soll` — same instant on
+             * both sides, no clock. That is the half the 1-second settle got wrong: below one second
+             * it wrote `trim` alone, which is right only if the loop has not moved at all, and past
+             * it wrote `trim x K`, which is right only if the loop has finished.
+             *
+             * The other half is that the loop takes K back at a FIXED slope. After a K step the
+             * trim ramps at `KF_LA_KI_NEG` (0.0406/s in the band) until the lean switch, so in that
+             * window `trim x K = K (1 - 0.0406 t)` — time since the step, with no VE error in it.
+             * Re-simulated over the band's drives that wrote +5.5..8.4 % per pass with no fixed
+             * point (and the old settle +0.6..5 %, also none), which is the RO 7.5-10 % spike.
+             * Such samples are therefore NOT written: `isKRampExcluded` is the one predicate, the
+             * ramp state comes from `KRampTracker` (rampState.ts), and each cell counts what it lost
+             * so a cell left with nothing reads 'k-ramp' rather than 'no-evidence'.
+             *
+             * Dropping is now right where it was wrong before. The objection that killed earlier
+             * settle FILTERS — the enriched population lives entirely in the high-load cells — is
+             * answered by K HOLD: with the floor held the gate never opens, K is 1.000 everywhere,
+             * nothing is a ramp, and every sample is `c_i = trim`. Where the gate does open, what is
+             * dropped is precisely what never measured anything.
+             *
+             * A session stored with the old `rfKorrSettleSec` re-derives under this rule instead —
+             * a knowing replay divergence of the kind `veMethod` documents.
              */
-            const wait = settleSec ?? RF_KORR_SETTLE_SEC_DEFAULT;
-            const settled = !point.rfKorrGateOpen
-                || (point.rfKorrDwellSec !== undefined && point.rfKorrDwellSec >= wait);
-            const measured = (plan.apply && rfKorr !== undefined && settled) ? trim * rfKorr : trim;
+            if (isKRampExcluded(point)) {
+                this.countKRamp(grid, rpmInfo, loadInfo);
+                return;
+            }
+            const measured = (plan.apply && rfKorr !== undefined) ? trim * rfKorr : trim;
 
             // Stated at the air the table is defined for, per sample, before it is binned.
             //
@@ -876,32 +812,9 @@ export class VECalculator {
                 correction = measured * factor;
             }
 
-            // The 'tuned' correction: divide the nominal one by what the CORRECTED table would
-            // have applied at this operating point. What survives is the trim as it would read
-            // with the exhaust at nominal temperature — which is what the VE table should hold.
-            //
-            // Per sample rather than per cell, because Δ varies within a cell and the ratio does
-            // not survive being averaged first. A sample the tuner could not place gets no tuned
-            // value at all, so its cell simply carries less evidence for that path.
-            // `plan.apply` gates this as well as the multiply above, and it has to: the tuned form
-            // is `New = Old × STFT × rf_korr ÷ k_new` (docs/ecu-logic/60 §6.4). With `apply` false —
-            // reachable through a legacy 'as-logged' session — `correction` is STFT alone, so
-            // dividing gives `STFT ÷ k_new`, which is neither documented derivation and is lean by
-            // the whole size of the correction. Half of a two-term identity is not a compromise
-            // between them.
-            // `settled` here too. The tuned form divides `trim x rf_korr` by k_new; on an
-            // unsettled sample the numerator is `trim` alone, so dividing would leave `trim / k_new`
-            // — lean by the whole correction, which is the failure `tunedRfKorrAt`'s own header
-            // describes arriving by another door.
-            let tunedCorrection: number | undefined;
-            if (tuned && plan.apply && rfKorr !== undefined && settled) {
-                const kNew = this.tunedRfKorrAt(tuned, point);
-                if (kNew !== undefined && kNew > 0) tunedCorrection = correction / kNew;
-            }
-
             // Distribute to up to 4 neighbors
             this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
-                correction, rfKorr, tunedCorrection, point.time);
+                correction, rfKorr, point.time);
         }
     }
 
@@ -917,7 +830,7 @@ export class VECalculator {
     ): {
         newMap: VEMap | null; diffMap: number[][]; hitMap: number[][]; correctionMap: number[][];
         weightMap: number[][]; rfKorrMap: number[][]; rfKorrSpreadMap: number[][];
-        tunedUsedMap: boolean[][]; acceptedMap: boolean[][]; realisedMap: number[][];
+        acceptedMap: boolean[][]; realisedMap: number[][];
         demandMap: number[][];
         rejectMap: (VeReject | null)[][];
         coverage: { withEvidence: number; withAnyData: number; total: number };
@@ -948,7 +861,6 @@ export class VECalculator {
         const weightMap: number[][] = [];
         const rfKorrMap: number[][] = [];
         const rfKorrSpreadMap: number[][] = [];
-        const tunedUsedMap: boolean[][] = [];
         const demandMap: number[][] = [];
         /**
          * Which cells this gate accepted — the decision itself, not a number to re-test it from.
@@ -1019,7 +931,6 @@ export class VECalculator {
             const weightRow: number[] = [];
             const rfKorrRow: number[] = [];
             const rfKorrSpreadRow: number[] = [];
-            const tunedUsedRow: boolean[] = [];
             const demandRow: number[] = [];
             const acceptedRow: boolean[] = [];
             const realisedRow: number[] = [];
@@ -1175,7 +1086,9 @@ export class VECalculator {
                 // run only under the statistical method, because under DIRECT that question is
                 // answered by the next drive rather than by refusing this one. See VeMethod.
                 const structural: VeReject | null =
-                    cell.rawCount === 0 ? 'no-evidence'
+                    // Nothing written here — and if that is because every sample was mid-ramp, say
+                    // so: the cure is holding the state past the lean switch, not driving to it.
+                    cell.rawCount === 0 ? (cell.kRampCount > 0 ? 'k-ramp' : 'no-evidence')
                         // SAMPLES COUNTS SAMPLES THAT WERE IN THE CELL, not ones that grazed it.
                         //
                         // `rawCount` is incremented by `distributeWeight` for every corner it
@@ -1211,40 +1124,15 @@ export class VECalculator {
                 // THE DEMAND, computed for every cell that has any evidence — not only the written
                 // ones.
                 //
-                // This used to live inside the accept branch, which made two true things
-                // unreportable: what a refused cell asked for, and which divisor it would have
-                // used. Both are exactly what an operator needs in order to decide whether to go
-                // and drive it again, and both are now on `demandMap` / `tunedUsedMap` whatever the
+                // This used to live inside the accept branch, which made a true thing unreportable:
+                // what a refused cell asked for. That is exactly what an operator needs in order to
+                // decide whether to go and drive it again, and it is on `demandMap` whatever the
                 // verdict was. It also separates the two questions the write answers — what the
                 // evidence asked for, and how much of that the evidence supports — which the
                 // shrinkage below would otherwise blur into one number.
                 const nominal = cell.weightSum > 0 ? cell.sumStftWeighted / cell.weightSum : 1;
 
-                // Take the tuned correction only if it stays close to the one that would have
-                // been used anyway. Thin evidence behind k_new shows up here as a large
-                // divergence, and a cell that diverges takes the nominal value and says so.
-                let demand = nominal;
-                let usedTuned = false;
-                // `weightSumTuned` accumulates at ANY weight, while `minTunedNear`/`maxTunedNear`
-                // are written only by samples at `w >= CLAMP_MIN_WEIGHT` — so this condition alone
-                // could take the tuned branch on a cell whose tuned values all came from grazes,
-                // and then `lo <= hi` below is `+Infinity <= -Infinity`, false, and the cell is
-                // written with NO anti-ratchet bound. The nominal bounds that do exist sit
-                // unconsulted, because the clamp reads whichever quantity was averaged.
-                //
-                // Reproduced through the real accumulatePoint/finalizeGrid: four samples inside a
-                // cell at w 0.75 demanding +10 % with no tuned value, plus two grazing samples at
-                // w 0.075 carrying a tuned 1.20, wrote +20.0 % — past everything its own samples
-                // asked for. So the branch now requires the bounds it will be clamped against.
-                const tunedBounded = cell.minTunedNear <= cell.maxTunedNear;
-                if (cell.weightSumTuned > 0.1 && tunedBounded) {
-                    const candidate = cell.sumTunedWeighted / cell.weightSumTuned;
-                    if (nominal > 0 && Math.abs(candidate / nominal - 1) <= TUNED_VS_NOMINAL_MAX) {
-                        demand = candidate;
-                        usedTuned = true;
-                    }
-                }
-                tunedUsedRow.push(usedTuned);
+                const demand = nominal;
                 demandRow.push(demand);
 
                 if (accepted) {
@@ -1288,16 +1176,15 @@ export class VECalculator {
                     // The cell's own samples and its bracket's mean are pointing opposite ways, and
                     // the honest answer to that is to leave the cell alone; `demandMap` still
                     // reports what was asked for, so the disagreement stays visible.
-                    // Bounds from whichever quantity was actually averaged — see minTunedNear.
-                    const lo = usedTuned ? cell.minTunedNear : cell.minCorrectionNear;
-                    const hi = usedTuned ? cell.maxTunedNear : cell.maxCorrectionNear;
+                    const lo = cell.minCorrectionNear;
+                    const hi = cell.maxCorrectionNear;
                     if (lo <= hi) {
                         const bounded = Math.min(hi, Math.max(lo, avgCorrection));
                         if ((bounded - 1) * (avgCorrection - 1) < 0) avgCorrection = 1;
                         else if (Math.abs(bounded - 1) < Math.abs(avgCorrection - 1)) avgCorrection = bounded;
                     }
 
-                    // Last line of defence, both paths. Nothing before the divide could reach it.
+                    // Last line of defence.
                     avgCorrection = Math.min(CORRECTION_MAX, Math.max(CORRECTION_MIN, avgCorrection));
 
                     // THE GAIN, and it is the second half of the method switch.
@@ -1374,7 +1261,6 @@ export class VECalculator {
             weightMap.push(weightRow);
             rfKorrMap.push(rfKorrRow);
             rfKorrSpreadMap.push(rfKorrSpreadRow);
-            tunedUsedMap.push(tunedUsedRow);
             demandMap.push(demandRow);
             acceptedMap.push(acceptedRow);
             realisedMap.push(realisedRow);
@@ -1404,7 +1290,6 @@ export class VECalculator {
             hitMap, // Returns Integer Hits
             correctionMap,
             weightMap, // Returns Weight Sum
-            tunedUsedMap, // Which cells actually took the 'tuned' correction
             acceptedMap,  // Which cells cleared the gate, i.e. which ones were rewritten
             realisedMap,  // What the car will do, after interpolation attenuates the write
             // What each cell ASKED for, before the significance shrinkage damped it. Equal to
@@ -1426,6 +1311,135 @@ export class VECalculator {
                 total: rows * cols,
             }
         };
+    }
+
+    /**
+     * The `aq_rel_rf` a sample sits at on the map's Y axis — its `correctedLoad` when the log filter
+     * made one, otherwise the raw opening corrected HERE by the same table and the same rule.
+     *
+     * Raw samples (the latch source) never went through the filter, so they carry no
+     * `correctedLoad`, and this used to look them up at `rawLoad` instead — reading rf_soll low by
+     * the factor wherever it is below 1 (0.95 at 2100 rpm, 0.70 at idle on the stock table) and so
+     * walking a latch that stayed shut where the DME's was open. One definition for both callers
+     * now, the filter's own `interpolateFactor`, with its rule that a zero factor is a hole in the
+     * table rather than an infinite load.
+     */
+    private loadFor(point: LogDataPoint, air?: RfKorrAirInput): number {
+        if (point.correctedLoad !== undefined) return point.correctedLoad;
+        if (air?.loadTable === null) return point.rawLoad;
+        const factor = interpolateFactor(point.rpm, air?.loadTable ?? APP_CONFIG.MSS54HP.INTERPOLATION_TABLE);
+        return point.rawLoad / (factor === 0 ? 1 : factor);
+    }
+
+    /**
+     * The DME's rf_soll for this sample — the Alpha-N lookup times RF_PT_KORR — or undefined.
+     *
+     * Extracted so the latch walk below can have it without running the whole annotation over the
+     * raw log a second time. Undefined means the same three things it means at the call site: no
+     * RF channel, an operating point outside the table, or no air data to divide the density out.
+     */
+    private rfSollFor(
+        currentMap: VEMap, point: LogDataPoint, air?: RfKorrAirInput,
+    ): number | undefined {
+        if (point.rf === undefined) return undefined;
+        const rfSollTable = this.interpolateMap(currentMap, point.rpm, this.loadFor(point, air));
+        if (!(rfSollTable > 0)) return undefined;
+        const ptKorr = rfPtKorrFor(point, air?.curves ?? null, air?.assumedPressureMbar);
+        if (ptKorr === undefined) return undefined;
+        return rfSollTable * ptKorr;
+    }
+
+    /**
+     * A walk over the RAW log reproducing the DME's rf_korr state: the latch, and — off the K the
+     * latch lets through — whether the lambda loop was still taking a K step back (rampState.ts).
+     *
+     * One object both paths hold: the batch `annotateRfKorr` steps a fresh one over the whole log,
+     * the live run keeps one across flushes and steps the raw samples that arrived. Both state
+     * machines must see every raw sample once, in time order, and the K they are fed must be the
+     * same number — so they live together here rather than as two things a caller keeps in step.
+     *
+     * K is `RF / rf_soll` (with the truncation step put back, as `rfKorrUngated`) where the latch is
+     * open and 1 where it is shut: what the DME applied, from its own output.
+     */
+    public rfKorrWalk(
+        currentMap: VEMap, egt: EgtTables, air?: RfKorrAirInput,
+    ): { step(point: LogDataPoint): RfKorrStep } {
+        const latch = new RfKorrLatch();
+        const ramp = new KRampTracker(egt.lambda);
+        return {
+            step: (p: LogDataPoint): RfKorrStep => {
+                const rfSoll = this.rfSollFor(currentMap, p, air);
+                const open = latch.step(egt, p.rpm, rfSoll, p.vehicleSpeed);
+                const k = open && rfSoll !== undefined && p.rf !== undefined
+                    ? ((p.rf + RF_TRUNCATION_MEAN_PERCENT) / 100) / rfSoll : 1;
+                const kRamp = ramp.step({
+                    time: p.time, rpm: p.rpm, rf: p.rf, stft1: p.stft1, stft2: p.stft2, gateOpen: open, k,
+                });
+                return { open, kRamp };
+            },
+        };
+    }
+
+    /**
+     * The K HOLD check, as an accumulator a live run can feed sample by sample. Null when the
+     * tables are not held, because then there is nothing to check.
+     *
+     * Walks a latch over the STOCK floor (`withStockRfKorrFloor`) and collects `RF / rf_soll` where
+     * that latch is open — the samples the DME would have enriched had the hold not been there.
+     */
+    public kHoldCheck(
+        currentMap: VEMap, egt: EgtTables, air?: RfKorrAirInput,
+    ): { step(point: LogDataPoint): void; verdict(): KHoldNotInEffect | null } | null {
+        if (!isRfKorrFloorHeld(egt)) return null;
+        const stock = withStockRfKorrFloor(egt);
+        const latch = new RfKorrLatch();
+        const ratios: number[] = [];
+        return {
+            step: (p: LogDataPoint) => {
+                const rfSoll = this.rfSollFor(currentMap, p, air);
+                const open = latch.step(stock, p.rpm, rfSoll, p.vehicleSpeed);
+                if (open && rfSoll !== undefined && p.rf !== undefined) {
+                    ratios.push(((p.rf + RF_TRUNCATION_MEAN_PERCENT) / 100) / rfSoll);
+                }
+            },
+            verdict: () => {
+                if (ratios.length < K_HOLD_CHECK_MIN_SAMPLES) return null;
+                const sorted = [...ratios].sort((a, b) => a - b);
+                const m = sorted.length >> 1;
+                const median = sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+                return median >= K_HOLD_IN_EFFECT_MAX_RATIO ? { medianRatio: median, n: ratios.length } : null;
+            },
+        };
+    }
+
+    /**
+     * Which floor the drive was REALLY run against: the as-run tables, or — when they say K HOLD and
+     * the car says otherwise — the same tables with the stock floor back.
+     *
+     *     held  = all six points of the as-run floor exactly 2.000
+     *     check = median RF / rf_soll over samples where the STOCK floor's latch is open
+     *     held && check >= 1.05  ->  walk the latch on the stock floor, and say so
+     *
+     * Why it is worth a pass over the log. With the hold believed and not in force, every sample is
+     * gate-shut, nothing is a ramp, and the write is `trim` alone — while the car WAS applying K.
+     * That writes `VE / K`: lean by the whole enrichment, at the loads where lean costs most. The
+     * usual way to get there is a write that did not take (a flash interrupted, a BIN without the
+     * patch flashed by another tool) under a session that records the patch as armed.
+     *
+     * `kHoldNotInEffect` is null when the tables are not held, when the hold checks out, or when too
+     * few samples ever reached the stock floor to say. Over `source`, which should be the raw log for
+     * the reason the latch walks it.
+     */
+    public resolveKHold(
+        currentMap: VEMap, egt: EgtTables, air: RfKorrAirInput | undefined, source: LogDataPoint[],
+    ): { egt: EgtTables; kHoldNotInEffect: KHoldNotInEffect | null } {
+        const check = this.kHoldCheck(currentMap, egt, air);
+        if (!check) return { egt, kHoldNotInEffect: null };
+        for (const p of source) check.step(p);
+        const verdict = check.verdict();
+        return verdict
+            ? { egt: withStockRfKorrFloor(egt), kHoldNotInEffect: verdict }
+            : { egt, kHoldNotInEffect: null };
     }
 
     /**
@@ -1451,98 +1465,22 @@ export class VECalculator {
      * pair — see LogDataPoint.egtFromRfKorr / rfKorrFromEgt — which is the same rf_korr reached
      * by karter16's TABG route, so the two can be laid side by side. Without it this behaves
      * exactly as it did before the tables existed, which is what every no-binary path relies on.
-     */
-    /**
-     * What the CORRECTED table will apply at this sample's operating point, once flashed.
      *
-     * Reads the tuned grid on its own axes, with the same clamped-bilinear rule the DME uses, so
-     * the number divided out here is the number the DME will multiply back in.
+     * It also reproduces the DME's rf_korr latch — and the lambda loop's answer to it — across
+     * the log.
      *
-     * **The gate is half of that promise, and it used to be missing.** The DME reads
-     * KF_RF_KORR_DRREL only when `rf_soll > kl_rf_korr_rf_min(N)`; below the floor it applies
-     * 1.000 no matter how cold the exhaust is (docs/ecu-logic/20-egt-correction.md §1). Looking the
-     * table up on Δ alone therefore divided gate-shut samples by a correction that was never
-     * applied and never will be — and since the table's floor is 1.000 and Δ is clipped at 0, the
-     * residual `1/k_new` could only ever go one way: LEAN.
-     *
-     * Measured on session #904: 12.3 % of samples had the gate open, but 39.9 % were gate-shut with
-     * a divisor above 1 (median 1.023, p99 1.208, max 1.242), each pushing its cell 2-20 % lean.
-     * `TUNED_VS_NOMINAL_MAX` bounded a whole cell to 15 %, which is a backstop and not a defence.
-     *
-     * Every other consumer of rf_korr in this file already reproduces the gate — the table-delta
-     * route codes it explicitly in `annotateRfKorrPoint`, and so does the tuner's own input pass,
-     * which drops gate-shut samples with a comment about the lean direction. This was the one place
-     * that did not.
-     *
-     * **The line that used to stand here said the measured route "gets it for free — `rf` really
-     * does equal `rf_soll` when the correction is off". That was an assumption, and it was false.**
-     * Measured over six drives, 586 gate-shut samples read above 1.10, because the ratio also
-     * carries the rf_soll filter's lag and the load-axis reconstruction. `annotateRfKorrPoint` now
-     * gates the measured route explicitly, on both halves of the DME's condition. See the block
-     * comment there for what the assumption cost on the car.
-     *
-     * Returns undefined when the sample has no Δ — nothing can be said about it, and the cell just
-     * carries less evidence for the tuned path.
-     */
-    private tunedRfKorrAt(tuned: RfKorrTuneResult, point: LogDataPoint): number | undefined {
-        if (point.tabgDelta === undefined) return undefined;
-        // Both fields are written together in annotateRfKorrPoint, so an undefined verdict beside a
-        // defined Δ should not be reachable. Refuse rather than assume: guessing "open" is the
-        // direction that leans the map out.
-        if (point.rfKorrGateOpen === undefined) return undefined;
-        // Shut: the DME will apply 1.000 here, so the cell must keep the whole trim-corrected
-        // filling. Dividing by 1 is the honest no-op, not an absence of evidence — the sample says
-        // something definite about this cell and should carry its weight.
-        if (!point.rfKorrGateOpen) return 1.0;
-        return interpMap2d(tuned.rpm, tuned.delta, tuned.tuned, point.rpm, point.tabgDelta);
-    }
-
-    /**
-     * The DME's rf_soll for this sample — the Alpha-N lookup times RF_PT_KORR — or undefined.
-     *
-     * Extracted so the latch walk below can have it without running the whole annotation over the
-     * raw log a second time. Undefined means the same three things it means at the call site: no
-     * RF channel, an operating point outside the table, or no air data to divide the density out.
-     */
-    private rfSollFor(
-        currentMap: VEMap, point: LogDataPoint, air?: RfKorrAirInput,
-    ): number | undefined {
-        if (point.rf === undefined) return undefined;
-        const rfSollTable = this.interpolateMap(
-            currentMap, point.rpm, point.correctedLoad ?? point.rawLoad);
-        if (!(rfSollTable > 0)) return undefined;
-        const ptKorr = rfPtKorrFor(point, air?.curves ?? null, air?.assumedPressureMbar);
-        if (ptKorr === undefined) return undefined;
-        return rfSollTable * ptKorr;
-    }
-
-    /**
-     * Advance a caller-held latch by one raw sample. The live path's half of `annotateRfKorr`.
-     *
-     * Exists so the live run can walk the latch itself — it has to, because it sees the drive in
-     * increments and the latch is state the drive accumulates — without reimplementing `rfSollFor`.
-     * One definition of rf_soll, two callers, which is the same rule `tabgDelta` follows.
-     */
-    public stepRfKorrLatch(
-        latch: RfKorrLatch, currentMap: VEMap, point: LogDataPoint, egt: EgtTables,
-        perSecond: number, air?: RfKorrAirInput,
-    ): { open: boolean; dwellSec: number } {
-        return latch.stepTimed(
-            egt, point.rpm, this.rfSollFor(currentMap, point, air), point.vehicleSpeed,
-            point.time, perSecond);
-    }
-
-    /**
-     * Annotate a log, reproducing the DME's rf_korr latch across it.
-     *
-     * `latchSource` is the sequence the LATCH walks, and it should be the raw log — every sample the
+     * `latchSource` is the sequence the walk covers, and it should be the raw log — every sample the
      * DME saw, before this app's filters removed any. `logData` is what gets annotated and may be
      * any subset of it. When the two differ the verdicts are matched by timestamp.
      *
      * Omitting `latchSource` walks `logData` itself. Measured over #941-#946 that disagrees with the
      * raw-log answer on 0.29 % of samples — 6 % of the enriched population — and it errs one way: a
      * dropped fuel-cut sample would have reset the latch, so a subset keeps the correction alive
-     * longer than the car did, which raises the map. Pass the raw log.
+     * longer than the car did, which raises the map. Pass the raw log. It matters twice over for
+     * the ramp: a fuel-cut sample is also the commonest loop restart.
+     *
+     * The tables are put through `resolveKHold` first, so a held drive whose hold did not take is
+     * read as the stock-gate drive it was. A caller that needs to SAY so calls that itself.
      */
     public annotateRfKorr(
         currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
@@ -1550,26 +1488,21 @@ export class VECalculator {
     ): LogDataPoint[] {
         if (!egt) return logData.map(p => this.annotateRfKorrPoint(currentMap, p, egt, air, null));
 
-        // One walk, in time order, over what the DME saw — the latch AND the clock that starts when
-        // it engages. Both come from the same pass for the reason tabgDelta does: two places
-        // needing one answer must not be able to reach different ones.
+        // One walk, in time order, over what the DME saw — the latch AND the ramp it starts. Both
+        // come from the same pass for the reason tabgDelta does: two places needing one answer
+        // must not be able to reach different ones.
         const source = latchSource ?? logData;
-        const perSecond = timeScaleSeconds(source);
-        const latch = new RfKorrLatch();
-        const track = new Map<number, { open: boolean; dwellSec: number }>();
-        for (const p of source) {
-            track.set(p.time, latch.stepTimed(
-                egt, p.rpm, this.rfSollFor(currentMap, p, air), p.vehicleSpeed, p.time, perSecond));
-        }
+        const tables = this.resolveKHold(currentMap, egt, air, source).egt;
+        const walk = this.rfKorrWalk(currentMap, tables, air);
+        const track = new Map<number, RfKorrStep>();
+        for (const p of source) track.set(p.time, walk.step(p));
         // A sample whose timestamp is not in the track came from outside the latch source, and
-        // there is no history for it. `null` says so rather than substituting a guess.
+        // there is no history for it. `null` says so rather than substituting a guess — and it gets
+        // no `kRamp`, which `isKRampExcluded` reads as a ramp if the entry condition calls it open.
         return logData.map(p => {
             const t = track.get(p.time);
-            const out = this.annotateRfKorrPoint(currentMap, p, egt, air, t ? t.open : null);
-            // Only where the correction is running. A shut sample has no step to wait for, and
-            // saying "0 seconds since it engaged" there would read as the least settled thing in
-            // the log.
-            return out.rfKorrGateOpen && t ? { ...out, rfKorrDwellSec: t.dwellSec } : out;
+            const out = this.annotateRfKorrPoint(currentMap, p, tables, air, t ? t.open : null);
+            return t && out.rfKorrGateOpen !== undefined ? { ...out, kRamp: t.kRamp } : out;
         });
     }
 
@@ -1592,8 +1525,7 @@ export class VECalculator {
         {
             if (point.rf === undefined) return point;
 
-            const loadVal = point.correctedLoad ?? point.rawLoad;
-            const rfSollTable = this.interpolateMap(currentMap, point.rpm, loadVal);
+            const rfSollTable = this.interpolateMap(currentMap, point.rpm, this.loadFor(point, air));
             // rfSoll is dimensionless (the table stores raw/1000, 1.0 = 100% fill); the DS2 RF
             // channel is a percentage. A zero or negative lookup means the operating point sits
             // outside anything the table describes, and a ratio there would be noise.
@@ -1729,7 +1661,6 @@ export class VECalculator {
         load: { idx1: number; idx2: number; w1: number; w2: number },
         val: number,
         rfKorr?: number,
-        tunedVal?: number,
         time?: number
     ) {
         // 4 corners:
@@ -1779,20 +1710,27 @@ export class VECalculator {
                     if (rfKorr > cell.maxRfKorr) cell.maxRfKorr = rfKorr;
                 }
 
-                // Its own weight, like rf_korr's: the tuned correction is available on strictly
-                // fewer samples than the nominal one, and dividing by the shared weightSum would
-                // understate it on any cell holding a mix.
-                if (tunedVal !== undefined) {
-                    cell.sumTunedWeighted += tunedVal * w;
-                    cell.weightSumTuned += w;
-                    if (w >= CLAMP_MIN_WEIGHT) {
-                        if (tunedVal < cell.minTunedNear) cell.minTunedNear = tunedVal;
-                        if (tunedVal > cell.maxTunedNear) cell.maxTunedNear = tunedVal;
-                    }
-                }
             }
         };
 
+        add(load.idx1, rpm.idx1, load.w1 * rpm.w1);
+        add(load.idx1, rpm.idx2, load.w1 * rpm.w2);
+        add(load.idx2, rpm.idx1, load.w2 * rpm.w1);
+        add(load.idx2, rpm.idx2, load.w2 * rpm.w2);
+    }
+
+    /** A sample the ramp rule kept out, charged to the corners it would have landed on — every
+     *  corner with any weight, the same reach `rawCount` has, so 'k-ramp' and 'no-evidence' are
+     *  decided over one footprint. */
+    private countKRamp(
+        grid: GridCell[][],
+        rpm: { idx1: number; idx2: number; w1: number; w2: number },
+        load: { idx1: number; idx2: number; w1: number; w2: number },
+    ) {
+        const rows = this.loadAxis.length, cols = this.rpmAxis.length;
+        const add = (r: number, c: number, w: number) => {
+            if (r >= 0 && r < rows && c >= 0 && c < cols && w > 0) grid[r][c].kRampCount++;
+        };
         add(load.idx1, rpm.idx1, load.w1 * rpm.w1);
         add(load.idx1, rpm.idx2, load.w1 * rpm.w2);
         add(load.idx2, rpm.idx1, load.w2 * rpm.w1);

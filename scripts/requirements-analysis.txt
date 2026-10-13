@@ -1,4 +1,0 @@
-# Reproducible offline analyses and numerical verify:* scripts; Python 3.12.
-numpy==2.4.1
-scipy==1.16.2
-matplotlib==3.10.3

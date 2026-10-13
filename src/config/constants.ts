@@ -410,42 +410,57 @@ export const TANK_VENT_GAIN = {
  * Verified against session #946's BASE: x = 1400/1600/2000/2500/3300/4000 rpm,
  * y = 700/550/650/650/650/800 raw, i.e. 0.70/0.55/0.65/0.65/0.65/0.80 RF.
  *
- * ## Why an app patch exists for it
+ * What the DME does with it — `rf_korr`, master 0x021A70, re-evaluated every background pass:
  *
- * `KF_RF_KORR_DRREL` is derived as `A(Δ)/A(0) = k(Δ)·STFT(Δ) / [k(0)·STFT(0)]`, so it needs, in one
- * VE cell, a gate-open sample at Δ ≈ 0 to divide by. On this car those two conditions are mutually
- * exclusive, and the six-drive measurement says so exactly: of 3,063 gate-open samples the smallest
- * Δ ever seen was 46 °C and NONE reached the table's 30 °C anchor row, while Δ ≤ 30 itself is
- * abundant — 13,228 samples of it — all of it below the floor with the gate shut. The floor is what
- * separates them: it admits only filling above 0.55-0.80, where `kf_rf_tabg_modell` reads 600-750 °C
- * and a Pt200 with the exhaust system's thermal mass behind it (τ ≈ 148 s, docs/ecu-logic/
- * 60-tuning-logic.md §6.1.6) never catches up inside a road pull.
+ *     rf_soll >  floor(N)         && V >  k_rf_korr_v_min  ->  rf_korr = KF_RF_KORR_DRREL(N, Δ)
+ *     rf_soll >= floor(N) - 0.100 && V >= k_rf_korr_v_min  ->  rf_korr held
+ *     otherwise                                            ->  rf_korr = 1.000
+ *     RF = rf_soll · rf_korr >> 10,   Δ = max(0, kf_rf_tabg_modell(N, RF) − TABG)
  *
- * Dropping the floor moves the gate down to where Δ ≈ 0 already exists. Replayed over the same six
- * drives, with no change to how they were driven:
+ * Every reader was found by whole-binary scan: this curve is read only by `rf_korr`, and `rf_korr`
+ * only by `rf_calc`. So the floor is a pure lever on whether the DRREL step reaches RF at all.
  *
- *     floor   gate-open   anchors (Δ<=30)   VE cells with an anchor AND ratio samples
- *     0.70       2,412            0            0      <- stock, and why the tuner writes nothing
- *     0.50       8,212           21            1
- *     0.45      12,480           93            6
- *     0.40      19,113          319           13
- *     0.35      27,151          908           18
+ * ## K HOLD — the measurement patch, `HELD_RAW` in all six points
  *
- * 0.40 is the value the toggle writes: the first floor that earns a double-figure cell count.
+ * With the floor unreachable the gate never opens, and the DME uses 1.000 everywhere, which is the
+ * table's Δ=30 row: K ≡ 1. The VE log needs that because of how the lambda loop answers a K step.
+ * Its rich-side I slope is fixed (`KF_LA_KI_NEG` 13 raw = 0.0406/s at 2200-2700 rpm, RF >= 0.5;
+ * logged median −0.040/s), so after the gate opens the trim reads ≈ 1 − 0.0406·t whatever the VE
+ * error is, and `trim × K` reports elapsed time rather than VE. Written back, it lifts the band
+ * +5.5..8.4 % per pass with no fixed point. With K ≡ 1 the trim alone carries the VE error, and
+ * DIRECT converges (error ×0.55-0.65 per pass).
  *
- * ## What it costs while it is in the car
+ * Why 2000 (2.000 RF):
  *
- * The gate is what keeps this correction off the light-load part of the map. With the floor at 0.40
- * the DME applies `rf_korr` across a much wider region — and since Δ sits at 130-300 °C whenever the
- * car is moving under load, that means the Δ=200/300 rows, i.e. +5 to +28 % of enrichment where
- * there was none. RF is inflated with it, so ignition and the torque model move too. TUNING ONLY,
- * for one measurement drive, with the VE write disarmed.
+ *   - The entry compare is unsigned, so rf_soll would have to exceed 2.000, and the hold branch
+ *     needs 2.000 − `k_rf_korr_hys` = 1.900. `kf_rf_soll` peaks near 1.2, so neither is reachable.
+ *   - 0xFFFF is the obvious "never", but `readEgtTables`' plausibility check refuses a floor above
+ *     2.0, and then the whole EGT set reads null — the app would lose the gate it replays drives with.
+ *   - Held is detected by EXACT equality of all six words (`getRfKorrGateFloorHeld`), never by a
+ *     threshold: a synthetic test image or a hand-raised floor at 1.5 is not this patch.
+ *
+ * `rf_korr_st` has one reader, the slave's LAA enable, and PATCH already empties that window
+ * (`K_LAA_TMOT_MIN` = 100 °C). Without PATCH, LAA would learn this band's error — which is why the
+ * hub offers K HOLD only with PATCH armed.
+ *
+ * What it costs while it is in the car: no cold-exhaust enrichment at all, and because RF no longer
+ * carries rf_korr, up to 2.3° more ignition advance at 2400-3000 rpm part load. TUNING ONLY; every
+ * restore (PATCH OFF, FINALIZE) puts `STOCK_RAW` back — see `BinaryPatcher.setRfKorrGateFloor`.
+ *
+ * ## The retired drop
+ *
+ * `DROPPED_RAW` was the RF GATE toggle: a 0.400 floor to make Δ ≤ 30 samples reachable as an anchor
+ * for DRREL. The anchor is now the converged VE itself, so the toggle is gone and nothing writes a
+ * drop into an image that leaves the app. The two constants stay so a BIN still carrying it is
+ * recognised, and so a log recorded against it replays through the floor the DME was running.
  */
 export const RF_KORR_GATE_FLOOR = {
     /** The Y block. The X block at 0xE900 is deliberately absent: the breakpoints stay BMW's. */
     VALUES_ADDRESS: 0xE90C,
     POINTS: 6,
-    /** 0.400 RF. */
+    /** 2.000 RF — K HOLD. Unreachable by rf_soll on entry and on hold; see the doc above. */
+    HELD_RAW: 2000,
+    /** 0.400 RF — the retired RF GATE drop. Recognised and restored, never written by a build. */
     DROPPED_RAW: 400,
     /**
      * A floor at or below this counts as "this app dropped it", for the same reason
@@ -454,9 +469,40 @@ export const RF_KORR_GATE_FLOOR = {
      * anything at 0.45 or under is not a calibration this car shipped with.
      */
     DROPPED_MAX_RAW: 450,
-    /** Where a restore lands when the loaded BASE was ALREADY dropped and so cannot say what it
-     *  held before. Read off session #946's BASE, not transcribed from a document. */
+    /** Where a restore lands when the loaded BASE was ALREADY held or dropped and so cannot say
+     *  what it held before. Read off session #946's BASE, not transcribed from a document. */
     STOCK_RAW: [700, 550, 650, 650, 650, 800],
+} as const;
+
+/**
+ * `KF_RF_KORR_DRREL` (master, X 0xE84A, Y 0xE862, Z 0xE86E, `x/1024`) as BMW ships it in 0401 —
+ * the 純正 the RF KORR tuner's 300/400 shrink is a fraction of.
+ *
+ *     s          = (new(top) − 1) / (STOCK(top) − 1)       top: the highest row this log measured
+ *     new(r>top) = 1 + s · (STOCK(r) − 1)                  stepped from the LOADED value, −0.05/log
+ *
+ * Against BMW's table, not the loaded one, because the loaded one is this app's own work from the
+ * second DRREL pass on. Taken against the loaded table the ratio is pass-relative: once the top row
+ * stops moving s reads 1, and once it reaches 1.000 the column has no excess to divide by, so rows
+ * the step limit had held back froze part-way (stock 1.25/1.32/1.37 at Δ 200/300/400 with D = 1.0
+ * measured each pass: 300/400 stuck at 1.070/1.120 from the fifth pass, against 1.000 by the
+ * formula). The loaded table is still where each step starts from.
+ *
+ * Read off the shipped partial (`public/mock`), whose DRREL the community patch does not touch;
+ * `verify:rf-korr-tuner` pins the two equal. A table on other axes is another calibration, and the
+ * tuner shrinks it against its own loaded values instead.
+ */
+export const CSL_STOCK_RF_KORR_DRREL = {
+    RPM: [1100, 1200, 1400, 1600, 1900, 2200, 2350, 3000, 3200, 4000, 5000, 5100],
+    DELTA: [30, 40, 100, 200, 300, 400],
+    RAW: [
+        [1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024],
+        [1024, 1044, 1044, 1044, 1044, 1043, 1043, 1043, 1043, 1044, 1044, 1024],
+        [1024, 1044, 1052, 1059, 1059, 1070, 1094, 1070, 1070, 1067, 1044, 1024],
+        [1024, 1075, 1069, 1030, 1042, 1166, 1189, 1126, 1102, 1078, 1075, 1024],
+        [1024, 1075, 1075, 1046, 1062, 1284, 1308, 1204, 1123, 1094, 1075, 1024],
+        [1024, 1075, 1075, 1070, 1094, 1357, 1404, 1260, 1139, 1102, 1075, 1024],
+    ],
 } as const;
 
 // Stock WOT Threshold Map (4x4) - Transcribed

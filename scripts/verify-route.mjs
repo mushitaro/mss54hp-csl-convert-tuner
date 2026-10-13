@@ -6,14 +6,16 @@
  * and two answers can disagree. Here the route is a NAME for a combination already chosen by other
  * means — so it cannot be picked, and it cannot be picked wrongly.
  *
- * What these assertions protect is the mapping being honest about consequences. Route B rests on
- * dividing the VE map by k_new, which no car has ever checked; if that combination ever stopped
- * being named B, the warning attached to B would silently stop appearing.
+ * What these assertions protect is the mapping being honest about consequences. There used to be a
+ * route B — the VE map and the correction table in one flash, the VE divided by k_new — and the
+ * write confirm warned about that division. Both are gone: the tuner anchors on the VE the drive ran
+ * on, so the hub never arms the two together, and an armed table is A1 whatever run measured it.
+ * If a combination ever named B again, the confirm would describe a division nothing performs.
  */
 import {
-    LOG_PROFILES, expectedHz, exchangeMs, sampleMs, blocksOf, describeExchanges, productionExchanges,
+    LOG_PROFILES, expectedHz, exchangeMs, sampleMs, blocksOf, describeExchanges,
     LAMBDA_SLOW_LANE_EVERY, LAMBDA_TRUTH_GATE, lambdaTrimAgrees,
-    missingPatches, deriveRoute, routeNeedsUnverifiedDivision, processesSupportedBy,
+    missingPatches, deriveRoute, processesSupportedBy,
 } from '../src/lib/log-engine/logProfile.ts';
 import { LAMBDA_TRIM_RAM_READ } from '../src/lib/dme-link/ramMap.ts';
 
@@ -62,22 +64,9 @@ console.log('\n[what a sample costs, from the exchanges it is made of]');
     const swapped = expectedHz(trimByRam);
     check('reading the trim from RAM instead of block 19 is at least 1.5x faster',
         swapped > veSlow * 1.5, `${swapped.toFixed(2)} vs ${veSlow.toFixed(2)}`);
-    // Production retains that speed benefit. WORKS now spends two full-rate reads
-    // plus one 1/8-rate read on independent rf_korr/rf_soll/MAP diagnostics; comparing
-    // that richer profile to the block-only fallback no longer measures a speed win.
-    const productionVe = expectedHz(productionExchanges(LOG_PROFILES.VE.exchanges));
-    check('the production VE profile remains faster than the fallback', productionVe > veSlow,
-        `${productionVe.toFixed(2)} vs ${veSlow.toFixed(2)}`);
-    const direct = LOG_PROFILES.VE.exchanges.filter(x =>
-        x.kind === 'ram' && [0xFFEEA6, 0xFFEDEE, 0xFFEED8].includes(x.address));
-    check('WORKS explicitly budgets all three direct RAM diagnostics', direct.length === 3);
-    check('the three diagnostic reads cost 110.9 ms/sample in the declared wire model',
-        Math.abs(sampleMs(direct) - 110.8984375) < 1e-8, sampleMs(direct).toFixed(4));
-    const withoutDirect = LOG_PROFILES.VE.exchanges.filter(x => !direct.includes(x));
-    check('the injection response is budgeted once per WORKS sample',
-        withoutDirect.find(x => x.selection === 19)?.every === undefined);
-    check('the displayed WORKS rate includes the diagnostic cost',
-        Math.abs(1000 / ve - sampleMs(withoutDirect) - sampleMs(direct)) < 1e-8);
+    // And the profile as shipped still beats the fallback outright, carrying more channels than it.
+    check('...and the VE profile as shipped is still faster than the fallback', ve > veSlow,
+        `${ve.toFixed(2)} vs ${veSlow.toFixed(2)}`);
     // ...and it must still be slower than dropping the trim altogether, or something is wrong with
     // the model: EGT reads strictly fewer bytes for strictly fewer channels.
     check('and still slower than reading block 3 alone', ve < egt, `${ve.toFixed(2)} vs ${egt.toFixed(2)}`);
@@ -92,9 +81,8 @@ console.log('\n[what a sample costs, from the exchanges it is made of]');
     check('a 1/8 lane costs an eighth of its exchange',
         Math.abs(sampleMs(only(b3, slow)) - (exchangeMs(b3) + exchangeMs(b19) / 8)) < 1e-9);
     check('every: 1 is the same as no every', sampleMs(only({ ...b19, every: 1 })) === sampleMs(only(b19)));
-    check('production keeps the block 19 slow lane, WORKS reads injection every sample',
-        productionExchanges(LOG_PROFILES.VE.exchanges).some(x => x.kind === 'block' && x.selection === 19 && x.every === LAMBDA_SLOW_LANE_EVERY)
-        && LOG_PROFILES.VE.exchanges.some(x => x.kind === 'block' && x.selection === 19 && (x.every ?? 1) === 1));
+    check('the VE profile puts block 19 on the slow lane',
+        LOG_PROFILES.VE.exchanges.some(x => x.kind === 'block' && x.selection === 19 && x.every === LAMBDA_SLOW_LANE_EVERY));
     // The fallback is what a VE log has always been, and it must claim nothing.
     check('the fallback reads both blocks every sample',
         blocksOf(LOG_PROFILES.VE.fallback).join() === '3,19'
@@ -169,11 +157,12 @@ console.log('\n[the route is a name for a combination, not a setting]');
 {
     const r = (o) => deriveRoute({ process: 'VE', writeRfKorr: false, hasVeMap: true, ...o });
     check('VE, table untouched          -> CONSERVATIVE', r({}) === 'CONSERVATIVE', r({}));
-    check('VE, table armed              -> B', r({ writeRfKorr: true }) === 'B');
+    // The DRREL drive: a VE-profile log with ALPHA-N off and the table armed. Route A's first half,
+    // whatever map the same log also derived — the hub never writes the two together.
+    check('VE, table armed              -> A1', r({ writeRfKorr: true }) === 'A1', r({ writeRfKorr: true }));
+    check('VE, table armed, no VE map   -> A1', r({ writeRfKorr: true, hasVeMap: false }) === 'A1');
     check('VE on an EGT parent          -> A2', r({ parentProcess: 'EGT' }) === 'A2');
-    // Arming the table on an EGT-derived base is B again, not A2: the write carries both, so it is
-    // the combined shape whatever the base was.
-    check('VE on an EGT parent, armed   -> B', r({ parentProcess: 'EGT', writeRfKorr: true }) === 'B');
+    check('VE on an EGT parent, armed   -> A1', r({ parentProcess: 'EGT', writeRfKorr: true }) === 'A1');
     check('EGT, table armed             -> A1',
         deriveRoute({ process: 'EGT', writeRfKorr: true, hasVeMap: false }) === 'A1');
     check('EGT, nothing armed           -> NONE',
@@ -183,12 +172,20 @@ console.log('\n[the route is a name for a combination, not a setting]');
         deriveRoute({ process: 'INERTIA', writeRfKorr: true, hasVeMap: true }) === 'NONE');
 }
 
-console.log('\n[only B rests on the division no car has checked]');
+console.log('\n[no combination is route B any more — nothing divides the VE map by k_new]');
 {
-    check('B does', routeNeedsUnverifiedDivision('B'));
-    for (const route of ['CONSERVATIVE', 'A1', 'A2', 'NONE']) {
-        check(`${route} does not`, !routeNeedsUnverifiedDivision(route));
+    const seen = new Set();
+    for (const process of ['VE', 'EGT', 'INERTIA', 'IDLE', 'LLS']) {
+        for (const writeRfKorr of [false, true]) {
+            for (const hasVeMap of [false, true]) {
+                for (const parentProcess of [undefined, 'VE', 'EGT']) {
+                    seen.add(deriveRoute({ process, writeRfKorr, hasVeMap, parentProcess }));
+                }
+            }
+        }
     }
+    check('every route is one of CONSERVATIVE / A1 / A2 / NONE',
+        [...seen].every(x => ['CONSERVATIVE', 'A1', 'A2', 'NONE'].includes(x)), [...seen].join());
 }
 
 console.log('\n[what a log can be used for is decided by the channels it has]');

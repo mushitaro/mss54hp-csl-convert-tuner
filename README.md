@@ -147,7 +147,11 @@ opening anything**.
 - **WRITE** — the derived tables: `ALPHA-N` (the measured map, with `SHAPE` as a mode on it) and
   `WARMUP`. Each row states what it would write and, where it cannot, why.
 - **PATCH** — the logic switches the ECU is left holding: MAP compensation, the LTFT window, the
-  tank vent, the WOT threshold. These change what the DME *does*, not what a table says.
+  tank vent, the WOT threshold, and **K HOLD** — the `rf_korr` gate floor raised out of reach so the
+  DME applies 1.000 everywhere, which keeps the VE log clear of the exhaust-temperature enrichment
+  and the lambda ramp that follows each step of it. K HOLD arms with PATCH and can be turned off on
+  its own (for the DRREL and full-load VE runs); FINALIZE puts the stock floor back. These change
+  what the DME *does*, not what a table says.
 - **RESTORE** — putting a table back to the bytes the binary was loaded with. One row per table,
   each named in the ECU's own vocabulary, and locked against the write of the same table: whichever
   ran last would win, and a restore a tune can overwrite is not a restore.

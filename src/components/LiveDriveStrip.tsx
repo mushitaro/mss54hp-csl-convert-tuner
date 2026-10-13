@@ -7,8 +7,6 @@ import type { useLiveRun } from '@/hooks/useLiveRun';
 import { interpolateFactor } from '@/lib/log-engine/filter';
 import type { InterpolationPoint } from '@/lib/types';
 import type { DriveView } from '@/lib/features';
-import { useDialogLang } from '@/hooks/useDialogLang';
-import type { MovingLiveCoverage } from '@/lib/ve-calculator/movingResponseLive';
 
 /**
  * What the driver cannot get anywhere else, over the map they are aiming at.
@@ -63,7 +61,6 @@ const nearest = (axis: readonly number[], v: number): number => {
 export function LiveDriveStrip({
     feed, interpolationTable, settleSec, view, views, onViewChange,
     hitMap, rpmAxis, loadAxis, coverageOk, cues = true,
-    acquisition,
 }: {
     feed: ReturnType<typeof useLiveRun>['readout'];
     /** The session's Alpha-N table — the same one `processLogData` corrects the load with. */
@@ -81,11 +78,8 @@ export function LiveDriveStrip({
     /** "This area needs no more driving" — the VE target, from RAW FILTER. */
     coverageOk?: number;
     cues?: boolean;
-    /** Moving-response reports recorded candidates/passes, never a dwell target or final adoption. */
-    acquisition?: MovingLiveCoverage | null;
 }) {
     const { sample, heldSec, hz } = useLiveReadout(feed);
-    const language = useDialogLang();
 
     // The map's own Y axis. `interpolateFactor` is the filter's function, not a copy of it.
     const factor = sample && interpolationTable
@@ -104,12 +98,6 @@ export function LiveDriveStrip({
         : null;
     const cellKey = here ? here.r + ':' + here.c : null;
     const cellSamples = here ? (hitMap?.[here.r]?.[here.c] ?? 0) : null;
-    const moving = !!acquisition && view === 've';
-    const acquired = here ? acquisition?.cells[here.r]?.[here.c] : undefined;
-    const acquisitionState = acquired?.state ?? 'unvisited';
-    const acquisitionLabel = language === 'ja'
-        ? { unvisited: '未記録', blocked: '条件外', collecting: '解析候補', revisited: '複数通過' }[acquisitionState]
-        : { unvisited: 'Unvisited', blocked: 'Excluded', collecting: 'Candidate', revisited: 'Revisited' }[acquisitionState];
 
     // The entry TIME of the current cell, as state rather than a ref written during render — the
     // dwell has to survive re-renders that carry no new sample, and mutating a ref on the way past
@@ -131,7 +119,7 @@ export function LiveDriveStrip({
     const holding = heldSec !== null;
     const counting = holding && (need <= 0 || heldSec >= need);
     // The tones belong to the RF KORR clock, which is the one with a hard threshold to cross.
-    useDriveCues({ holding, counting, heldSec, enabled: cues && view === 'rfkorr' && !acquisition });
+    useDriveCues({ holding, counting, heldSec, enabled: cues && view === 'rfkorr' });
 
     /** Seconds of driving still owed, for whichever view is up. Null when it cannot be computed. */
     let target: number | null = null;
@@ -162,19 +150,17 @@ export function LiveDriveStrip({
                         flex items-stretch gap-3 font-mono tabular-nums">
             <Cell label="AQ %" value={aq === null ? '—' : aq.toFixed(1)} tone="text-blue-400" />
             <Cell
-                label={moving ? (language === 'ja' ? '測定点の状態' : 'ACQUISITION') : view === 've' ? 'HELD IN CELL' : 'ABOVE FLOOR'}
-                value={moving ? acquisitionLabel : clock === null ? '—' : `${clock.toFixed(1)} s`}
-                tone={moving ? (acquisitionState === 'unvisited' ? 'text-slate-400' : 'text-indigo-300')
-                    : done ? 'text-emerald-400' : clock === null ? 'text-slate-600' : 'text-slate-100'}
+                label={view === 've' ? 'HELD IN CELL' : 'ABOVE FLOOR'}
+                value={clock === null ? '—' : `${clock.toFixed(1)} s`}
+                tone={done ? 'text-emerald-400' : clock === null ? 'text-slate-600' : 'text-slate-100'}
             />
             <Cell
-                label={moving ? (language === 'ja' ? '候補数 · 通過回数' : 'CANDIDATES · PASSES') : view === 've'
+                label={view === 've'
                     ? (cellSamples === null ? 'TO COVERED' : `TO COVERED · ${cellSamples}`)
                     : 'TO SETTLED'}
-                value={moving ? `${acquired?.candidates ?? 0} · ${acquired?.passes ?? 0}`
-                    : target === null ? '—' : target <= 0 ? 'done'
+                value={target === null ? '—' : target <= 0 ? 'done'
                     : `+${target.toFixed(target < 10 ? 1 : 0)} s`}
-                tone={moving ? 'text-indigo-300' : target !== null && target <= 0 ? 'text-emerald-400' : 'text-violet-300'}
+                tone={target !== null && target <= 0 ? 'text-emerald-400' : 'text-violet-300'}
             />
             {/* The one interactive thing here — and only where there is a choice to make.
                 A single-view build shows the name as a label instead of a button, because the

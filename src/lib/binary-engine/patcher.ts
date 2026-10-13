@@ -391,23 +391,31 @@ export class BinaryPatcher extends BinaryParser {
     }
 
     /**
-     * Drops `kl_rf_korr_rf_min` to 0.400 at all six rpm points, or puts it back.
+     * Sets `kl_rf_korr_rf_min` to K HOLD, to the retired drop, or back to stock.
      *
-     * The Y block only — the rpm breakpoints at 0xE900 stay BMW's, because the point of the patch
-     * is to move WHERE the correction engages in filling, not to reshape the curve's rpm structure.
+     * The Y block only — the rpm breakpoints at 0xE900 stay BMW's, because the patch moves WHERE in
+     * filling the correction engages, not the curve's rpm structure. What each value does in the DME,
+     * and why HOLD is 2000, are in `RF_KORR_GATE_FLOOR`'s own doc.
      *
-     * Why this patch exists, what it earns and what it costs while it is in the car are all in
-     * `RF_KORR_GATE_FLOOR`'s own doc, with the six-drive replay behind the 0.40.
+     *     'hold'   all six = HELD_RAW (2.000)   the gate never opens, rf_korr ≡ 1.000
+     *     'drop'   all six = DROPPED_RAW (0.400) only `bytesAsRun`, to replay a log recorded on it
+     *     'stock'  the six as loaded — or STOCK_RAW when the loaded six were held or dropped
      *
-     * The restore is the same rule as `setWOTThreshold`: write back the six the binary was loaded
-     * with, and fall back to `RF_KORR_GATE_FLOOR.STOCK_RAW` only when the loaded curve was itself
-     * already dropped and so has nothing true to say. It matters more here than for one byte,
-     * because the app READS this curve back: `readEgtTables` builds `EgtTables.rfKorrMin` from these
-     * exact bytes and `gateOpen` / `rfKorrActive` / `RfKorrLatch` / `rfKorrCensus` all decide from
-     * it. Overwriting it does not merely change the calibration, it changes which samples every
-     * later derivation believes the DME was correcting — the same trap `setWOTThreshold` documents.
+     * The restore is the same rule as `setWOTThreshold`: write back what the binary was loaded with,
+     * and fall back to `RF_KORR_GATE_FLOOR.STOCK_RAW` only when the loaded curve is this app's own
+     * work and so has nothing true to say. HOLD has to be in that fallback, not only the drop. A held
+     * image comes back into the app three ordinary ways — the post-write reload, a FINALIZE from the
+     * stored image, and a new session parented on a TUNED that was built held — and in each the
+     * "loaded" six are 2000. Writing those back would carry the hold into the release BIN, with the
+     * cold-exhaust enrichment gone and nothing on the hub to say so.
+     *
+     * It matters more here than for one byte, because the app READS this curve back: `readEgtTables`
+     * builds `EgtTables.rfKorrMin` from these exact bytes and `gateOpen` / `rfKorrActive` /
+     * `RfKorrLatch` / `rfKorrCensus` all decide from it. Overwriting it does not merely change the
+     * calibration, it changes which samples every later derivation believes the DME was correcting —
+     * the same trap `setWOTThreshold` documents.
      */
-    public setRfKorrGateFloor(drop: boolean): void {
+    public setRfKorrGateFloor(mode: RfKorrFloorMode): void {
         const addr = RF_KORR_GATE_FLOOR.VALUES_ADDRESS;
         const n = RF_KORR_GATE_FLOOR.POINTS;
 
@@ -416,17 +424,25 @@ export class BinaryPatcher extends BinaryParser {
         for (let i = 0; i < n; i++) {
             asLoaded.push((this.original[addr + i * 2] << 8) | this.original[addr + i * 2 + 1]);
         }
+        // The same two tests the parser's detectors make — exact for held, the stock-free gap for
+        // the drop — so a restore recognises its own work exactly when the hub reports it.
+        const wasHeld = asLoaded.every(v => v === RF_KORR_GATE_FLOOR.HELD_RAW);
         const wasDropped = asLoaded.every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
 
-        const raws = drop
-            ? asLoaded.map(() => RF_KORR_GATE_FLOOR.DROPPED_RAW)
-            : wasDropped
-                ? [...RF_KORR_GATE_FLOOR.STOCK_RAW]
-                : asLoaded;
+        const raws = mode === 'hold'
+            ? asLoaded.map(() => RF_KORR_GATE_FLOOR.HELD_RAW)
+            : mode === 'drop'
+                ? asLoaded.map(() => RF_KORR_GATE_FLOOR.DROPPED_RAW)
+                : (wasHeld || wasDropped)
+                    ? [...RF_KORR_GATE_FLOOR.STOCK_RAW]
+                    : asLoaded;
 
         raws.forEach((raw, i) => this.setUint16(addr + i * 2, raw));
     }
 }
+
+/** What `BinaryPatcher.setRfKorrGateFloor` writes. */
+export type RfKorrFloorMode = 'stock' | 'drop' | 'hold';
 
 /**
  * The bytes the DME was RUNNING: a BASE, plus the logic patches that were armed against it.
@@ -461,9 +477,29 @@ export interface LogicPatches {
     applyPatch: boolean;
     applyWotDisable: boolean;
     applyTankVentDisable: boolean;
-    /** `kl_rf_korr_rf_min` dropped to 0.400 — see `BinaryPatcher.setRfKorrGateFloor`. Optional
-     *  because every stored session predates it, and absent has to keep meaning "stock floor". */
+    /** `kl_rf_korr_rf_min` held at 2.000 — K HOLD, see `RF_KORR_GATE_FLOOR`. Optional because
+     *  every session stored before it predates it, and absent has to keep meaning "stock floor". */
+    applyRfKorrHold?: boolean;
+    /**
+     * The retired RF GATE drop (0.400). READ-ONLY history: nothing in the app sets it any more, but
+     * flash records and tune settings written while the toggle existed carry it, and a log recorded
+     * against a dropped floor has to replay through that floor — `bytesAsRun` honours it for exactly
+     * that. `patchOnImage` does not: an image leaving the app never carries the drop again.
+     */
     applyRfKorrGateDrop?: boolean;
+}
+
+/**
+ * Which floor the DME was running, from the flags on record. HOLD wins when both are set: the two
+ * write the same six words, so only one of them can have been in the car, and the drop is the
+ * retired one — a dropped BIN opened with K HOLD armed is written held.
+ */
+export function rfKorrFloorMode(
+    patches: Pick<LogicPatches, 'applyRfKorrHold' | 'applyRfKorrGateDrop'>,
+): RfKorrFloorMode {
+    if (patches.applyRfKorrHold) return 'hold';
+    if (patches.applyRfKorrGateDrop) return 'drop';
+    return 'stock';
 }
 
 export function bytesAsRun(base: ArrayBuffer, patches: LogicPatches): ArrayBuffer {
@@ -472,8 +508,36 @@ export function bytesAsRun(base: ArrayBuffer, patches: LogicPatches): ArrayBuffe
     else patcher.enableMapCorrection();
     patcher.setWOTThreshold(patches.applyWotDisable);
     patcher.setTankVentDisable(patches.applyTankVentDisable);
-    patcher.setRfKorrGateFloor(!!patches.applyRfKorrGateDrop);
+    patcher.setRfKorrGateFloor(rfKorrFloorMode(patches));
     return patcher.getBuffer();
+}
+
+/**
+ * `bytesAsRun` for a drive replayed from the store, where the record may be silent on a patch.
+ *
+ * A field the record does not carry is read off the stored BASE's own bytes, never taken as false.
+ * With no settings and no real flash in the session, nothing this app did has moved the car since
+ * that BASE went in, so the car runs the BASE as stored — and the toggles say the same, because
+ * `useBinaryFile` resolves each one as `override ?? detected` from the same bytes. Coercing the
+ * missing field to false instead replayed a held drive through the STOCK floor: a Re-tune child
+ * created from a held TUNED has a held BASE, no settings and no flash, and a crash before its
+ * first SAVE recovered that drive on a gate the car did not have — stock-gate samples marked
+ * k-ramp, the `kHeld` refusal and the high-Δ guard both lost, and the next refilter (which
+ * follows the held toggles) building a different map from the one recovery showed.
+ *
+ * Per field, so an older flash record that predates a patch falls back for that one patch only,
+ * the way the toggles already do. A field that IS on record wins over the bytes: it is what the
+ * drive ran.
+ */
+export function bytesAsRecorded(base: ArrayBuffer, recorded: Partial<LogicPatches> | undefined): ArrayBuffer {
+    const det = readLogicPatches(base);
+    return bytesAsRun(base, {
+        applyPatch: recorded?.applyPatch ?? det.applyPatch,
+        applyWotDisable: recorded?.applyWotDisable ?? det.applyWotDisable,
+        applyTankVentDisable: recorded?.applyTankVentDisable ?? det.applyTankVentDisable,
+        applyRfKorrHold: recorded?.applyRfKorrHold ?? det.applyRfKorrHold,
+        applyRfKorrGateDrop: recorded?.applyRfKorrGateDrop ?? det.applyRfKorrGateDrop,
+    });
 }
 
 /**
@@ -499,7 +563,10 @@ export function patchOnImage(base: ArrayBuffer, patches: LogicPatches): ArrayBuf
     else patcher.enableMapCorrection();
     patcher.setWOTThreshold(patches.applyWotDisable);
     patcher.setTankVentDisable(patches.applyTankVentDisable);
-    patcher.setRfKorrGateFloor(!!patches.applyRfKorrGateDrop);
+    // HOLD or a restore, never the drop — the same two `buildPatchedBuffer` writes. A legacy record
+    // that flashed RF GATE rebuilds with the floor back at stock, so this file is one a build could
+    // still produce today, and the session list's PATCH-ON row names only what it carries.
+    patcher.setRfKorrGateFloor(patches.applyRfKorrHold ? 'hold' : 'stock');
     // Last, after every other byte has moved — the same order buildPatchedBuffer uses.
     patcher.applyChecksumCorrection();
     return patcher.getBuffer();
@@ -508,8 +575,9 @@ export function patchOnImage(base: ArrayBuffer, patches: LogicPatches): ArrayBuf
 /**
  * Which logic patches a stored image is carrying, read back out of the bytes.
  *
- * The same four questions `useBinaryFile` asks when a BASE arrives, in one place so the session
- * list can ask them of bytes it never loaded into the workspace. PATCH is two bytes agreeing —
+ * The same questions `useBinaryFile` asks when a BASE arrives, in one place so the session list
+ * can ask them of bytes it never loaded into the workspace. The floor is asked both ways — held
+ * and dropped — because either one means this BASE is not stock. PATCH is two bytes agreeing —
  * the map correction off AND the temperature limit raised — because either alone is a half-applied
  * patch and not the state WRITE PATCH-ON leaves.
  */
@@ -519,6 +587,7 @@ export function readLogicPatches(image: ArrayBuffer): LogicPatches {
         applyPatch: parser.getMapCorrectionStatus() && parser.getTempThreshold() >= 99,
         applyWotDisable: parser.getWOTThresholdStatus(),
         applyTankVentDisable: parser.getTankVentDisabled(),
+        applyRfKorrHold: parser.getRfKorrGateFloorHeld(),
         applyRfKorrGateDrop: parser.getRfKorrGateFloorDropped(),
     };
 }
