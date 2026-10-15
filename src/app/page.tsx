@@ -103,7 +103,7 @@ import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolv
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import type { HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
-import { withRfKorrRamp } from '@/lib/log-engine/lambdaGates';
+import { withLambdaRamp } from '@/lib/log-engine/lambdaGates';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
 import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
@@ -1301,18 +1301,23 @@ export default function Home() {
   /**
    * VALID and the drop census, as the MAP saw them rather than as the filter left them.
    *
-   * Gate-open samples the lambda loop had not yet taken an rf_korr step back on pass every filter
-   * and are then skipped by the VE write (`isKRampExcluded`), so the filter's VALID counted them as
-   * evidence the map never used. They move from VALID into the census as `k ramp`; TOTAL — VALID
-   * plus everything left out — is the same drive either way. Floored at zero for the beat between a
-   * refilter and the recalculation it schedules, when the count still describes the previous pass.
+   * Samples whose lambda trim was still ramping back from the last event — a loop restart after a
+   * fuel cut, or an rf_korr step, gate open or shut — pass every filter and are then skipped by the
+   * VE write (`isLambdaRampExcluded`), so the filter's VALID counted them as evidence the map never
+   * used. They move from VALID into the census as `lambda ramp`:
+   *
+   *     VALID = validCount - lambdaRampCount        TOTAL = VALID + every reason left out
+   *
+   * so TOTAL is the same drive either way. Floored at zero (and the census count capped at
+   * validCount) for the beat between a refilter and the recalculation it schedules, when the count
+   * still describes the previous pass.
    */
-  const validForMap = processedLog ? Math.max(0, processedLog.validCount - veCalc.kRampCount) : 0;
+  const validForMap = processedLog ? Math.max(0, processedLog.validCount - veCalc.lambdaRampCount) : 0;
   const dropCensus = useMemo(
     () => (processedLog
-      ? withRfKorrRamp(processedLog.dropCensus, Math.min(veCalc.kRampCount, processedLog.validCount))
+      ? withLambdaRamp(processedLog.dropCensus, Math.min(veCalc.lambdaRampCount, processedLog.validCount))
       : null),
-    [processedLog, veCalc.kRampCount]);
+    [processedLog, veCalc.lambdaRampCount]);
 
   /**
    * The sample rate, measured against what this profile should manage.

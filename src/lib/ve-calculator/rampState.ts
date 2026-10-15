@@ -1,5 +1,6 @@
 /**
- * Has the DME's lambda loop finished taking back the last step in rf_korr?
+ * Has the DME's lambda loop finished taking back the last step — in rf_korr, or the restart that
+ * put its integrator back at 1.000?
  *
  * ## The mechanism this exists for
  *
@@ -99,6 +100,76 @@
  *
  * For the reason `RfKorrLatch` does: the integrator kept running on samples this app later
  * dropped, and a restart is most often a fuel-cut sample — exactly what the VE filter removes.
+ *
+ * ## A restart is a clock with the gate shut too
+ *
+ *     excluded from the VE write  <=>  kRamp !== false          (`isLambdaRampExcluded`)
+ *
+ * whatever the gate says. This file was written for the K step, and the write used to skip only
+ * gate-open samples; but the restart ramp is the same clock without K in it. After a lift-off fuel
+ * cut, or BA / loop-off, the integrator is put back at exactly 1.000 and walks down at
+ * `KF_LA_KI_NEG` (~0.04/s) for as long as the map is rich, so until the lean switch the trim reads
+ * `1 - 0.04 t`: the seconds since fuelling resumed, not the cell. Under K HOLD the gate never opens,
+ * a restart is the only event there is, and the band was written from it.
+ *
+ * Measured on the two stage-1 K HOLD drives — #971 on map M0, #974 on M1, which is #971's TUNED
+ * and 3.7-7.9 % leaner than M0 in every band cell (RO 7.5 / 10 x 2200-2900 rpm). Bank samples the
+ * tracker calls ramps, among the VE samples that reach a band cell, binned by time since the
+ * restart (the last sample at exactly 1.000, or the reset jump):
+ *
+ *     since restart     <= 0.6 s   0.6-1.2   1.2-2    2-3     3-5
+ *     #971  (M0)         0.992     0.974    0.949   0.914   0.895
+ *     #974  (M1)         0.996     0.976    0.946   0.912   0.887
+ *
+ * Two maps 6 % apart give the same trim at the same second, so the trim is the clock. And it is
+ * most of the band: 39 % of #971's band samples and 70 % of #974's were such ramps, 74 % / 91 %
+ * of them within 3 s of a fuel cut, and 10 of #971's 187 (1 of #974's 100) more than 5 s after any
+ * restart signature. DIRECT averaging them asks the band for ~-6 % on every pass whatever the map
+ * is — M0 -> M1 moved the band cells -3.7..-7.9 %, M1 -> its own TUNED another 0..-7.6 % — while
+ * the limit-cycle midpoints put M1 within about ±3 % there. That is the ratchet this file was
+ * written to stop, arriving by the other door.
+ *
+ * So the predicate no longer reads the gate. It needs every sample the walk covered to carry a
+ * defined `kRamp`, gate open or shut, which is what `annotateRfKorr` and the live walk now attach;
+ * undefined is left meaning only "the walk never saw this sample", and that still counts as a ramp.
+ *
+ * ## Why a load rise is not an event
+ *
+ * An entry from cruise also falls on its way in — and it was measured before deciding against it.
+ * An entry here is a rise of >= X %RF within <= Y s with no restart signature or fuel cut in the
+ * 5 s before it and the banks apart for 2 s (#967/#968/#970/#971 on M0, #974 on M1):
+ *
+ *   - The map cannot be told from the clock. Where M0 and M1 differ — the band — #974 has ONE such
+ *     entry at X/Y = 5/1, 10/2 or 15/2. Everywhere else the two maps sit < 1 % apart, so over the
+ *     30-47 cells both drives entered, the slope of `ln(trim_M1 / trim_M0)` on `ln(VE_M0 / VE_M1)`
+ *     (1 = the trim is the VE error, 0 = a clock) comes out -0.03 ± 0.26 (5/1, 2.5-6 s after) and
+ *     0.06 ± 0.44 (10/2): either answer fits.
+ *   - The DME's own transient fuel is too short to make one. `baFTi` (acceleration enrichment,
+ *     logged on #967/#968/#970) is at most 1.11 and lasts 1-2 samples, a median 0.61-0.68 s; after
+ *     the entries above it is above 1.0005 on 16 % of samples in the first 0.35 s, 2 % at 0.35-0.7 s
+ *     and ~1 % after. A multi-second fall is not that.
+ *   - Without an event the loop is walking from the last cell's error to this one's, and that heads
+ *     where the write should end: DIRECT converging both cells removes it (`lambdaCyclingFlags`). A
+ *     restart heads to `1 - 0.04 t` from 1.000 whatever the cell is, and nothing removes that.
+ *   - In the band the samples such an event would hold are not one-sided: still pending since the
+ *     entry they read 0.939 / 0.959 / 0.944 against 0.955 / 0.938 / 0.939 after the reversal
+ *     (X/Y 5/1, 10/2, 15/2). The cost is not small: at 10/2, 103-244 VE samples a drive.
+ *
+ * The visit gate (calculator.ts, `VE_MIN_VISITS` and `VE_MIN_EFFECTIVE_VISITS`) is what answers the
+ * one-episode cell instead: three visits, worth at least two equal ones by weight.
+ *
+ * ## Why the exclusion ends at the first switch, and not seconds later
+ *
+ * The kept samples nearest a restart do not ask for more cut than later ones. #971's post-ramp VE
+ * samples, stated against M1 (`trim x VE_M0 / VE_M1`) and binned by seconds since the restart
+ * signature, read at RO 6-8.75 % x 2150-3000 rpm +0.6 / -0.1 / +0.4 / -4.8 / -4.8 % at 0-3 / 3-5 /
+ * 5-8 / 8-12 / 12-20 s (44 / 34 / 39 / 28 / 13 samples), and at RO 3-6 % +1.8 / +1.3 / +1.2 /
+ * -1.8 %: the early samples ask for no more cut than the late ones, so excluding them longer would
+ * not move the write toward the map. #974's band is too thin to say (33 post-ramp samples in
+ * RO 6-12.5 %), and 10 of its 15 at RO 8.75-12.5 % are one stretch, 770-772 s, reading -9.7 %. That
+ * stretch is what the cross-drive slope of `ln(demand_974 / demand_971)` on `ln(M0 / M1)` sees
+ * (1 = the trim follows the map, 0 = a clock): 0.28 ± 0.16 over 13 cells with it, 0.80 ± 0.11 over
+ * 12 with the eight seconds 765-773 s left out — one episode, not a clock.
  */
 
 // Not `interpMap2d` from egtTables: that module reads these tables (`readEgtTables`), and importing
@@ -297,10 +368,247 @@ export class KRampTracker {
     }
 }
 
-/** Is this sample excluded from a VE write as a ramp? The ONE predicate the calculator, the drop
- *  census and the live counter share. A gate-open sample whose ramp state was never walked —
- *  `kRamp` undefined — counts as a ramp: the alternative credits it `trim x K`, which during a
- *  ramp is the time since the step and not the VE error. */
-export function isKRampExcluded(point: { rfKorrGateOpen?: boolean; kRamp?: boolean }): boolean {
-    return point.rfKorrGateOpen === true && point.kRamp !== false;
+/**
+ * The longest half-cycle — one reversal of a bank's trim to the next — that is still the limit
+ * cycle, in seconds. Every sample of a longer one is a WALK.
+ *
+ * A half-cycle is the I ramp running one way, so its length is its excursion. Per half-cycle, the
+ * median trim move on the K HOLD drives #971 / #974 is 0.012 / 0.011 at 0.5-1 s, 0.023 / 0.022 at
+ * 1-1.5 s, 0.040 / 0.035 at 1.5-2 s and 0.056 / 0.047 at 2-2.5 s. Up to 1.5 s that is the cycle's
+ * own swing, ±0.02 about its centre — the tolerance every reader of this flag works to; past it
+ * the trim is covering a distance it was not already within. The car's loop sits well inside: the
+ * DME's own P-jump counters (`LA_P_SPR_COUNT`, logged on #967/#968/#970) put consecutive jumps of
+ * a bank 0.52 s apart at p10, 0.61 s at p25 and 0.89 s at the median, and the tracker's reversals
+ * on #971 / #974 come 0.86 / 1.00 s apart at the median.
+ *
+ * What it costs is reversals the log cannot see. A half-cycle shorter than one sample interval can
+ * hide its pair of reversals, and three half-cycles then read as one of ~2 s. On the VE profile
+ * (#971 / #974: a sample every 0.18 s at the median, 0.39 s at p90) that takes a half-cycle under
+ * 0.2-0.4 s, below the counters' p10; at the 1.5-2 Hz the counter channels slowed #967/#968/#970
+ * to, it is common. Either way the cost lands on "not cycling", which every reader takes as "do
+ * not read".
+ */
+export const HALF_CYCLE_MAX_SEC = 1.5;
+
+/** One raw sample, as the cycle tracker needs it. `time` is in the LOG's own unit — the flags are
+ *  told seconds-per-unit. */
+export type LambdaCycleSample = Pick<KRampSample, 'time' | 'rpm' | 'rf' | 'stft1' | 'stft2'>;
+
+/**
+ * What one sample did to one bank's phase. `absent`: no reading. `reset`: a restart signature, so
+ * the phase so far is void. `reversal`: the P jump against the phase's direction, which ends one
+ * half-cycle and opens the next. `none`: the phase goes on.
+ */
+export type LambdaBankEvent = 'absent' | 'reset' | 'reversal' | 'none';
+
+/** One sample's step of `LambdaCycleTracker`, per bank (index 0 is bank 1). */
+export interface LambdaCycleStep {
+    event: [LambdaBankEvent, LambdaBankEvent];
+    /** On the integrator's clamp (`STOP_TOLERANCE`, as `KRampTracker`): reporting a bound, not a
+     *  mixture, so never cycling. */
+    pinned: [boolean, boolean];
+}
+
+interface CycleBank {
+    /** Running minimum / maximum of the trim since the last reversal or reset. */
+    lo: number;
+    hi: number;
+    /** The phase the trim is in: +1 rising (a lean phase, after a lean switch), -1 falling (a rich
+     *  phase), 0 unknown — after a reset, until the first move says which. */
+    dir: -1 | 0 | 1;
+    prev: number | undefined;
+}
+
+/**
+ * Where does each bank's trim REVERSE? The event half of `lambdaCyclingFlags`, which says what the
+ * reversals are for. Causal: `step` sees each raw sample once, in time order.
+ *
+ *   REVERSAL - in a falling phase, the trim rose `REVERSAL_FRACTION` x P+ above `lo` (the lean
+ *              switch); in a rising phase, it fell `REVERSAL_FRACTION` x P- below `hi` (the rich
+ *              switch). P from `lambdaPJumpAt` at this (N, RF), as `KRampTracker` takes it. Then
+ *              `lo = hi = v` and the direction flips.
+ *   RESET    - loop off (every present bank exactly 1.000), both banks bit-identical, a one-sample
+ *              move over `TRIM_RESET_JUMP`, or the first reading after none: the same restart
+ *              signatures as `KRampTracker`, plus the gap. The direction is unknown; the first move
+ *              after it sets the direction and is NOT a reversal — there is nothing yet to reverse.
+ *
+ * ## Why the direction is part of it
+ *
+ * A ramp's own I slope crosses either threshold within a fraction of a second — 0.8 x P- = 0.0078
+ * is 0.19 s at 0.0406/s — so comparing the trim with its extremes since the last reversal, without
+ * the direction, calls a monotone walk a train of rich switches, one every sample. The P jump is the
+ * one move AGAINST the phase's direction, and that is what is counted.
+ */
+export class LambdaCycleTracker {
+    private readonly pJumps: LambdaPJumps | null;
+    private readonly fMin: number;
+    private readonly fMax: number;
+    private readonly banks: CycleBank[] = [0, 1].map(() => ({ lo: 1, hi: 1, dir: 0, prev: undefined }));
+
+    constructor(params?: LambdaRampParams | null) {
+        this.pJumps = params?.pJumps ?? null;
+        this.fMin = params?.fMin ?? TRIM_CLAMP_FALLBACK.min;
+        this.fMax = params?.fMax ?? TRIM_CLAMP_FALLBACK.max;
+    }
+
+    /** Advance one sample and say what it did to each bank. */
+    step(s: LambdaCycleSample): LambdaCycleStep {
+        const trims = [s.stft1, s.stft2];
+        const present = trims.filter((v): v is number => v !== undefined);
+        const { pos, neg } = lambdaPJumpAt(this.pJumps, s.rpm, (s.rf ?? 0) / 100);
+        const allAtOne = present.length > 0 && present.every(v => v === 1);
+        const identical = present.length === 2 && trims[0] === trims[1];
+
+        const out: LambdaCycleStep = { event: ['absent', 'absent'], pinned: [false, false] };
+        trims.forEach((v, i) => {
+            const b = this.banks[i];
+            if (v === undefined) {
+                // What the integrator did across the gap is unknown; the next reading starts afresh.
+                b.prev = undefined; b.dir = 0;
+                return;
+            }
+            out.pinned[i] = v <= this.fMin + STOP_TOLERANCE || v >= this.fMax - STOP_TOLERANCE;
+            const reset = allAtOne || identical || b.prev === undefined
+                || Math.abs(v - b.prev) > TRIM_RESET_JUMP;
+            b.prev = v;
+            if (reset) {
+                b.lo = v; b.hi = v; b.dir = 0;
+                out.event[i] = 'reset';
+                return;
+            }
+            b.lo = Math.min(b.lo, v);
+            b.hi = Math.max(b.hi, v);
+            out.event[i] = 'none';
+            if (b.dir === 0) {
+                if (v < b.hi) b.dir = -1;
+                else if (v > b.lo) b.dir = 1;
+            } else if (b.dir < 0 ? v - b.lo >= REVERSAL_FRACTION * pos : b.hi - v >= REVERSAL_FRACTION * neg) {
+                b.dir = b.dir < 0 ? 1 : -1;
+                b.lo = v; b.hi = v;
+                out.event[i] = 'reversal';
+            }
+        });
+        return out;
+    }
+}
+
+/**
+ * Is the lambda loop LIMIT-CYCLING at each sample — reversing about the trim that holds λ = 1 at
+ * this operating point — or WALKING toward a trim it has not reached?
+ *
+ *   per bank        the half-cycle a sample is in: the reversal at or before it (`r_open`) and the
+ *                   first one after it (`r_close`), with no reset or missing reading between
+ *                   (`LambdaCycleTracker`)
+ *   bank cycling    off its clamp, both reversals in the log, and
+ *                   t(r_close) - t(r_open) <= HALF_CYCLE_MAX_SEC
+ *   lambdaCycling   at least one bank present, and every present bank cycling
+ *
+ * ## Why `kRamp` does not answer this
+ *
+ * `KRampTracker` asks one question: has each bank reversed since the last K step or loop restart.
+ * After that one switch it calls the bank settled until the next K event. But a K step is not the
+ * only step the loop answers. Move from a cell whose VE is 4 % rich into one that is right, and the
+ * trim — at 0.96 — has to walk back at the same I slope it walks a K step back at; until it gets
+ * there it carries the PREVIOUS cell's error, and nothing about K moved. Under K HOLD the gate never
+ * opens, so a restart is the tracker's only event and every such walk reads settled. Measured on
+ * #971 (a K HOLD drive): 448-452 s the trim walked 1.04 -> 0.89 and 461-465 s 1.00 -> 0.84, at
+ * ~-0.04/s, with `kRamp` false throughout.
+ *
+ * ## Why it needs the reversal AFTER the sample
+ *
+ * A walk starts with a switch. The move into the new cell turns the mixture, the sensor reports it,
+ * and the P jump that answers is a reversal like any other — then the I ramp runs one way for as
+ * long as the distance takes. Only the end of a phase says how long it was, so a flag that looks
+ * back alone ("reversed within the last 1.5 s") passes the first 1.5 s of every walk: on #971 that
+ * is where 72 % of the gate-region samples it called cycling sat, and 4 of the 5 rises the high-Δ
+ * guard once read as lean locks. Asked of the whole half-cycle, the walk is a walk from its first
+ * sample.
+ *
+ * The price is the end of a log. The last half-cycle has not closed, so it reads "not cycling" —
+ * on a live run, the last second or so until the next flush re-annotates the prefix. And it is a
+ * pass over a log, not a step: the live VE stream, annotated one sample at a time, does not carry
+ * the flag, and nothing that reads the live stream needs it.
+ *
+ * ## Measured
+ *
+ * Against the DME's P-jump counters on #967/#968/#970, a sample truly cycling where both banks sit
+ * between two counter rises at most 2 s apart: the samples this calls cycling are 0.86 right, at a
+ * recall of 0.26. Of what it passes, 14 % sits in a counter gap over 2 s — a walk — where the
+ * backward look passed 48 %; on the anchor check's gate-shut post-ramp population, 14 % against
+ * 48 %. (Against a 1.5 s gap it scores 0.70 / 0.32 — at those logs' 0.5-0.66 s sampling both
+ * lengths are read to a sample either way — and against the backward truth "a rise in the last
+ * 1.5 s" 0.97 / 0.17.) The recall is the sampling's price: at 1.5-2 Hz most short half-cycles hide
+ * a reversal pair. On #971 / #974 it calls 23 % / 17 % of the loop-on samples cycling, and 3 % / 2 %
+ * of those the stock gate would have entered: those drives' gate region was walking almost
+ * throughout.
+ *
+ * What the readers get. #971's α — the within-cell slope of ln trim on ln K*, the share of BMW's
+ * enrichment the engine needed — reads +0.038 [-0.024, +0.097] over 891 samples at 1200-5000 rpm,
+ * where the backward look read +0.065 [+0.011, +0.112] and the limit cycle's own midpoints give
+ * +0.005..+0.03; the stock gate region keeps 14 samples, too few to estimate, where the backward
+ * look read +0.518 off its walk starts. Over #964-#970 the DRREL tuner's tables come out unchanged:
+ * D turns away 1-9 post-ramp samples a drive (the 3 thin-count samples #966 and #968 each used
+ * among them), and the anchor check keeps 14-21 % of its gate-shut samples, 290-516 a drive, with
+ * its median moving -0.002..+0.007 and no verdict changing.
+ *
+ * ## Independent of `kRamp`
+ *
+ * The two answer different questions and neither replaces the other. A bank that has settled on a
+ * K step and then walks a VE step is post-ramp AND not cycling; a bank cycling before a K step is
+ * still mid-ramp after it, whatever its half-cycles. The VE write reads only `kRamp` (see
+ * `LogDataPoint.lambdaCycling` for why); the readers that need the trim to be the error at THIS
+ * operating point read both.
+ */
+export function lambdaCyclingFlags(
+    samples: readonly LambdaCycleSample[], params: LambdaRampParams | null | undefined, secondsPerUnit: number,
+): boolean[] {
+    const tracker = new LambdaCycleTracker(params);
+    const steps = samples.map(s => tracker.step(s));
+    const t = samples.map(s => s.time * secondsPerUnit);
+    const n = samples.length;
+    const flags = steps.map(s => s.event.some(e => e !== 'absent'));
+    const open = new Array<number>(n);
+    for (let k = 0; k < 2; k++) {
+        // Forward: the reversal that opened each sample's half-cycle, -1 since a reset or a gap.
+        let last = -1;
+        for (let i = 0; i < n; i++) {
+            const e = steps[i].event[k];
+            if (e === 'absent' || e === 'reset') last = -1;
+            else if (e === 'reversal') last = i;
+            open[i] = last;
+        }
+        // Backward: the reversal that closes it, -1 when a reset, a gap or the log's end comes first.
+        let next = -1;
+        for (let i = n - 1; i >= 0; i--) {
+            const e = steps[i].event[k];
+            if (e !== 'absent') {
+                const cycling = !steps[i].pinned[k] && open[i] >= 0 && next >= 0
+                    && t[next] - t[open[i]] <= HALF_CYCLE_MAX_SEC;
+                if (!cycling) flags[i] = false;
+            }
+            if (e === 'absent' || e === 'reset') next = -1;
+            else if (e === 'reversal') next = i;
+        }
+    }
+    return flags;
+}
+
+/**
+ * Is this sample excluded from a VE write as a lambda ramp? The ONE predicate the calculator, the
+ * drop census (`lambdaRamp`) and the live counter share.
+ *
+ *     excluded  <=>  kRamp !== false
+ *
+ * Whatever the gate state: a bank pending since the last event — the gate opening or shutting, a K
+ * step, or a loop restart — is reading the time since that event, with the gate shut as with it
+ * open (see "A restart is a clock with the gate shut too" above). The gate no longer enters.
+ *
+ * Undefined is the walk never having seen the sample — a timestamp outside the raw log it walked —
+ * and it counts as a ramp: the alternative credits it a trim whose history is unknown. Every sample
+ * the walk did see carries a defined value, gate open or shut, binary or not (`annotateRfKorr`,
+ * `VECalculator.rfKorrWalk`), so this does not refuse a stream wholesale; a hand-built sample that
+ * was never annotated must say `kRamp: false` to be written.
+ */
+export function isLambdaRampExcluded(point: { kRamp?: boolean }): boolean {
+    return point.kRamp !== false;
 }

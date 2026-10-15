@@ -3,18 +3,27 @@
  * fill.
  *
  *     trim  = mean(STFT1, STFT2) x mean(LTFT1, LTFT2)        the VE write's own trim
- *     D_i   = rfKorr_i x trim_i                              gate open AND kRamp === false
+ *     D_i   = rfKorr_i x trim_i                              gate open AND kRamp === false AND
+ *                                                            lambdaCycling === true
  *     DRREL(N, Δ) <- Σ w·D_i / Σ w                           -0.05 / +0.10 per log, [1.000, 1.40],
  *                                                            never the Δ 30 row or 1100/5100 rpm
  *     refused 'kHeld'          the floor is K HOLD (2.000 x 6), so the gate never opened
- *     refused 'veNotAnchored'  median trim of the gate-shut post-ramp samples outside 1 ± 0.02
- *     above the highest written row of a column, with a K HOLD drive's guard ok:
+ *     refused 'veNotAnchored'  median trim of the gate-shut, post-ramp, limit-cycling samples
+ *                              outside 1 ± 0.02
+ *     above the highest written row of a column, with a K HOLD drive's guard ok (and stored by the
+ *     convergence rule — it carries skippedUnconverged):
  *         s = (k_new_top - 1) / (k_stock_top - 1),   k = 1 + s (k_stock - 1)   (same step, range)
  *         k_stock BMW's table (CSL_STOCK_RF_KORR_DRREL), the step from the loaded one
  *     the guard, over a K HOLD drive:
  *         K* = DRREL(N, model(N, rf_soll · K*) - TABG),  Δ* = model(N, rf_soll · K*) - TABG
- *         samples    = Δ* >= 300, stock gate entered, loop running
- *         leanLocked = any bank on its +clamp, or risen P+ + 0.02 without a rich switch
+ *         cell       = nearest AXIS_RPM node x 5 %RF bin of rf_soll
+ *         converged  = >= 6 loop-on, limit-cycling samples at Δ* < 200 in the cell, median trim 1 ± 0.02;
+ *                      ref_b = bank b's median STFT there
+ *         history    = per bank, the cells since 1.5 s before its trough, none before its last reset
+ *                      (loop off, identical banks, a leap, a gap)
+ *         samples    = Δ* >= 300, stock gate entered, loop running, and the sample's cell and each
+ *                      bank's history converged — the rest are skippedUnconverged
+ *         leanLocked = any bank on its +clamp, or STFT_b >= max ref_b over cell + history + P+ + 0.04
  *         ok         = samples >= 10 && leanLocked === 0
  *
  * All synthetic, plus the one binary the repo ships (public/mock) for BMW's stock tables. Nothing
@@ -25,8 +34,9 @@
 import fs from 'node:fs';
 import { tuneRfKorrTable, rfKorrCensus, RF_KORR_TUNE_DEFAULTS } from '../src/lib/ve-calculator/rfKorrTuner.ts';
 import {
-    computeHighDeltaGuard, counterfactualRfKorr,
-    HIGH_DELTA_GUARD_DELTA_MIN, HIGH_DELTA_GUARD_MIN_SAMPLES, LEAN_LOCK_MARGIN,
+    computeHighDeltaGuard, counterfactualRfKorr, guardCell,
+    HIGH_DELTA_GUARD_DELTA_MIN, HIGH_DELTA_GUARD_MIN_SAMPLES, HIGH_DELTA_GUARD_BASELINE_DELTA_MAX,
+    GUARD_CONVERGED_MIN_SAMPLES, GUARD_CONVERGED_TOLERANCE, LEAN_LOCK_MARGIN,
 } from '../src/lib/ve-calculator/highDeltaGuard.ts';
 import { readEgtTables, tabgModelAt, withStockRfKorrFloor } from '../src/lib/ve-calculator/egtTables.ts';
 import { VECalculator, RF_TRUNCATION_MEAN_PERCENT } from '../src/lib/ve-calculator/calculator.ts';
@@ -58,8 +68,8 @@ const truth = (rpm, delta, s) => 1 + s * (stockAt(rpm, delta) - 1);
 // --- annotated samples, as annotateRfKorr hands them to the tuner ---------------------------------
 //
 // The tuner's contract is the annotated fields — rfKorr (K the DME applied), rfSoll, rfKorrGateOpen,
-// kRamp, tabgDelta, the trims — so these are built directly. One end-to-end pass through the real
-// annotation is at the bottom.
+// kRamp, lambdaCycling, tabgDelta, the trims — so these are built directly, limit-cycling unless a
+// check says otherwise. One end-to-end pass through the real annotation is at the bottom.
 
 let clock = 0;
 const LTFT = 0.98;   // off 1.000 on purpose: a tuner that dropped the long-term store reads 2 % high
@@ -69,7 +79,7 @@ const LTFT = 0.98;   // off 1.000 on purpose: a tuner that dropped the long-term
  * the tuner's own settle window and are not used; the remaining samples carry D = `d` exactly, the
  * trim split ±0.002 across the banks and the long-term store at LTFT.
  */
-function block({ rpm, delta, load = 20, d, k = 1, n = 40, gate = true, kRamp = false, rfSoll = 0.9, v = 80 }) {
+function block({ rpm, delta, load = 20, d, k = 1, n = 40, gate = true, kRamp = false, lambdaCycling = true, rfSoll = 0.9, v = 80 }) {
     const trim = d / k;
     const stft = trim / LTFT;
     const rf = 100 * rfSoll * k;
@@ -77,7 +87,7 @@ function block({ rpm, delta, load = 20, d, k = 1, n = 40, gate = true, kRamp = f
     return Array.from({ length: n }, () => ({
         time: (clock = +(clock + 0.2).toFixed(6)), rpm, rawLoad: load, correctedLoad: load,
         stft1: stft + 0.002, stft2: stft - 0.002, ltft1: LTFT, ltft2: LTFT,
-        rf, rfSoll, rfKorr: gate ? k : 1, rfKorrGateOpen: gate, kRamp,
+        rf, rfSoll, rfKorr: gate ? k : 1, rfKorrGateOpen: gate, kRamp, lambdaCycling,
         vehicleSpeed: v, exhaustTemp: model - delta, tabgDelta: delta,
     }));
 }
@@ -145,6 +155,50 @@ console.log('\n[veNotAnchored: the gate-shut trim is off 1.000]');
     check('the live census says the same', rfKorrCensus([...cruise(1.04), ...cells], EGT, VE_AXES).report.refused === 'veNotAnchored');
 }
 
+console.log('\n[D and the anchor read only limit-cycling samples]');
+{
+    const cells = [];
+    for (const rpm of [2200, 3000]) for (const delta of [40, 100, 200]) cells.push([rpm, delta]);
+    const log = [...cruise(1.0), ...cells.flatMap(([rpm, delta]) => cell(rpm, delta, truth(rpm, delta, 0.9)))];
+    // A walk into the 2200 / 100 cell: post-ramp by kRamp, but the trim still carrying the last
+    // cell's error — D reads 0.06 off what this cell needs.
+    const walk = block({ rpm: 2200, delta: 100, d: truth(2200, 100, 0.9) + 0.06, k: stockAt(2200, 100), lambdaCycling: false, n: 30 });
+    const base = tune(log), res = tune([...log, ...walk]);
+    const at = (t) => t.measuredMap[D(100)][R(2200)];
+    check('the walk samples are counted as not cycling, and not used',
+        res.report.samplesNotCycling === 30 && res.report.samplesUsed === base.report.samplesUsed,
+        `${res.report.samplesNotCycling} ${res.report.samplesUsed} vs ${base.report.samplesUsed}`);
+    check('...the cell is measured as without them, at A(Δ)', near(at(res), at(base)) && near(at(base), truth(2200, 100, 0.9)),
+        `${at(res)} ${at(base)}`);
+    const read = tune([...log, ...walk.map(p => ({ ...p, lambdaCycling: true }))]);
+    check('...which, read, would have pulled it toward the last cell', at(read) - at(base) > 0.01, `${at(read)} vs ${at(base)}`);
+    const bare = tune([...log, ...walk.map(({ lambdaCycling, ...p }) => p)]);
+    check('no lambdaCycling at all (the walk did not cover it) is not cycling either', bare.report.samplesNotCycling === 30);
+    check('the live census counts them the same way',
+        rfKorrCensus([...log, ...walk], EGT, VE_AXES).report.samplesNotCycling === 30);
+    // No trim on either bank: no cycle to judge (the flag is false there by construction), so the
+    // sample is the trim's census, not the cycle's.
+    const bareTrim = walk.map(({ stft1, stft2, ...p }) => p);
+    const noTrim = rfKorrCensus([...log, ...bareTrim], EGT, VE_AXES).report;
+    const without = rfKorrCensus(log, EGT, VE_AXES).report;
+    // The block's first samples fall inside the tuner's settle window and are counted there first.
+    check('gate-open samples with no trim at all: samplesNoTrim, not samplesNotCycling',
+        noTrim.samplesNotCycling === 0 && noTrim.samplesNoTrim > 0
+        && noTrim.samplesNoTrim + noTrim.samplesNotSettled - without.samplesNotSettled === 30,
+        `${noTrim.samplesNotCycling} ${noTrim.samplesNoTrim} ${noTrim.samplesNotSettled - without.samplesNotSettled}`);
+
+    // The anchor: gate-shut samples walking at 1.06 are the last cell's error, not this VE's.
+    const cells2 = cell(2200, 100, truth(2200, 100, 0.9));
+    const walkShut = cruise(1.06, 30).map(p => ({ ...p, lambdaCycling: false }));
+    const anchored = tune([...cruise(1.0, 20), ...walkShut, ...cells2]);
+    check('anchor check: gate-shut samples not cycling are not read', anchored.report.anchorTrimSamples === 20
+        && anchored.report.refused === null, `${anchored.report.anchorTrimSamples} ${anchored.report.refused}`);
+    const misread = tune([...cruise(1.0, 20), ...walkShut.map(p => ({ ...p, lambdaCycling: true })), ...cells2]);
+    check('...read as the error, they would refuse a converged VE', misread.report.refused === 'veNotAnchored',
+        `${misread.report.refused} median ${misread.report.anchorTrimMedian}`);
+    check('...and kRamp alone does not keep them out: they are post-ramp', walkShut.every(p => p.kRamp === false));
+}
+
 console.log('\n[kHeld: K HOLD drive]');
 {
     // Under the hold every sample is gate-shut and K = 1; the VE is converged.
@@ -197,7 +251,7 @@ console.log('\n[300/400: the shrink ratio of the highest measured row, only with
         ...[40, 100].flatMap(d => cell(4000, d, truth(4000, d, 0.6))),
         ...[100, 200].flatMap(d => cell(3200, d, stockAt(3200, d) + 0.03)),
     ];
-    const OK = { samples: 30, leanLocked: 0, ok: true };
+    const OK = { samples: 30, leanLocked: 0, skippedUnconverged: 0, ok: true };
     const res = tune(log, { highDeltaGuard: OK });
     const at = (rpm, delta) => res.tuned[D(delta)][R(rpm)];
     const ex = (rpm, delta) => res.extrapolated[D(delta)][R(rpm)] && res.updated[D(delta)][R(rpm)]
@@ -219,7 +273,7 @@ console.log('\n[300/400: the shrink ratio of the highest measured row, only with
     check('extrapolatedCells counts them: 2 + 2 + 3', res.report.extrapolatedCells === 7, String(res.report.extrapolatedCells));
     check('a column with nothing measured gets nothing', [200, 300, 400].every(d => !res.updated[D(d)][R(1600)]));
 
-    const locked = tune(log, { highDeltaGuard: { samples: 30, leanLocked: 4, ok: false } });
+    const locked = tune(log, { highDeltaGuard: { samples: 30, leanLocked: 4, skippedUnconverged: 0, ok: false } });
     check('guard lean-locked: 300/400 stay stock, unflagged, rejected as unmeasured',
         [2200, 3000].every(rpm => [300, 400].every(d => locked.tuned[D(d)][R(rpm)] === stockAt(rpm, d)
             && !locked.extrapolated[D(d)][R(rpm)] && locked.rejected[D(d)][R(rpm)] === 'no-evidence')));
@@ -228,6 +282,11 @@ console.log('\n[300/400: the shrink ratio of the highest measured row, only with
     const absent = tune(log);
     check('guard null or absent: stock', [none, absent].every(t => t.report.extrapolatedCells === 0
         && t.tuned[D(400)][R(2200)] === stockAt(2200, 400)));
+    // Stored before the VE had to be shown converged: it counted walks, and a rich VE could have
+    // hidden a lean need. Its `ok` is not this rule's ok.
+    const stale = tune(log, { highDeltaGuard: { samples: 30, leanLocked: 0, ok: true } });
+    check('a guard stored before the convergence rule (no skippedUnconverged): stock',
+        stale.report.extrapolatedCells === 0 && stale.tuned[D(400)][R(2200)] === stockAt(2200, 400));
 
     // The shrink follows a measurement; it cannot make a log acceptable on its own.
     const two = tune([...cruise(1.0), ...[100, 200].flatMap(d => cell(2200, d, truth(2200, d, 0.9)))], { highDeltaGuard: OK });
@@ -246,7 +305,7 @@ console.log('\n[300/400 over several DRREL passes: the shrink is against BMW\'s 
     // table the last one wrote, and K is what that table applied. Against the loaded table the
     // ratio was pass-relative — s read 1 once row 200 stopped moving, and the column had no excess
     // left once it reached 1.000 — so 300/400 froze where the -0.05 step had got them.
-    const OK = { samples: 30, leanLocked: 0, ok: true };
+    const OK = { samples: 30, leanLocked: 0, skippedUnconverged: 0, ok: true };
     let egt = EGT;
     const path = { 300: [stockAt(2200, 300)], 400: [stockAt(2200, 400)] };
     for (let pass = 1; pass <= 10; pass++) {
@@ -320,91 +379,225 @@ console.log('\n[Δ*: the fixed point the DME\'s own pass-by-pass update settles 
 
 /**
  * A switching P+I loop in continuous time (5 ms), the sensor seeing the mixture `delay` late, read
- * every 0.3 s — the VE profile's ~3 Hz. `m` is how lean the hold leaves the engine: the loop
- * centres on trim = 1 / m. Bank 2 rides 0.004 below bank 1.
+ * every 0.3 s, over a drive of segments, each a stretch of road: `m1` / `m2` how lean the hold
+ * leaves each bank there (the loop centres on trim = 1 / m), TABG, RF. ONE loop across the segments,
+ * so a change of segment is a walk from one trim to the next, as on the car. `off` is the loop
+ * switched off — overrun cut, the VL — which holds the integrator at exactly 1.000 and restarts it
+ * from there. Bank 2 starts 0.004 below bank 1.
+ *
+ * `delay` is 0.4 s, gas transport plus sensor: half-cycles of 0.4-0.75 s, where the DME's P-jump
+ * counters on #967/#968/#970 put the car's at 0.52 s (p10) and 0.89 s (median). At 0.12 s the lean
+ * phase is shorter than the 0.3 s sample, pairs of reversals vanish between samples, and the cycle
+ * flag (rampState.ts) rightly calls little of a baseline cycling — a cell would then be skipped as
+ * never shown converged rather than judged.
  */
-function holdLoop({ m1 = 1.0, m2 = m1, T = 12, delay = 0.12, trim0 = 1.0 }) {
+function heldDrive(segments, { delay = 0.4, rpm = 2500 } = {}) {
     const dt = 0.005, lag = Math.round(delay / dt), every = Math.round(0.3 / dt);
     const KI_NEG = 0.0406, KI_POS = 0.050, P_POS = LAMBDA_P_JUMP_FALLBACK.pos, P_NEG = LAMBDA_P_JUMP_FALLBACK.neg;
-    const banks = [{ trim: trim0 + 0.003, m: m1, mix: [], was: null }, { trim: trim0 - 0.001, m: m2, mix: [], was: null }];
+    // Bank 2 sees its own exhaust 20 ms later, so a restart does not leave the two bit-identical.
+    const banks = [{ trim: 1.003, mix: [], was: null, lag }, { trim: 0.999, mix: [], was: null, lag: lag + 4 }];
+    const q = (x) => Math.round(x * 32768) / 32768;
     const out = [];
-    for (let i = 0; i * dt <= T; i++) {
-        for (const b of banks) {
-            b.mix.push(b.trim * b.m);
-            const rich = b.mix[Math.max(0, i - lag)] > 1;
-            if (b.was !== null && rich !== b.was) b.trim += rich ? -P_NEG : P_POS;
-            else b.trim += (rich ? -KI_NEG : KI_POS) * dt;
-            b.trim = Math.min(1.3, Math.max(0.7, b.trim));
-            b.was = rich;
+    let i = 0;
+    for (const s of segments) {
+        const m = [s.m1 ?? 1, s.m2 ?? s.m1 ?? 1];
+        for (let n = 0; n * dt < s.T; n++, i++) {
+            banks.forEach((b, k) => {
+                if (s.off) { b.trim = 1; b.was = null; b.mix.length = 0; return; }
+                b.mix.push(b.trim * m[k]);
+                const rich = b.mix[Math.max(0, b.mix.length - 1 - b.lag)] > 1;
+                if (b.was !== null && rich !== b.was) b.trim += rich ? -P_NEG : P_POS;
+                else b.trim += (rich ? -KI_NEG : KI_POS) * dt;
+                b.trim = Math.min(1.3, Math.max(0.7, b.trim));
+                b.was = rich;
+            });
+            if (i % every === 0) {
+                out.push({
+                    time: +(i * dt).toFixed(6), rpm: s.rpm ?? rpm, rawLoad: 20,
+                    stft1: q(banks[0].trim), stft2: q(banks[1].trim),
+                    rf: s.rf ?? RF_HOLD, vehicleSpeed: s.v ?? 80, exhaustTemp: s.tabg,
+                });
+            }
         }
-        if (i % every === 0) out.push(banks.map(b => Math.round(b.trim * 32768) / 32768));
     }
     return out;
 }
 // 2500 rpm, RF 75 % — over the stock 0.65 floor, so the stock gate would have entered — at 80 km/h.
-// TABG 240 puts Δ* well above 300 on BMW's model; 520 puts it at the bottom of the table.
+// TABG 240 puts Δ* well above 300 on BMW's model; 520 puts it under the 200 a baseline needs.
 const RF_HOLD = 75;
-const deltaStar = (tabg) => counterfactualRfKorr(EGT, 2500, (RF_HOLD + RF_TRUNCATION_MEAN_PERCENT) / 100, tabg).delta;
-const holdLog = (trims, { tabg = 240, t0 = 0, rf = RF_HOLD, v = 80 } = {}) => trims.map(([a, b], i) => ({
+const TABG_HIGH = 240, TABG_BASE = 520;
+const deltaStar = (tabg, rf = RF_HOLD, rpm = 2500) => counterfactualRfKorr(EGT, rpm, (rf + RF_TRUNCATION_MEAN_PERCENT) / 100, tabg).delta;
+/** The cell shown converged: the loop at λ = 1 below Δ* 200, ~27 samples. */
+const BASE = { T: 8, m1: 1.0, tabg: TABG_BASE };
+const high = (extra = {}) => ({ T: 12, m1: 1.0, tabg: TABG_HIGH, ...extra });
+/** Hand-written trims as log rows, from `t0`. */
+const holdLog = (trims, { tabg = TABG_HIGH, t0 = 0, rf = RF_HOLD, v = 80 } = {}) => trims.map(([a, b], i) => ({
     time: +(t0 + 0.3 * i).toFixed(6), rpm: 2500, rawLoad: 20, stft1: a, stft2: b, rf, vehicleSpeed: v, exhaustTemp: tabg,
 }));
+const guard = (log, egt = HELD) => computeHighDeltaGuard(log, egt);
+/** Samples of a drive at Δ* >= 300 the stock gate would have entered, loop on — what the guard
+ *  either counts or skips. */
+const atHigh = (log, tabg = TABG_HIGH) => log.filter(p => p.exhaustTemp === tabg && !(p.stft1 === 1 && p.stft2 === 1)
+    && (p.vehicleSpeed ?? 0) > 20 && p.rf >= 65).length;
+const medianOf = (xs) => { const s = [...xs].sort((a, b) => a - b), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 
-console.log('\n[the high-Δ guard over a K HOLD drive]');
+console.log('\n[the high-Δ guard over a K HOLD drive whose VE is shown converged]');
 {
-    check(`the synthetic sits at Δ* >= ${HIGH_DELTA_GUARD_DELTA_MIN} (Δ* ${deltaStar(240).toFixed(0)})`, deltaStar(240) >= HIGH_DELTA_GUARD_DELTA_MIN);
-    check(`...and the cold-model case below it (Δ* ${deltaStar(520).toFixed(0)})`, deltaStar(520) < HIGH_DELTA_GUARD_DELTA_MIN);
+    check(`the synthetic sits at Δ* >= ${HIGH_DELTA_GUARD_DELTA_MIN} (Δ* ${deltaStar(TABG_HIGH).toFixed(0)})`, deltaStar(TABG_HIGH) >= HIGH_DELTA_GUARD_DELTA_MIN);
+    check(`...and its baseline under ${HIGH_DELTA_GUARD_BASELINE_DELTA_MAX} (Δ* ${deltaStar(TABG_BASE).toFixed(0)})`,
+        deltaStar(TABG_BASE) < HIGH_DELTA_GUARD_BASELINE_DELTA_MAX);
+    check('the rules: 6 baseline samples, 1 ± 0.02, a lock 0.04 past centre + P+',
+        GUARD_CONVERGED_MIN_SAMPLES === 6 && GUARD_CONVERGED_TOLERANCE === 0.02 && LEAN_LOCK_MARGIN === 0.04);
+    check('cells: nearest rpm node x 5 %RF of rf_soll', guardCell(2500, 75) === guardCell(2400, 79.8)
+        && guardCell(2500, 75) !== guardCell(2500, 70) && guardCell(2500, 75) !== guardCell(2700, 75) && guardCell(2500, undefined) === undefined);
 
-    const cycling = holdLoop({ m1: 1.0 });
-    const g = computeHighDeltaGuard(holdLog(cycling), HELD);
-    check('a loop that reaches λ = 1: every sample counted, none lean-locked, ok',
-        g && g.samples === cycling.length && g.leanLocked === 0 && g.ok === true, JSON.stringify(g));
+    const flat = heldDrive([BASE, high()]);
+    const g = guard(flat);
+    check('a loop that reaches λ = 1: every high-Δ sample counted, none lean-locked, ok',
+        g && g.samples === atHigh(flat) && g.samples >= HIGH_DELTA_GUARD_MIN_SAMPLES && g.skippedUnconverged === 0
+        && g.leanLocked === 0 && g.ok === true, JSON.stringify(g));
 
-    // 8 % lean under the hold: the trim has to climb to 1.087 at I+ 0.050/s, 1.7 s of rising with no
-    // rich switch — past P+ + 0.02 = 0.04 after 0.8 s.
-    const lean = computeHighDeltaGuard(holdLog(holdLoop({ m1: 0.92 })), HELD);
-    check('8 % lean: lean-locked samples, not ok', lean && lean.leanLocked > 0 && lean.ok === false, JSON.stringify(lean));
-    // Lean before Δ* got to 300: the climb is over and the loop cycles around 1.064. Still lean.
-    const settledLean = computeHighDeltaGuard(holdLog(holdLoop({ m1: 0.94, trim0: 1 / 0.94 })), HELD);
-    check('6 % lean, the trim already cycling at 1.064: locked by its level, not ok',
-        settledLean && settledLean.leanLocked > settledLean.samples * 0.8 && !settledLean.ok, JSON.stringify(settledLean));
-    const pinned = computeHighDeltaGuard(holdLog(holdLoop({ m1: 0.7, T: 20 })), HELD);
+    // 8 % lean at Δ* >= 300 in a cell converged below 200: the trim has to climb to 1.087 at I+
+    // 0.050/s with no rich switch — past centre + P+ + 0.04 = 1.06 after ~1.2 s.
+    const lean = guard(heldDrive([BASE, high({ m1: 0.92 })]));
+    check('8 % lean in a converged cell: a lock, counted — not ok', lean && lean.leanLocked > 0 && lean.skippedUnconverged === 0
+        && lean.ok === false, JSON.stringify(lean));
+    // 6 % lean: the trim climbs to 1.064 and cycles there, ±0.02 — over the 1.06 line for about half of it.
+    const settledLean = guard(heldDrive([BASE, high({ m1: 0.94 })]));
+    check('6 % lean, the trim climbing to and cycling at 1.064: locked wherever it stands past 1.06, not ok',
+        settledLean && settledLean.leanLocked > settledLean.samples * 0.4 && !settledLean.ok, JSON.stringify(settledLean));
+    // 2 % lean: the centre moves to 1.02, the peaks to ~1.045 — under the line. The direction the
+    // guard cannot see: a need under ~4 % is the cycle's own peak in a 5 %RF cell.
+    const slight = guard(heldDrive([BASE, high({ m1: 0.98 })]));
+    check('2 % lean: under the margin, no lock — the floor of what a 1-2 s moment can show',
+        slight && slight.leanLocked === 0 && slight.samples > 0, JSON.stringify(slight));
+    const pinned = guard(heldDrive([BASE, high({ m1: 0.7, T: 20 })]));
     check('30 % lean, both banks on the +clamp: locked, not ok', pinned && pinned.leanLocked > 0 && !pinned.ok, JSON.stringify(pinned));
-    const oneBank = computeHighDeltaGuard(holdLog(holdLoop({ m1: 0.92, m2: 1.0 })), HELD);
     // One table feeds both banks, so a shrink the lean bank needed the enrichment for leans it.
-    check('only one bank lean: that is a lock, not ok',
-        oneBank && oneBank.leanLocked > 0 && oneBank.ok === false, JSON.stringify(oneBank));
-    // The threshold itself, on hand-written lean phases: trough, the P+ jump, then the I ramp — a
-    // rise of P+ + 0.015 and a rich switch is a normal half cycle; P+ + 0.025 is a lock.
-    const P = LAMBDA_P_JUMP_FALLBACK.pos;
-    const phase = (top) => {
-        const out = [];
-        for (let rep = 0; rep < 4; rep++) {
-            out.push(1.0, 1.0 + P);
-            for (let x = 1.0 + P + 0.005; x <= 1.0 + top + 1e-9; x += 0.005) out.push(x);
-            out.push(1.0 + top - 0.012, 1.0 + 0.002);   // the rich switch, and down the I- ramp
-        }
-        return out.map(v => [v, v - 0.004]);
-    };
-    const normal = computeHighDeltaGuard(holdLog(phase(P + LEAN_LOCK_MARGIN - 0.005)), HELD);
-    check(`a lean phase rising P+ + ${LEAN_LOCK_MARGIN - 0.005} and switching: no lock`,
-        normal && normal.leanLocked === 0 && normal.samples >= HIGH_DELTA_GUARD_MIN_SAMPLES, JSON.stringify(normal));
-    const over = computeHighDeltaGuard(holdLog(phase(P + LEAN_LOCK_MARGIN + 0.005)), HELD);
-    check(`...rising P+ + ${LEAN_LOCK_MARGIN + 0.005}: locked at the top of each phase`,
-        over && over.leanLocked === 4, JSON.stringify(over));
+    const oneBank = guard(heldDrive([BASE, high({ m1: 0.92, m2: 1.0 })]));
+    check('only one bank lean: that is a lock, not ok', oneBank && oneBank.leanLocked > 0 && oneBank.ok === false, JSON.stringify(oneBank));
 
-    const short = computeHighDeltaGuard(holdLog(cycling.slice(0, HIGH_DELTA_GUARD_MIN_SAMPLES - 1)), HELD);
-    check(`fewer than ${HIGH_DELTA_GUARD_MIN_SAMPLES} samples at Δ* >= 300: not ok`,
+    // The threshold itself, on hand-written lean phases after the converged baseline and a loop
+    // restart: a trough under the bank's centre, the P+ jump, the I ramp to a peak, the rich switch.
+    // The centre is the baseline's own median, as the guard takes it.
+    const P = LAMBDA_P_JUMP_FALLBACK.pos;
+    const baseRows = heldDrive([BASE]);
+    const ref = medianOf(baseRows.filter(r => r.time >= 2).map(r => r.stft1));
+    const phase = (above) => {
+        const out = [];
+        const lo = ref - 0.012, peak = ref + P + above;
+        for (let rep = 0; rep < 4; rep++) {
+            out.push(lo, lo + P);
+            // The I ramp, kept 0.01 under the line, so each phase has one sample to judge: its top.
+            for (let x = lo + P + 0.005; x < ref + P + LEAN_LOCK_MARGIN - 0.01; x += 0.005) out.push(x);
+            out.push(peak, peak - 0.012, lo + 0.004);   // the top, the rich switch, down the I- ramp
+        }
+        return [[1, 1], ...out.map(v => [v, v - 0.004])];
+    };
+    const t0 = baseRows.at(-1).time + 0.3;
+    const normal = guard([...baseRows, ...holdLog(phase(LEAN_LOCK_MARGIN - 0.008), { t0 })]);
+    check(`lean phases peaking P+ + ${LEAN_LOCK_MARGIN - 0.008} over the centre: no lock`,
+        normal && normal.leanLocked === 0 && normal.samples >= HIGH_DELTA_GUARD_MIN_SAMPLES, JSON.stringify(normal));
+    const over = guard([...baseRows, ...holdLog(phase(LEAN_LOCK_MARGIN + 0.008), { t0 })]);
+    check(`...peaking P+ + ${LEAN_LOCK_MARGIN + 0.008}: locked at the top of each phase`, over && over.leanLocked === 4, JSON.stringify(over));
+
+    const full = heldDrive([BASE, high()]);
+    const nBase = full.filter(p => p.exhaustTemp === TABG_BASE).length;
+    const short = guard(full.slice(0, nBase + HIGH_DELTA_GUARD_MIN_SAMPLES - 1));
+    check(`fewer than ${HIGH_DELTA_GUARD_MIN_SAMPLES} counted samples: not ok`,
         short && short.samples === HIGH_DELTA_GUARD_MIN_SAMPLES - 1 && short.leanLocked === 0 && !short.ok, JSON.stringify(short));
-    const cold = computeHighDeltaGuard(holdLog(cycling, { tabg: 520 }), HELD);
-    check('Δ* under 300: nothing counted', cold && cold.samples === 0 && !cold.ok, JSON.stringify(cold));
-    const slow = computeHighDeltaGuard(holdLog(cycling, { v: 15 }), HELD);
-    check('under 20 km/h the stock gate would not have entered: nothing counted', slow && slow.samples === 0);
-    const light = computeHighDeltaGuard(holdLog(cycling, { rf: 50 }), HELD);
-    check('rf_soll under the stock floor: nothing counted', light && light.samples === 0);
-    const off = computeHighDeltaGuard(holdLog(cycling.map(() => [1, 1])), HELD);
-    check('loop off (both banks exactly 1.000, the VL): nothing counted', off && off.samples === 0);
-    check('not a K HOLD drive: null', computeHighDeltaGuard(holdLog(cycling), EGT) === null);
-    check('a hold that did not take (stock floor back): null', computeHighDeltaGuard(holdLog(cycling), withStockRfKorrFloor(HELD)) === null);
+    const cold = guard(heldDrive([BASE, high({ tabg: TABG_BASE })]));
+    check('Δ* under 300: nothing counted, nothing skipped', cold && cold.samples === 0 && cold.skippedUnconverged === 0 && !cold.ok, JSON.stringify(cold));
+    const slow = guard(heldDrive([BASE, high({ v: 15 })]));
+    check('under 20 km/h the stock gate would not have entered: nothing counted', slow && slow.samples === 0 && slow.skippedUnconverged === 0);
+    const light = guard(heldDrive([BASE, high({ rf: 50 })]));
+    check('rf_soll under the stock floor: nothing counted', light && light.samples === 0 && light.skippedUnconverged === 0);
+    const off = guard(heldDrive([BASE, high({ off: true })]));
+    check('loop off (both banks exactly 1.000, the VL): nothing counted', off && off.samples === 0 && off.skippedUnconverged === 0);
+    check('not a K HOLD drive: null', guard(flat, EGT) === null);
+    check('a hold that did not take (stock floor back): null', guard(flat, withStockRfKorrFloor(HELD)) === null);
+    const ms = flat.map(p => ({ ...p, time: Math.round(p.time * 1e4) / 10 }));
+    check('the same drive logged in milliseconds: the same verdict (the cycle bound is converted)',
+        JSON.stringify(guard(ms)) === JSON.stringify(g), JSON.stringify(guard(ms)));
+}
+
+console.log('\n[a loop restart ends the history: a lock after an overrun cut is counted]');
+{
+    // Re-entry after a lift, the commonest way into Δ* >= 300: 3 s of overrun cut (loop off at RF 5,
+    // a cell no baseline ever shows converged), then 2 s 8 % lean at Δ* ~380, then cruise. The
+    // restart puts the integrator at 1.000 whatever came before, so only the cells since count.
+    const COLD = 190;
+    check(`the re-entry sits at Δ* ~380 (${deltaStar(COLD).toFixed(0)})`, deltaStar(COLD) >= 350);
+    const reentries = (m, T) => {
+        const segs = [BASE];
+        for (let k = 0; k < 4; k++) segs.push({ T: 3, off: true, rf: 5, tabg: COLD }, { T, m1: m, tabg: COLD }, { T: 8, m1: 1.0, tabg: TABG_BASE });
+        return heldDrive(segs);
+    };
+    const cut = reentries(0.92, 2);
+    const rc = guard(cut);
+    check('8 % lean for 2 s after each cut: every re-entry sample counted, locks, not ok',
+        rc && rc.skippedUnconverged === 0 && rc.samples === atHigh(cut, COLD) && rc.leanLocked > 0 && !rc.ok, JSON.stringify(rc));
+    const longer = guard(reentries(0.94, 2.5));
+    check('6 % lean for 2.5 s after each cut: locks, not ok', longer && longer.skippedUnconverged === 0
+        && longer.leanLocked > 0 && !longer.ok, JSON.stringify(longer));
+    // The same re-entries at λ = 1: the restart walks from 1.000 to a centre it is already at.
+    const clean = guard(reentries(1.0, 2));
+    check('...and at λ = 1 after the same cuts: counted, no lock, ok', clean && clean.skippedUnconverged === 0
+        && clean.samples >= HIGH_DELTA_GUARD_MIN_SAMPLES && clean.leanLocked === 0 && clean.ok, JSON.stringify(clean));
+}
+
+console.log('\n[the lock is read against the converged centres, not the trough]');
+{
+    // Two cells both shown converged, one centred at 0.99 and one at 1.01 — the 0.02 the convergence
+    // test allows each. Walked between at Δ* >= 300 with no density effect, the trim rises from the
+    // first cell's trough to the second's peak, 0.02 more than a cycle does; that is VE error, and
+    // it does not stand past the higher centre + P+ + 0.04.
+    const A = { rpm: 2500, m1: 1 / 0.99 }, B = { rpm: 2900, m1: 1 / 1.01 };
+    check('two cells, both in the stock gate at Δ* >= 300', guardCell(2500, RF_HOLD) !== guardCell(2900, RF_HOLD)
+        && deltaStar(TABG_HIGH, RF_HOLD, 2900) >= HIGH_DELTA_GUARD_DELTA_MIN);
+    for (const delay of [0.25, 0.4, 0.6]) {
+        const segs = [{ T: 8, ...A, tabg: TABG_BASE }, { T: 8, ...B, tabg: TABG_BASE }];
+        for (let k = 0; k < 4; k++) segs.push({ T: 4, ...A, tabg: TABG_HIGH }, { T: 4, ...B, tabg: TABG_HIGH });
+        const drive = heldDrive(segs, { delay });
+        const r = guard(drive);
+        check(`A <-> B four times at Δ* >= 300 (dead time ${delay} s): every sample counted, no lock, ok`,
+            r && r.skippedUnconverged === 0 && r.samples === atHigh(drive) && r.leanLocked === 0 && r.ok, JSON.stringify(r));
+    }
+}
+
+console.log('\n[a rise where the VE is not shown converged is not judged]');
+{
+    // The 8 % lean climb again, with no baseline at all: the cell was never shown converged.
+    const drive = heldDrive([high({ m1: 0.92 })]);
+    const none = guard(drive);
+    check('no baseline: every high-Δ sample skipped, no lock, not ok',
+        none && none.samples === 0 && none.leanLocked === 0 && none.skippedUnconverged === atHigh(drive) && !none.ok, JSON.stringify(none));
+    // A baseline that shows the VE 5 % rich (median 0.95): the climb out of it is that error walking.
+    const rich = guard(heldDrive([{ ...BASE, m1: 1.05 }, high({ m1: 0.92 })]));
+    check('a baseline median of 0.95: skipped, no lock', rich && rich.samples === 0 && rich.leanLocked === 0
+        && rich.skippedUnconverged > 0, JSON.stringify(rich));
+    // Right, but too little of it: 4 baseline samples.
+    const thin = guard(heldDrive([{ ...BASE, T: 1.2 }, high({ m1: 0.92 })]));
+    check(`fewer than ${GUARD_CONVERGED_MIN_SAMPLES} baseline samples: skipped, no lock`,
+        thin && thin.samples === 0 && thin.leanLocked === 0 && thin.skippedUnconverged > 0, JSON.stringify(thin));
+
+    // #971's shape: the cell under test is converged, but the trim arrives from a neighbour (RF 70)
+    // whose trim at this Δ* stands 6 % rich, at 0.943, and walks up 0.057 into it.
+    const A_BASE = BASE, B_HIGH = { T: 6, rf: 70, m1: 1.06, tabg: TABG_HIGH }, A_HIGH = high({ T: 8 });
+    check('the neighbour is another cell, inside the stock gate, at Δ* >= 300', guardCell(2500, 70) !== guardCell(2500, RF_HOLD)
+        && deltaStar(TABG_HIGH, 70) >= HIGH_DELTA_GUARD_DELTA_MIN);
+    const walkIn = heldDrive([A_BASE, B_HIGH, A_HIGH]);
+    const w = guard(walkIn);
+    check('a walk up out of a neighbour never shown converged: not a lock, skipped',
+        w && w.leanLocked === 0 && w.skippedUnconverged > 0, JSON.stringify(w));
+    check('...while the cycle that follows it in the converged cell is counted',
+        w.samples > 0 && w.samples + w.skippedUnconverged === atHigh(walkIn), JSON.stringify(w));
+    // The same walk with the neighbour shown converged (at λ = 1, below Δ* 200): now it is judged,
+    // and it is not a lock — the trim climbs to the converged cell's centre and cycles there, never
+    // past it + P+ + 0.04. A rise read from the trough called this a lock.
+    const judged = guard(heldDrive([{ ...BASE, rf: 70 }, A_BASE, B_HIGH, A_HIGH]));
+    check('...the same walk with the neighbour shown converged: judged, and not a lock',
+        judged && judged.skippedUnconverged === 0 && judged.leanLocked === 0 && judged.ok, JSON.stringify(judged));
 }
 
 console.log('\n[end to end: annotateRfKorr -> kRamp -> the tuner]');
@@ -429,7 +622,12 @@ console.log('\n[end to end: annotateRfKorr -> kRamp -> the tuner]');
         { T: 6, open: false, k: 1, a: 1, delta: 30, load: 20 },
         { T: 14, open: true, k: K, a: A, delta: 100, load: 30 },
     ];
-    const dt = 0.005, lag = Math.round(0.12 / dt), every = Math.round(0.3 / dt);
+    // A 0.4 s dead time: P jumps 0.40 / 0.75 s apart, where the DME's counters on #967/#968/#970 put
+    // the car's at 0.52 s (p10) and 0.89 s (median). At the 0.12 s this used to run, the lean phase is
+    // shorter than the 0.3 s sample, the 3 Hz log aliases the cycle, and the cycling flag drops the
+    // few samples where a reversal pair vanished inside one interval — which moved the mean of the
+    // rest 0.0005, across this check's ±0.005 from the 0.0049 it already sat at.
+    const dt = 0.005, lag = Math.round(0.4 / dt), every = Math.round(0.3 / dt);
     let trim = 1.002, was = null, i = 0;
     const mix = [], log = [];
     for (const s of segments) {

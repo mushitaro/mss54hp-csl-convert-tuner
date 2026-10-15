@@ -16,7 +16,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
-import { processLogData } from '../src/lib/log-engine/filter.ts';
+import { processLogData, timeScaleSeconds } from '../src/lib/log-engine/filter.ts';
 import { VECalculator } from '../src/lib/ve-calculator/calculator.ts';
 import { resolveRfKorr, resolveTransientWindow } from '../src/lib/types.ts';
 import { APP_CONFIG } from '../src/config/constants.ts';
@@ -77,8 +77,10 @@ function syntheticLog(n = 900) {
             rawLoad: dwell ? 7.5 : (pulling ? 8.2 + Math.sin(t * 1.3) * 0.9 : 0.8),
             // Limit cycle PLUS per-sample noise. Without the second term the series is
             // perfectly predictable, and the autocorrelation gate correctly refuses every cell.
-            stft1: 1.04 + Math.sin(t * 0.7) * 0.05 + jitter(i) * 0.02,
-            stft2: 1.02 + Math.cos(t * 0.6) * 0.05 + jitter(i + 7919) * 0.02,
+            // Every 150th sample the loop restarts (both banks exactly 1.000 for two samples), so
+            // the ramp the walk marks after it is part of what batch and live must agree on.
+            stft1: restartAt(i) ? 1 : 1.04 + Math.sin(t * 0.7) * 0.05 + jitter(i) * 0.02,
+            stft2: restartAt(i) ? 1 : 1.02 + Math.cos(t * 0.6) * 0.05 + jitter(i + 7919) * 0.02,
             coolantTemp: Math.min(92, 40 + t * 1.5),
             rf: (pulling || dwell) ? 70 + Math.sin(t) * 20 : 12,
             exhaustTemp: Math.round((300 + ((pulling || dwell) ? 400 : 0)) / 16) * 16,
@@ -86,6 +88,9 @@ function syntheticLog(n = 900) {
         };
     });
 }
+
+/** A loop-off: two samples at exactly 1.000 on both banks, every 150 — a restart to the walk. */
+const restartAt = (i) => i > 0 && i % 150 < 2;
 
 /**
  * The same drive on a link whose rate is NOT constant.
@@ -125,8 +130,8 @@ function jitteryLog(n = 900) {
             rawLoad: dwell ? 7.5 : (pulling ? 8.2 + Math.sin(t * 1.3) * 0.9 : 0.8),
             // Limit cycle PLUS per-sample noise. Without the second term the series is
             // perfectly predictable, and the autocorrelation gate correctly refuses every cell.
-            stft1: 1.04 + Math.sin(t * 0.7) * 0.05 + jitter(i) * 0.02,
-            stft2: 1.02 + Math.cos(t * 0.6) * 0.05 + jitter(i + 7919) * 0.02,
+            stft1: restartAt(i) ? 1 : 1.04 + Math.sin(t * 0.7) * 0.05 + jitter(i) * 0.02,
+            stft2: restartAt(i) ? 1 : 1.02 + Math.cos(t * 0.6) * 0.05 + jitter(i + 7919) * 0.02,
             coolantTemp: Math.min(92, 40 + t * 1.5),
             rf: (pulling || dwell) ? 70 + Math.sin(t) * 20 : 12,
             exhaustTemp: Math.round((300 + ((pulling || dwell) ? 400 : 0)) / 16) * 16,
@@ -217,23 +222,45 @@ for (const [label, log] of [['session #902', realLog()], ['synthetic', synthetic
             `both ${bSec.validCount} — the setting had no effect`);
     }
 
-    // And the map the whole thing exists to produce.
+    // And the map the whole thing exists to produce — composed the way the hook composes it: the
+    // batch `runCalculation` annotates `data` off a walk over `rawData`, and `appendCalculation`
+    // holds ONE walk across flushes, steps the raw samples that arrived, then annotates and bins the
+    // data samples that arrived with the walk's `kRamp` on each. No EGT tables here, so the walk
+    // sees restarts only — and still must, because the write refuses a sample without a verdict.
     const calc = new VECalculator();
     const map = flatMap();
     const plan = resolveRfKorr({});
-    const annotated = calc.annotateRfKorr(map, b.data, null);
+    const annotated = calc.annotateRfKorr(map, b.data, null, undefined, b.rawData);
+    check('every batch sample carries a ramp verdict (the write refuses one without)',
+        annotated.every(p => typeof p.kRamp === 'boolean'));
+    check('...and some of them are ramps, so the per-cell ramp counts below compare something',
+        label === 'session #902' || annotated.some(p => p.kRamp === true), 'no restart reached `data`');
     const gridBatch = calc.createGrid();
-    for (const p of annotated) calc.accumulatePoint(gridBatch, p, plan, null);
+    // The visit gap's unit off the RAW log, as runCalculation hands it in and appendCalculation reads it.
+    const spuBatch = timeScaleSeconds(b.rawData);
+    for (const p of annotated) calc.accumulatePoint(gridBatch, p, plan, null, spuBatch);
     const wantMap = calc.finalizeGrid(map, gridBatch, {});
 
     const gridLive = calc.createGrid();
-    let consumed = 0;
+    const walk = calc.rfKorrWalk(map, null);
+    const track = new Map();
+    let consumed = 0, consumedRaw = 0;
     const incLog = incremental(log, 13);
-    // Bin in the same drip-feed the live path uses, annotating one sample at a time.
+    // Bin in the same drip-feed the live path uses: the raw samples first (17 at a time, out of
+    // step with the 13 data samples on purpose), then the data samples, one at a time.
     while (consumed < incLog.data.length) {
         const upto = Math.min(incLog.data.length, consumed + 13);
+        const lastT = incLog.data[upto - 1].time;
+        while (consumedRaw < incLog.rawData.length
+            && (incLog.rawData[consumedRaw].time <= lastT || consumedRaw % 17 !== 0)) {
+            const p = incLog.rawData[consumedRaw++];
+            track.set(p.time, walk.step(p));
+        }
+        const spu = timeScaleSeconds(incLog.rawData.slice(0, consumedRaw));
         for (let i = consumed; i < upto; i++) {
-            calc.accumulatePoint(gridLive, calc.annotateRfKorrPoint(map, incLog.data[i], null), plan, null);
+            const t = track.get(incLog.data[i].time);
+            const a = calc.annotateRfKorrPoint(map, incLog.data[i], null, undefined, t ? t.open : null);
+            calc.accumulatePoint(gridLive, t ? { ...a, kRamp: t.kRamp } : a, plan, null, spu);
         }
         consumed = upto;
         calc.finalizeGrid(map, gridLive, {});   // finalising must not disturb the grid
@@ -266,6 +293,17 @@ for (const [label, log] of [['session #902', realLog()], ['synthetic', synthetic
     check('lag cross-products identical', sameNums(
         gridBatch.map(r => r.map(c => c.sumLagAB)),
         gridLive.map(r => r.map(c => c.sumLagAB))), 'the autocorrelation sums drifted');
+    // The visit gate's counters sit behind a cursor of their own (`visitEnd`), so they get the
+    // same check: a drip feed that reset or skipped it would split or merge visits.
+    check('visit counts identical', sameNums(
+        gridBatch.map(r => r.map(c => c.visits)),
+        gridLive.map(r => r.map(c => c.visits))), 'the visit cursor drifted');
+    check('...and the visit weights the effective count reads', sameNums(
+        gridBatch.map(r => r.map(c => [c.visitWeightSum, c.visitWeight, c.visitWeightSqDone])),
+        gridLive.map(r => r.map(c => [c.visitWeightSum, c.visitWeight, c.visitWeightSqDone]))), 'the visit weights drifted');
+    check('...and the ramp exclusions per cell', sameNums(
+        gridBatch.map(r => r.map(c => c.lambdaRampCount)),
+        gridLive.map(r => r.map(c => c.lambdaRampCount))), 'the ramp counts drifted');
 }
 
 /**

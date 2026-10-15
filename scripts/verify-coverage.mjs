@@ -32,6 +32,7 @@
  */
 import {
     VECalculator, MIN_INDEPENDENT, AUTOCORR_FALLBACK, tCritical95, autocorrInflation, DIRECT_MIN_SAMPLES, VE_MIN_WEIGHT_DEFAULT,
+    VE_MIN_VISITS, VISIT_GAP_SEC, VE_MIN_EFFECTIVE_VISITS,
 } from '../src/lib/ve-calculator/calculator.ts';
 import { APP_CONFIG } from '../src/config/constants.ts';
 import { RF_KORR_TUNE_DEFAULTS, withDefaults } from '../src/lib/ve-calculator/rfKorrTuner.ts';
@@ -74,14 +75,17 @@ while (TOO_FEW > 3 && indepOf(TOO_FEW) > MIN_INDEPENDENT - 0.5) TOO_FEW--;
  * — which is what the gap rule says and is not what a 1.1 s correlation time means. A fixture at a
  * rate no DS2 log runs at was testing a path no drive reaches.
  */
+// `kRamp: false` on every fixture sample: hand-built, never walked, and post-ramp by construction —
+// the write refuses a sample with no ramp verdict (`isLambdaRampExcluded`), and the ramp is
+// verify:k-ramp's subject, not this file's.
 const samples = (n, rpm, load, stft) => Array.from({ length: n }, (_, i) => ({
-    time: i * 0.2, rpm, rawLoad: load, correctedLoad: load, stft1: stft, stft2: stft, rf: 30,
+    time: i * 0.2, rpm, rawLoad: load, correctedLoad: load, stft1: stft, stft2: stft, rf: 30, kRamp: false,
 }));
 
 /** The same, but at a real log's spacing and with the trim under the caller's control, so a cell
  *  can be given a genuine time series to estimate its own autocorrelation from. */
 const series = (n, rpm, load, fn, dt = 0.2) => Array.from({ length: n }, (_, i) => ({
-    time: i * dt, rpm, rawLoad: load, correctedLoad: load, stft1: fn(i), stft2: fn(i), rf: 30,
+    time: i * dt, rpm, rawLoad: load, correctedLoad: load, stft1: fn(i), stft2: fn(i), rf: 30, kRamp: false,
 }));
 
 /**
@@ -104,12 +108,16 @@ const at = (m, rpm, load) => m[LOAD.indexOf(load)][RPM.indexOf(rpm)];
  * silently passing for the wrong reason once the default moved. The DIRECT side has its own section
  * at the end, including the comparison that motivated the default.
  */
+//
+// One visit is enough HERE (`minCellVisits: 1`): each fixture cell is one unbroken run, because the
+// autocorrelation cases need the run structure intact, and splitting it into three visits would test
+// a different series. The visit gate has its own section at the end, run as shipped.
 const run = (log, opts) => new VECalculator().calculateNewVEMap(flat(), log,
-    { applyRfKorr: false, veMethod: 'statistical', ...opts });
+    { applyRfKorr: false, veMethod: 'statistical', minCellVisits: 1, ...opts });
 
 /** The default method, spelled out so a case that means "as shipped" cannot drift. */
 const runDirect = (log, opts) => new VECalculator().calculateNewVEMap(flat(), log,
-    { applyRfKorr: false, veMethod: 'direct', ...opts });
+    { applyRfKorr: false, veMethod: 'direct', minCellVisits: 1, ...opts });
 
 console.log('\n[one sample no longer moves a cell]');
 {
@@ -510,6 +518,49 @@ console.log('\n[the two evidence bars, as literals]');
         VE_MIN_WEIGHT_DEFAULT + ' vs ' + (DIRECT_MIN_SAMPLES * 0.25));
 }
 
+/**
+ * The visit gate, as shipped: a cell's substantial samples must come from VE_MIN_VISITS separate
+ * runs, a gap over VISIT_GAP_SEC between two of them starting the next, and those runs must be worth
+ * VE_MIN_EFFECTIVE_VISITS equal ones by weight — (Sum W_v)^2 / Sum W_v^2. Where it sits in the order is
+ * part of the instruction: fewer than three samples is "hold longer" (thin-count) even though it is
+ * also fewer than three visits, and a cell short of visits is "come back" before it is "drive nearer
+ * the middle" (thin-weight).
+ */
+console.log('\n[visits: occasions, not samples]');
+{
+    check('the bar is three visits, one second apart', VE_MIN_VISITS === 3 && VISIT_GAP_SEC === 1.0,
+        `${VE_MIN_VISITS} / ${VISIT_GAP_SEC}`);
+    const asShipped = { minCellVisits: undefined };
+    const cell = (r) => at(r.rejectMap, 2700, VE_LOAD);
+    // `k` runs of `per` samples each, `gap` seconds between the end of one and the start of the next.
+    const visits = (k, per, gap) => Array.from({ length: k }, (_, v) => samples(per, 2700, VE_LOAD, 1.10)
+        .map(p => ({ ...p, time: p.time + v * ((per - 1) * 0.2 + gap) }))).flat();
+    const one = runDirect(samples(ENOUGH, 2700, VE_LOAD, 1.10), asShipped);
+    check(`one unbroken run of ${ENOUGH} samples is ONE visit: refused as few-visits`, cell(one) === 'few-visits', cell(one));
+    check('...and still reports what it measured', at(one.hitMap, 2700, VE_LOAD) === ENOUGH
+        && Math.abs(at(one.correctionMap, 2700, VE_LOAD) - 1.10) < 1e-9);
+    check('two samples: thin-count first', cell(runDirect(samples(2, 2700, VE_LOAD, 1.10), asShipped)) === 'thin-count');
+    check('two visits 1.5 s apart: few-visits', cell(runDirect(visits(2, 6, 1.5), asShipped)) === 'few-visits');
+    const three = runDirect(visits(3, 6, 1.5), asShipped);
+    check('three visits 1.5 s apart: written', cell(three) === null && at(three.acceptedMap, 2700, VE_LOAD),
+        String(cell(three)));
+    check('three runs only 0.8 s apart are ONE visit: few-visits', cell(runDirect(visits(3, 6, 0.8), asShipped)) === 'few-visits');
+    // Three runs by count, one by weight: a long run and two grazes. Runs of `ns[v]` samples, 1.5 s apart.
+    const runsOf = (ns) => { let t0 = 0; return ns.map(n => { const r = samples(n, 2700, VE_LOAD, 1.10).map(p => ({ ...p, time: p.time + t0 })); t0 = r.at(-1).time + 1.5; return r; }).flat(); };
+    check(`runs of 1 + 12 + 2 samples (worth 1.51, bar ${VE_MIN_EFFECTIVE_VISITS}): few-visits`,
+        cell(runDirect(runsOf([1, 12, 2]), asShipped)) === 'few-visits', String(cell(runDirect(runsOf([1, 12, 2]), asShipped))));
+    check('runs of 4 + 6 + 5 (worth 2.92): written', cell(runDirect(runsOf([4, 6, 5]), asShipped)) === null,
+        String(cell(runDirect(runsOf([4, 6, 5]), asShipped))));
+    // The statistical method's structural bars include it too.
+    check('the statistical method refuses one visit the same way',
+        cell(run(samples(ENOUGH, 2700, VE_LOAD, 1.10), asShipped)) === 'few-visits');
+    // A Testo CSV counts in milliseconds; the gap is in seconds, read off the log's own unit.
+    const ms = visits(3, 6, 1.5).map(p => ({ ...p, time: Math.round(p.time * 1000) }));
+    check('the same three visits in milliseconds: written', cell(runDirect(ms, asShipped)) === null,
+        String(cell(runDirect(ms, asShipped))));
+    const msOne = samples(ENOUGH, 2700, VE_LOAD, 1.10).map(p => ({ ...p, time: Math.round(p.time * 1000) }));
+    check('...and one run in milliseconds is still one visit', cell(runDirect(msOne, asShipped)) === 'few-visits');
+}
 
 console.log(fails === 0 ? '\nALL PASS' : '\n' + fails + ' FAILURE(S)');
 process.exit(fails ? 1 : 0);

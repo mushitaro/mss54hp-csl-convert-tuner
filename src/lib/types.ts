@@ -245,26 +245,54 @@ export interface LogDataPoint {
     rfKorrGateOpen?: boolean;
 
     /**
-     * The lambda loop is still taking back a step in rf_korr at this sample — see rampState.ts.
+     * The lambda loop is still taking back its last step at this sample — a step in rf_korr, or the
+     * restart that put its integrator back at 1.000 — see rampState.ts.
      *
      * Set by `annotateRfKorr` from a walk over the RAW log, matched by timestamp like
-     * `rfKorrGateOpen`, and only where the binary's EGT tables could be read. True from a K step
-     * (the gate opening or shutting, or K moving >= 0.02 while it is open) or a loop restart until
-     * each bank's trim has made the switch that ends the ramp — the lean-switch jump after a rise
-     * or a restart, the rich-switch drop after K FELL by 0.04 or more, the gate shutting on a
-     * stepped K included; true while a trim sits on its clamp.
+     * `rfKorrGateOpen`, on EVERY sample the walk covered: gate open, gate shut, and samples with no
+     * gate verdict at all (no RF channel, no air data, no readable tables — the walk then sees
+     * restarts only). True from an event — the gate opening or shutting, K moving >= 0.02 while it
+     * is open, or a loop restart (every bank exactly 1.000, both banks bit-identical, or a one-sample
+     * jump over 0.10) — until each bank's trim has made the switch that ends the ramp: the
+     * lean-switch jump after a rise or a restart, the rich-switch drop after K FELL by 0.04 or more,
+     * the gate shutting on a stepped K included; true while a trim sits on its clamp.
      *
      * Why it matters: until that jump the trim is ramping at the controller's fixed I slope, so
-     * `trim x rf_korr` reads `K (1 - 0.0406 t)` — the time since the step, not the VE error. The VE
-     * write skips gate-open samples where this is true (`isKRampExcluded`), and so does the
-     * rf_korr tuner. A gate-SHUT sample carries it too: the VE write takes that sample whatever it
-     * says (the exclusion is gate-open only, so the climb back after an exit is written as trim),
-     * and the rf_korr tuner's anchor check reads a gate-shut trim only where it is false.
+     * `trim x rf_korr` reads `K (1 - 0.0406 t)` after a K step and `1 - 0.04 t` after a restart —
+     * the time since the event, not the VE error. The VE write skips every sample where this is not
+     * false (`isLambdaRampExcluded`), gate open or shut: under K HOLD the restart after a fuel cut is
+     * the only event, and on #971 / #974 it was 39 % / 70 % of the band. The rf_korr tuner skips
+     * gate-open ones, and its anchor check reads a gate-shut trim only where it is false.
      *
-     * Undefined on a gate-open sample means the walk did not cover it, and `isKRampExcluded` reads
-     * that as a ramp — the direction that does not credit the step.
+     * Undefined means the walk did not cover the sample (its timestamp is not in the raw log that
+     * was walked), and `isLambdaRampExcluded` reads that as a ramp — the direction that does not
+     * credit a trim whose history is unknown.
      */
     kRamp?: boolean;
+
+    /**
+     * The lambda loop is limit-cycling at this sample: for every present bank, off its clamp, the
+     * half-cycle the sample sits in — from the trim's last reversal (a P jump against the direction
+     * it was moving) to its next — is in the log and no longer than 1.5 s. See `lambdaCyclingFlags`
+     * in rampState.ts. False is a trim WALKING somewhere, and the commonest walk is not a K step at
+     * all: it is the loop carrying the last cell's VE error into this one at the I slope, ~0.04/s,
+     * which `kRamp` does not see.
+     *
+     * Set by `annotateRfKorr` beside `kRamp`, over the same RAW log, matched by timestamp, and only
+     * where the binary's EGT tables could be read. Undefined means the pass did not cover the
+     * sample, and every reader takes that as not cycling. The live VE stream never carries it: its
+     * points are annotated as they arrive, before the half-cycle they sit in has ended.
+     *
+     * Who reads it: the rf_korr tuner — its D samples and its anchor check need the trim to be the
+     * error at THIS operating point — and the high-Δ guard, which computes the same flags over the
+     * raw log itself. The VE write does NOT, on purpose: a walk is the difference between this
+     * cell's error and the last one's, and it heads toward this cell's, so DIRECT converging both
+     * cells shrinks it to nothing — it slows the write, it does not move where the write ends.
+     * Dropping walks would cost the cells the car only passes through. The VE write's one exclusion
+     * stays `isLambdaRampExcluded`: a K step or a restart not yet taken back, which is a clock, not
+     * an error — from 1.000 or from K, whatever the cell is, so nothing converges it away.
+     */
+    lambdaCycling?: boolean;
 }
 
 export interface ProcessedLog {

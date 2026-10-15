@@ -43,10 +43,14 @@ const at = (rpm, load, stft, n, t0 = 0) => Array.from({ length: n }, (_, i) => (
     stft1: stft * (1 + (i % 2 ? 0.002 : -0.002)),
     stft2: stft * (1 + (i % 2 ? 0.002 : -0.002)),
     coolantTemp: 90,
+    // Post-ramp by construction: never walked, and the write refuses a sample with no ramp verdict.
+    kRamp: false,
 }));
 
+// One visit is enough here: each fixture is one unbroken run, and the visit gate is pinned in
+// verify:coverage and verify:k-ramp, not in a file about self-share.
 const run = (points, map = flat(0.5)) => calc.calculateNewVEMap(map, points, {
-    applyRfKorr: false, minCellSamples: 10, minCellWeight: 5.0,
+    applyRfKorr: false, minCellSamples: 10, minCellWeight: 5.0, minCellVisits: 1,
 });
 
 console.log('\n# The statistic, and where its threshold comes from\n');
@@ -197,7 +201,7 @@ console.log('\n# The accumulators stay sums, so a live run still matches a batch
     const grid = calc.createGrid();
     const plan = { apply: false, source: 'rf-ratio' };
     for (const p of pts) calc.accumulatePoint(grid, p, plan, null, null);
-    const inc = calc.finalizeGrid(flat(0.5), grid, { minCellSamples: 10, minCellWeight: 5.0 });
+    const inc = calc.finalizeGrid(flat(0.5), grid, { minCellSamples: 10, minCellWeight: 5.0, minCellVisits: 1 });
     check('incremental and batch agree on the correction',
         near(inc.correctionMap[r][c], batch.correctionMap[r][c], 1e-12));
     check('...and on the realised gain', near(inc.realisedMap[r][c], batch.realisedMap[r][c], 1e-12));

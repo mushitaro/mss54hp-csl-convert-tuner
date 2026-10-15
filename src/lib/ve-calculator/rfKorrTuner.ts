@@ -14,8 +14,9 @@ import { CSL_STOCK_RF_KORR_DRREL } from '@/config/constants';
  * ## The formula
  *
  *     trim   = mean(STFT1, STFT2) x mean(LTFT1, LTFT2)       the VE write's own trim
- *     D_i    = rfKorr_i x trim_i                            gate open, and the lambda loop has
- *                                                           taken the last K step back (!kRamp)
+ *     D_i    = rfKorr_i x trim_i                            gate open, the lambda loop has taken
+ *                                                           the last K step back (!kRamp), and it
+ *                                                           is limit-cycling (lambdaCycling)
  *     DRREL(N, Δ) <- Σ w·D_i / Σ w                          bilinear on the table's (N, Δ) lattice,
  *                                                           -0.05 / +0.10 per log, [1.000, 1.40]
  *
@@ -33,14 +34,16 @@ import { CSL_STOCK_RF_KORR_DRREL } from '@/config/constants';
  *
  * Mid-ramp samples say nothing: there the trim is ramping at the controller's fixed I slope and
  * `trim x K` reads K (1 - 0.0406 t), the time since the step (rampState.ts). They are counted
- * (`samplesKRamp`) and skipped.
+ * (`samplesKRamp`) and skipped. So are post-ramp samples whose trim is still WALKING — carrying the
+ * last operating point's error at the same I slope, with no K step behind it (`samplesNotCycling`):
+ * `D = K x trim` assumes the loop has settled on the trim that cancels K HERE, and a walk has not.
  *
  * ## Two refusals, each a table of nothing rather than a weak one
  *
  * - `kHeld` — the drive ran K HOLD, so the gate never opened and there is no K to measure.
- * - `veNotAnchored` — the gate-SHUT post-ramp samples of the same drive, where K is 1.000 and the
- *   trim is the VE's own error, have a median trim outside 1 ± `anchorTrimTolerance`. The formula
- *   above assumes the VE is converged; skip stage 1 and its error lands in every D.
+ * - `veNotAnchored` — the gate-SHUT post-ramp, limit-cycling samples of the same drive, where K is
+ *   1.000 and the trim is the VE's own error, have a median trim outside 1 ± `anchorTrimTolerance`.
+ *   The formula above assumes the VE is converged; skip stage 1 and its error lands in every D.
  *
  * ## Rows above the highest measured one
  *
@@ -162,7 +165,9 @@ export interface RfKorrTuneOptions {
 
     /**
      * The high-Δ guard from the nearest K HOLD drive (highDeltaGuard.ts). `ok` lets the rows above
-     * the highest measured one follow its shrink ratio; null, absent, or not ok leaves them stock.
+     * the highest measured one follow its shrink ratio; null, absent, or not ok leaves them stock —
+     * and so does a guard without `skippedUnconverged`, which was stored by the rule before the VE had
+     * to be shown converged: it counted cell-to-cell walks, and a rich VE could hide a lean need.
      */
     highDeltaGuard?: HighDeltaGuard | null;
 }
@@ -247,6 +252,9 @@ export interface RfKorrTuneReport {
     /** Gate open, and the lambda loop still taking the last K step back (`kRamp`): the trim is the
      *  time since the step, not a measurement. */
     samplesKRamp: number;
+    /** Gate open and post-ramp, but the trim was not limit-cycling (`lambdaCycling` not true): it was
+     *  walking from the last operating point's error toward this one's, so `K x trim` is neither. */
+    samplesNotCycling: number;
     /** RF or TABG was still moving, so Δ is sensor lag rather than a density signal. */
     samplesNotSettled: number;
     /** The operating point had moved within the log filter's Settle Time — `settleUnsteady`.
@@ -269,8 +277,8 @@ export interface RfKorrTuneReport {
      * every drive, including the ones that were going perfectly.
      */
     samplesUsed: number;
-    /** The anchor check: gate-shut post-ramp samples with a trim, and their median trim (null
-     *  with none). See `anchorTrimTolerance`. */
+    /** The anchor check: gate-shut post-ramp, limit-cycling samples with a trim, and their median
+     *  trim (null with none). See `anchorTrimTolerance`. */
     anchorTrimSamples: number;
     anchorTrimMedian: number | null;
     /** The table declined as a whole, and why. Decided here, so the live census and the final
@@ -339,8 +347,11 @@ const flags = (rows: number, cols: number) =>
  * `(p.stft1 ?? p.stft2 ?? 1)`, so a row with no trim at all silently became 1.000 — and then
  * `D = rfKorr x 1` is the table already in the ECU, returned as a derivation of it. The long-term
  * store multiplies in as it does there, and reads 1.0 where the log does not carry it.
+ *
+ * Exported for the high-Δ guard, whose "this cell's VE is converged" must mean what the anchor
+ * check's does.
  */
-function trimOf(p: LogDataPoint): number | undefined {
+export function trimOf(p: LogDataPoint): number | undefined {
     const stft = [p.stft1, p.stft2].filter((v): v is number => v !== undefined);
     if (!stft.length) return undefined;
     const ltft = [p.ltft1, p.ltft2].filter((v): v is number => v !== undefined);
@@ -451,7 +462,8 @@ export function rfKorrCensus(
     const report: RfKorrTuneReport = {
         samplesTotal: annotatedLog.length,
         samplesNoMeasurement: 0, samplesNoDelta: 0,
-        samplesGateShut: 0, samplesHysteresis: 0, samplesKRamp: 0, samplesNotSettled: 0,
+        samplesGateShut: 0, samplesHysteresis: 0, samplesKRamp: 0, samplesNotCycling: 0,
+        samplesNotSettled: 0,
         samplesNoTrim: 0, samplesUnsettledPoint: 0,
         samplesUsed: 0,
         anchorTrimSamples: 0, anchorTrimMedian: null,
@@ -516,11 +528,15 @@ export function rfKorrCensus(
         // loop settled, its trim is the VE's own error, which is exactly what the anchor check
         // needs. `kRamp === false` keeps out the climb back after the gate shuts on a stepped K:
         // the exit is a K drop, and the tracker holds the bank until the rich switch that ends it
-        // (rampState.ts). The VE write takes those samples regardless — its exclusion is gate-open
-        // only — so this is the one reader they are kept from.
+        // (rampState.ts). `lambdaCycling === true` keeps out the walk from one cell's error to the
+        // next, which `kRamp` cannot see: a walk read as the error says the VE is off by whatever
+        // the last cell was. The VE write excludes the first kind too (`isLambdaRampExcluded`,
+        // gate open or shut) but takes the walk, which DIRECT converges away; this reader cannot
+        // wait for that, so it is the one the walk is kept from.
         if (p.rfKorrGateOpen !== true) {
             report.samplesGateShut++;
-            if (p.rfKorrGateOpen === false && p.kRamp === false && trim !== undefined && trim > 0) {
+            if (p.rfKorrGateOpen === false && p.kRamp === false && p.lambdaCycling === true
+                && trim !== undefined && trim > 0) {
                 anchorTrims.push(trim);
             }
             continue;
@@ -541,9 +557,19 @@ export function rfKorrCensus(
         }
 
         // The loop still taking the last K step back. Undefined counts as a ramp, as it does for
-        // the VE write (`isKRampExcluded`): the alternative credits the time since the step.
+        // the VE write (`isLambdaRampExcluded`): the alternative credits the time since the step.
         if (p.kRamp !== false) {
             report.samplesKRamp++;
+            continue;
+        }
+
+        // Post-ramp, but the trim is still walking from the last operating point's error: `K x trim`
+        // is part of that cell's answer and part of this one's. Undefined is not cycling, for the
+        // reason undefined `kRamp` is a ramp. A sample with no trim at all has no cycle to judge —
+        // the flag is false there by construction — and is left to `samplesNoTrim` below, where an
+        // EGT-profile log has always been counted.
+        if (trim !== undefined && p.lambdaCycling !== true) {
+            report.samplesNotCycling++;
             continue;
         }
 
@@ -572,8 +598,8 @@ export function rfKorrCensus(
     }
 
     // The anchor check, over the same drive. A median rather than a mean: the population is every
-    // settled gate-shut sample from light cruise up to the floor, and a mean would let one stretch
-    // near a trim clamp decide whether the whole map is converged.
+    // settled, cycling gate-shut sample from light cruise up to the floor, and a mean would let one
+    // stretch near a trim clamp decide whether the whole map is converged.
     report.anchorTrimSamples = anchorTrims.length;
     if (anchorTrims.length) {
         const sorted = [...anchorTrims].sort((a, b) => a - b);
@@ -732,7 +758,7 @@ export function tuneRfKorrTable(
     // here nothing measured at all. Not taken from a row whose stock excess is under `identitySpan`,
     // where `s` would divide by the table's own rounding. Identity columns are skipped by
     // construction: nothing in them is written.
-    if (o.highDeltaGuard?.ok === true) {
+    if (o.highDeltaGuard?.ok === true && o.highDeltaGuard.skippedUnconverged !== undefined) {
         const base = shrinkBase(rpmAxis, deltaAxis) ?? stock;
         for (let c = 0; c < cols; c++) {
             let top = -1;

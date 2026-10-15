@@ -151,10 +151,13 @@ export interface TuneSettings {
     calibrationEdits?: CalEdit[];
     /**
      * What a K HOLD drive says about the 300 / 400 rows of KF_RF_KORR_DRREL (highDeltaGuard.ts):
-     * how many samples reached Δ* >= 300 with the loop running, and whether any of them had both
-     * banks lean-locked. Stored here because the DRREL is tuned on a LATER drive, with K HOLD off,
-     * which cannot measure it — that session reads its nearest ancestor's guard. Derived from this
-     * session's own log, so a rebuild recomputes the same value.
+     * how many samples reached Δ* >= 300 with the loop running in cells the same drive showed
+     * converged (`samples`), how many of those had either bank lean-locked, and how many were
+     * skipped because their cell or the cells their trim came from were not shown converged
+     * (`skippedUnconverged`). A guard stored without `skippedUnconverged` predates that rule and the
+     * tuner does not fill the rows on it. Stored here because the DRREL is tuned on a LATER drive,
+     * with K HOLD off, which cannot measure it — that session reads its nearest ancestor's guard.
+     * Derived from this session's own log, so a rebuild recomputes the same value.
      *
      * Absent on every session that did not run held — the guard only exists for a held floor, and
      * a hold the car did not apply reads as not held. Optional, so no DB_VERSION bump.

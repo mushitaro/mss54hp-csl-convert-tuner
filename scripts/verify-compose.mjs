@@ -40,9 +40,13 @@ console.log('\n[the invariant the composition rests on, against the REAL calcula
 // calculateNewVEMap's actual output, every run, before anything else is worth checking.
 {
     const base = { xAxis: RPM, yAxis: LOAD, data: LOAD.map(() => RPM.map(() => 50)) };
-    // 400 samples on one axis intersection, at a real log's 0.2 s spacing, asking for +20 %.
+    // 400 samples on one axis intersection, at a real log's 0.2 s spacing, asking for +20 % — in
+    // four visits of 100, 2 s apart, because one unbroken dwell is one visit and the gate wants
+    // three (VE_MIN_VISITS). Post-ramp by construction (`kRamp: false`): a hand-built sample was
+    // never walked, and the write refuses one with no ramp verdict.
     const log = Array.from({ length: 400 }, (_, i) => ({
-        time: i * 0.2, rpm: 2700, rawLoad: 7.50, correctedLoad: 7.50, stft1: 1.20, stft2: 1.20, rf: 30,
+        time: i * 0.2 + Math.floor(i / 100) * 2, rpm: 2700, rawLoad: 7.50, correctedLoad: 7.50,
+        stft1: 1.20, stft2: 1.20, rf: 30, kRamp: false,
     }));
     const r = new VECalculator().calculateNewVEMap(base, log, { applyRfKorr: false });
     check('the calculator accepted at least one cell', !!r.newMap && r.acceptedMap.flat().some(Boolean));

@@ -45,7 +45,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseLogFile } from '../src/lib/log-engine/parser.ts';
-import { processLogData } from '../src/lib/log-engine/filter.ts';
+import { processLogData, timeScaleSeconds } from '../src/lib/log-engine/filter.ts';
 import { DEFAULT_FILTER_CONFIG } from '../src/lib/log-engine/filterDefaults.ts';
 import { VECalculator } from '../src/lib/ve-calculator/calculator.ts';
 import { tuneRfKorrTable } from '../src/lib/ve-calculator/rfKorrTuner.ts';
@@ -72,17 +72,24 @@ const CSV = path.join(root, 'scripts', 'fixtures', 'practice-drive.testo.csv');
  * When a change is MEANT to move the tuned bytes, measure it again from the app — never paste this
  * script's own output here, which would turn the check into "the script agrees with itself".
  *
- * Re-measured 2026-10-13 from `next build` served statically, in headless Chromium 1179, through
- * UPLOAD BIN, TESTO CSV and DOWNLOAD TUNED. The same harness on the previous tree returned the
- * previous golden (bb6214a8…) first, so the two numbers are measured the same way. It moved on
- * purpose: the latch now reads a raw sample's rf_soll at its CORRECTED load (it had read the raw
- * opening, below 2400 rpm too low), so this drive's low-rpm cruise sits in the hysteresis hold band
- * and its gate-open samples rise from 320 to 944; the k-ramp rule then keeps the mid-ramp ones out
- * of the VE write, where the old 1-s settle wrote them. 15 cells change: five at 1100/1300 rpm,
- * RO 2.4-7.5 %, by +0.001; and at RO 30-65 %, 1600-3100 rpm, two land on a different value while
- * eight stay at BASE, refused as thin-count / thin-weight / k-ramp.
+ * Re-measured 2026-10-15 from `next build`'s static export in headless Chromium 1179 (every request
+ * fulfilled from the export on disk at a loopback origin, which the app needs for
+ * `crypto.randomUUID`), through the first-load disclaimer, NEW SESSION, UPLOAD BIN, TESTO CSV and
+ * DOWNLOAD TUNED, the downloaded blob hashed. The same harness on the previous tree (6d1914a)
+ * returned the previous golden (e8309ff0…) first, so the two numbers are measured the same way.
+ * It moved on purpose, and by two rules, from 11 moved cells to 5:
+ *
+ *   - the ramp exclusion reads `kRamp` whatever the gate says. The drive opens at 1602 rpm with the
+ *     gate open and the gate shuts at 1.6 s on a stepped K — a drop, so the banks wait for the rich
+ *     switch — and the four idle-edge cells RO 1.0-1.4 % / 870 rpm were fed only by those first
+ *     seconds: written +3.4 % before, refused as lambda-ramp now (303 of the 979 VE samples are
+ *     ramps either way; 35 of them gate-shut, which the old rule wrote);
+ *   - the visit gate. RO 30 % / 1600 rpm (+3.6 %, 14 samples) and RO 45 % / 1800 rpm (+3.0 %, 15)
+ *     each came from two visits, and are refused as few-visits.
+ *
+ * The five at RO 2.4-7.5 % / 1100-1300 rpm are written as before.
  */
-const GOLDEN = 'e8309ff00f024b27b1b0c3d1c7cd593d1cde190e6e5a08abd5c11097f570cf50';
+const GOLDEN = '881233375714d5e85f3a525803aa06eec9a7f5791d464371a50ffd274b2a538f';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -147,7 +154,9 @@ const rfKorr = egt
 // The table is derived and, on a first load, not armed (writeRfKorr defaults off) — so it is
 // computed for parity with the hook and goes nowhere, as in the app.
 void rfKorr;
-const result = calc.calculateNewVEMap(map, annotated, { ...options, egt });
+// The visit gap's unit off the RAW log, as runCalculation passes it.
+const result = calc.calculateNewVEMap(map, annotated,
+    { ...options, egt, secondsPerUnit: timeScaleSeconds(processed.rawData) });
 const newMap = result.newMap;
 
 // --- DOWNLOAD TUNED: buildPatchedBuffer(newMap, no overrides, extras all null) -----------------

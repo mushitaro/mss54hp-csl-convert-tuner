@@ -113,11 +113,11 @@ const TEXT = {
             + 'AUTHORITY は、測った要求のうち何 % を今回書くかです。100 % のまま動かさないでください。要求は既にこのセル自身のサンプルが出した範囲に抑えられているので、ここを下げても安全にはならず、収束が遅くなるだけです。ログが荒れていて 1 回ぶん信用しきれないときだけ 50〜70 % に落とします。\n'
             + 'MIN SAMPLES はセルを書き換えるのに要るサンプル数です。既定 3 —— 平均が取れる最小限で、精度のバーではありません。数えるのは「そのセルの中に入ったサンプル」だけで、隣のために取られてかすっただけのものは数えません。\n'
             + 'MIN WEIGHT は、そのセルが受け取った取り分の合計の下限です。既定 2.5。\n'
-            + '1 サンプルは、はさむ 4 つの格子点に取り分として配られます。取り分の合計は必ず 1.00 で、近い格子点ほど大きくなります。MIN SAMPLES が「何回そのセルを訪れたか」を数えるのに対し、MIN WEIGHT は「DME が読んだ数字のうちそのセルが占めた量」を合計します。四角のちょうど真ん中に落ちたサンプルは 4 点に 0.25 ずつ配るので、3 回訪れたセルの取り分が 0.75 しかない、ということが起こります。別の質問なので、両方に下限があります。\n'
+            + '1 サンプルは、はさむ 4 つの格子点に取り分として配られます。取り分の合計は必ず 1.00 で、近い格子点ほど大きくなります。MIN SAMPLES が「そのセルの中に入ったサンプルの数」を数えるのに対し、MIN WEIGHT は「DME が読んだ数字のうちそのセルが占めた量」を合計します。四角のちょうど真ん中に落ちたサンプルは 4 点に 0.25 ずつ配るので、3 サンプル入ったセルの取り分が 0.75 しかない、ということが起こります。別の質問なので、両方に下限があります。\n'
             + '上げると、証拠の薄い一帯がまとまって純正値のまま残ります。下げると、隣のセルのために取られたサンプルでセルが書き換わります。\n'
             + '実測（1400 rpm、開度 25 / 30 / 45 %）: 2.5 ではこの 3 セルが一緒に純正値のまま残り、開度を上げるほど値が上がる並びが保たれました。0 では 45 % だけが書き換わり、65 % が純正値のまま取り残されて −5.3 % のくぼみができました。踏み増したときに DME への要求が下がる形になるので、車はそこで揺れます。\n'
             + '0 で無効。純正値のまま残った領域は、この値を下げるのではなく、そこをもう一度走ってください。\n'
-            + 'このやり方で落ちるのは「そこを走っていないセル」だけです。1 バイトも変わらないセルは、設定ではなく走行が足りません。\n'
+            + 'このやり方で落ちるのは、走っていないセルのほかに、3 回の別々の機会に満たない（1 回が重みの大半を持つ場合を含む）セルと、アクセルを戻した後や K の段差の後で λ が戻り途中だったサンプルしか無いセルです。どれも設定ではなく、そこをもう一度走って直します。\n'
             + '次にやること: 焼いて、次のセッションの BASE に「いま焼いたバイナリ」を指定して、同じ領域をもう一度走ってください。要求がどこも ±2 % に収まったら収束です。そこで初めて STATISTICAL と SHAPE の出番になります。',
         covVeHintStat:
             '収束したあとの最終確認だけに使ってください。ふだんは DIRECT です。\n'
@@ -229,11 +229,11 @@ const TEXT = {
             + 'AUTHORITY is how much of the measured demand this pass applies. Leave it at 100 %. The demand is already bounded by what samples inside that cell actually asked for, so lowering this does not make the result safer — it only makes convergence slower. Drop it to 50-70 % only when a drive was too messy to take at face value.\n'
             + 'MIN SAMPLES is how many points a cell needs before it is written. The default of 3 is the fewest that can carry an average; it is not a precision bar. It counts only points that landed INSIDE the cell — ones that merely grazed it on their way to a neighbour do not count.\n'
             + 'MIN WEIGHT is the floor on the total share a cell received. Default 2.5.\n'
-            + 'One sample is split across the four grid points that bracket it. The shares always sum to 1.00, and the nearer point gets the larger one. MIN SAMPLES counts how many times a cell was visited; MIN WEIGHT adds up how much of the number the DME read was this cell. A sample landing dead centre gives each of the four 0.25, so a cell visited three times can hold three quarters of one sample. They ask different questions, which is why both have a floor.\n'
+            + 'One sample is split across the four grid points that bracket it. The shares always sum to 1.00, and the nearer point gets the larger one. MIN SAMPLES counts the points that landed inside a cell; MIN WEIGHT adds up how much of the number the DME read was this cell. A sample landing dead centre gives each of the four 0.25, so a cell with three points in it can hold three quarters of one sample. They ask different questions, which is why both have a floor.\n'
             + 'Raising it leaves a thinly covered neighbourhood at stock together. Lowering it lets a cell be written on samples that were really its neighbour\'s.\n'
             + 'Measured at 1400 rpm, 25 / 30 / 45 % opening: at 2.5 those three stay at stock together and the row still rises with opening. At 0 only 45 % moved, 65 % was left at stock, and the row dipped 5.3 % — the DME is asked for less as the throttle opens further, which is where the car bucks.\n'
             + '0 turns it off. A region that stayed at stock needs driving again, not a lower setting.\n'
-            + 'The only cells this refuses are ones you did not drive. A cell that stays byte-for-byte identical needs driving, not a different setting.\n'
+            + 'Besides cells you did not drive, this refuses a cell seen on fewer than 3 separate occasions (or with one occasion holding most of its weight), and one seen only while the trim was still ramping back after a lift-off or a K step. The cure for each is driving there again, not a different setting.\n'
             + 'What to do next: flash, set the NEXT session\'s BASE to the binary you just flashed, and drive the same region again. When no cell asks for more than about 2 %, the map has converged — and that is when STATISTICAL and SHAPE become the right tools.',
         covVeHintStat:
             'For the final check after the map has converged. Use DIRECT for everything before that.\n'
@@ -680,9 +680,9 @@ export const FilterConfigPanel: React.FC<Props> = ({
                                     </SubField>
 
                                     {/* WEIGHT — the other half of "does this cell have evidence",
-                                        and it reads coverage where SAMPLES reads visits. A cell can
-                                        be visited three times and still have been three quarters of
-                                        one sample's worth, because a sample between four nodes
+                                        and it reads coverage where SAMPLES counts points inside the
+                                        cell. A cell can hold three points and still have been three
+                                        quarters of one sample's worth, because a sample between four nodes
                                         gives each of them a quarter. See VE_MIN_WEIGHT_DEFAULT for
                                         why 2.5 and what it costs. 0 turns the bar off. */}
                                     <SubField label={t.subWeight} value={veWeight.toFixed(1)}>

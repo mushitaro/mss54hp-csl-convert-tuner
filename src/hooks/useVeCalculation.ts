@@ -6,7 +6,7 @@ import { tuneRfKorrTable, rfKorrCensus, RfKorrTuneResult, RfKorrTuneReport } fro
 import { rfKorrRouteAgreement, RfKorrRouteAgreement } from '@/lib/ve-calculator/rfKorrRoutes';
 import { summariseChargeTemp, type ChargeTempInfo } from '@/lib/ve-calculator/chargeTemp';
 import type { EgtTables } from '@/lib/ve-calculator/egtTables';
-import { isKRampExcluded } from '@/lib/ve-calculator/rampState';
+import { isLambdaRampExcluded } from '@/lib/ve-calculator/rampState';
 import { computeHighDeltaGuard, type HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
 import { VEMap, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
 import { MAP_DIMENSIONS, APP_CONFIG } from '@/config/constants';
@@ -34,9 +34,10 @@ export function useVeCalculation() {
      * rebuilding it each flush would restart the DME's state machines from "reset" twice a second.
      * It walks `rawData`, not `data`, because the car's latch and lambda integrator advanced on
      * samples the filters drop — and it must, or the live map and the STOP map would disagree.
-     * `verify:incremental` pins that they do not. Null without EGT tables: nothing to walk.
+     * `verify:incremental` pins that they do not. Walked without EGT tables too: there is no latch
+     * then, but a loop restart is still a ramp the VE write must not take (`rfKorrWalk`).
      */
-    walk: { step(point: LogDataPoint): RfKorrStep } | null;
+    walk: { step(point: LogDataPoint): RfKorrStep };
     consumedRaw: number;
     gateTrack: Map<number, RfKorrStep>;
     /** The tables the walk runs on — the as-run ones, or the stock floor when the K HOLD check
@@ -49,9 +50,9 @@ export function useVeCalculation() {
      *  flipping is the one thing that rebuilds a live run mid-drive. */
     kHold: { step(point: LogDataPoint): void; verdict(): KHoldNotInEffect | null } | null;
     kHoldNotInEffect: KHoldNotInEffect | null;
-    /** Gate-open `data` samples the write skipped as mid-ramp — `isKRampExcluded`, counted as they
-     *  are binned so the number is the grid's own. */
-    kRampCount: number;
+    /** `data` samples the write skipped as mid-ramp, gate open or shut — `isLambdaRampExcluded`,
+     *  counted as they are binned so the number is the grid's own. */
+    lambdaRampCount: number;
   } | null>(null);
   const [newMap, setNewMap] = useState<VEMap | null>(null);
   const [mapData, setMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
@@ -130,12 +131,13 @@ export function useVeCalculation() {
   const [coverage, setCoverage] = useState<{ withEvidence: number; withAnyData: number; total: number } | null>(null);
 
   /**
-   * Samples of `data` the VE write skipped because the lambda loop was still taking back an
-   * rf_korr step — the census's `rfKorrRamp` (see `withRfKorrRamp`). Counted with
-   * `isKRampExcluded`, the predicate the write itself uses, on the batch pass and on every live
-   * flush, so VALID minus this is what the map was actually built from.
+   * Samples of `data` the VE write skipped because the lambda loop was still taking back its last
+   * step — an rf_korr step, or the restart to 1.000 after a fuel cut — gate open or shut: the
+   * census's `lambdaRamp` (see `withLambdaRamp`). Counted with `isLambdaRampExcluded`, the
+   * predicate the write itself uses, on the batch pass and on every live flush, so VALID minus this
+   * is what the map was actually built from.
    */
-  const [kRampCount, setKRampCount] = useState<number>(0);
+  const [lambdaRampCount, setLambdaRampCount] = useState<number>(0);
 
   /**
    * Set when the as-run binary says K HOLD and the drive says otherwise: the median RF / rf_soll
@@ -191,7 +193,11 @@ export function useVeCalculation() {
     // The VE derivation no longer reads the tuner's table: a VE and a DRREL are never written into
     // one BIN, so there is no k_new to divide by (see VeCalcOptions.writeRfKorr). The table is still
     // derived above, for the RF KORR tab and the WRITE RF KORR path.
-    const result = calc.calculateNewVEMap(map, annotated, { ...options, egt });
+    // The visit gap's time unit off the RAW log, as the filters read it and as the live path below
+    // reads it: the filtered stream can open with samples seconds apart, and a unit read off that
+    // prefix would differ from the one the STOP pass reads off the whole.
+    const result = calc.calculateNewVEMap(map, annotated,
+      { ...options, egt, secondsPerUnit: timeScaleSeconds(processed.rawData) });
 
     /*
      * What restating this log would do to it: measured always, applied inside the calculator.
@@ -222,7 +228,7 @@ export function useVeCalculation() {
       { rpm: map.xAxis, load: map.yAxis },
       { secondsPerUnit: timeScaleSeconds(processed.data) }));
     setTunedRfKorr(rfKorr);
-    setKRampCount(annotated.filter(isKRampExcluded).length);
+    setLambdaRampCount(annotated.filter(isLambdaRampExcluded).length);
     setKHoldNotInEffect(hold?.kHoldNotInEffect ?? null);
     setHighDeltaGuard(egt ? computeHighDeltaGuard(processed.rawData, egt) : null);
     // The census, from the batch path too.
@@ -306,11 +312,11 @@ export function useVeCalculation() {
       const egt = hold ? hold.egt : null;
       liveRef.current = {
         map, grid: calc.createGrid(), consumed: 0, annotated: [],
-        walk: egt ? calc.rfKorrWalk(map, egt, options.rfKorrAir) : null,
+        walk: calc.rfKorrWalk(map, egt, options.rfKorrAir),
         consumedRaw: 0, gateTrack: new Map(), egt, egtIn: options.egt ?? null,
         kHold: options.egt ? calc.kHoldCheck(map, options.egt, options.rfKorrAir) : null,
         kHoldNotInEffect: hold?.kHoldNotInEffect ?? null,
-        kRampCount: 0,
+        lambdaRampCount: 0,
       };
     }
     const live = liveRef.current!;
@@ -321,7 +327,7 @@ export function useVeCalculation() {
     for (let i = live.consumedRaw; i < processed.rawData.length; i++) {
       const p = processed.rawData[i];
       live.kHold?.step(p);
-      if (live.walk) live.gateTrack.set(p.time, live.walk.step(p));
+      live.gateTrack.set(p.time, live.walk.step(p));
     }
     live.consumedRaw = processed.rawData.length;
     // The hold check's verdict can only be known from the drive, so it can change as the drive
@@ -335,19 +341,27 @@ export function useVeCalculation() {
       return;
     }
     if (verdict) live.kHoldNotInEffect = verdict;
+    // The log's time unit for the visit gap, off the RAW log as the batch pass reads it
+    // (`runCalculation`) and as the filters do: dense from the first sample, so every flush reads
+    // the unit the STOP pass will. Once per flush: it looks at the first 200 steps only.
+    const secondsPerUnit = timeScaleSeconds(processed.rawData);
     for (let i = live.consumed; i < processed.data.length; i++) {
       const src = processed.data[i];
       const t = live.gateTrack.get(src.time);
       const annotated = calc.annotateRfKorrPoint(
         map, src, live.egt, options.rfKorrAir, t ? t.open : null);
-      // Same rule as the batch `annotateRfKorr`: the ramp state only where a gate verdict exists.
-      const point = t && annotated.rfKorrGateOpen !== undefined
-        ? { ...annotated, kRamp: t.kRamp } : annotated;
+      // Same rule as the batch `annotateRfKorr`: the ramp state on every sample the walk covered,
+      // gate verdict or not, because the write excludes on it whatever the gate says.
+      // No `lambdaCycling` here: it is decided on the half-cycle a sample sits in, which has not
+      // ended when the sample arrives, and nothing that reads this stream reads it. The census
+      // below has it — it re-annotates the whole raw prefix.
+      const point = t ? { ...annotated, kRamp: t.kRamp } : annotated;
       live.annotated.push(point);
-      if (isKRampExcluded(point)) live.kRampCount++;
+      if (isLambdaRampExcluded(point)) live.lambdaRampCount++;
       // Same reference as the batch path, or a live flush and the STOP pass would build
-      // different maps from one drive. verify:incremental asserts they agree.
-      calc.accumulatePoint(live.grid, point, plan, options.normaliseTo);
+      // different maps from one drive. verify:incremental asserts they agree. The time unit too:
+      // the visit gap is in seconds, and both paths read the unit off the raw log.
+      calc.accumulatePoint(live.grid, point, plan, options.normaliseTo, secondsPerUnit);
     }
     live.consumed = processed.data.length;
 
@@ -375,7 +389,7 @@ export function useVeCalculation() {
     setRfKorrMap(result.rfKorrMap);
     setRfKorrSpreadMap(result.rfKorrSpreadMap);
     setCoverage(result.coverage);
-    setKRampCount(live.kRampCount);
+    setLambdaRampCount(live.lambdaRampCount);
     setKHoldNotInEffect(live.kHoldNotInEffect);
 
     // The census, not the table. `rfKorrData` is the tuner's own sample set (it skips the transient
@@ -417,7 +431,7 @@ export function useVeCalculation() {
     setRouteAgreement(undefined);
     setCoverage(null);
     setRfKorrLive(null);
-    setKRampCount(0);
+    setLambdaRampCount(0);
     setKHoldNotInEffect(null);
     setHighDeltaGuard(null);
   };
@@ -434,7 +448,7 @@ export function useVeCalculation() {
     rfKorrMap,
     rfKorrSpreadMap,
     coverage,
-    kRampCount,
+    lambdaRampCount,
     kHoldNotInEffect,
     highDeltaGuard,
     rfKorrLive,

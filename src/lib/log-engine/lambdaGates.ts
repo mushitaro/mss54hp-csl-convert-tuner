@@ -114,26 +114,28 @@ export type DropReason =
     | 'settle'
     | 'excluded'
     /**
-     * Gate-open samples the lambda loop had not yet answered: rf_korr stepped and the trim was
-     * still ramping it back (rampState.ts). They pass every filter here and reach `data`; the VE
-     * write skips them. So this filter never assigns the reason — it cannot, since the verdict
-     * needs the rf_korr latch, the as-run map and the air curves. The VE calculation counts it
-     * with `isKRampExcluded`, the predicate the write itself uses, on the batch pass and on every
-     * live flush, and `withRfKorrRamp` puts that count into the census the panel shows.
+     * Samples the lambda loop had not yet answered: its trim was still ramping back from the last
+     * event — a loop restart at 1.000 after a fuel cut or loop-off, or an rf_korr step — gate open
+     * or shut (rampState.ts). They pass every filter here and reach `data`; the VE write skips
+     * them. So this filter never assigns the reason — it cannot, since the verdict needs a walk over
+     * the raw log (and, for the K step, the rf_korr latch, the as-run map and the air curves). The
+     * VE calculation counts it with `isLambdaRampExcluded`, the predicate the write itself uses, on
+     * the batch pass and on every live flush, and `withLambdaRamp` puts that count into the census
+     * the panel shows.
      */
-    | 'rfKorrRamp';
+    | 'lambdaRamp';
 
 export type DropCensus = Record<DropReason, number>;
 
 export const EMPTY_CENSUS: DropCensus = {
     coldEngine: 0, idle: 0, transient: 0, catProtect: 0, fullLoad: 0, highLoadSettle: 0,
-    settle: 0, controllerStop: 0, fuelCut: 0, excluded: 0, rfKorrRamp: 0,
+    settle: 0, controllerStop: 0, fuelCut: 0, excluded: 0, lambdaRamp: 0,
 };
 
-/** The filter's census with the VE calculation's k-ramp count put in. A copy: the filter's own
- *  object is the live run's resume state and must not carry a number it did not count. */
-export function withRfKorrRamp(census: DropCensus, rfKorrRamp: number): DropCensus {
-    return { ...census, rfKorrRamp };
+/** The filter's census with the VE calculation's lambda-ramp count put in. A copy: the filter's
+ *  own object is the live run's resume state and must not carry a number it did not count. */
+export function withLambdaRamp(census: DropCensus, lambdaRamp: number): DropCensus {
+    return { ...census, lambdaRamp };
 }
 
 /**

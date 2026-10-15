@@ -119,12 +119,19 @@ const REMEDY: Record<string, { en: string; ja: string }> = {
     'trim-rigid': { en: 'the lambda loop was not correcting — check it was closed', ja: 'λ ループが閉じていたか確認する' },
     'no-ti-factor': { en: 'KF_TI_N_RF could not be read from this binary', ja: 'この BIN から KF_TI_N_RF を読めなかった' },
     'ti-branch-unproven': { en: 'log LLS_ST to settle which branch runs', ja: 'LLS_ST をログに入れて分岐を確定する' },
-    // Every sample here was taken while the lambda loop was still taking back an rf_korr step, so
-    // none could be written. Holding the state past the lean switch makes post-ramp samples; K HOLD
-    // removes the step altogether.
-    'k-ramp': {
-        en: 'hold the throttle still for longer once it stops, or run with K HOLD',
-        ja: 'スロットルを止めてから長めに保つか、K HOLD で走る',
+    // Every sample here was taken while the lambda loop was still ramping back — from a restart
+    // after a fuel cut, or an rf_korr step — so none could be written. A steady pedal past the lean
+    // switch makes post-ramp samples, and after a lift-off that takes a few seconds.
+    'lambda-ramp': {
+        en: 'after a lift-off or tip-in, hold the pedal steady for a few seconds before the cell counts',
+        ja: 'アクセルを戻した後や踏み込んだ後は、数秒ペダルを一定に保つ —— セルに数えられるのはそこから',
+    },
+    // Enough samples, too few occasions — or three of which one holds most of the weight: one dwell
+    // is one observation however long it lasts, so the cure is coming back on passes alike, and a
+    // 4th-gear pull is the repeatable way to come back.
+    'few-visits': {
+        en: 'drive through this cell on 3 separate occasions of similar length — a steady 4th-gear pull, minutes apart',
+        ja: '別々の機会に 3 回、同じくらいの長さでこの状態を通る —— 4 速の一定ペダルの引きを、時間を空けて',
     },
 };
 
@@ -173,10 +180,10 @@ export function buildCoverage(input: CoverageInputs): CellCoverage[][] {
             const samples = hitMap?.[r]?.[c] ?? 0;
             const reason = rejectMap?.[r]?.[c] ?? null;
             const correction = correctionMap?.[r]?.[c] ?? 1;
-            // 'k-ramp' is the one refusal with no written sample behind it: the cell WAS driven, and
-            // every sample was mid-ramp. Calling it unvisited — or below the engine's reach — would
-            // send the reader to drive a state they already drove.
-            const driven = samples > 0 || reason === 'k-ramp';
+            // 'lambda-ramp' is the one refusal with no written sample behind it: the cell WAS driven,
+            // and every sample was mid-ramp. Calling it unvisited — or below the engine's reach —
+            // would send the reader to drive a state they already drove.
+            const driven = samples > 0 || reason === 'lambda-ramp';
             row.push({
                 row: r, col: c, samples,
                 weight: weightMap?.[r]?.[c],

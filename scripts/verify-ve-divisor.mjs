@@ -60,10 +60,10 @@ const inAir = (sample) => ({
     // written into thirty call sites, because "was the car moving" is not what most of these
     // checks are about; the ones that ARE override it.
     //
-    // POST-RAMP by default, for the same reason. A gate-open sample the lambda loop has not answered
-    // yet is not written at all (`isKRampExcluded`). Every check below is about the multiply rather
-    // than the ramp, so they say `kRamp: false` and the one section that IS about the ramp
-    // overrides it.
+    // POST-RAMP by default, for the same reason. A sample the lambda loop has not answered yet —
+    // gate open or shut — is not written at all (`isLambdaRampExcluded`). Every check below is about
+    // the multiply rather than the ramp, so they say `kRamp: false` and the one section that IS about
+    // the ramp overrides it.
     intakeTemp: 20, ambientPressure: 960.5, vehicleSpeed: 80, kRamp: false, ...sample,
     ...(sample.rf === undefined ? {} : { rf: sample.rf - RF_TRUNCATION_MEAN_PERCENT }),
 });
@@ -113,10 +113,12 @@ function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tu
     // sample is built to be unambiguous either way.
     const point = calc.annotateRfKorrPoint(map, inAir(sample), egt, air, gate);
     const grid = calc.createGrid();
-    // Enough copies to clear the evidence gate, which is 10 samples and weight 5.
+    // Enough copies to clear the evidence gate, which is 10 samples and weight 5 — and one visit,
+    // because forty copies at one instant are one visit and the visit gate is not this file's.
     for (let i = 0; i < 40; i++) calc.accumulatePoint(grid, point, { source: 'rf-ratio', apply });
     const out = calc.finalizeGrid(map, grid, {
-        minCellSamples: 1, minCellWeight: 0.01, tunedRfKorr: writeRfKorr ? tunedTable : null, writeRfKorr,
+        minCellSamples: 1, minCellWeight: 0.01, minCellVisits: 1,
+        tunedRfKorr: writeRfKorr ? tunedTable : null, writeRfKorr,
     });
     let best = null;
     for (let r = 0; r < LOAD.length; r++) for (let c = 0; c < RPM.length; c++) {
@@ -129,8 +131,8 @@ function run(map, sample, { apply = true, writeRfKorr = true, air = FLAT_AIR, tu
             best = { w: out.weightMap[r][c], correction: out.demandMap[r][c] };
         }
     }
-    const kRampCell = out.rejectMap.some(row => row.some(v => v === 'k-ramp'));
-    return { point, ...best, written: best !== null, kRampCell, out };
+    const rampCell = out.rejectMap.some(row => row.some(v => v === 'lambda-ramp'));
+    return { point, ...best, written: best !== null, rampCell, out };
 }
 
 // rf_soll 0.30 -> below the 0.55 floor -> gate SHUT. rf is a percentage, so rf = 30 * rfKorr.
@@ -281,20 +283,24 @@ console.log('\n[same time, and only once the loop has answered — the settle cl
 
     const ramp = run(OPEN, { ...s, kRamp: true }, { writeRfKorr: false });
     check('mid-ramp: the sample is NOT written', !ramp.written);
-    check('...and its cell says why: k-ramp', ramp.kRampCell);
+    check('...and its cell says why: lambda-ramp', ramp.rampCell);
     check('...while the measurement on the sample is untouched', near(ramp.point.rfKorr, 1.1, 1e-9),
         String(ramp.point.rfKorr));
 
     // A gate-open sample the walk never covered cannot be shown to be post-ramp.
     const unknown = run(OPEN, { ...s, kRamp: undefined }, { writeRfKorr: false, gate: true });
     check('no ramp state on a gate-open sample reads as a ramp — not written', !unknown.written);
-    // A gate-SHUT sample has no step to take back, so the ramp flag must not gate it.
-    const shutRamp = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, kRamp: true }, { writeRfKorr: false });
-    check('a gate-shut sample is written whatever its ramp flag says',
-        shutRamp.written && near(shutRamp.correction, 0.9, 1e-9), String(shutRamp.correction));
-    const shutNone = run(SHUT, { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100, kRamp: undefined }, { writeRfKorr: false });
-    check('...and with no ramp state at all', shutNone.written && near(shutNone.correction, 0.9, 1e-9),
-        String(shutNone.correction));
+    // A gate-SHUT sample has no K step to take back, but a loop restart is the same clock without
+    // K: the integrator at 1.000 ramping down until the lean switch. So the flag gates it too.
+    const shutBase = { time: 0, rpm: 2200, rawLoad: 30, stft1: 0.9, stft2: 0.9, rf: 30, exhaustTemp: 100 };
+    const shutRamp = run(SHUT, { ...shutBase, kRamp: true }, { writeRfKorr: false });
+    check('a gate-shut sample mid-ramp is NOT written either', !shutRamp.written && shutRamp.rampCell,
+        `written ${shutRamp.written}`);
+    const shutNone = run(SHUT, { ...shutBase, kRamp: undefined }, { writeRfKorr: false });
+    check('...nor one with no ramp state at all', !shutNone.written && shutNone.rampCell);
+    const shutPost = run(SHUT, { ...shutBase, kRamp: false }, { writeRfKorr: false });
+    check('a gate-shut post-ramp sample is written with the trim alone',
+        shutPost.written && near(shutPost.correction, 0.9, 1e-9), String(shutPost.correction));
 }
 
 console.log('\n[gate SHUT: the DME applies 1.000, so nothing may be divided out]');

@@ -1,9 +1,10 @@
 /**
- * The k-ramp rule: a gate-open sample is VE evidence only once the lambda loop has taken back the
- * last rf_korr step.
+ * The k-ramp rule: a sample is VE evidence only once the lambda loop has taken back its last step —
+ * an rf_korr step or a loop restart to 1.000 — gate open or shut.
  *
  *     after a K step the trim ramps at KF_LA_KI_NEG (0.0406/s in the band) until the lean switch,
- *     so in that window  trim x K = K (1 - 0.0406 t)  — the time since the step, not the VE error
+ *     so in that window  trim x K = K (1 - 0.0406 t)  — the time since the step, not the VE error;
+ *     after a restart the same clock runs from 1.000 with K = 1:  trim = 1 - 0.0406 t
  *
  *     EVENT    gate in/out, or |K - K_at_last_event| >= 0.02 while open
  *     RESTART  every bank exactly 1.000, both banks bit-identical, or a one-sample move > 0.10
@@ -14,10 +15,26 @@
  *              never while the trim sits on its clamp
  *     kRamp    any bank still pending or pinned
  *
- * and what the VE write and the census do with it, the K HOLD check that catches a hold that did
- * not take, and the latch's load fix. All synthetic: a flat Alpha-N table so rf_soll is one number,
- * flat air curves so RF_PT_KORR is 1, and the one binary the repo ships (public/mock) for the
- * P-jump tables. Nothing here reads archive/.
+ * and what the VE write and the census do with it — it excludes every sample with kRamp !== false,
+ * GATE OPEN OR SHUT, because a restart after a fuel cut is the same clock without K (rampState.ts) —
+ * the visit gate that comes after it (a cell's substantial samples from >= 3 runs, a gap over 1.0 s
+ * starting the next, and worth >= 2 equal runs by weight: (Sum W_v)^2 / Sum W_v^2), the K HOLD check that catches a hold that did not take, and the latch's load
+ * fix. Then the second, independent question — is the loop limit-cycling, or walking from the last
+ * cell's error to this one's:
+ *
+ *     REVERSAL       falling phase: the trim rose >= 0.8 x P+ above its minimum since the last
+ *                    reversal; rising phase: fell >= 0.8 x P- below its maximum. Direction flips.
+ *     RESET          every bank exactly 1.000, both banks bit-identical, a one-sample move > 0.10,
+ *                    or no reading: the half-cycle is void, direction set by the next move
+ *     lambdaCycling  for every present bank, off its clamp, the half-cycle the sample sits in —
+ *                    last reversal to next, no reset between — is in the log and lasts at most
+ *                    HALF_CYCLE_MAX_SEC (1.5 s, in SECONDS: the log's unit converted with
+ *                    timeScaleSeconds). A walk is not cycling from its first sample; the end of a
+ *                    log (a live prefix) is not cycling until its half-cycle closes.
+ *
+ * All synthetic: a flat Alpha-N table so rf_soll is one number, flat air curves so RF_PT_KORR is 1,
+ * and the one binary the repo ships (public/mock) for the P-jump tables. Nothing here reads
+ * archive/.
  *
  * The rule's thresholds were checked against the DME's own P-jump counters on archive sessions
  * #967/#968/#970 by a scratch replay (not shipped): settled precision 0.92, recall 0.61 over every
@@ -26,13 +43,16 @@
 import fs from 'node:fs';
 import {
     VECalculator, RF_TRUNCATION_MEAN_PERCENT, K_HOLD_IN_EFFECT_MAX_RATIO, K_HOLD_CHECK_MIN_SAMPLES,
+    VE_MIN_VISITS, VISIT_GAP_SEC, VE_MIN_EFFECTIVE_VISITS,
 } from '../src/lib/ve-calculator/calculator.ts';
 import {
-    KRampTracker, isKRampExcluded, readLambdaRampParams, lambdaPJumpAt,
-    K_STEP_MIN, K_DROP_MIN, REVERSAL_FRACTION, TRIM_RESET_JUMP, LAMBDA_P_JUMP_FALLBACK,
+    KRampTracker, LambdaCycleTracker, isLambdaRampExcluded, readLambdaRampParams, lambdaPJumpAt, lambdaCyclingFlags,
+    K_STEP_MIN, K_DROP_MIN, REVERSAL_FRACTION, TRIM_RESET_JUMP, LAMBDA_P_JUMP_FALLBACK, HALF_CYCLE_MAX_SEC,
 } from '../src/lib/ve-calculator/rampState.ts';
+import { timeScaleSeconds } from '../src/lib/log-engine/filter.ts';
 import { isRfKorrFloorHeld, withStockRfKorrFloor, readEgtTables } from '../src/lib/ve-calculator/egtTables.ts';
-import { EMPTY_CENSUS, withRfKorrRamp } from '../src/lib/log-engine/lambdaGates.ts';
+import { EMPTY_CENSUS, withLambdaRamp } from '../src/lib/log-engine/lambdaGates.ts';
+import { resolveRfKorr } from '../src/lib/types.ts';
 import { buildCoverage, coverageRemedy } from '../src/lib/ve-calculator/cellCoverage.ts';
 import { APP_CONFIG, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
 
@@ -86,14 +106,16 @@ function stepRamp({ k = 1.16, m = 1.0, before = 4, after = 12, start = 1.0 } = {
  * The same controller in continuous time — 5 ms steps, the sensor seeing the mixture `delay` late,
  * the trim read every DT — so the lean switch can fall anywhere inside a sample interval and the
  * ramp before it partly cancels the jump. This is the case `REVERSAL_FRACTION < 1` exists for.
+ * `mOf` moves the VE error over time — the car driving into a cell the map has wrong by another
+ * amount — with no K step at all.
  */
-function simulate({ kOf, openOf, m = 1.0, T = 14, delay = 0.12, trim0 = 1.0 }) {
+function simulate({ kOf, openOf, m = 1.0, mOf = () => m, T = 14, delay = 0.12, trim0 = 1.0 }) {
     const dt = 0.005, lag = Math.round(delay / dt), every = Math.round(DT / dt);
     let trim = trim0, wasRich = null;
     const mix = [], out = [], leanSwitches = [], richSwitches = [];
     for (let i = 0; i * dt <= T; i++) {
         const t = i * dt;
-        mix.push(trim * kOf(t) * m);
+        mix.push(trim * kOf(t) * mOf(t));
         const rich = mix[Math.max(0, i - lag)] > 1;
         if (wasRich !== null && rich !== wasRich) {
             trim += rich ? -P_NEG : P_POS;
@@ -185,7 +207,7 @@ console.log('\n[a fall in K waits for the rich switch that ends the climb back]'
         const pts = sim.rows.map((x, i) => ({ ...x, kRamp: r[i], rfKorrGateOpen: x.open, c: ((x.v1 + x.v2) / 2) * x.k }));
         const climb = pts.filter(p => p.t >= tDrop && p.t < firstRich);
         if (climb.some(p => p.c < 0.99)) climbs++;
-        leaked.push(...climb.filter(p => !isKRampExcluded(p) && p.c < 0.99).map(p => p.c.toFixed(3)));
+        leaked.push(...climb.filter(p => !isLambdaRampExcluded(p) && p.c < 0.99).map(p => p.c.toFixed(3)));
         if (pts.some(p => p.t >= firstRich + 4 * DT && p.kRamp)) lateSettle.push(ph.toFixed(2));
         phases++;
     }
@@ -200,7 +222,8 @@ console.log('\n[a fall in K waits for the rich switch that ends the climb back]'
     // The gate shutting on a stepped K is the same drop, K -> 1.000. Without a fuel cut the trim is
     // left at its K-cancelling level and climbs back over ~2.5 s. Those samples stay ramp until the
     // rich switch — the RF KORR anchor check reads gate-shut samples only when `kRamp === false` —
-    // and the VE write still takes them: its exclusion is gate-open only (isKRampExcluded).
+    // and the VE write leaves them out too: its exclusion reads `kRamp` whatever the gate says
+    // (isLambdaRampExcluded), so the climb is no longer written as a lean VE error.
     const tExit = 10;
     const ex = simulate({ kOf: t => (t < 2 || t >= tExit ? 1 : 1.16), openOf: t => t >= 2 && t < tExit, T: 16 });
     const exitRich = ex.richSwitches.find(t => t > tExit + 0.12);
@@ -208,8 +231,8 @@ console.log('\n[a fall in K waits for the rich switch that ends the climb back]'
     const shutClimb = ex.rows.map((x, i) => [x, re[i]]).filter(([x]) => x.t >= tExit && x.t < exitRich);
     check('a gate exit from K 1.16 without a fuel cut: kRamp until the rich switch',
         shutClimb.length > 3 && shutClimb.every(([, k]) => k), shutClimb.map(([, k]) => +k).join(''));
-    check('...those gate-shut samples are still not excluded from the VE write',
-        shutClimb.every(([x, k]) => !isKRampExcluded({ rfKorrGateOpen: x.open, kRamp: k })));
+    check('...and those gate-shut samples are excluded from the VE write as well',
+        shutClimb.every(([x, k]) => !x.open && isLambdaRampExcluded({ rfKorrGateOpen: x.open, kRamp: k })));
     // A small fall keeps the rise test: K 1.16 -> 1.13 is taken back by the one P+ jump it causes.
     const small = simulate({ kOf: t => (t < 2 ? 1 : t < 10.2 ? 1.16 : 1.13), openOf: t => t >= 2, T: 16 });
     const rs = track(small.rows);
@@ -331,6 +354,190 @@ console.log('\n[P+ comes from the as-run binary, and the fallback is the band va
     check('the EGT tables carry the same parameters for the walk', JSON.stringify(readEgtTables(ab)?.lambda) === JSON.stringify(params));
 }
 
+// --- the limit-cycle flag (lambdaCyclingFlags) ---------------------------------------------------
+
+/** The flags over rows of { t, v1, v2 }, `t` in `secondsPerUnit`. */
+const cycles = (rows, { params = null, secondsPerUnit = 1, rpm = 2500, rf = 60 } = {}) => lambdaCyclingFlags(
+    rows.map(r => ({ time: r.t, rpm: r.rpm ?? rpm, rf: r.rf ?? rf, stft1: r.v1, stft2: r.v2 })), params, secondsPerUnit);
+/** The sample indices at which the tracker sees bank 1 reverse (the synthetic's banks move as one). */
+const reversalsAt = (rows) => {
+    const tr = new LambdaCycleTracker(null);
+    return rows.map((r, i) => (tr.step({ time: r.t, rpm: 2500, rf: 60, stft1: r.v1, stft2: r.v2 }).event[0] === 'reversal' ? i : -1))
+        .filter(i => i >= 0);
+};
+const bits = (xs) => xs.map(x => +x).join('');
+/** The flags over an index range [a, b), as bits for a failure message. */
+const span = (c, a, b) => c.slice(a, b);
+/**
+ * The loop's dead time for these checks: 0.4 s, gas transport plus sensor. With it the synthetic's
+ * half-cycles run 0.40-0.75 s; the DME's own P-jump counters on #967/#968/#970 put the car's at
+ * 0.52 s (p10) and 0.89 s (median), so the car is at least this slow. The 0.12 s the k-ramp checks
+ * above use makes a lean phase shorter than the 0.3 s sample, whose P+ and the P- after it net to
+ * 0.016 in one interval — exactly the 0.8 x P+ threshold — so pairs of reversals vanish and the
+ * half-cycles around them read long: the safe side, and the price of a 3 Hz log on a loop faster
+ * than the car's.
+ */
+const CYCLE_DELAY = 0.4;
+const loop = (opts) => simulate({ kOf: () => 1, openOf: () => false, delay: CYCLE_DELAY, ...opts });
+/** A gate-shut loop at λ = 1 that, at `T_MOVE`, drives into a cell `m` times rich: the trim walks
+ *  from 1.000 to 1/m at KI_NEG with no switch, then cycles there. No K step anywhere. */
+const T_MOVE = 10;
+const cellWalk = (m = 1.12, T = 20) => loop({ mOf: t => (t < T_MOVE ? 1.0 : m), T });
+/** Every switch of a simulated loop, in time order. */
+const switches = (sim) => [...sim.leanSwitches, ...sim.richSwitches].sort((a, b) => a - b);
+
+console.log('\n[the reversals are the loop\'s switches]');
+{
+    const lc = loop({ T: 20 });
+    const sw = switches(lc), rev = reversalsAt(lc.rows);
+    check('every reversal the tracker counts follows a switch of the loop by at most two samples',
+        rev.length > 15 && rev.every(i => sw.some(t => t <= lc.rows[i].t && t > lc.rows[i].t - 2 * DT)),
+        rev.map(i => lc.rows[i].t.toFixed(1)).join(' '));
+    check('...and no switch goes uncounted while the loop cycles at λ = 1',
+        sw.filter(t => t > 1 && t < lc.rows.at(-1).t - 2 * DT).every(t => rev.some(i => lc.rows[i].t >= t && lc.rows[i].t < t + 2 * DT)));
+    // A monotone ramp crosses either threshold within a fraction of a second; only the move against
+    // the phase's direction is a reversal.
+    const ramp = Array.from({ length: 12 }, (_, i) => ({ t: i * DT, v1: 1 - KI_NEG * DT * i, v2: 0.996 - KI_NEG * DT * i }));
+    check('a monotone ramp has no reversal at all', reversalsAt(ramp).length === 0);
+}
+
+console.log('\n[lambdaCycling: a limit cycle reads cycling, a walk does not — from its first sample]');
+{
+    check('HALF_CYCLE_MAX_SEC is 1.5 s', HALF_CYCLE_MAX_SEC === 1.5);
+    const lc = loop({ T: 20 });
+    const sw = switches(lc);
+    const halves = sw.slice(1).map((t, i) => t - sw[i]);
+    check('the synthetic\'s half-cycles are inside the bound', halves.length > 10 && Math.max(...halves) < HALF_CYCLE_MAX_SEC,
+        Math.max(...halves).toFixed(2));
+    const c = cycles(lc.rows);
+    const rev = reversalsAt(lc.rows);
+    check('a limit cycle reads cycling on every sample from its first reversal to its last',
+        rev.at(-1) - rev[0] > 30 && span(c, rev[0], rev.at(-1)).every(x => x), bits(span(c, rev[0], rev.at(-1))));
+    check('...and not before its first: the half-cycle it is in has no start', span(c, 0, rev[0]).every(x => !x));
+    check('...nor from its last on: the log ended before that half-cycle closed', span(c, rev.at(-1), c.length).every(x => !x),
+        bits(span(c, rev.at(-1), c.length)));
+
+    // Into a cell 12 % rich at T_MOVE: the trim walks 1.00 -> 0.89 at 0.0406/s with no switch. The
+    // half-cycle it sits in opens at the last reversal before the move reached the sensor and closes
+    // at the lean switch that ends it.
+    const w = cellWalk();
+    const cw = cycles(w.rows);
+    const kr = track(w.rows);
+    const wrev = reversalsAt(w.rows);
+    const tIn = T_MOVE + CYCLE_DELAY;
+    const open = wrev.filter(i => w.rows[i].t <= tIn).at(-1), close = wrev.find(i => w.rows[i].t > tIn);
+    check('the walk\'s half-cycle lasts more than 2 s (else this tests nothing)', w.rows[close].t - w.rows[open].t > 2.0,
+        (w.rows[close].t - w.rows[open].t).toFixed(2));
+    check('a walk reads NOT cycling on every sample, from the reversal it opens with',
+        close - open >= 6 && span(cw, open, close).every(x => !x), bits(span(cw, open, close)));
+    check('...those within 1.5 s of that reversal included: what a backward look would have passed',
+        span(w.rows, open, close).filter(x => x.t - w.rows[open].t <= HALF_CYCLE_MAX_SEC).length >= 4);
+    check('...on samples kRamp calls settled: the case the flag exists for', span(kr, open, close).every(k => k === false));
+    const first = w.rows.findIndex(x => x.t >= 2);
+    check('...and cycling before it', span(cw, first, open).length > 20 && span(cw, first, open).every(x => x),
+        bits(span(cw, first, open)));
+    check('...and again once the loop cycles around the new trim', wrev.at(-1) - close > 5
+        && span(cw, close, wrev.at(-1)).every(x => x), bits(span(cw, close, wrev.at(-1))));
+}
+
+console.log('\n[lambdaCycling resets: loop off, identical banks, a leap, a missing reading]');
+{
+    const rows = loop({ T: 14 }).rows;
+    const at = rows.findIndex(x => x.t >= 6);
+    const plain = cycles(rows);
+    check('cycling around the sample the resets go on', plain[at - 1] && plain[at] && plain[at + 1]);
+    const variants = {
+        'loop off (both banks exactly 1.000)': r => ({ ...r, v1: 1, v2: 1 }),
+        'both banks bit-identical': r => ({ ...r, v2: r.v1 }),
+        [`a one-sample leap over TRIM_RESET_JUMP (${TRIM_RESET_JUMP})`]: r => ({ ...r, v1: r.v1 - 0.15, v2: r.v2 - 0.15 }),
+    };
+    for (const [name, f] of Object.entries(variants)) {
+        const changed = rows.map((r, i) => (i === at ? f(r) : r));
+        const c = cycles(changed);
+        const rev = reversalsAt(changed);
+        // The half-cycle the reset falls in is void both ways: from the reversal before it, and up
+        // to the first reversal the tracker counts after it.
+        const before = rev.filter(i => i < at).at(-1), after = rev.find(i => i > at);
+        check(`${name}: not cycling from the reversal before it to the first one after`,
+            span(c, before, after).every(x => !x), bits(span(c, before - 1, after + 1)));
+        check('...and cycling again from there', rev.at(-1) - after > 5 && span(c, after, rev.at(-1)).every(x => x),
+            bits(span(c, after, rev.at(-1))));
+    }
+    // A bank with no reading: the sample is judged on the bank that has one; the missing bank's
+    // half-cycle is cut there, both ways.
+    const gap = cycles(rows.map((r, i) => (i === at ? { ...r, v1: undefined } : r)));
+    check('bank 1 missing: the sample reads bank 2 alone (cycling)', gap[at] === true);
+    check('...and either side of it bank 1\'s half-cycle has no end, or no start: not cycling',
+        gap[at - 1] === false && gap[at + 1] === false, bits(gap.slice(at - 2, at + 3)));
+    const none = cycles(rows.map((r, i) => (i === at ? { ...r, v1: undefined, v2: undefined } : r)));
+    check('no bank present: not cycling', none[at] === false);
+}
+
+console.log('\n[a trim on its clamp is never cycling]');
+{
+    // Reversing every sample against the clamp — it switches, and it is still reporting a bound.
+    for (const [clamp, other] of [[0.70, 0.73], [1.30, 1.27]]) {
+        const rows = Array.from({ length: 16 }, (_, i) => {
+            const v = i % 2 ? clamp : other;
+            return { t: i * DT, v1: v, v2: v + (clamp < 1 ? 0.004 : -0.004) };
+        });
+        const c = cycles(rows);
+        const inner = rows.map((r, i) => [r, c[i]]).slice(3, -1);
+        check(`pinned at ${clamp}: never cycling on a clamp sample`, inner.filter(([r]) => r.v1 === clamp).every(([, x]) => !x));
+        check('...though the samples off it, reversing as often, are', inner.filter(([r]) => r.v1 !== clamp).every(([, x]) => x),
+            bits(inner.map(([, x]) => x)));
+    }
+}
+
+console.log('\n[one bank walking is not cycling]');
+{
+    const rows0 = loop({ T: 14 }).rows;
+    const at = rows0.findIndex(x => x.t >= 6);
+    let v2 = rows0[at].v2;
+    const rows = rows0.map((r, i) => (i <= at ? r : { ...r, v2: (v2 -= KI_NEG * DT) }));
+    const c = cycles(rows);
+    check('bank 1 cycling, bank 2 walking from 6 s on: not cycling anywhere in the walk',
+        span(c, at + 1, c.length).every(x => !x), bits(span(c, at + 1, c.length)));
+    const single = cycles(rows0.map(r => ({ ...r, v2: undefined })));
+    const rev = reversalsAt(rows0);
+    check('a single-bank log reads its one bank', span(single, rev[0], rev.at(-1)).every(x => x),
+        bits(span(single, rev[0], rev.at(-1))));
+}
+
+console.log('\n[a prefix reads its open half-cycle not cycling, and the rest as the whole log does]');
+{
+    // What a live census sees: it re-annotates the raw prefix each flush, and the half-cycle the
+    // prefix ends in has not closed yet.
+    const rows = cellWalk().rows;
+    const full = cycles(rows);
+    for (const n of [25, 40, 52]) {
+        const pre = cycles(rows.slice(0, n));
+        const differ = pre.map((x, i) => (x !== full[i] ? i : -1)).filter(i => i >= 0);
+        check(`prefix of ${n} samples (to ${rows[n - 1].t.toFixed(1)} s): cycling only where the whole log says so`,
+            pre.every((x, i) => !x || full[i]));
+        // A half-cycle the whole log calls cycling is at most 1.5 s long, so if it runs past the
+        // prefix's end, its samples are all within 1.5 s of it.
+        check(`...and different only within ${HALF_CYCLE_MAX_SEC} s of its end`,
+            differ.every(i => rows[n - 1].t - rows[i].t < HALF_CYCLE_MAX_SEC) && (n === 40 || differ.length > 0),
+            JSON.stringify(differ));
+    }
+}
+
+console.log('\n[the bound is in seconds: a millisecond log is converted, not assumed]');
+{
+    // Stretched 1 % so no half-cycle lands exactly on 1.5 s, where float rounding in either unit
+    // could tip a comparison and the two would differ for a reason that is not the unit.
+    const sec = cellWalk().rows.map(r => ({ ...r, t: +(r.t * 1.01).toFixed(4) }));
+    const ms = sec.map(r => ({ ...r, t: Math.round(r.t * 1e4) / 10 }));
+    check('timeScaleSeconds reads the ms log as 0.001 s per unit, the seconds log as 1',
+        timeScaleSeconds(ms.map(r => ({ time: r.t }))) === 0.001 && timeScaleSeconds(sec.map(r => ({ time: r.t }))) === 1);
+    const want = cycles(sec);
+    check('the ms log with its unit reads exactly what the seconds log reads',
+        JSON.stringify(cycles(ms, { secondsPerUnit: 0.001 })) === JSON.stringify(want) && want.some(x => x) && want.some(x => !x));
+    check('...and taken as seconds it would not: the unit decides the verdict',
+        JSON.stringify(cycles(ms, { secondsPerUnit: 1 })) !== JSON.stringify(want));
+}
+
 // --- through the calculator ----------------------------------------------------------------------
 
 const FLAT_AIR = {
@@ -376,17 +583,20 @@ console.log('\n[the VE write: mid-ramp samples are not written, post-ramp ones a
     check('the walk marks the ramp on the annotated samples',
         ann.slice(rows.findIndex(r => r.open), switchAt).every(p => p.rfKorrGateOpen && p.kRamp === true));
     check('...and post-ramp after the switch', ann.slice(switchAt).every(p => p.rfKorrGateOpen && p.kRamp === false));
-    const res = calc.calculateNewVEMap(MAP, ann, { minCellSamples: 3, minCellWeight: 0 });
+    // One visit per cell here (`minCellVisits: 1`): this section is about the ramp; the visit gate
+    // has its own below.
+    const res = calc.calculateNewVEMap(MAP, ann, { minCellSamples: 3, minCellWeight: 0, minCellVisits: 1 });
     const [rr, rc] = cellOf(2200, 7.5);
     const [pr, pc] = cellOf(3100, 15);
     // The ramp cell also holds the four gate-shut samples from before the step. Take them out to see
     // the verdict on the ramp alone.
-    const rampOnly = calc.calculateNewVEMap(MAP, ann.filter(p => p.rfKorrGateOpen), { minCellSamples: 3, minCellWeight: 0 });
-    check('a cell whose every sample was mid-ramp is refused as k-ramp', rampOnly.rejectMap[rr][rc] === 'k-ramp',
+    const rampOnly = calc.calculateNewVEMap(MAP, ann.filter(p => p.rfKorrGateOpen),
+        { minCellSamples: 3, minCellWeight: 0, minCellVisits: 1 });
+    check('a cell whose every sample was mid-ramp is refused as lambda-ramp', rampOnly.rejectMap[rr][rc] === 'lambda-ramp',
         String(rampOnly.rejectMap[rr][rc]));
     check('...and reports no written sample', rampOnly.hitMap[rr][rc] === 0);
-    check('with the pre-step gate-shut samples in it, the cell is not k-ramp (it has evidence)',
-        res.rejectMap[rr][rc] !== 'k-ramp' && res.hitMap[rr][rc] > 0);
+    check('with the pre-step gate-shut samples in it, the cell is not lambda-ramp (it has evidence)',
+        res.rejectMap[rr][rc] !== 'lambda-ramp' && res.hitMap[rr][rc] > 0);
     const post = ann.slice(switchAt);
     const expected = post.reduce((a, p) => a + ((p.stft1 + p.stft2) / 2) * p.rfKorr, 0) / post.length;
     check('the post-ramp cell is written with mean(trim x K)', near(res.demandMap[pr][pc], expected, 1e-9),
@@ -401,35 +611,41 @@ console.log('\n[the VE write: mid-ramp samples are not written, post-ramp ones a
     const ramp = ann.filter(p => p.kRamp && p.rfKorrGateOpen);
     const rampDemand = ramp.reduce((a, p) => a + ((p.stft1 + p.stft2) / 2) * p.rfKorr, 0) / ramp.length;
     check('...where the ramp samples would have written a RISE', rampDemand > 1.03, String(rampDemand));
-    check('isKRampExcluded is exactly gate-open AND not post-ramp',
-        isKRampExcluded({ rfKorrGateOpen: true, kRamp: true }) && isKRampExcluded({ rfKorrGateOpen: true })
-        && !isKRampExcluded({ rfKorrGateOpen: true, kRamp: false })
-        && !isKRampExcluded({ rfKorrGateOpen: false, kRamp: true }) && !isKRampExcluded({}));
+    check('isLambdaRampExcluded is exactly "not post-ramp", whatever the gate says',
+        isLambdaRampExcluded({ rfKorrGateOpen: true, kRamp: true }) && isLambdaRampExcluded({ rfKorrGateOpen: true })
+        && !isLambdaRampExcluded({ rfKorrGateOpen: true, kRamp: false })
+        && isLambdaRampExcluded({ rfKorrGateOpen: false, kRamp: true }) && isLambdaRampExcluded({ kRamp: true })
+        && !isLambdaRampExcluded({ rfKorrGateOpen: false, kRamp: false }) && !isLambdaRampExcluded({ kRamp: false })
+        && isLambdaRampExcluded({}));
 }
 
 console.log('\n[the census and the cell detail]');
 {
-    check('the census has an rfKorrRamp count, zero by default', EMPTY_CENSUS.rfKorrRamp === 0);
+    check('the census has a lambdaRamp count, zero by default', EMPTY_CENSUS.lambdaRamp === 0);
     const c = { ...EMPTY_CENSUS, fuelCut: 3 };
-    const merged = withRfKorrRamp(c, 7);
-    check('withRfKorrRamp puts the count in', merged.rfKorrRamp === 7 && merged.fuelCut === 3);
-    check('...on a copy: the filter\'s resume census is untouched', c.rfKorrRamp === 0);
+    const merged = withLambdaRamp(c, 7);
+    check('withLambdaRamp puts the count in', merged.lambdaRamp === 7 && merged.fuelCut === 3);
+    check('...on a copy: the filter\'s resume census is untouched', c.lambdaRamp === 0);
     const tsx = fs.readFileSync(new URL('../src/components/DropCensus.tsx', import.meta.url), 'utf8');
-    check('DropCensus labels it "k ramp"', /rfKorrRamp:\s*'k ramp'/.test(tsx));
-    // What happened, then what to do — the cell detail's remedy, so the sheet names a cure too.
+    check('DropCensus labels it "lambda ramp"', /lambdaRamp:\s*'lambda ramp'/.test(tsx));
+    // What happened, then what to do — in each language, and the instruction is the pedal.
     check('...with what happened and the cure, in each language',
-        /rfKorrRamp:\s*'rf_korr had just stepped, and the lambda loop had not yet taken it back\. Hold the throttle still for longer once it stops, or run with K HOLD\.'/.test(tsx)
-        && /rfKorrRamp:\s*'rf_korr が掛かった直後で、ラムダがまだ戻していない。スロットルを止めてから長めに保つか、K HOLD で走る。'/.test(tsx));
+        /lambdaRamp:\s*'The lambda trim was still ramping back from a fuel cut, a loop restart or an rf_korr step, so it read the seconds since then rather than the map\. After a lift-off or a tip-in, hold the pedal steady for a few seconds — the cell counts from there\.'/.test(tsx)
+        && /lambdaRamp:\s*'燃料カット・ループ再始動・rf_korr の段差のあとで λ トリムがまだ戻る途中にあり、マップではなく経過秒数を読んでいました。アクセルを戻した後や踏み込んだ後は、数秒ペダルを一定に保ってください — そこからがセルに数えられます。'/.test(tsx));
     const grid = buildCoverage({
-        hitMap: [[0, 0]], weightMap: [[0, 0]], correctionMap: [[1, 1]],
-        rejectMap: [['k-ramp', 'no-evidence']], rows: 1, cols: 2,
+        hitMap: [[0, 0, 5]], weightMap: [[0, 0, 4]], correctionMap: [[1, 1, 0.95]],
+        rejectMap: [['lambda-ramp', 'no-evidence', 'few-visits']], rows: 1, cols: 3,
     });
-    check('a k-ramp cell reads as driven-and-refused, not as never driven',
+    check('a lambda-ramp cell reads as driven-and-refused, not as never driven',
         grid[0][0].state === 'refused' && grid[0][1].state === 'unvisited');
     check('...and not as below the engine\'s reach', grid[0][0].belowReach === false);
-    check('its remedy names what to do, in both languages',
-        coverageRemedy('k-ramp', 'ja') === 'スロットルを止めてから長めに保つか、K HOLD で走る'
-        && /K HOLD/.test(coverageRemedy('k-ramp', 'en') ?? ''));
+    check('a few-visits cell is driven-and-refused', grid[0][2].state === 'refused');
+    check('the ramp remedy names the pedal, in both languages',
+        coverageRemedy('lambda-ramp', 'en') === 'after a lift-off or tip-in, hold the pedal steady for a few seconds before the cell counts'
+        && coverageRemedy('lambda-ramp', 'ja') === 'アクセルを戻した後や踏み込んだ後は、数秒ペダルを一定に保つ —— セルに数えられるのはそこから');
+    check('the visit remedy names the three occasions, in both languages',
+        /3 separate occasions/.test(coverageRemedy('few-visits', 'en') ?? '')
+        && /別々の機会に 3 回/.test(coverageRemedy('few-visits', 'ja') ?? ''));
 }
 
 console.log('\n[batch and live walk the same ramp]');
@@ -444,8 +660,47 @@ console.log('\n[batch and live walk the same ramp]');
     for (const [a, b] of [[0, 3], [3, 4], [4, 11], [11, log.length]]) {
         for (const p of log.slice(a, b)) live.push(walk.step(p));
     }
-    check('chunked live steps == the batch annotation', live.every((s, i) => !s.open || s.kRamp === batch[i]),
+    check('chunked live steps == the batch annotation', live.every((s, i) => s.kRamp === batch[i]),
         JSON.stringify(live.map(s => s.kRamp)) + ' vs ' + JSON.stringify(batch));
+    check('the walk carries no cycle flag: that needs the half-cycle to end', live.every(s => !('cycling' in s)));
+}
+
+console.log('\n[lambdaCycling on the annotated log, and the VE write does not read it]');
+{
+    // The cell walk through the calculator: gate shut throughout (K HOLD looks the same), and the
+    // walk samples come out kRamp false, lambdaCycling false.
+    const rows = cellWalk().rows.map(r => ({ ...r, t: +(r.t * 1.01).toFixed(4) }));
+    const log = toLog(rows);
+    const ann = calc.annotateRfKorr(MAP, log, EGT, FLAT_AIR, log);
+    check('every annotated sample carries the flag beside kRamp',
+        ann.every(p => typeof p.lambdaCycling === 'boolean' && p.kRamp !== undefined));
+    check('...and agrees with lambdaCyclingFlags run on its own',
+        JSON.stringify(ann.map(p => p.lambdaCycling)) === JSON.stringify(cycles(rows, { rpm: 2200, rf: 70 })));
+    check('the walk samples: post-ramp by kRamp, not cycling', ann.some(p => p.kRamp === false && p.lambdaCycling === false));
+    // What the live census does each flush: annotate the raw prefix that has arrived.
+    for (const n of [30, 45]) {
+        const pre = calc.annotateRfKorr(MAP, log.slice(0, n), EGT, FLAT_AIR, log.slice(0, n));
+        check(`annotateRfKorr over a ${n}-sample prefix: cycling only where the whole drive says so, and the same `
+            + `${HALF_CYCLE_MAX_SEC} s back from its end`,
+            pre.every((p, i) => !p.lambdaCycling || ann[i].lambdaCycling)
+            && pre.every((p, i) => p.lambdaCycling === ann[i].lambdaCycling || log[n - 1].time - log[i].time < HALF_CYCLE_MAX_SEC * 1.01));
+    }
+    // The annotation of the same drive in milliseconds decides the unit itself.
+    const logMs = log.map(p => ({ ...p, time: Math.round(p.time * 1e4) / 10 }));
+    const annMs = calc.annotateRfKorr(MAP, logMs, EGT, FLAT_AIR, logMs);
+    check('annotateRfKorr on the same drive in ms: the same flag, sample for sample',
+        JSON.stringify(annMs.map(p => p.lambdaCycling)) === JSON.stringify(ann.map(p => p.lambdaCycling)));
+    // Outside the latch source there is no history: no kRamp and no lambdaCycling.
+    const stray = { ...log[5], time: log[5].time + 0.05 };
+    const [s] = calc.annotateRfKorr(MAP, [stray], EGT, FLAT_AIR, log);
+    check('a sample the walk did not cover gets neither flag', s.kRamp === undefined && s.lambdaCycling === undefined);
+    // The VE write never reads it: flipped or stripped, the same map.
+    const opts = { minCellSamples: 1, minCellWeight: 0, minCellVisits: 1 };
+    const a = calc.calculateNewVEMap(MAP, ann, opts);
+    const b = calc.calculateNewVEMap(MAP, ann.map(p => ({ ...p, lambdaCycling: !p.lambdaCycling })), opts);
+    const c = calc.calculateNewVEMap(MAP, ann.map(({ lambdaCycling, ...p }) => p), opts);
+    const same = (x, y) => JSON.stringify([x.newMap, x.demandMap, x.hitMap]) === JSON.stringify([y.newMap, y.demandMap, y.hitMap]);
+    check('the VE write: the same map with lambdaCycling flipped or absent', same(a, b) && same(a, c));
 }
 
 console.log('\n[K HOLD that did not take: read the drive with the stock floor, and say so]');
@@ -480,7 +735,7 @@ console.log('\n[K HOLD that did not take: read the drive with the stock floor, a
     check('hold in force: no verdict', ok.kHoldNotInEffect === null && isRfKorrFloorHeld(ok.egt));
     const annHeld = calc.annotateRfKorr(MAP, heldLog, HELD, FLAT_AIR, heldLog);
     check('...every sample gate-shut, K exactly 1', annHeld.every(p => p.rfKorrGateOpen === false && p.rfKorr === 1));
-    const w = calc.calculateNewVEMap(MAP, annHeld, { minCellSamples: 1, minCellWeight: 0 });
+    const w = calc.calculateNewVEMap(MAP, annHeld, { minCellSamples: 1, minCellWeight: 0, minCellVisits: 1 });
     const [r, c] = cellOf(2200, 7.5);
     const trimMean = annHeld.reduce((a, p) => a + (p.stft1 + p.stft2) / 2, 0) / annHeld.length;
     check('...and the cell is written with the trim alone', near(w.demandMap[r][c], trimMean, 1e-9),
@@ -515,6 +770,295 @@ console.log('\n[the latch reads raw samples at the corrected load]');
     const deflt = calc.annotateRfKorr(map, data, egt, { curves: FLAT_AIR.curves }, raw);
     check('no loadTable: the app\'s default table, which is the same correction here',
         deflt.every(p => p.rfKorrGateOpen === true));
+}
+
+// --- the gate-shut restart, and the visit gate ---------------------------------------------------
+
+/**
+ * A gate-shut limit cycle around `c` — the trim that holds λ = 1 at (`rpm`, `load`) — for `n`
+ * samples from `t0`: down at KI_NEG until it would pass c - 0.01, then the P+ jump; up at KI_POS
+ * until it would pass c + 0.01, then the P- jump. Bank 2 rides 0.003 below: two working banks never
+ * read the same code. K is 1 and the gate shut throughout — K HOLD's case.
+ */
+function cycleRows({ c, n, t0, rpm, load, v0 = c + 0.005, dir0 = -1 }) {
+    const rows = [];
+    let v = v0, dir = dir0, t = t0;
+    for (let i = 0; i < n; i++, t += DT) {
+        if (dir < 0) { const next = v - KI_NEG * DT; if (next <= c - 0.01) { v += P_POS; dir = 1; } else v = next; }
+        else { const next = v + KI_POS * DT; if (next >= c + 0.01) { v -= P_NEG; dir = -1; } else v = next; }
+        rows.push({ t, open: false, k: 1, v1: v, v2: v - 0.003, rpm, load });
+    }
+    return rows;
+}
+
+/**
+ * A lift-off fuel cut and the restart after it, gate shut: `cut` samples with both banks exactly
+ * 1.000 (the loop off — the VE filter drops them, the walk does not), then the integrator from 1.000
+ * ramping at KI_NEG with both banks bit-identical for `rampSec` — the clock, whatever the cell
+ * needs — then the lean switch (P+, the banks part) and the limit cycle around `c`.
+ */
+function restartRows({ c, t0, rpm, load, cut = 3, rampSec, n }) {
+    const rows = [];
+    let t = t0;
+    for (let i = 0; i < cut; i++, t += DT) rows.push({ t, open: false, k: 1, v1: 1, v2: 1, rpm, load: 0.4, cut: true });
+    let v = 1.0;
+    for (let i = 0, steps = Math.round(rampSec / DT); i < steps; i++, t += DT) {
+        v -= KI_NEG * DT;
+        rows.push({ t, open: false, k: 1, v1: v, v2: v, rpm, load, ramp: true });
+    }
+    v += P_POS;
+    rows.push({ t, open: false, k: 1, v1: v, v2: v - 0.003, rpm, load, switched: true });
+    rows.push(...cycleRows({ c, n, t0: t + DT, rpm, load, v0: v, dir0: 1 }));
+    return rows;
+}
+
+/** The VE stream of a raw log: what the filter would leave — the fuel-cut samples out. */
+const veStream = (raw, rows) => raw.filter((_, i) => !rows[i].cut);
+const trimOf = (p) => (p.stft1 + p.stft2) / 2;
+const meanTrim = (ps) => ps.reduce((a, p) => a + trimOf(p), 0) / ps.length;
+
+console.log('\n[a restart with the gate shut is the same clock: excluded until the reversal, written after]');
+{
+    // Cruise at 1800 rpm / RO 5 with the loop switching, then a fuel cut, and fuelling resumes at
+    // 2700 rpm / RO 7.5 — a cell 10 % rich, so the trim it needs is 0.90. From the restart the trim
+    // ramps 1.000 -> 0.89 over 2.7 s with the gate SHUT; then the lean switch, and the cycle at 0.90.
+    const C_B = 0.90;
+    const cruise = cycleRows({ c: 0.98, n: 20, t0: 0, rpm: 1800, load: 5 });
+    const rows = [...cruise, ...restartRows({ c: C_B, t0: cruise.at(-1).t + DT, rpm: 2700, load: 7.5, rampSec: 2.7, n: 24 })];
+    const raw = toLog(rows);
+    const data = veStream(raw, rows);
+    const ann = calc.annotateRfKorr(MAP, data, EGT, FLAT_AIR, raw);
+    const kept = rows.filter(r => !r.cut);
+    const isRamp = kept.map(r => !!r.ramp), afterSwitch = kept.map((r, i) => i >= kept.findIndex(x => x.switched));
+    check('every sample is gate-shut and carries a ramp verdict',
+        ann.every(p => p.rfKorrGateOpen === false && typeof p.kRamp === 'boolean'));
+    check('the cruise before the cut: post-ramp throughout (the cruise is unaffected)',
+        ann.slice(0, cruise.length).every(p => p.kRamp === false));
+    check('every sample of the restart ramp, gate shut, is kRamp',
+        ann.filter((_, i) => isRamp[i]).length === 9 && ann.filter((_, i) => isRamp[i]).every(p => p.kRamp === true));
+    check('...and from the lean switch on, post-ramp', ann.filter((_, i) => afterSwitch[i]).every(p => p.kRamp === false),
+        bits(ann.filter((_, i) => afterSwitch[i]).map(p => p.kRamp)));
+    check('...so the predicate excludes the ramp, and only the ramp',
+        ann.every((p, i) => isLambdaRampExcluded(p) === isRamp[i]));
+
+    const res = calc.calculateNewVEMap(MAP, ann, { minCellVisits: 1 });
+    const [br, bc] = cellOf(2700, 7.5), [ar, ac] = cellOf(1800, 5);
+    const post = ann.filter((_, i) => afterSwitch[i]);
+    check('the restart cell is written from the post-switch samples alone',
+        res.acceptedMap[br][bc] && res.hitMap[br][bc] === post.length && near(res.demandMap[br][bc], meanTrim(post), 1e-12),
+        `${res.hitMap[br][bc]} hits, ${res.demandMap[br][bc]} vs ${meanTrim(post)}`);
+    check('...which is the cell\'s own error, 1 / 1.10 to within the cycle\'s asymmetry',
+        Math.abs(res.demandMap[br][bc] - C_B) < 0.01, String(res.demandMap[br][bc]));
+    // What the ramp says instead: 1 - 0.0406 t, the seconds since fuelling resumed — 0.94 on
+    // average over its 2.7 s, whatever the cell needed.
+    const rampMean = meanTrim(ann.filter((_, i) => isRamp[i]));
+    check('...where the ramp samples, written, would have read 3 % or more nearer 1.000 than the cell',
+        rampMean - res.demandMap[br][bc] > 0.03, `${rampMean.toFixed(4)} vs ${res.demandMap[br][bc].toFixed(4)}`);
+    check('the cruise cell is written from every one of its samples',
+        res.hitMap[ar][ac] === cruise.length && near(res.demandMap[ar][ac], meanTrim(ann.slice(0, cruise.length)), 1e-12));
+    // The same restart with every sample of the cell inside the ramp: nothing written, and it says so.
+    const short = [...cruise, ...restartRows({ c: C_B, t0: cruise.at(-1).t + DT, rpm: 2700, load: 7.5, rampSec: 2.7, n: 0 })]
+        .filter(r => !r.switched);
+    const shortRaw = toLog(short);
+    const rampOnly = calc.calculateNewVEMap(MAP, calc.annotateRfKorr(MAP, veStream(shortRaw, short), EGT, FLAT_AIR, shortRaw),
+        { minCellVisits: 1 });
+    check('a cell reached only inside a gate-shut ramp is refused as lambda-ramp, with no written sample',
+        rampOnly.rejectMap[br][bc] === 'lambda-ramp' && rampOnly.hitMap[br][bc] === 0, String(rampOnly.rejectMap[br][bc]));
+}
+
+console.log('\n[the visit gate: a cell needs three separate visits]');
+{
+    // Cell C (2400 rpm / RO 10, needs 0.95) is visited `k` times for 8 samples each, the car going to
+    // cell D (3100 rpm / RO 15) for `away` samples in between. Every sample sits on a breakpoint
+    // (w = 1), so each visit is 8 samples and W 8: the count and the weight bars are cleared by any
+    // one visit, and only the visit gate can refuse.
+    check(`VE_MIN_VISITS is 3 and VISIT_GAP_SEC ${VISIT_GAP_SEC} s`, VE_MIN_VISITS === 3 && VISIT_GAP_SEC === 1.0);
+    const tour = (k, away, middle = 'cycle') => {
+        const rows = [];
+        let t = 0;
+        for (let v = 0; v < k; v++) {
+            const visit = v === 1 && middle === 'ramp'
+                // The middle visit made of nothing but a restart ramp: a fuel cut at D, fuelling back
+                // in C, and the car gone to D again before the switch (the banks identical throughout).
+                ? restartRows({ c: 0.95, t0: t, rpm: 2400, load: 10, rampSec: 2.4, n: 0 }).filter(r => !r.switched)
+                : cycleRows({ c: 0.95, n: 8, t0: t, rpm: 2400, load: 10 });
+            rows.push(...visit);
+            t = rows.at(-1).t + DT;
+            if (v < k - 1) {
+                const d = middle === 'ramp' && v === 1
+                    ? restartRows({ c: 1.0, t0: t, rpm: 3100, load: 15, cut: 0, rampSec: 0.6, n: away })
+                    : cycleRows({ c: 1.0, n: away, t0: t, rpm: 3100, load: 15 });
+                rows.push(...d);
+                t = rows.at(-1).t + DT;
+            }
+        }
+        return rows;
+    };
+    const verdict = (rows) => {
+        const raw = toLog(rows);
+        const ann = calc.annotateRfKorr(MAP, veStream(raw, rows), EGT, FLAT_AIR, raw);
+        return { res: calc.calculateNewVEMap(MAP, ann, {}), ann };
+    };
+    const [cr, cc] = cellOf(2400, 10);
+    // `away` samples at D put the gap between C's last and next sample at (away + 1) x 0.3 s.
+    const two = verdict(tour(2, 5)).res, three = verdict(tour(3, 5)).res;
+    check('two visits 1.8 s apart: refused as few-visits', two.rejectMap[cr][cc] === 'few-visits', String(two.rejectMap[cr][cc]));
+    check('...though its 16 samples and W 16 clear the count and weight bars', two.hitMap[cr][cc] === 16 && two.weightMap[cr][cc] >= 16 - 1e-9);
+    check('...and its demand is still reported', Math.abs(two.demandMap[cr][cc] - 0.95) < 0.01, String(two.demandMap[cr][cc]));
+    check('three visits 1.8 s apart: written', three.rejectMap[cr][cc] === null && three.acceptedMap[cr][cc],
+        String(three.rejectMap[cr][cc]));
+    const near3 = verdict(tour(3, 2)).res;
+    check('three runs only 0.9 s apart are ONE visit: refused', near3.rejectMap[cr][cc] === 'few-visits',
+        String(near3.rejectMap[cr][cc]));
+    const justOver = verdict(tour(3, 3)).res;
+    check('three runs 1.2 s apart are three: written', justOver.rejectMap[cr][cc] === null, String(justOver.rejectMap[cr][cc]));
+    // A visit is made of samples the write TAKES: one that was all ramp does not count.
+    const rampMiddle = verdict(tour(3, 5, 'ramp'));
+    const rampSamples = rampMiddle.ann.filter(p => p.rpm === 2400 && p.kRamp === true).length;
+    check('the middle visit is a restart ramp in C, every sample of it kRamp (else this tests nothing)', rampSamples === 8,
+        String(rampSamples));
+    check('...so C has two visits that count, and is refused as few-visits', rampMiddle.res.rejectMap[cr][cc] === 'few-visits',
+        String(rampMiddle.res.rejectMap[cr][cc]));
+
+    // THREE VISITS, ONE OF THEM THE CELL. #974's 10 % / 2700 rpm had substantial samples 1 + 9 + 3,
+    // the middle visit 72 % of the weight: three visits by count, (Sum W_v)^2 / Sum W_v^2 = 1.76 by
+    // weight. Here every sample sits on the breakpoint (w = 1), so W_v is the visit's sample count.
+    check(`VE_MIN_EFFECTIVE_VISITS is ${VE_MIN_EFFECTIVE_VISITS}`, VE_MIN_EFFECTIVE_VISITS === 2);
+    const visitsOf = (ns, away = 5) => {
+        const rows = [];
+        let t = 0;
+        ns.forEach((n, v) => {
+            rows.push(...cycleRows({ c: 0.95, n, t0: t, rpm: 2400, load: 10 }));
+            t = rows.at(-1).t + DT;
+            if (v < ns.length - 1) { rows.push(...cycleRows({ c: 1.0, n: away, t0: t, rpm: 3100, load: 15 })); t = rows.at(-1).t + DT; }
+        });
+        return verdict(rows).res;
+    };
+    const lopsided = visitsOf([1, 9, 3]);
+    check('visits of 1 + 9 + 3 samples (worth 1.86 by weight): refused as few-visits, though three by count',
+        lopsided.rejectMap[cr][cc] === 'few-visits' && lopsided.hitMap[cr][cc] === 13 && lopsided.weightMap[cr][cc] >= 13 - 1e-9,
+        `${lopsided.rejectMap[cr][cc]}, ${lopsided.hitMap[cr][cc]} hits`);
+    check('...and a fourth visit of 3 makes it worth 2.6: written', visitsOf([1, 9, 3, 3]).rejectMap[cr][cc] === null,
+        String(visitsOf([1, 9, 3, 3]).rejectMap[cr][cc]));
+    check('unequal is not lopsided — 8 + 4 + 4 (worth 2.67): written', visitsOf([8, 4, 4]).rejectMap[cr][cc] === null,
+        String(visitsOf([8, 4, 4]).rejectMap[cr][cc]));
+    check('a script that turns the visit gate off (minCellVisits 0) turns the weight half off too',
+        (() => { const raw = toLog(tour(1, 5)); const ann = calc.annotateRfKorr(MAP, raw, EGT, FLAT_AIR, raw);
+            return calc.calculateNewVEMap(MAP, ann, { minCellVisits: 0 }).rejectMap[cr][cc] === null; })());
+}
+
+console.log('\n[live and batch agree: ramp, visits, verdicts]');
+{
+    // The two drives above back to back — the restart and the three-visit tour — with the fuel-cut
+    // samples in the raw log only. The batch is runCalculation's: annotate `data` off one walk over
+    // `rawData`, then calculateNewVEMap. The live is appendCalculation's: ONE walk held across
+    // flushes, raw samples stepped as they arrive, each data sample annotated with the walk's
+    // `kRamp` and binned with the log's time unit.
+    const a = [...cycleRows({ c: 0.98, n: 20, t0: 0, rpm: 1800, load: 5 })];
+    a.push(...restartRows({ c: 0.90, t0: a.at(-1).t + DT, rpm: 2700, load: 7.5, rampSec: 2.7, n: 24 }));
+    let t = a.at(-1).t + DT;
+    for (let v = 0; v < 3; v++) {
+        a.push(...cycleRows({ c: 0.95, n: 8, t0: t, rpm: 2400, load: 10 }));
+        t = a.at(-1).t + DT;
+        a.push(...cycleRows({ c: 1.0, n: 5, t0: t, rpm: 3100, load: 15 }));
+        t = a.at(-1).t + DT;
+    }
+    const raw = toLog(a);
+    const data = veStream(raw, a);
+    const ann = calc.annotateRfKorr(MAP, data, EGT, FLAT_AIR, raw);
+    // runCalculation hands the visit gap the RAW log's unit; appendCalculation reads the raw prefix.
+    const batch = calc.calculateNewVEMap(MAP, ann, { secondsPerUnit: timeScaleSeconds(raw) });
+    const gridB = calc.createGrid();
+    const plan = resolveRfKorr({});
+    for (const p of ann) calc.accumulatePoint(gridB, p, plan, undefined, timeScaleSeconds(raw));
+
+    const walk = calc.rfKorrWalk(MAP, EGT, FLAT_AIR);
+    const track = new Map();
+    const gridL = calc.createGrid();
+    let rawAt = 0, dataAt = 0, rampLive = 0;
+    for (const chunk of [3, 1, 11, 7, 40, 1000]) {
+        // Raw arrives first and runs ahead of the filtered stream, as on the car.
+        const rawEnd = Math.min(raw.length, rawAt + chunk + 2);
+        for (; rawAt < rawEnd; rawAt++) track.set(raw[rawAt].time, walk.step(raw[rawAt]));
+        const dataEnd = data.findIndex(p => p.time > raw[rawAt - 1].time);
+        const upto = dataEnd < 0 ? data.length : dataEnd;
+        const spu = timeScaleSeconds(raw.slice(0, rawAt));
+        for (; dataAt < upto; dataAt++) {
+            const st = track.get(data[dataAt].time);
+            const p0 = calc.annotateRfKorrPoint(MAP, data[dataAt], EGT, FLAT_AIR, st ? st.open : null);
+            const p = st ? { ...p0, kRamp: st.kRamp } : p0;
+            if (isLambdaRampExcluded(p)) rampLive++;
+            calc.accumulatePoint(gridL, p, plan, undefined, spu);
+        }
+        calc.finalizeGrid(MAP, gridL, {});   // every flush finalises; it must not disturb the grid
+    }
+    const live = calc.finalizeGrid(MAP, gridL, {});
+    check('the live run consumed every sample', rawAt === raw.length && dataAt === data.length);
+    check('the drive has ramp samples and a three-visit cell (else this compares nothing)',
+        rampLive > 5 && batch.rejectMap[cellOf(2400, 10)[0]][cellOf(2400, 10)[1]] === null, `${rampLive}`);
+    check('the same ramp count: live counter == the batch census', rampLive === ann.filter(isLambdaRampExcluded).length,
+        `${rampLive} vs ${ann.filter(isLambdaRampExcluded).length}`);
+    check('the same visits in every cell', JSON.stringify(gridB.map(r => r.map(c => c.visits)))
+        === JSON.stringify(gridL.map(r => r.map(c => c.visits))));
+    check('the same visit weights in every cell (the sums the effective count reads)',
+        JSON.stringify(gridB.map(r => r.map(c => [c.visitWeightSum, c.visitWeight, c.visitWeightSqDone])))
+        === JSON.stringify(gridL.map(r => r.map(c => [c.visitWeightSum, c.visitWeight, c.visitWeightSqDone]))));
+    check('the same ramp exclusions in every cell', JSON.stringify(gridB.map(r => r.map(c => c.lambdaRampCount)))
+        === JSON.stringify(gridL.map(r => r.map(c => c.lambdaRampCount))));
+    check('the same verdict in every cell', JSON.stringify(batch.rejectMap) === JSON.stringify(live.rejectMap));
+    check('the same demand, hits and map', JSON.stringify([batch.demandMap, batch.hitMap, batch.newMap])
+        === JSON.stringify([live.demandMap, live.hitMap, live.newMap]));
+}
+
+console.log('\n[the visit gap\'s unit comes off the raw log, on both paths]');
+{
+    // The filtered stream can open sparse while the raw log is dense: here the first VE sample is in
+    // cell D at 100 s and the next in C at 106 s, everything between filtered out. Read off that
+    // prefix the median step is 6 — a millisecond log by `timeScaleSeconds` — and C's first sample
+    // is stored as 0.106 s; the next flush reads seconds and opens a visit that is not one. C is
+    // visited twice (106 s, 200 s), four samples each.
+    const rows = [];
+    const seg = (c, n, rpm, load) => {
+        const t0 = rows.length ? rows.at(-1).t + DT : 100;
+        rows.push(...cycleRows({ c, n, t0, rpm, load }));
+    };
+    seg(1.0, 20, 3100, 15); seg(0.95, 4, 2400, 10); seg(1.0, 310, 3100, 15); seg(0.95, 4, 2400, 10);
+    const raw = toLog(rows);
+    const data = raw.filter((p, i) => i === 0 || p.rpm === 2400);
+    const [cr, cc] = cellOf(2400, 10);
+    check('the filtered prefix reads as milliseconds, the raw log as seconds (else this tests nothing)',
+        timeScaleSeconds(data.slice(0, 2)) === 0.001 && timeScaleSeconds(raw.slice(0, 21)) === 1
+        && timeScaleSeconds(data) === 1);
+    const ann = calc.annotateRfKorr(MAP, data, EGT, FLAT_AIR, raw);
+    const batch = calc.calculateNewVEMap(MAP, ann, { secondsPerUnit: timeScaleSeconds(raw) });
+    check('the batch: two visits, refused as few-visits', batch.rejectMap[cr][cc] === 'few-visits',
+        String(batch.rejectMap[cr][cc]));
+    // appendCalculation over flushes ending at data lengths 2, 3, 4, all — once on the raw prefix's
+    // unit (what the hook reads), once on the filtered prefix's (what it used to read).
+    const plan = resolveRfKorr({});
+    const live = (unitOf) => {
+        const walk = calc.rfKorrWalk(MAP, EGT, FLAT_AIR), track = new Map(), grid = calc.createGrid();
+        let rawAt = 0, dataAt = 0;
+        for (const upto of [2, 3, 4, data.length]) {
+            for (; rawAt < raw.length && raw[rawAt].time <= data[upto - 1].time; rawAt++) {
+                track.set(raw[rawAt].time, walk.step(raw[rawAt]));
+            }
+            const spu = unitOf(rawAt, upto);
+            for (; dataAt < upto; dataAt++) {
+                const st = track.get(data[dataAt].time);
+                const p0 = calc.annotateRfKorrPoint(MAP, data[dataAt], EGT, FLAT_AIR, st ? st.open : null);
+                calc.accumulatePoint(grid, st ? { ...p0, kRamp: st.kRamp } : p0, plan, undefined, spu);
+            }
+        }
+        return { grid, res: calc.finalizeGrid(MAP, grid, {}) };
+    };
+    const now = live((rawAt) => timeScaleSeconds(raw.slice(0, rawAt)));
+    const before = live((_, upto) => timeScaleSeconds(data.slice(0, upto)));
+    check('live on the raw unit: the same two visits and the same verdict as the batch',
+        now.grid[cr][cc].visits === 2 && now.res.rejectMap[cr][cc] === 'few-visits'
+        && JSON.stringify(now.res.rejectMap) === JSON.stringify(batch.rejectMap), `${now.grid[cr][cc].visits} visits`);
+    check('...where the filtered prefix\'s unit counted three and wrote the cell', before.grid[cr][cc].visits === 3
+        && before.res.rejectMap[cr][cc] === null, `${before.grid[cr][cc].visits} visits, ${before.res.rejectMap[cr][cc]}`);
 }
 
 console.log(fails === 0 ? '\nAll k-ramp checks passed.\n' : `\n${fails} check(s) FAILED.\n`);

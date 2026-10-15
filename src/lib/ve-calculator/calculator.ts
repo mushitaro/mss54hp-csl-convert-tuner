@@ -8,11 +8,11 @@ import {
     rfKorrActive, rfKorrAt, isRfKorrFloorHeld, withStockRfKorrFloor,
     rfKorrProfileAt, tabgModelAt,
 } from './egtTables';
-import { KRampTracker, isKRampExcluded } from './rampState';
+import { KRampTracker, isLambdaRampExcluded, lambdaCyclingFlags } from './rampState';
 import type { RfKorrTuneOptions } from './rfKorrTuner';
 import { MAX_SAMPLE_SD } from './veScatter';
 import { axisBracket } from '@/lib/log-engine/axisBracket';
-import { interpolateFactor } from '@/lib/log-engine/filter';
+import { interpolateFactor, timeScaleSeconds } from '@/lib/log-engine/filter';
 
 interface GridCell {
     sumStftWeighted: number; // Sum(STFT * Weight)
@@ -29,12 +29,31 @@ interface GridCell {
     maxRfKorr: number;
 
     /**
-     * Gate-open samples that would have landed here and were NOT written, because the lambda loop
-     * was still taking back an rf_korr step (`isKRampExcluded`). Counted per corner the way
-     * `rawCount` is, so a cell whose only evidence was mid-ramp is refused as 'k-ramp' rather than
-     * reported as never driven.
+     * Samples that would have landed here and were NOT written, because the lambda loop was still
+     * taking back its last step — an rf_korr step or a restart to 1.000, gate open or shut
+     * (`isLambdaRampExcluded`). Counted per corner the way `rawCount` is, so a cell whose only
+     * evidence was mid-ramp is refused as 'lambda-ramp' rather than reported as never driven.
      */
-    kRampCount: number;
+    lambdaRampCount: number;
+
+    /**
+     * How many separate VISITS the cell's substantial samples (`w >= CLAMP_MIN_WEIGHT`, after the
+     * ramp exclusion) came from: a run of them with no gap over `VISIT_GAP_SEC` between one and the
+     * next is one visit. `visitEnd` is the last such sample's time in seconds, null before the first.
+     * See VE_MIN_VISITS.
+     */
+    visits: number;
+    visitEnd: number | null;
+
+    /**
+     * The same substantial samples' WEIGHT, split by visit, for the effective visit count
+     * `(Sum W_v)^2 / Sum W_v^2` (`effectiveVisits`, VE_MIN_EFFECTIVE_VISITS). `visitWeightSum` is
+     * Sum W_v over every visit, `visitWeight` the open visit's W_v, and `visitWeightSqDone` the sum of
+     * W_v^2 over the visits already closed — sums, so the live path stays incremental.
+     */
+    visitWeightSum: number;
+    visitWeight: number;
+    visitWeightSqDone: number;
 
     /**
      * Sum(Weight^2), which with `weightSum` gives the cell's SELF-SHARE, `Sum(w^2)/Sum(w)`.
@@ -250,9 +269,10 @@ export const DIRECT_MIN_SAMPLES = 3;
  * Weight a cell needs before it is written — the sum of the shares it actually received.
  *
  * A COUNT AND A WEIGHT ANSWER DIFFERENT QUESTIONS, and this map needs both. The count above asks
- * "did enough separate moments visit this cell"; this asks "how much of the DME's own reading was
- * this cell". One sample sitting dead centre between four nodes gives each of them 0.25, so a cell
- * can be visited three times and still have been three quarters of a sample's worth of evidence.
+ * "did enough samples land inside this cell"; this asks "how much of the DME's own reading was this
+ * cell". One sample sitting dead centre between four nodes gives each of them 0.25, so a cell can
+ * hold three samples and still have been three quarters of a sample's worth of evidence. (Whether
+ * those samples were separate OCCASIONS is a third question: VE_MIN_VISITS.)
  *
  * WHY IT IS BACK. This defaulted to 0 and was documented as retired: the value it carried then was
  * 5.0, copied from `RF_KORR_TUNE_DEFAULTS`, and measured over six drives it refused two cells while
@@ -274,6 +294,102 @@ export const DIRECT_MIN_SAMPLES = 3;
  * control rather than a constant.
  */
 export const VE_MIN_WEIGHT_DEFAULT = 2.5;
+
+/**
+ * Separate visits a cell's substantial samples must come from before it is written — under both
+ * methods, after the count and before the weight.
+ *
+ *     visit    a run of samples landing substantially in the cell (`w >= CLAMP_MIN_WEIGHT`, after
+ *              the ramp exclusion), no two consecutive ones more than VISIT_GAP_SEC apart
+ *     written  only if visits >= VE_MIN_VISITS
+ *              and (Sum W_v)^2 / Sum W_v^2 >= VE_MIN_EFFECTIVE_VISITS     W_v = visit v's weight
+ *
+ * WHAT THE COUNT AND THE WEIGHT CANNOT SEE. Both are sums over samples, and the samples of one
+ * dwell are one observation: the loop's limit cycle makes consecutive samples two to four points on
+ * the same swing (AUTOCORR_FALLBACK), and whatever started the dwell — the walk from the last cell,
+ * the throttle that got it there — is shared by every one of them. What a cell's mean needs is
+ * OCCASIONS. In the band (RO 7.5 / 10 x 2200-2900 rpm) of the K HOLD drives #971 / #974, the mean of
+ * one visit's post-ramp samples scatters about its cell's other visits by 5.8 % (one sd, pooled
+ * within cell; 5.6 / 6.2 % per drive). One visit is a ±5.8 % answer, two ±4.1 %, three ±3.3 % —
+ * the first count at which one pass is about as fine as the ±3 % the limit-cycle midpoints resolve
+ * the band to. Those are EQUAL visits. The write is the weight-sum mean, so the answer's spread is
+ * 5.8 % / sqrt((Sum W_v)^2 / Sum W_v^2), and three visits of which one holds most of the weight are
+ * nearer one: that is the second half of the bar, VE_MIN_EFFECTIVE_VISITS.
+ *
+ * What it refuses, replayed on #967/#968/#970/#971/#974 with the ramp exclusion in place: 2 / 1 / 2
+ * / 7 / 9 cells that the count and weight bars would have written, all on W 2.6-5.4 from 3-8
+ * substantial samples, asking -13.3..+6.2 %. The extreme is #968's 7.5 % / 2400 rpm, which was
+ * written at -13.3 % off four samples of ONE visit. The count alone did not refuse a cell with one
+ * long visit and two short ones — #974's 10 % / 2700 rpm, 1 + 9 + 3 substantial samples with the
+ * middle visit carrying 72 % of their weight, written at -9.3 % — and the effective count now does.
+ * Neither asks for agreement between the occasions.
+ *
+ * WHY IT IS NOT `thin-independent`. That statistic divides by the run length a cell's lag pairs
+ * imply and runs only under the statistical method; this is a count of occasions and runs under
+ * both. A cell refused here needs the car back on another occasion, not a longer hold — so the
+ * remedy differs from `thin-count`'s, and `thin-count` is tested first: fewer than three samples is
+ * fewer than three visits, and "hold longer" is the instruction that reaches three samples.
+ */
+export const VE_MIN_VISITS = 3;
+
+/**
+ * The longest gap between two of a cell's substantial samples that is still one visit, in SECONDS.
+ *
+ * The boundary between a dwell's own sample steps and the car leaving. Over #967/#968/#970/#971/#974
+ * the raw log steps 0.385 s at the median, 0.678 s at p90 and 0.934 s at p99 (the slow profiles of
+ * #967-#970 run at 1.5-2 Hz), and only 0.59 % of steps exceed 1.0 s. Between consecutive substantial
+ * samples of one cell, after the ramp exclusion, 69 % of gaps are <= 0.8 s and 95 % of those in
+ * 0.6-1.0 s are a single raw step; then 1.6 % fall in 0.8-1.0 s, 1.7 % in 1.0-1.5 s, 1.0 % in
+ * 1.5-2 s, and 27 % are over 3 s. 1.0 s is the first bound above the slowest in-dwell step: lower,
+ * and a 1.5 Hz log splits every dwell into visits; higher buys nothing, because so little lies
+ * between 1 and 3 s. A DS2 stall over a second inside a dwell (0.35 % of gaps) counts one visit
+ * extra — the permissive direction, and rare.
+ *
+ * In seconds: `accumulatePoint` is told the log's unit (`timeScaleSeconds`), so a Testo CSV in
+ * milliseconds is judged on the same clock.
+ */
+export const VISIT_GAP_SEC = 1.0;
+
+/**
+ * How many EQUAL visits a cell's weight must be worth — the second half of the visit gate.
+ *
+ *     n_eff = (Sum W_v)^2 / Sum W_v^2        W_v = the substantial weight of visit v
+ *     few-visits  if  visits < VE_MIN_VISITS  or  n_eff < VE_MIN_EFFECTIVE_VISITS
+ *
+ * n_eff is the visit count when the visits weigh the same and falls toward 1 as one of them takes
+ * the weight; a cell's mean scatters 5.8 % / sqrt(n_eff) in the band (VE_MIN_VISITS). It closes the
+ * case the count let through: three visits by count, one by weight. #974's 10 % / 2700 rpm had
+ * visits of 0.53 / 4.83 / 1.33 W — n_eff 1.76 — and was written at -9.3 % from the middle one, two
+ * seconds at 770 s, 4.4 s after fuelling resumed from a cut.
+ *
+ * WHY 2 AND NOT 3. On #966/#967/#968/#970/#971/#974, 2 refuses 0 / 1 / 1 / 0 / 2 / 1 of the cells the
+ * count wrote, all W 2.5-7.9: #967 3.2 % / 3100 rpm (+2.1 %), #968 1.0 % / 1300 (-1.2 %), #971
+ * 1.2 % / 1400 (4 visits, 87 % in one, -1.0 %) and 0.8 % / 2900 (+4.8 %), and #974's 10 % / 2700.
+ * 2.5 refuses 4 / 3 / 4 / 3 / 7 / 5 and 3 refuses 14 / 4 / 5 / 6 / 11 / 12, and both take cells no
+ * precision argument should: #971's idle 0.2 % / 870 rpm — 8 visits, W 161, one long idle holding
+ * most of it, n_eff 2.40 — and its 0.4 % / 1600 rpm — 3 visits, W 32, a ten-second dwell holding
+ * 66 %, n_eff 2.05. The 5.8 % is the band's scatter, where a visit is two seconds out of a fuel cut.
+ * On one measure over the six drives — the sd of a cell's visit means about their mean, visits of
+ * two samples or more, pooled within cell — the band (RO 5-15 % x 2200-2900 rpm) reads 4.1 %, idle
+ * (RO <= 1.6 %, <= 1100 rpm) 3.6 % and every other driven cell 2.1 %: a long dwell there is not the
+ * answer of one band visit. 2 is "at least two visits' worth" — ±4.1 % at worst in the band, the
+ * precision of two equal visits — and no idle or cruise cell on these drives pays for it.
+ *
+ * What no per-cell bar sees is one stretch of driving that is a visit in each of several cells.
+ * On #974, 765-773 s — a fuel cut, the restart ramp to 0.875, then three seconds at RO 8-16 reading
+ * 0.88-0.91 — is one visit, 30-41 % of the weight, in each of 7.5 / 2700, 10 / 2900 and 15 / 2900,
+ * which are written at -4.9 / -6.3 / -4.2 %; without those eight seconds the same drive writes
+ * 7.5 / 2700 at -1.7 % and refuses the other two. Three pulls through each cell is what dilutes it
+ * (`67-tuning-procedure.md` §8.3).
+ */
+export const VE_MIN_EFFECTIVE_VISITS = 2;
+
+/** `(Sum W_v)^2 / Sum W_v^2` over a cell's visits — how many equal visits its weight is worth. Reads
+ *  the open visit without closing it, so a live flush can finalise mid-visit. 0 for an empty cell. */
+function effectiveVisits(cell: GridCell): number {
+    const sq = cell.visitWeightSqDone + cell.visitWeight * cell.visitWeight;
+    return sq > 0 ? (cell.visitWeightSum * cell.visitWeightSum) / sq : 0;
+}
 
 /**
  * The variance-of-the-mean inflation for a run of `n` correlated samples, EXACTLY.
@@ -359,6 +475,13 @@ export type VeReject =
     | 'no-evidence'
     /** Samples, but not enough of them. */
     | 'thin-count'
+    /**
+     * Enough samples, but from fewer than `VE_MIN_VISITS` separate visits — one or two episodes, each
+     * a single observation however long it lasted — or from visits of which one holds so much of the
+     * weight that they are worth fewer than `VE_MIN_EFFECTIVE_VISITS`. The remedy is another
+     * occasion, not a longer hold.
+     */
+    | 'few-visits'
     /** Enough samples, but they landed at the edges — `weightSum` is what that costs. */
     | 'thin-weight'
     /** The evidence is mostly ABOUT THE NEIGHBOURS. See MIN_SELF_SHARE. */
@@ -376,11 +499,12 @@ export type VeReject =
     | 'imprecise'
     /**
      * Samples landed here, and every one of them was taken while the lambda loop was still taking
-     * back an rf_korr step — so none could be written (`isKRampExcluded`, rampState.ts). Distinct
-     * from 'no-evidence' because the remedy is not "drive here": it is "hold the throttle past the
-     * lean switch", or run with K HOLD so there is no step to take back.
+     * back its last step — an rf_korr step, or the restart to 1.000 after a fuel cut or loop-off,
+     * gate open or shut — so none could be written (`isLambdaRampExcluded`, rampState.ts). Distinct
+     * from 'no-evidence' because the remedy is not "drive here": it is "hold the pedal steady past
+     * the lean switch", which after a lift-off or a tip-in takes a few seconds.
      */
-    | 'k-ramp';
+    | 'lambda-ramp';
 
 /**
  * What `annotateRfKorrPoint` needs to measure rf_korr honestly.
@@ -457,7 +581,7 @@ export const K_HOLD_IN_EFFECT_MAX_RATIO = 1.05;
 export const K_HOLD_CHECK_MIN_SAMPLES = 5;
 
 /** One raw sample's worth of the DME's rf_korr state: the latch, and whether the loop was still
- *  taking back a K step. */
+ *  taking back its last step — a K step, or a restart to 1.000 (rampState.ts). */
 export interface RfKorrStep {
     open: boolean;
     kRamp: boolean;
@@ -537,6 +661,19 @@ export interface VeCalcOptions {
     directAuthority?: number;
     minCellSamples?: number;
     minCellWeight?: number;
+    /**
+     * Visits a cell needs — see VE_MIN_VISITS, the default. No control and no stored config sets
+     * it: it is here so an analysis script can measure what the gate costs, and so a verify script
+     * about something else can feed one burst. The app never passes it.
+     */
+    minCellVisits?: number;
+    /**
+     * Seconds per unit of `point.time`, for the visit gap. The app passes `timeScaleSeconds` of the
+     * RAW log — what the filters read the unit off (`processLogData`), dense from the first sample —
+     * on the batch and the live path alike, so the two cannot reach different units off different
+     * prefixes. Absent: read off the samples passed in, which is what a script gets.
+     */
+    secondsPerUnit?: number;
 
     /**
      * Overrides for the rf_korr tuner's own grid thresholds, forwarded untouched.
@@ -607,9 +744,15 @@ export class VECalculator {
         // options lands on the same arithmetic the app has always done.
         const plan = resolveRfKorr(options);
         const grid = this.createGrid();
+        // The log's time unit, for the visit gap. The app hands in the raw log's answer, which the
+        // live path reads too (`VeCalcOptions.secondsPerUnit`); a caller that does not gets the
+        // answer off the samples it passed.
+        const secondsPerUnit = options.secondsPerUnit ?? timeScaleSeconds(logData);
 
         // 1. Binning / Aggregation (Weighted)
-        for (const point of logData) this.accumulatePoint(grid, point, plan, options.normaliseTo);
+        for (const point of logData) {
+            this.accumulatePoint(grid, point, plan, options.normaliseTo, secondsPerUnit);
+        }
 
         return this.finalizeGrid(currentMap, grid, options);
     }
@@ -632,7 +775,8 @@ export class VECalculator {
                         sumStftWeighted: 0, weightSum: 0, rawCount: 0,
                         sumRfKorrWeighted: 0, weightSumRfKorr: 0,
                         minRfKorr: Infinity, maxRfKorr: -Infinity,
-                        kRampCount: 0,
+                        lambdaRampCount: 0, visits: 0, visitEnd: null,
+                        visitWeightSum: 0, visitWeight: 0, visitWeightSqDone: 0,
                         sumWeightSq: 0, sumStftSqWeighted: 0,
                         substantialCount: 0, lagPairs: 0, sumLagAB: 0, sumLagA: 0, sumLagB: 0,
                         sumLagA2: 0, sumLagB2: 0, prevVal: null, prevTime: null,
@@ -660,6 +804,9 @@ export class VECalculator {
          *  read from a field so the live and batch paths cannot disagree about it — see
          *  `verify:incremental`. */
         normaliseTo?: RfPtKorrCurves | null,
+        /** Seconds per unit of `point.time` (`timeScaleSeconds`): 1 for a DS2 log, 0.001 for a Testo
+         *  CSV. Only the visit gap reads it; both paths pass the filters' answer for the same log. */
+        secondsPerUnit = 1,
     ): void {
         {
             // Use Corrected Load if available, else Raw Load
@@ -754,7 +901,8 @@ export class VECalculator {
              * SAME TIME, AND ONLY ONCE THE LOOP HAS ANSWERED.
              *
              *     c_i = trim(t) x K(t)                          K = rf_korr the DME applied at t
-             *     written only where the gate is shut, or the trim has reversed since K last moved
+             *     written only where the trim has reversed since the last event — K moving, the
+             *     gate opening or shutting, or the loop restarting at 1.000 — gate open or shut
              *
              * The DME applies K to every injection (`rf_calc`, 120 deg CA), re-reading
              * `KF_RF_KORR_DRREL(N, tabg_delta)` each background pass, so the trim at t is an error
@@ -768,21 +916,29 @@ export class VECalculator {
              * window `trim x K = K (1 - 0.0406 t)` — time since the step, with no VE error in it.
              * Re-simulated over the band's drives that wrote +5.5..8.4 % per pass with no fixed
              * point (and the old settle +0.6..5 %, also none), which is the RO 7.5-10 % spike.
-             * Such samples are therefore NOT written: `isKRampExcluded` is the one predicate, the
-             * ramp state comes from `KRampTracker` (rampState.ts), and each cell counts what it lost
-             * so a cell left with nothing reads 'k-ramp' rather than 'no-evidence'.
+             * Such samples are therefore NOT written: `isLambdaRampExcluded` is the one predicate,
+             * the ramp state comes from `KRampTracker` (rampState.ts), and each cell counts what it
+             * lost so a cell left with nothing reads 'lambda-ramp' rather than 'no-evidence'.
              *
-             * Dropping is now right where it was wrong before. The objection that killed earlier
+             * WITH THE GATE SHUT TOO. A restart is the same clock without K: after a fuel cut or a
+             * loop-off the integrator starts again at exactly 1.000 and ramps at the same slope
+             * until the lean switch, so `trim = 1 - 0.04 t` whatever the cell is. Under K HOLD the
+             * gate never opens and that was most of the band — 70 % of #974's band samples — read
+             * 0.996 / 0.976 / 0.946 / 0.912 / 0.887 by second since the restart on a map 6 % leaner
+             * than #971's, which read 0.992 / 0.974 / 0.949 / 0.914 / 0.895 (rampState.ts). Written,
+             * it asked the band for ~-6 % on every pass whatever the map: the ratchet again.
+             *
+             * Dropping is right where it was wrong before. The objection that killed earlier
              * settle FILTERS — the enriched population lives entirely in the high-load cells — is
              * answered by K HOLD: with the floor held the gate never opens, K is 1.000 everywhere,
-             * nothing is a ramp, and every sample is `c_i = trim`. Where the gate does open, what is
-             * dropped is precisely what never measured anything.
+             * and the only events are restarts, so what is dropped is the few seconds after one.
+             * Where the gate does open, what is dropped is precisely what never measured anything.
              *
              * A session stored with the old `rfKorrSettleSec` re-derives under this rule instead —
              * a knowing replay divergence of the kind `veMethod` documents.
              */
-            if (isKRampExcluded(point)) {
-                this.countKRamp(grid, rpmInfo, loadInfo);
+            if (isLambdaRampExcluded(point)) {
+                this.countLambdaRamp(grid, rpmInfo, loadInfo);
                 return;
             }
             const measured = (plan.apply && rfKorr !== undefined) ? trim * rfKorr : trim;
@@ -814,7 +970,7 @@ export class VECalculator {
 
             // Distribute to up to 4 neighbors
             this.distributeWeight(grid, this.loadAxis.length, this.rpmAxis.length, rpmInfo, loadInfo,
-                correction, rfKorr, point.time);
+                correction, rfKorr, point.time, secondsPerUnit > 0 ? secondsPerUnit : 1);
         }
     }
 
@@ -848,6 +1004,11 @@ export class VECalculator {
         // See VE_MIN_WEIGHT_DEFAULT for why this is a live bar again and why 2.5. A session that
         // stored its own value still replays with it, and 0 is a value: it still means "no bar".
         const minWeight = options.minCellWeight ?? VE_MIN_WEIGHT_DEFAULT;
+        // See VE_MIN_VISITS. Not on the panel and not in a stored config, so every session derives
+        // with the constant; the option is for scripts. The effective-visit bar follows it down, so
+        // a script that turns the visit gate off (0) turns both halves off.
+        const minVisits = options.minCellVisits ?? VE_MIN_VISITS;
+        const minEffectiveVisits = Math.min(VE_MIN_EFFECTIVE_VISITS, minVisits);
         // Counted so the UI can say how much of the map this log actually earned. A threshold the
         // user cannot see the cost of is a threshold they cannot choose.
         let cellsWithEvidence = 0;
@@ -1088,7 +1249,7 @@ export class VECalculator {
                 const structural: VeReject | null =
                     // Nothing written here — and if that is because every sample was mid-ramp, say
                     // so: the cure is holding the state past the lean switch, not driving to it.
-                    cell.rawCount === 0 ? (cell.kRampCount > 0 ? 'k-ramp' : 'no-evidence')
+                    cell.rawCount === 0 ? (cell.lambdaRampCount > 0 ? 'lambda-ramp' : 'no-evidence')
                         // SAMPLES COUNTS SAMPLES THAT WERE IN THE CELL, not ones that grazed it.
                         //
                         // `rawCount` is incremented by `distributeWeight` for every corner it
@@ -1109,8 +1270,13 @@ export class VECalculator {
                         // samples substantially inside it, and any cell clearing that has, by
                         // construction, the samples the clamp needs. 236 -> 181 cells on #933.
                         : cell.substantialCount < minSamples ? 'thin-count'
-                            : cell.weightSum < minWeight ? 'thin-weight'
-                                : null;
+                            // The same samples, counted as OCCASIONS: one dwell is one observation
+                            // however many samples it held — and no one of them may carry the
+                            // cell. See VE_MIN_VISITS and VE_MIN_EFFECTIVE_VISITS.
+                            : cell.visits < minVisits || effectiveVisits(cell) < minEffectiveVisits
+                                ? 'few-visits'
+                                : cell.weightSum < minWeight ? 'thin-weight'
+                                    : null;
                 const reject: VeReject | null = structural ?? (!statistical ? null
                     : selfShare < MIN_SELF_SHARE ? 'shared-evidence'
                         : wSd > MAX_SAMPLE_SD ? 'scatter'
@@ -1351,7 +1517,8 @@ export class VECalculator {
 
     /**
      * A walk over the RAW log reproducing the DME's rf_korr state: the latch, and — off the K the
-     * latch lets through — whether the lambda loop was still taking a K step back (rampState.ts).
+     * latch lets through and the trim's own restarts — whether the lambda loop was still taking its
+     * last step back (rampState.ts).
      *
      * One object both paths hold: the batch `annotateRfKorr` steps a fresh one over the whole log,
      * the live run keeps one across flushes and steps the raw samples that arrived. Both state
@@ -1360,16 +1527,26 @@ export class VECalculator {
      *
      * K is `RF / rf_soll` (with the truncation step put back, as `rfKorrUngated`) where the latch is
      * open and 1 where it is shut: what the DME applied, from its own output.
+     *
+     * Whether the loop is limit-cycling (`lambdaCyclingFlags`) is not one of these machines: it is
+     * decided on the half-cycle a sample sits in, which ends after the sample, so it cannot be
+     * stepped. `annotateRfKorr` computes it over the same raw log beside this walk.
+     *
+     * `egt` null — a binary whose tables could not be read — still walks the RAMP: with no latch
+     * the gate reads shut and K 1, so the only events are restarts, which need nothing but the trim
+     * (P jumps and clamps fall back to the 0401 values). That is what lets the VE write treat an
+     * undefined `kRamp` as unwalked rather than as "no binary": every sample this walk sees gets a
+     * verdict either way (`isLambdaRampExcluded`).
      */
     public rfKorrWalk(
-        currentMap: VEMap, egt: EgtTables, air?: RfKorrAirInput,
+        currentMap: VEMap, egt: EgtTables | null, air?: RfKorrAirInput,
     ): { step(point: LogDataPoint): RfKorrStep } {
-        const latch = new RfKorrLatch();
-        const ramp = new KRampTracker(egt.lambda);
+        const latch = egt ? new RfKorrLatch() : null;
+        const ramp = new KRampTracker(egt?.lambda ?? null);
         return {
             step: (p: LogDataPoint): RfKorrStep => {
-                const rfSoll = this.rfSollFor(currentMap, p, air);
-                const open = latch.step(egt, p.rpm, rfSoll, p.vehicleSpeed);
+                const rfSoll = latch ? this.rfSollFor(currentMap, p, air) : undefined;
+                const open = latch && egt ? latch.step(egt, p.rpm, rfSoll, p.vehicleSpeed) : false;
                 const k = open && rfSoll !== undefined && p.rf !== undefined
                     ? ((p.rf + RF_TRUNCATION_MEAN_PERCENT) / 100) / rfSoll : 1;
                 const kRamp = ramp.step({
@@ -1486,23 +1663,38 @@ export class VECalculator {
         currentMap: VEMap, logData: LogDataPoint[], egt?: EgtTables | null,
         air?: RfKorrAirInput, latchSource?: LogDataPoint[],
     ): LogDataPoint[] {
-        if (!egt) return logData.map(p => this.annotateRfKorrPoint(currentMap, p, egt, air, null));
-
         // One walk, in time order, over what the DME saw — the latch AND the ramp it starts. Both
         // come from the same pass for the reason tabgDelta does: two places needing one answer
-        // must not be able to reach different ones.
+        // must not be able to reach different ones. Without tables there is no latch, but there is
+        // still a ramp to walk: a restart needs only the trim (`rfKorrWalk`).
         const source = latchSource ?? logData;
-        const tables = this.resolveKHold(currentMap, egt, air, source).egt;
+        const tables = egt ? this.resolveKHold(currentMap, egt, air, source).egt : null;
         const walk = this.rfKorrWalk(currentMap, tables, air);
         const track = new Map<number, RfKorrStep>();
         for (const p of source) track.set(p.time, walk.step(p));
+        // The limit-cycle flag over the same raw log, on its own time unit (`timeScaleSeconds`, the
+        // filters' answer): its half-cycle bound is in seconds. Only where there is a gate verdict,
+        // because only the readers of a gate verdict read it.
+        const cyclingAt = new Map<number, boolean>();
+        if (tables) {
+            const cycling = lambdaCyclingFlags(source, tables.lambda, timeScaleSeconds(source));
+            source.forEach((p, i) => cyclingAt.set(p.time, cycling[i]));
+        }
+        // `kRamp` on EVERY sample the walk covered — gate open, gate shut, or no gate verdict at all
+        // (no RF channel, no air data, no tables) — because the VE write excludes on it whatever the
+        // gate says (`isLambdaRampExcluded`), and a covered sample left undefined would be refused.
+        //
         // A sample whose timestamp is not in the track came from outside the latch source, and
         // there is no history for it. `null` says so rather than substituting a guess — and it gets
-        // no `kRamp`, which `isKRampExcluded` reads as a ramp if the entry condition calls it open.
+        // no `kRamp`, which `isLambdaRampExcluded` reads as a ramp, and no `lambdaCycling`, which
+        // every reader of it reads as not cycling.
         return logData.map(p => {
             const t = track.get(p.time);
             const out = this.annotateRfKorrPoint(currentMap, p, tables, air, t ? t.open : null);
-            return t && out.rfKorrGateOpen !== undefined ? { ...out, kRamp: t.kRamp } : out;
+            if (!t) return out;
+            return out.rfKorrGateOpen !== undefined
+                ? { ...out, kRamp: t.kRamp, lambdaCycling: cyclingAt.get(p.time) === true }
+                : { ...out, kRamp: t.kRamp };
         });
     }
 
@@ -1661,7 +1853,8 @@ export class VECalculator {
         load: { idx1: number; idx2: number; w1: number; w2: number },
         val: number,
         rfKorr?: number,
-        time?: number
+        time?: number,
+        secondsPerUnit = 1,
     ) {
         // 4 corners:
         // (r1, c1) weight: load.w1 * rpm.w1
@@ -1701,6 +1894,25 @@ export class VECalculator {
                         cell.prevVal = val;
                         cell.prevTime = time;
                     }
+
+                    // The visit, on the same population: a new one when this is the cell's first
+                    // substantial sample, when the last one is more than VISIT_GAP_SEC back, or when
+                    // the clock went backwards (another log appended). No clock at all counts as the
+                    // one visit it cannot tell apart — the refusing direction. A new visit closes the
+                    // open one's weight into the squares `effectiveVisits` reads.
+                    if (time !== undefined) {
+                        const t = time * secondsPerUnit;
+                        if (cell.visitEnd === null || t - cell.visitEnd > VISIT_GAP_SEC || t < cell.visitEnd) {
+                            cell.visits++;
+                            cell.visitWeightSqDone += cell.visitWeight * cell.visitWeight;
+                            cell.visitWeight = 0;
+                        }
+                        cell.visitEnd = t;
+                    } else if (cell.visits === 0) {
+                        cell.visits = 1;
+                    }
+                    cell.visitWeight += w;
+                    cell.visitWeightSum += w;
                 }
 
                 if (rfKorr !== undefined) {
@@ -1720,16 +1932,16 @@ export class VECalculator {
     }
 
     /** A sample the ramp rule kept out, charged to the corners it would have landed on — every
-     *  corner with any weight, the same reach `rawCount` has, so 'k-ramp' and 'no-evidence' are
-     *  decided over one footprint. */
-    private countKRamp(
+     *  corner with any weight, the same reach `rawCount` has, so 'lambda-ramp' and 'no-evidence'
+     *  are decided over one footprint. */
+    private countLambdaRamp(
         grid: GridCell[][],
         rpm: { idx1: number; idx2: number; w1: number; w2: number },
         load: { idx1: number; idx2: number; w1: number; w2: number },
     ) {
         const rows = this.loadAxis.length, cols = this.rpmAxis.length;
         const add = (r: number, c: number, w: number) => {
-            if (r >= 0 && r < rows && c >= 0 && c < cols && w > 0) grid[r][c].kRampCount++;
+            if (r >= 0 && r < rows && c >= 0 && c < cols && w > 0) grid[r][c].lambdaRampCount++;
         };
         add(load.idx1, rpm.idx1, load.w1 * rpm.w1);
         add(load.idx1, rpm.idx2, load.w1 * rpm.w2);

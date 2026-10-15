@@ -40,7 +40,7 @@ const LABEL: Record<DropReason, string> = {
     highLoadSettle: 'short pull',
     settle: 'unsettled',
     excluded: 'excluded',
-    rfKorrRamp: 'k ramp',
+    lambdaRamp: 'lambda ramp',
 };
 
 /**
@@ -62,7 +62,7 @@ const WHY: Record<'ja' | 'en', Record<DropReason, string>> = {
         highLoadSettle: 'The pull was too fresh. Above 55 % filling the DME steps its exhaust-temperature correction up off a sensor that lags, and the lambda trim needs about six seconds to walk after it — until then the reading is high by whatever it has not covered. Hold the pull longer: two drives disagreed by 5 % at high load until the short-pull samples came out.',
         settle: 'The operating point was still moving a settle ago, so the two things rf_korr is a ratio OF were measured at different air flows. This does not touch the VE map: the sample stays in the log and can still earn a cell. Hold a steady throttle for longer than Settle Time if the rf_korr table is what you are after.',
         excluded: 'You took this stretch out of the drive, because it disagreed with the rest of it. Nothing is wrong with these samples except that they belong to a different population; RESTORE on the map tab puts them back.',
-        rfKorrRamp: 'rf_korr had just stepped, and the lambda loop had not yet taken it back. Hold the throttle still for longer once it stops, or run with K HOLD.',
+        lambdaRamp: 'The lambda trim was still ramping back from a fuel cut, a loop restart or an rf_korr step, so it read the seconds since then rather than the map. After a lift-off or a tip-in, hold the pedal steady for a few seconds — the cell counts from there.',
     },
     ja: {
         coldEngine: '水温 60 °C 未満では DME が λ 制御を閉じないため、λ トリムが更新されていません。水温が上がってからログを開始してください。',
@@ -75,7 +75,7 @@ const WHY: Record<'ja' | 'en', Record<DropReason, string>> = {
         highLoadSettle: '引きが新しすぎます。充填 55 % を超えると DME は排気温補正を一段上げますが、その元になるセンサーは遅れて読むため、λ トリムが追いつくのに約 6 秒かかります。それまでの値は、追いつけていない分だけ高く出ます。引きをもっと長く保持してください — 2 本の走行が高負荷で 5 % 食い違い、この短い引きを除いて一致しました。',
         settle: 'Settle Time だけ前の時点で、まだ回転数か開度が動いていました。rf_korr は 2 つの量の比なので、その 2 つが別々の空気量で測られたことになります。VE マップには影響しません — このサンプルはログに残り、セルの根拠にもなります。rf_korr の表が目的なら、Settle Time より長くアクセルを一定に保ってください。',
         excluded: '走行の一部を、残りの区間と食い違うという理由であなたが除外しました。サンプル自体に問題はなく、別の母集団に属しているというだけです。マップタブの RESTORE で戻せます。',
-        rfKorrRamp: 'rf_korr が掛かった直後で、ラムダがまだ戻していない。スロットルを止めてから長めに保つか、K HOLD で走る。',
+        lambdaRamp: '燃料カット・ループ再始動・rf_korr の段差のあとで λ トリムがまだ戻る途中にあり、マップではなく経過秒数を読んでいました。アクセルを戻した後や踏み込んだ後は、数秒ペダルを一定に保ってください — そこからがセルに数えられます。',
     },
 };
 
