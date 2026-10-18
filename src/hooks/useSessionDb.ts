@@ -51,6 +51,7 @@ export function useSessionDb() {
 
     const setBase = useCallback(async (params: {
         sessionId: string; baseOrigin: BaseOrigin; baseBinaryBuffer: ArrayBuffer; baseFileName: string;
+        carBinaryBuffer?: ArrayBuffer | null; tuneSettings?: TuneSettings;
     }) => {
         const s = await setSessionBase(params);
         await refresh();
@@ -60,6 +61,7 @@ export function useSessionDb() {
     const saveSessionTune = useCallback(async (params: {
         sessionId: string; binaryFileName: string; tunedBinaryBuffer: ArrayBuffer;
         veMapSnapshot?: VEMap; tuneSettings: TuneSettings; log: LogDataPoint[] | null;
+        settingsAt?: number;
     }) => {
         const s = await saveTune(params);
         await refresh();
@@ -90,8 +92,10 @@ export function useSessionDb() {
         await refresh();
     }, [refresh]);
 
-    const recordFlash = useCallback(async (id: string, record: FlashRecord) => {
-        await appendFlashRecord(id, record);
+    /** `carImage` is the bytes just sent; kept as the session's car image when the flash was real.
+     *  See appendFlashRecord. */
+    const recordFlash = useCallback(async (id: string, record: FlashRecord, carImage?: ArrayBuffer | null) => {
+        await appendFlashRecord(id, record, carImage);
         await refresh();
     }, [refresh]);
 

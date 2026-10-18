@@ -63,14 +63,14 @@ const ROUTE_TEXT: Record<DialogLang, Record<RouteId, string>> = {
         NONE: '',
         CONSERVATIVE: 'ROUTE 0 — BMW の EGT 補正表はそのままです。VE マップだけを書きます。\n\n',
         A1: 'ROUTE A · 第1段 — EGT 補正表 (KF_RF_KORR_DRREL) だけを書きます。VE マップは含まれません。\n'
-            + '  この後は「Use as base → TUNED」で新しいセッションを作り、そこで VE を測ってください。\n\n',
+            + '  この後はセッション一覧の Actions → NEXT で新しいセッションを作り、そこで VE を測ってください。\n\n',
         A2: 'ROUTE A · 第2段 — VE マップを書きます。補正表はこのキャンペーンで既に書き換え済みです。\n\n',
     },
     en: {
         NONE: '',
         CONSERVATIVE: "ROUTE 0 — BMW's EGT correction table is left alone. Only the VE map is written.\n\n",
         A1: 'ROUTE A step 1 — the EGT correction table (KF_RF_KORR_DRREL) alone. No VE map.\n'
-            + '  Continue with "Use as base → TUNED" and measure VE in that new session.\n\n',
+            + '  Continue with Actions → NEXT in the session list and measure VE in that new session.\n\n',
         A2: 'ROUTE A step 2 — the VE map. The correction table was already replaced by this campaign.\n\n',
     },
 };
@@ -88,7 +88,6 @@ const JA = {
     noStoredBinary: 'このセッションにはBINが保存されていません。',
     noStoredTune: 'このセッションにはまだTUNEDが保存されていません。',
     noStoredLog: 'このセッションにはデータログが保存されていません。',
-    noTuneToFinalize: 'このセッションにはファイナライズできるTUNEDがありません。',
 
     titleRunPreflight: '走行前の確認',
     runPreflight: (profile: string, missing: string[]) =>
@@ -113,15 +112,15 @@ const JA = {
         + 'DME が RAM 読みを断っている、この系統のキャリブレーションでアドレスが違う。\n\n'
         + 'まずエンジンを暖機アイドルで回した状態でもう一度試すことを勧めます。',
     btnIdleRunAnyway: '確認せずに記録する',
-    noBinaryOfKind: (which: string) => `このセッションには ${which.toUpperCase()} のBINがありません。`,
-    notReconstructed: '保存されたデータログからこのセッションを再構築できませんでした。書き込みは無効です。',
+    notReconstructed: '保存されたデータログからこのセッションを再構築できませんでした。マップはもう一度書けません。'
+        + 'パッチのスイッチは書けます(車に入っている BIN から組み立てます)。',
     setBaseFirst: '先にBASEを設定してください(BINを読み込むか、DMEから読み出してください)。',
     parseBinaryFailed: (message: string) => `BINの解析に失敗しました: ${message}`,
     noValidCsvData: 'CSVから有効なデータを読み取れませんでした。',
 
     saved:
         'セッションを保存しました。DRAFT のままです — フィルターを変えて再計算し、保存し直せます。\n' +
-        '読み取り専用になるのは ECU に WRITE したときだけです。\n\n' +
+        '読み取り専用になるのは、チューンを ECU に WRITE したときだけです(パッチだけの WRITE ではなりません)。\n\n' +
         'OK        = このまま読み込んでおく(すぐ WRITE できます)\n' +
         'キャンセル = ワークスペースを閉じてセッション一覧に戻る',
 
@@ -257,9 +256,10 @@ const JA = {
     writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
         `✅ 書き込みが完了しました(${JA.writeVerifiedBy(v)})。\n\n` + KEY_CYCLE_JA,
 
-    retuneConfirm:
-        'このチューンの続きから、次のセッションを始めますか？\n\n' +
-        'OK        = 新規セッションを作成(BASE = 今書き込んだTUNED)\n' +
+    // NEXT を、それを決める瞬間に聞く。BASE は今書いた BIN そのもの（= 車に入っているもの）。
+    nextConfirm:
+        '今書き込んだ BIN から、次のセッションを始めますか？(NEXT)\n\n' +
+        'OK        = 新規セッションを作成(BASE = 今書き込んだ BIN。スイッチとフィルタ設定を引き継ぐ)\n' +
         'キャンセル = セッション一覧に戻る',
 
     writeFailed: (reason: string | null, a?: { wasBackgrounded: boolean }) =>
@@ -350,7 +350,6 @@ const EN: NativeDialogText = {
     noStoredBinary: 'This session has no stored binary.',
     noStoredTune: 'This session has no saved tune yet.',
     noStoredLog: 'This session has no stored log.',
-    noTuneToFinalize: 'This session has no saved tune to finalize.',
 
     titleRunPreflight: 'Before this run',
     runPreflight: (profile: string, missing: string[]) =>
@@ -375,15 +374,15 @@ const EN: NativeDialogText = {
         + 'refusing RAM reads, or this calibration puts the channel elsewhere.\n\n'
         + 'Try again with the engine running at a warm idle before overriding this.',
     btnIdleRunAnyway: 'Record without the check',
-    noBinaryOfKind: (which: string) => `This session has no ${which.toUpperCase()} binary.`,
-    notReconstructed: 'This session could not be reconstructed from its stored log — flashing is disabled.',
+    notReconstructed: 'This session could not be reconstructed from its stored log, so its map cannot be '
+        + 'written again. Its patch switches still can — the build starts from the BIN in the car.',
     setBaseFirst: 'Set a BASE first (upload a BIN or read it from the DME).',
     parseBinaryFailed: (message: string) => `Error parsing binary: ${message}`,
     noValidCsvData: 'No valid data found in CSV.',
 
     saved:
         'Session saved. It stays a DRAFT — change the filters, re-derive and save again.\n' +
-        'Only writing to the ECU makes a session read-only.\n\n' +
+        'Only writing a tune to the ECU makes a session read-only (a patch-only WRITE does not).\n\n' +
         'OK     = keep it loaded (you can WRITE it now)\n' +
         'Cancel = close the workspace and return to the session list',
 
@@ -490,9 +489,9 @@ const EN: NativeDialogText = {
     writeDone: (v: { mode: 'quick' | 'full'; readBack: boolean }) =>
         `✅ The write is complete (${EN.writeVerifiedBy(v)}).\n\n` + KEY_CYCLE_EN,
 
-    retuneConfirm:
-        'Start the next session from this tune?\n\n' +
-        'OK     = create a new session (BASE = the TUNED just written)\n' +
+    nextConfirm:
+        'Start the next session from the BIN just written? (NEXT)\n\n' +
+        'OK     = create a new session (BASE = the BIN just written; switches and filter settings carry over)\n' +
         'Cancel = return to the session list',
 
     writeFailed: (reason: string | null, a?: { wasBackgrounded: boolean }) =>

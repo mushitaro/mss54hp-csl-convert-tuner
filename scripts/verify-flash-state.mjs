@@ -211,7 +211,9 @@ console.log('\n[the last real flash is what the car holds, whatever the tune was
 {
     // The campaign that broke: the tune went out PATCH-ON, then FINALIZE took the patches off. The
     // list said FINAL; reopening re-armed PATCH, WOT TH and TANK VENT from `tuneSettings`, and the
-    // next WRITE shut the purge valve again. Reopening now takes the four from this answer.
+    // next WRITE shut the purge valve again. Reopening now reads the four off the CAR IMAGE — the
+    // bytes that patch-off write sent (verify:car-image) — and this answer is what the list's PATCH
+    // word and the log replay still read for a session whose settings cannot say.
     const on = { applyPatch: true, applyWotDisable: true, applyTankVentDisable: true };
     const finalized = session(flash({ at: 1, tuned: true, settings: on }), flash({ at: 2, tuned: true }));
     const car = armedPatchesFromHistory(finalized);

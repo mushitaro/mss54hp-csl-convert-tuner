@@ -1,19 +1,16 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { BinaryParser } from '@/lib/binary-engine/parser';
-import { BinaryPatcher } from '@/lib/binary-engine/patcher';
-import { IDLE_WRITE_SEALED } from '@/lib/idle/seal';
-import { readIdleTables } from '@/lib/idle/idleTables';
-import { composeLlsTv } from '@/lib/lls/composeLlsTv';
-import type { LlsTvEdit } from '@/lib/lls/ringGain';
-import { writtenVeGrid, type ShapeArm } from '@/lib/ve-calculator/composeVeGrid';
-import { applyCalibrationEdits } from '@/lib/calibration/apply';
-import type { CalEdit, RunSpan } from '@/lib/calibration/edits';
-import { findEcuItem } from '@/lib/ecu-items/catalog';
-import { VECalculator } from '@/lib/ve-calculator/calculator';
+import { readPatchStatus } from '@/lib/binary-engine/patcher';
+import { buildImage, type PatchExtras } from '@/lib/binary-engine/buildImage';
 import type { VEMap } from '@/lib/types';
+import type { LlsTvEdit } from '@/lib/lls/ringGain';
 import { MAP_DIMENSIONS } from '@/config/constants';
 import { dialogText } from '@/lib/dialog-text';
 import { downloadBlob, MIME_BIN } from '@/lib/download';
+
+// The bag of derived tables a build carries moved to lib/binary-engine/buildImage.ts with the build
+// itself; re-exported so every importer of the hook keeps one place to name it from.
+export type { PatchExtras };
 
 function getFormattedDate() {
   const now = new Date();
@@ -69,7 +66,6 @@ export function derivedBaseName(name: string): string {
   return out;
 }
 
-/** Tables that are not derived from the VE map and so cannot be rebuilt from it. */
 /**
  * Whether a write carries a DERIVED TABLE rather than only configuration.
  *
@@ -101,67 +97,6 @@ export function writeClaimsTune(
     || (extras?.calibrationEdits?.edits.length ?? 0) > 0;
 }
 
-export type PatchExtras = {
-  /** The back-calculated KF_RF_KORR_DRREL, 6 x 12 physical values. Null writes nothing. */
-  tunedRfKorr?: number[][] | null;
-  /** The idle valve duty proposal, `KF_LLS_TV` as 13 x 10 physical per cent. Null writes nothing.
-   *  Reaches a byte since 2026-09-03 — see lib/idle/seal.ts for what opened it. */
-  tunedIdleTv?: number[][] | null;
-  /**
-   * The micro-throttle ring solve, as an edit list rather than a grid.
-   *
-   * An edit list and not a table because it has to be COMPOSED with `tunedIdleTv` — the two
-   * derivations share `KF_LLS_TV`, and a second full grid here would mean whichever ran last won,
-   * which is the defect `composeVeGrid` exists to stop happening on `kf_rf_soll`. Carrying the
-   * cells it claims lets `composeLlsTv` give every cell exactly one owner.
-   */
-  tunedLlsTv?: readonly LlsTvEdit[] | null;
-  /**
-   * The SHAPE repair's grid and the cells it owns.
-   *
-   * Applied AFTER `composeVeGrid`, and that order is the point: a repair is defined as moving only
-   * cells no derivation measured, so by construction it cannot land on a cell the derivation owns.
-   * Composing first and overwriting after makes that ordering explicit rather than relying on the
-   * repair's own bookkeeping to have been right.
-   */
-  tunedShape?: ShapeArm | null;
-  /**
-   * The CALIBRATION tab's generic edits — self-contained raw runs, plus the byte spans the
-   * ARMED table writers own for this build. Applied LAST before applyChecksumCorrection, and
-   * apply skips any edit overlapping a span: the arbitration lives on the byte side, not only
-   * in the manifest's row locks (see lib/calibration/apply.ts).
-   */
-  calibrationEdits?: { edits: CalEdit[]; conflictSpans: RunSpan[] } | null;
-};
-
-/**
- * What the correction table is allowed to hold, as written.
- *
- * The floor is the important one: below 1.000 the table would LEAN the mixture at exactly the
- * condition BMW chose to enrich, which is the thing 20-egt-correction.md says not to do. The
- * tuner already clamps to the same range; this repeats it at the byte boundary so no future
- * caller can route around it.
- */
-const RF_KORR_WRITE_BOUNDS = { min: 1.0, max: 1.40 };
-
-/**
- * What the idle valve duty is allowed to hold, as written.
- *
- * DUTY PER CENT, because the write target is `KF_LLS_TV`. It used to be kg/h — 11.0 to 40.0 — from
- * when the target was `KF_LLR_QVS_GRUND`, and those numbers were the second reason that map was
- * sealed: they would have clamped sixteen untouched cold cells on the way past.
- *
- * These are the valve's own rails, `K_LLS_TV_MIN` and `K_LLS_TV_MAX` as this lineage holds them.
- * The tuner re-derives both from the LOADED binary rather than trusting these — a different
- * calibration puts them elsewhere — so this is the last-resort rail at the byte boundary, for the
- * same reason RF_KORR_WRITE_BOUNDS is: so no future caller can route around the tuner's own clamp.
- *
- * Measured against the stock table before this was allowed to write anything: all 130 cells sit
- * inside 14..97, so applying these bounds to the whole table moves no cell the tuner did not.
- * `verify:idle` asserts that, so a re-vendored binary cannot quietly break it.
- */
-const IDLE_TV_WRITE_BOUNDS = { min: 14.0, max: 97.0 };
-
 export function useBinaryFile() {
   const [binaryFile, setBinaryFile] = useState<File | null>(null);
   /** The idle proposal: `KF_LLS_TV` in duty per cent, 13x10. Held here so the panel can show what
@@ -172,15 +107,32 @@ export function useBinaryFile() {
   const [currentMap, setCurrentMap] = useState<VEMap | null>(null);
   const [initialMapData, setInitialMapData] = useState<number[][]>(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
 
-  // What the LOADED BYTES say, as opposed to what the toggles are asking for. Keeping wotDisabled
-  // here — it used to be computed in uploadBinary and thrown away after seeding the toggle — is what
-  // lets the hub compare the two and offer a write when they disagree.
+  /**
+   * The CAR IMAGE — the bytes the ECU holds as far as this session knows: its last real flash, or
+   * the BASE when it never wrote (lib/db/carImage.ts resolves it; the page sets it here on every
+   * load and after every write). Null means "the BASE", which is the right reading for a session
+   * that has not written and the only one available before a session is open.
+   *
+   * Held here rather than in the page for two reasons. `buildPatchedBuffer` starts every build from
+   * it, so DOWNLOAD TUNED, SAVE's TUNED and WRITE send the same bytes without each caller having to
+   * remember which image to start from. And `patchStatus` below is read off it: the hub's readouts
+   * and every "is this in the ECU" question mean the car, not the BASE the derivations read.
+   *
+   * Set in the same tick as the BASE by `uploadBinary` / `loadFromBuffer`, so no render pairs one
+   * session's BASE with another session's car.
+   */
+  const [carImage, setCarImage] = useState<ArrayBuffer | null>(null);
+
+  // What the bytes IN THE CAR say, as opposed to what the toggles are asking for. Derived on every
+  // change of either image rather than stored by the load, because the car image moves without a
+  // load now — a write updates it in place and the BASE stays the BASE.
   //
   // The floor is reported both ways. `rfKorrHeld` is K HOLD as the bytes have it, the twin of the
   // toggle below. `rfKorrGateDropped` has no toggle any more — RF GATE is retired — and is kept
-  // because a BIN that arrives carrying the drop will be written back to stock, which is a change
-  // the hub has to be able to name.
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; tankVentLearnStopped: boolean; rfKorrHeld: boolean; rfKorrGateDropped: boolean } | null>(null);
+  // because a car carrying the drop is replayed through it until a write takes it out.
+  const patchStatus = useMemo(
+    () => (binaryBuffer ? readPatchStatus(carImage ?? binaryBuffer) : null),
+    [binaryBuffer, carImage]);
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
   // [EXPERIMENTAL] UI Controls
@@ -234,8 +186,10 @@ export function useBinaryFile() {
    * nothing. Past that, WRITE still names every table in the confirmation before any byte moves,
    * and the filename's Tune_/Base_ prefix still follows the manifest rather than the derivation.
    *
-   * A stored session is untouched: `settings?.writeVe ?? writeVe` means an archived tune replays
-   * under the arming it was built with, not under today's default.
+   * A stored DRAFT reopens under the arming it saved (`seedToggles`, lib/db/carImage.ts). An
+   * ARCHIVED session reopens with this OFF: its map is re-derived on reopen under today's rules,
+   * which is not the map in the car, and with the build starting from the car image an armed
+   * ALPHA-N is the one thing that would re-send it under a patch change nobody meant as a tune.
    */
   const [writeVe, setWriteVe] = useState<boolean>(true);
   /** Whether the SHAPE repair's cells go into the next write. Off by default and reset with
@@ -244,7 +198,16 @@ export function useBinaryFile() {
    *  quietly across sessions. */
   const [writeShape, setWriteShape] = useState<boolean>(false);
 
-  const uploadBinary = async (file: File, overrides?: ToggleOverrides) => {
+  /**
+   * Loads a BASE and seeds every toggle — and, with it, the session's CAR IMAGE.
+   *
+   * `carImageIn` is the bytes the ECU holds for this session (lib/db/carImage.ts); omitted, the BASE
+   * is the car, which is what a fresh upload or a READ is. It is set in the same tick as the BASE so
+   * no render pairs them across sessions, and the toggles an override does not name are detected
+   * from IT rather than from the BASE: a toggle describes what the next write leaves in the car, and
+   * a toggle that matches the car's bytes is one the write gate reads as "nothing to change".
+   */
+  const uploadBinary = async (file: File, overrides?: ToggleOverrides, carImageIn?: ArrayBuffer | null) => {
     try {
       const buffer = await file.arrayBuffer();
       const parser = new BinaryParser(buffer);
@@ -252,50 +215,31 @@ export function useBinaryFile() {
 
       setBinaryFile(file);
       setBinaryBuffer(buffer);
+      setCarImage(carImageIn ?? null);
       setCurrentMap(map);
       setInitialMapData(map.data); // Store initial map data for comparison
 
-      // Check patch status
-      const isMapOff = parser.getMapCorrectionStatus();
-      const tempVal = parser.getTempThreshold();
-      const isTempHigh = tempVal >= 99;
-
-      // Check WOT status
-      const isWotDisabled = parser.getWOTThresholdStatus();
-      // Detectable in the bytes, exactly like the WOT threshold — so a BIN that came off the car
-      // with purge already disabled says so on the hub instead of quietly looking stock.
-      const isTankVentDisabled = parser.getTankVentDisabled();
-      // TANK VENT's second byte, K_TE_TMOT at 0xFF: purge never entered, TEA never learns. Reported
-      // beside the valve byte and NOT used to seed the toggle — see getTankVentLearnStopped. A car
-      // patched before this byte existed has the valve shut and K_TE_TMOT stock; it seeds ON from the
-      // valve byte, and page.tsx reads the missing half as drift, so the hub offers WRITE PATCH-ON
-      // and that write leaves both bytes patched.
-      const isTankVentLearnStopped = parser.getTankVentLearnStopped();
-      // Detectable the same way, and it has to be: this curve is an INPUT to every later
+      // What the CAR's bytes say — `patchStatus` reads the same thing off the same image once this
+      // render lands; here it seeds the toggles an override leaves open.
+      //
+      // TANK VENT seeds from the valve byte alone (`tankVentDisabled`), never from K_TE_TMOT: a car
+      // patched before that byte existed has the valve shut and K_TE_TMOT stock, seeds ON, and the
+      // build from it differs from the car by exactly the missing byte — so the hub offers WRITE
+      // PATCH-ON and that write leaves both bytes patched.
+      //
+      // The floor is detected the same way, and it has to be: this curve is an INPUT to every later
       // derivation (readEgtTables -> EgtTables.rfKorrMin -> gateOpen / RfKorrLatch / rfKorrCensus),
-      // so a BASE that arrives held — the post-write reload, a TUNED built held — must say so
-      // rather than let the app interpret its own drives through a gate the car was not running.
-      const isRfKorrHeld = parser.getRfKorrGateFloorHeld();
-      // The retired drop: detected, never re-armed. The next write returns it to stock.
-      const isRfKorrGateDropped = parser.getRfKorrGateFloorDropped();
-
-      setPatchStatus({
-        mapOff: isMapOff, // True if OFF
-        tempLimit: isTempHigh,
-        wotDisabled: isWotDisabled,
-        tankVentDisabled: isTankVentDisabled,
-        tankVentLearnStopped: isTankVentLearnStopped,
-        rfKorrHeld: isRfKorrHeld,
-        rfKorrGateDropped: isRfKorrGateDropped,
-      });
+      // so a car that is held must say so rather than let the app interpret its own drives through
+      // a gate the car was not running. The retired drop is detected and never re-armed.
+      const det = readPatchStatus(carImageIn ?? buffer);
 
       // Detection off the bytes is right when a BASE arrives fresh (upload / DME read), but wrong
-      // when reopening a saved session: that loads the BASE, which is normally unpatched, so the
-      // detected value would silently overwrite the settings the tune was actually built with.
-      setApplyPatch(overrides?.applyPatch ?? (isMapOff && isTempHigh));
-      setApplyWotDisable(overrides?.applyWotDisable ?? isWotDisabled);
-      setApplyTankVentDisable(overrides?.applyTankVentDisable ?? isTankVentDisabled);
-      setApplyRfKorrHold(overrides?.applyRfKorrHold ?? isRfKorrHeld);
+      // when reopening a draft whose saved settings are the operator's pending intent: the page
+      // passes those as overrides (lib/db/carImage.ts, seedToggles).
+      setApplyPatch(overrides?.applyPatch ?? (det.mapOff && det.tempLimit));
+      setApplyWotDisable(overrides?.applyWotDisable ?? det.wotDisabled);
+      setApplyTankVentDisable(overrides?.applyTankVentDisable ?? det.tankVentDisabled);
+      setApplyRfKorrHold(overrides?.applyRfKorrHold ?? det.rfKorrHeld);
       // These two leave no detectable trace in the bytes, so there is nothing to fall back on:
       // default them OFF on every load. Otherwise they persist from the previous session and
       // silently inject derived warmup/WOT tables into an unrelated binary.
@@ -311,7 +255,6 @@ export function useBinaryFile() {
       setWriteVe(overrides?.writeVe ?? true);
       setWriteShape(overrides?.writeShape ?? false);
       setTunedIdleTv(null);
-    setTunedLlsTv(null);
       setTunedLlsTv(null);
 
       return map;
@@ -321,185 +264,44 @@ export function useBinaryFile() {
     }
   };
 
-  // Applies all patches (VE table, experimental maps, logic patch, WOT threshold, checksum
-  // correction) to a fresh clone of binaryBuffer and returns the resulting bytes. Shared by the
-  // file-download flow and DB session saving, so both are guaranteed byte-identical.
-  //
-  // `settings` overrides the live toggle state. Needed because this reads that state through a
-  // closure: a caller that restores toggles and rebuilds in the same handler would otherwise hash
-  // the pre-restore values and "verify" nothing.
+  /**
+   * The bytes the next WRITE would send — and DOWNLOAD TUNED, and SAVE's TUNED, which are the same
+   * call so they cannot differ. The composition is `buildImage` (lib/binary-engine/buildImage.ts);
+   * this resolves its inputs from the hook's state.
+   *
+   * `source` is the image the build starts from, and it defaults to the CAR IMAGE: a write changes
+   * the car, so it is built on the car — the BASE stays the reference every derivation read, and is
+   * passed as the restore fallback. In a session that never wrote the two are the same image and
+   * this is the build it always was.
+   *
+   * `settings` overrides the live toggle state. Needed because this reads that state through a
+   * closure: a caller that restores toggles and rebuilds in the same handler would otherwise hash
+   * the pre-restore values and "verify" nothing.
+   */
   const buildPatchedBuffer = (
     newMap: VEMap | null,
     settings?: ToggleOverrides,
     extras?: PatchExtras,
+    source?: ArrayBuffer | null,
   ): ArrayBuffer | null => {
     if (!binaryBuffer) return null;
-
-    const usePatch = settings?.applyPatch ?? applyPatch;
-    const useWotDisable = settings?.applyWotDisable ?? applyWotDisable;
-    const useTankVentDisable = settings?.applyTankVentDisable ?? applyTankVentDisable;
-    const useRfKorrHold = settings?.applyRfKorrHold ?? applyRfKorrHold;
-    const useWarmup = settings?.writeWarmup ?? writeWarmup;
-    const useRestoreWot = settings?.restoreWotFuel ?? restoreWotFuel;
-    const useRestoreVe = settings?.restoreVe ?? restoreVe;
-    const useRestoreWarmup = settings?.restoreWarmup ?? restoreWarmup;
-    const useWriteVe = settings?.writeVe ?? writeVe;
-
-    const patcher = new BinaryPatcher(binaryBuffer);
-
-    // kf_rf_soll has exactly ONE writer, and everything that wants to change it passes through one
-    // composition gated by its own toggle: an OFF toggle contributes null, and nothing contributing
-    // means the table is not touched at all. Before composeVeGrid existed each workflow wrote the
-    // whole grid itself with call order as the only arbitration, and the order ran opposite to the
-    // comment describing it — so arming a second one reverted every corrected cell to BASE
-    // (65-workflows.md, defect 1).
-    /**
-     * The grid that reaches `kf_rf_soll` — the derivation plus the SHAPE mode, in one call.
-     *
-     * `writtenVeGrid` rather than the composition and the overlay written out here, because the
-     * WARMUP tab needs the same answer and computing it twice is how a screen and its bytes come
-     * apart. Null when nothing is armed for the table, and the table is then not touched at all.
-     */
-    const written = writtenVeGrid(
-      useWriteVe ? newMap?.data ?? null : null,
-      extras?.tunedShape ?? null,
-    );
-    if (written) patcher.setVETableData(written);
-
-    /**
-     * WARMUP derives from THE GRID THAT IS BEING WRITTEN, not from the tuned map beside it.
-     *
-     * It used to take `newMap` unconditionally, and that quietly dropped the SHAPE repair: `newMap`
-     * is the tuned grid before the overlay, and the shaped cells were overlaid onto a local copy of
-     * it a few lines above and nowhere else. So a flash could carry a repaired `kf_rf_soll` and a
-     * `kf_rf_soll_kath` interpolated from the UNREPAIRED one.
-     *
-     * That is not a rounding difference. `CSL_STOCK_WARMUP_LOAD` starts at 0.10 % and its first
-     * fourteen rows sit at or below 3.20 % — exactly the openings SHAPE exists to repair — and
-     * `generateWarmupMap` reads the main table by interpolation at exactly those openings. A
-     * falling column that SHAPE just removed from the warm table would be interpolated straight
-     * back into the cold one.
-     *
-     * `written` is null when nothing is armed for `kf_rf_soll`. WARMUP is then still allowed, from
-     * `newMap`: it writes its own table at its own address, and arming it without arming the main
-     * one is a legitimate thing to want. What it must never do is derive from a DIFFERENT grid than
-     * the one going into the flash beside it.
-     */
-    if (newMap && useWarmup) {
-      const source = written ? { ...newMap, data: written } : newMap;
-      const warmupMap = new VECalculator().generateWarmupMap(source);
-      patcher.setWarmupTable(warmupMap);
-    }
-
-    // Apply or Revert Logic Patch
-    if (usePatch) {
-      patcher.disableMapCorrection();
-    } else {
-      patcher.enableMapCorrection();
-    }
-
-    // The full-load fuel multiplier, put back to the community reference.
-    //
-    // Outside the `newMap` block on purpose, and one-way on purpose. This is a RESTORE: there is no
-    // derived value to write and no "off" direction that means anything, so arming it writes the
-    // reference and leaving it alone writes nothing. Anyone at any point in a tuning campaign can
-    // therefore get back to a known table, which is the whole reason it exists — see
-    // COMMUNITY_WOT_FUEL_RAW for the bug that made a known table worth having.
-    if (useRestoreWot) patcher.restoreWotFuel();
-
-    // The two Alpha-N tables, put back to the CSL 0401 reference.
-    //
-    // AFTER the composition and the warmup derivation above, and that order is the safety property
-    // rather than an accident. Both write the same bytes those two do, so whichever runs last wins,
-    // and a restore that could be overwritten by a tune is not a restore. The manifest also locks
-    // the two sides against each other so the case never arises — but the arbitration must not live
-    // only in the UI, because `settings` lets a caller reach this function with any pair of flags.
-    //
-    // One-way, like restoreWotFuel: false writes nothing rather than writing something else.
-    if (useRestoreVe) patcher.restoreVeTable();
-    if (useRestoreWarmup) patcher.restoreWarmupTable();
-
-    // [EXPERIMENTAL] WOT Threshold Patch (Independent of Logic Patch)
-    patcher.setWOTThreshold(useWotDisable);
-
-    // Tank ventilation — the valve gain and K_TE_TMOT, two bytes on one toggle (setTankVentDisable).
-    // Written unconditionally in BOTH directions, like the WOT threshold above and unlike the derived
-    // maps: `false` restores both rather than leaving whatever was there — the valve AND the purge
-    // learning come back. That is what makes turning the toggle off an actual restore — the whole safety
-    // story here is that the valve goes back, and a patch that only ever writes one way could not
-    // deliver it. Before applyChecksumCorrection, with everything else.
-    patcher.setTankVentDisable(useTankVentDisable);
-
-    // The rf_korr gate floor — K HOLD or stock. Both directions like the two above, and for a
-    // reason this one owns: the app READS this curve back to decide which of a drive's samples the
-    // DME was correcting, so a stale hold left in place would silently re-interpret every later log
-    // and ship in the release BIN. Off restores the six the binary was loaded with, or STOCK_RAW
-    // when those six were held or carry the retired drop. Never 'drop': that patch is retired, so
-    // no build writes it, whatever a stored record says.
-    patcher.setRfKorrGateFloor(useRfKorrHold ? 'hold' : 'stock');
-
-    // The back-calculated EGT correction. Threaded in explicitly rather than read off hook state
-    // for the same reason `settings` is: a caller that rebuilds inside one handler would otherwise
-    // hash a value the render has not caught up with.
-    //
-    // Never together with a derived VE map: page.tsx arms one or the other (see rfKorrArmed), because
-    // the table is anchored on the VE the drive ran on and one drive's VE error would land in both.
-    if (extras?.tunedRfKorr) {
-      const def = findEcuItem('KF_RF_KORR_DRREL');
-      if (def?.kind === 'map') {
-        patcher.setEcuMapValues(def, extras.tunedRfKorr, RF_KORR_WRITE_BOUNDS);
-      }
-    }
-
-    /**
-     * The idle valve duty — `KF_LLS_TV`, and the symbol here has to be the one the TUNER quantised
-     * against or the bytes are rounded to a grid they are not stored on.
-     *
-     * It said `KF_LLR_QVS_GRUND` until 2026-09-03, months after the estimator had moved. Nothing
-     * came of it only because the seal was shut and because a 13x10 proposal handed to a 5x6 writer
-     * throws rather than corrupts. Both halves now name `KF_LLS_TV`; `verify:idle` asserts they
-     * still agree, because "two places name the target" is exactly the shape that drifted.
-     *
-     * The guard sits at the byte boundary rather than only in the UI, so no caller can route
-     * around it — see lib/idle/seal.ts for what opened it and what stays shut.
-     */
-    if (!IDLE_WRITE_SEALED && (extras?.tunedIdleTv || extras?.tunedLlsTv?.length)) {
-      const def = findEcuItem('KF_LLS_TV');
-      // The LOADED image, not the patcher clone: the composer needs the stock table to tell which
-      // cells IDLE actually moved, and nothing earlier in this function touches KF_LLS_TV.
-      const tables = readIdleTables(binaryBuffer);
-      if (def?.kind === 'map' && tables) {
-        /*
-         * ONE writer, two derivations. IDLE moves the rows warm idle evidence reaches; the
-         * micro-throttle solve rebuilds the rows its drive reached. Both land here, so the
-         * arbitration is stated in `composeLlsTv` rather than decided by which branch ran last.
-         *
-         * `composeLlsTv` returns null when neither contributes anything, and then nothing is
-         * written at all — which matters more here than on kf_rf_soll, because setEcuMapValues
-         * clamps every one of the 130 cells it touches. A write of "no change" is still a write.
-         */
-        const composed = composeLlsTv(
-          tables.llsTv.values,
-          { idle: extras.tunedIdleTv ?? null, lls: extras.tunedLlsTv ?? null },
-          { rpm: tables.llsTv.x, mlKgH: tables.llsTv.y },
-        );
-        if (composed) {
-          patcher.setEcuMapValues(def, composed.values, IDLE_TV_WRITE_BOUNDS);
-        }
-      }
-    }
-
-    // CALIBRATION tab edits, last of the writers: nothing after them can clobber an edit on
-    // unrelated bytes, and an edit overlapping an armed writer's span is skipped inside apply
-    // rather than winning by call order.
-    if (extras?.calibrationEdits?.edits.length) {
-      applyCalibrationEdits(patcher, extras.calibrationEdits.edits, extras.calibrationEdits.conflictSpans);
-    }
-
-    // Recalculate checksum last, after all other patches have been applied
-    patcher.applyChecksumCorrection();
-
-    return patcher.getBuffer();
+    return buildImage({
+      source: source ?? carImage ?? binaryBuffer,
+      base: binaryBuffer,
+      newMap,
+      toggles: {
+        applyPatch: settings?.applyPatch ?? applyPatch,
+        applyWotDisable: settings?.applyWotDisable ?? applyWotDisable,
+        applyTankVentDisable: settings?.applyTankVentDisable ?? applyTankVentDisable,
+        applyRfKorrHold: settings?.applyRfKorrHold ?? applyRfKorrHold,
+        writeWarmup: settings?.writeWarmup ?? writeWarmup,
+        restoreWotFuel: settings?.restoreWotFuel ?? restoreWotFuel,
+        restoreVe: settings?.restoreVe ?? restoreVe,
+        restoreWarmup: settings?.restoreWarmup ?? restoreWarmup,
+        writeVe: settings?.writeVe ?? writeVe,
+      },
+      extras,
+    });
   };
 
   /** `newMap` is required, not optional, so that adding a caller cannot silently default to
@@ -552,9 +354,11 @@ export function useBinaryFile() {
   // Loads a buffer as if it were freshly uploaded/read from the DME, reusing uploadBinary's
   // parsing + patch-status detection. Pass `overrides` when the toggles are known from a saved
   // session rather than inferable from these bytes.
-  const loadFromBuffer = async (buffer: ArrayBuffer, fileName: string, overrides?: ToggleOverrides) => {
+  const loadFromBuffer = async (
+    buffer: ArrayBuffer, fileName: string, overrides?: ToggleOverrides, carImageIn?: ArrayBuffer | null,
+  ) => {
     const file = new File([buffer], fileName, { type: 'application/octet-stream' });
-    return uploadBinary(file, overrides);
+    return uploadBinary(file, overrides, carImageIn);
   };
 
   /** Drops the loaded binary and everything read out of it. A new session with no BASE must not
@@ -565,7 +369,9 @@ export function useBinaryFile() {
     setBinaryBuffer(null);
     setCurrentMap(null);
     setInitialMapData(Array(MAP_DIMENSIONS.rows).fill(Array(MAP_DIMENSIONS.cols).fill(0)));
-    setPatchStatus(null);
+    // The car goes with the BASE: a session without one has no car image either, and the next
+    // load sets both together.
+    setCarImage(null);
     setApplyPatch(false);
     setApplyWotDisable(false);
     setWriteWarmup(false);
@@ -589,6 +395,8 @@ export function useBinaryFile() {
   return {
     binaryFile,
     binaryBuffer,
+    carImage,
+    setCarImage,
     currentMap,
     initialMapData,
     patchStatus,

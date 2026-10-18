@@ -33,7 +33,7 @@ import { readRingTables, solveLlsTv, ringDrift, RING_GAIN_DEFAULTS } from '@/lib
 import { idleReachIfLlsTakes } from '@/lib/lls/composeLlsTv';
 import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
 import LlsPanel from '@/components/LlsPanel';
-import { WriteManifest, ManifestCorner, anythingArmed, type ManifestGroup } from '@/components/WriteManifest';
+import { WriteManifest, ManifestCorner, type ManifestGroup } from '@/components/WriteManifest';
 import {
   enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
   writeRowInMode,
@@ -64,7 +64,7 @@ import { VECalculator, VE_METHOD_DEFAULT, DIRECT_MIN_SAMPLES, DIRECT_AUTHORITY_D
 import { useDialogLang } from '@/hooks/useDialogLang';
 import { InterpolationTableEditor } from '@/components/InterpolationTableEditor';
 import { LogDataTable } from '@/components/LogDataTable';
-import { SessionList, OriginBadge, NewFromWhich } from '@/components/SessionList';
+import { SessionList, OriginBadge } from '@/components/SessionList';
 import { SessionStorePanel } from '@/components/SessionStorePanel';
 import { reauthHref } from '@/lib/session-sync/owner-sync';
 import { useGateStatus } from '@/hooks/useGateStatus';
@@ -99,20 +99,22 @@ import { AlertCircle, Download, FileCode, FileSpreadsheet, Zap, Play, Cpu, Trash
 import { PROJECT_REPO_URL } from '@/config/links';
 import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { isFieldPresent } from '@/lib/field-registry/registry';
-import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog, resolveRfKorr } from '@/lib/types';
+import { LogFilterConfig, InterpolationPoint, LogDataPoint, ProcessedLog } from '@/lib/types';
 import type { VeCalcOptions } from '@/lib/ve-calculator/calculator';
 import { readEgtTables, type EgtTables } from '@/lib/ve-calculator/egtTables';
 import type { HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
 import { withLambdaRamp } from '@/lib/log-engine/lambdaGates';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
-import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, tankVentDrift, type LogicPatches } from '@/lib/binary-engine/patcher';
+import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
+import { buildImage, sameBytes } from '@/lib/binary-engine/buildImage';
 import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
+import { resolveCarImage, seedToggles, sessionToggles, nextStart, storedWriteRfKorr } from '@/lib/db/carImage';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
 import { useBuildLabel, useIsPreviewBuild, usePreviewSurfaces } from '@/lib/build-variant';
-import { TuningSession, TuneSettings, BaseOrigin } from '@/lib/db/schema';
+import { TuningSession, TuneSettings } from '@/lib/db/schema';
 import { AdaptationSnapshot, FlashCounterInfo } from '@/lib/dme-link/types';
 import { ServiceBlockLayout, classifyFlashCounter } from '@/lib/dme-link/flashCounter';
 import { TUNE_ADAPTATION_CLEAR, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
@@ -616,15 +618,8 @@ export default function Home() {
    *  wrong rf_korr treatment, and the sha256 reproduction check then fails against bytes that were
    *  built correctly the first time. The `loadFromBuffer` call in the same handler already passes
    *  its stored settings explicitly for exactly this reason. */
-  /** Whether a stored session wrote the derived correction table.
-   *
-   *  Two eras to read. `writeRfKorr` is the field; sessions saved before it existed encoded the
-   *  same decision inside `filterConfig.rfKorrMode === 'tuned'`, which `resolveRfKorr` surfaces as
-   *  `legacyWrite`. Taking the absent field as plain false would drop the table write from every
-   *  archived session of the older kind, and its sha256 reproduction check would then fail against
-   *  bytes that were built correctly at the time. */
-  const storedWriteRfKorr = (settings?: TuneSettings): boolean =>
-    settings?.writeRfKorr ?? (settings ? resolveRfKorr(settings.filterConfig).legacyWrite : false);
+  // `storedWriteRfKorr` — whether a stored session wrote the derived correction table, in both of
+  // the eras that recorded it — lives in lib/db/carImage.ts beside the seeding that also reads it.
 
   /**
    * The high-Δ guard the RF KORR tuner may fill its 300 / 400 rows on, for a session's drive.
@@ -717,8 +712,9 @@ export default function Home() {
    *
    * One image for both readers below, because both have to describe the same car: the full-load
    * gate reads a table WRITE PATCH-ON rewrites, and the rf_korr gate reads the floor K HOLD
-   * rewrites. A BASE that arrived carrying the retired RF GATE drop keeps it here until a write
-   * takes it out — no toggle describes it any more, but it is what this car runs until then.
+   * rewrites. A car image carrying the retired RF GATE drop (`patchStatus` reads the car) keeps it
+   * here until a write takes it out — no toggle describes it any more, but it is what this car runs
+   * until then.
    */
   const asRunBuffer = useMemo(
     () => (binaryBuffer
@@ -820,19 +816,6 @@ export default function Home() {
   };
 
   /**
-   * Are the loaded bytes a session's stored TUNED, armed for the patch-off flash?
-   *
-   * A fact that cannot be derived, which is why it is recorded. handleFinalizeSession loads a tune
-   * that is already inside the bytes, so it produces no `newMap` — and handleDmeWrite reads the
-   * absence of a map as "these bytes carry only patches" and files the flash as PATCH ONLY. That is
-   * wrong for the single most important flash a session ever does: the finalize IS the tune reaching
-   * the road, and a history that calls it a patch write cannot tell it apart from arming a bare BASE.
-   *
-   * Cleared by resetDerived, i.e. by every path that swaps the working binary.
-   */
-  const finalizeArmedRef = useRef(false);
-
-  /**
    * The pending filter intent and the timer that turns it into a derivation — the full design is
    * on handleConfigChange. Declared here, above resetDerived, because resetDerived must be able to
    * kill them: a compute armed in one workspace firing into the next would republish the OLD
@@ -855,7 +838,6 @@ export default function Home() {
     veCalc.reset();
     logFileState.clear();
     liveRun.reset();
-    finalizeArmedRef.current = false;
     // The workspace this move was armed for is going away, so the move has to go with it — otherwise
     // it fires later against whatever gets loaded next.
     pendingTabRef.current = null;
@@ -868,9 +850,13 @@ export default function Home() {
   const handleUploadBase = async (session: TuningSession, file: File) => {
     setActiveSessionId(session.id);
     resetDerived();
-    const map = await binaryFileState.uploadBinary(file);
-    if (!map) return;
     const buffer = await file.arrayBuffer();
+    // The car this BASE sits in. An upload says nothing about the ECU, so it is the BASE itself —
+    // unless this draft has already written, and then its last real flash says what went in
+    // (lib/db/carImage.ts). `setBase` below drops any car image stored for the BASE it replaces.
+    const car = await resolveCarImage({ flashHistory: session.flashHistory, base: buffer });
+    const map = await binaryFileState.uploadBinary(file, undefined, car.source === 'base' ? null : car.image);
+    if (!map) return;
     await sessionDb.setBase({
       sessionId: session.id,
       baseOrigin: { kind: 'upload', fileName: file.name },
@@ -887,8 +873,8 @@ export default function Home() {
     // takes the driver away from both, to look at a calibration nothing has been derived from yet
     // (operator, 2026-08-25).
     //
-    // A branch (handleNewFrom) does move, to DASH, and the difference is real: it inherits a BASE
-    // and a lineage and has nothing left to be given, so its next step is the car.
+    // NEXT (handleNext) does move, to DASH, and the difference is real: it inherits a BASE and a
+    // lineage and has nothing left to be given, so its next step is the car.
   };
 
   /**
@@ -1246,49 +1232,41 @@ export default function Home() {
   const syncLook = syncStatus && describeSync(syncStatus);
 
 
-  /** The last step of a tune: put the finished map back on the road with the patches off.
+  /**
+   * FINALIZE — a shortcut that only SWITCHES: opens the session if it is not the open one, and turns
+   * PATCH, WOT TH, TANK VENT and K HOLD off on it (WARMUP and RESTORE WOT FUEL with them, which are
+   * tune content a road flash should not re-send). Nothing is written here.
    *
-   *  Loads the session's STORED TUNED as the working binary and disarms both patch toggles, which
-   *  leaves the bytes patched and the toggles saying otherwise — the drift the hub reads to offer
-   *  WRITE PATCH-OFF. Everything about the flash itself therefore stays on the one path that has the
-   *  confirm gate, the engine-stopped warning, the read-back verify and the key-cycle instructions.
+   * The write is the ordinary WRITE, and that is the whole design rather than a convenience. The hub
+   * offers a write exactly when the BIN it would send differs from the CAR IMAGE (lib/db/carImage.ts);
+   * with the four patches switched off over a car that holds them, it does, so the ring is live and
+   * every safeguard of the one write path applies — the lineage check against the car, the confirm
+   * that names what goes out, the engine-stopped warning, the read-back, the key cycle.
    *
-   *  It does NOT re-derive from the log the way opening an archived session does. There is nothing to
-   *  re-derive: the tuned map is already inside these bytes, and the only edit is the correction flag.
-   *  That also means it still works for a session whose log can no longer be replayed, and it cannot
-   *  reach the double-correction trap (V0*C^2) that rebuilding from a tuned map would.
+   * It used to load the stored TUNED as the workspace and disarm the toggles over it, relying on the
+   * drift between bytes and toggles to offer WRITE PATCH-OFF. That drift never counted an OFF as a
+   * change, so the write it set up was disabled ("Nothing armed"); and the TUNED it loaded is not
+   * necessarily what is in the car. The car image is, and the build starts from it, so the tune
+   * already in the ECU stays in the bytes without being re-derived — and an archived session opens
+   * with ALPHA-N off (seedToggles), so nothing re-derived rides along.
    *
-   *  No new session, either. This is the same tune reaching the ECU a second time, so it belongs in
-   *  the same row's flashHistory — see handleDmeWrite, which skips saveSessionTune for an archived
-   *  session precisely so the earlier flash record keeps pointing at the bytes it actually sent. */
+   * Offered on any session with a BASE that is not FINAL. On a session that never wrote a patch,
+   * switching them off leaves the build equal to the car, and the ring says so.
+   */
   const handleFinalizeSession = async (session: TuningSession) => {
-    const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins?.tunedBinaryBuffer) { alert(dialogText().noTuneToFinalize); return; }
-    setActiveSessionId(session.id);
-    resetDerived();
-    const map = await binaryFileState.loadFromBuffer(
-      bins.tunedBinaryBuffer,
-      session.binaryFileName ?? 'tuned.bin',
-      // Explicit, not detected: detection would read the patch back OFF the bytes and re-arm the very
-      // toggles this is here to clear, leaving nothing for the hub to notice.
-      //
-      // TANK VENT is in the list because finalising is where the promise to put the evaporative
-      // system back gets kept. Leaving it out meant a tune logged with the purge valve held shut
-      // went to the road that way, and the FINAL badge said road state.
-      // K HOLD joins TANK VENT here for the same reason: a held floor leaves the DME with no
-      // cold-exhaust enrichment and more part-load advance, and finalising is where it comes back
-      // out. OFF writes the stock floor, whatever these bytes were built with.
-      { applyPatch: false, applyWotDisable: false, applyTankVentDisable: false,
-        applyRfKorrHold: false, writeWarmup: false, restoreWotFuel: false },
-    );
-    if (!map) return;
-    // After loadFromBuffer, and after the resetDerived above that clears it. These bytes are the
-    // session's tune, so the flash they are heading for has to be recorded as a tune.
-    finalizeArmedRef.current = true;
-    // CURRENT MAP, not TUNED MAP: nothing was derived, so `newMap` is null and the TUNED MAP tab is
-    // disabled. The map to check before flashing is the one inside the bytes just loaded, and that
-    // is what CURRENT MAP shows.
-    goToTab('current');
+    if (session.id !== activeSessionId && !(await handleOpenSession(session))) return;
+    setApplyPatch(false);
+    setApplyWotDisable(false);
+    // TANK VENT is in the list because finalising is where the promise to put the evaporative
+    // system back gets kept. Leaving it out meant a tune logged with the purge valve held shut
+    // went to the road that way, and the FINAL badge said road state.
+    setApplyTankVentDisable(false);
+    // K HOLD joins TANK VENT for the same reason: a held floor leaves the DME with no cold-exhaust
+    // enrichment and more part-load advance, and finalising is where it comes back out. OFF writes
+    // the car's own floor back — the BASE's when the car image holds the hold (BinaryPatcher.fallback).
+    setApplyRfKorrHold(false);
+    setWriteWarmup(false);
+    setRestoreWotFuel(false);
   };
 
   // --- Session lifecycle -----------------------------------------------------------------------
@@ -1824,9 +1802,13 @@ export default function Home() {
   const armIdle = binaryFileState.setTunedIdleTv;
   useEffect(() => {
     if (!currentSession?.tuneSettings?.writeIdle) return;
+    // Not on a written session, for the reason ALPHA-N opens OFF there (seedToggles): the proposal is
+    // re-derived under today's rules, which need not give the bytes that went out, and a patch
+    // change on that session would re-send it unasked. Arming it again is the IDLE row's one tap.
+    if (currentSession.status === 'archived') return;
     if (!restoredIdleResult?.acceptable) return;
     armIdle(restoredIdleResult.tuned);
-  }, [currentSession?.id, currentSession?.tuneSettings?.writeIdle, restoredIdleResult, armIdle]);
+  }, [currentSession?.id, currentSession?.status, currentSession?.tuneSettings?.writeIdle, restoredIdleResult, armIdle]);
 
   /** Whether the idle run has rows worth a tab. A boolean off IdleWorkflow's own count, for the
    *  reason its trace flag is one: it crosses the boundary twice per run, not four times a second. */
@@ -2385,15 +2367,21 @@ export default function Home() {
     return created;
   };
 
-  /** Opens a saved session. Draft -> keep tuning. Archived -> reference + flash only. */
-  const handleOpenSession = async (session: TuningSession) => {
+  /** Opens a saved session. Draft -> keep tuning. Archived -> reference + flash only.
+   *  Resolves true when the session's BASE is now the workspace — FINALIZE switches on top of it. */
+  const handleOpenSession = async (session: TuningSession): Promise<boolean> => {
     // The base-less branch still swaps the ACTIVE session, so it must drop the outgoing
     // session's derived state like the main path does — without this, a log parked on an
     // empty draft ran the previous session's binary through runCalculation and showed a
     // cross-session tune under the new draft's identity.
-    if (!session.baseOrigin) { resetDerived(); setActiveSessionId(session.id); goToTab('startup'); return; }
+    if (!session.baseOrigin) { resetDerived(); setActiveSessionId(session.id); goToTab('startup'); return false; }
     const bins = await sessionDb.loadBinaries(session.id);
-    if (!bins) { alert(dialogText().noStoredBinary); return; }
+    if (!bins) { alert(dialogText().noStoredBinary); return false; }
+    // The bytes this session's car holds — before the load, so the BASE and its car land together.
+    const car = await resolveCarImage({
+      flashHistory: session.flashHistory, base: bins.baseBinaryBuffer,
+      tuned: bins.tunedBinaryBuffer, stored: bins.carBinaryBuffer,
+    });
 
     resetDerived();
     setActiveSessionId(session.id);
@@ -2410,22 +2398,19 @@ export default function Home() {
     // Rebuild the tune FROM THE BASE. Re-running the log against the stored tuned map (what the old
     // code did) would apply the same correction a second time — V0*C^2.
     /**
-     * What was armed when these bytes were last in the car, from whichever record can say.
+     * What the stored DRIVE ran — the replay's question, and only the replay's.
      *
      * `tuneSettings` first: it is the full picture, and it is what the tune was actually derived
-     * with. But it has ONE writer, `saveTune`, which only runs once a VE map exists — so a BASE
-     * armed with WRITE PATCH-ON before the first log run, and a research run stored by
-     * `saveResearchRun`, both reach here with it undefined. The old expression was
-     * `session.tuneSettings && { ... }`, which then collapsed the WHOLE bag to undefined and let
-     * detection-from-bytes decide. The bytes on offer are `bins.baseBinaryBuffer`, which is the
-     * PRE-patch image and always will be — `setBase` is never called again after a flash — so the
-     * app concluded the car was stock immediately after patching it, showed the PATCH wings off,
-     * withdrew DOWNLOAD PATCH-ON, warned at the next preflight that the patch was missing, locked
-     * WRITE RF KORR for want of a patched log, and raised no drift, because the toggle and the
-     * detection agreed with each other about the wrong bytes.
+     * with. But it has two writers, `saveTune` and NEXT's inheritance, and neither runs for a BASE
+     * armed with WRITE PATCH-ON before the first log run or for a research run stored by
+     * `saveResearchRun` — and for those the flash history says what the car was given. A patch on
+     * neither record is read off the BASE (`bytesAsRecorded`), never coerced to false.
      *
-     * The flash history is the fallback, and only for the three logic patches — see
-     * `armedPatchesFromHistory`.
+     * The TOGGLES are a different question — what the next write leaves in the car — and they are
+     * seeded separately below (`seedToggles`): a draft's saved settings when they are newer than its
+     * last real flash, the car image's own bytes otherwise. They used to be this bag with the last
+     * flash laid over it, which re-armed a stage-2 tune's K HOLD on reopen because the car still held
+     * it, and the next WRITE put the hold back.
      */
     const armed = session.tuneSettings
       ? {
@@ -2436,32 +2421,21 @@ export default function Home() {
         // The retired RF GATE drop, as the record has it. No toggle takes it; the log replay below
         // does, because a drive recorded on that floor ran through it.
         applyRfKorrGateDrop: session.tuneSettings.applyRfKorrGateDrop,
-        writeWarmup: session.tuneSettings.writeWarmup,
-        restoreWotFuel: session.tuneSettings.restoreWotFuel ?? false,
-        // Absent reads false, and here that is a fact rather than a default: no session predating
-        // these fields could have carried a restore, because neither writer existed.
-        restoreVe: session.tuneSettings.restoreVe ?? false,
-        restoreWarmup: session.tuneSettings.restoreWarmup ?? false,
-        writeRfKorr: storedWriteRfKorr(session.tuneSettings),
-        // Absent writeVe reads TRUE: sessions from before the field always wrote the map, and the
-        // reopened workspace must rebuild the same bytes. See TuneSettings.writeVe.
-        writeVe: session.tuneSettings.writeVe ?? true,
       }
       : armedPatchesFromHistory(session) ?? undefined;
 
-    // The toggles describe the CAR, and the car holds what its last real flash gave it. So that
-    // flash sets the four logic patches, over `tuneSettings`: an archived session's settings are
-    // never rewritten, and FINALIZE's patch-off write lands only in the history — reading the
-    // settings first re-armed PATCH, WOT TH and TANK VENT on a car the list badged FINAL, and the
-    // next WRITE shut the purge valve again (operator, 2026-10-04). `armed` itself is left alone:
-    // it is what the drive ran, and the log replay below reads it.
-    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
       bins.baseBinaryBuffer,
       session.baseFileName ?? 'base.bin',
-      car ? { ...armed, ...car } : armed,
+      seedToggles(session),
+      car.image,
     );
-    if (!map) return;
+    if (!map) return false;
+    // A session with settings and no drive still has filters — a NEXT child carries its parent's
+    // from creation — and nothing below would adopt them: `loadRawLog` does that only for a log.
+    if (!session.hasLog && session.tuneSettings) {
+      logFileState.adopt(session.tuneSettings.filterConfig, session.tuneSettings.interpolationTable);
+    }
 
     let rebuilt = false;
     if (session.hasLog) {
@@ -2501,8 +2475,9 @@ export default function Home() {
       }
     }
 
-    // WRITE only appears because the rebuild produced a tune; buildPatchedBuffer(null) does not
-    // no-op — it returns the BASE — so an unreconstructed session must not offer it.
+    // An unreconstructed session has no map to write: nothing derived it. Its PATCH switches can
+    // still be written — the build starts from the car image, so with no map it is the car with the
+    // switches applied, and the gate offers it only when that differs from the car.
     //
     // Silent for a draft that has no log yet: that is "continue where I left off", the most ordinary
     // thing in the app, and there is nothing to reconstruct. A session that HAS a log and could not
@@ -2528,6 +2503,7 @@ export default function Home() {
     // DASH, which is the pane the work actually begins in.)
     goToTab(rebuilt ? 'new' : 'current');
     setNarrowPane('dash');
+    return true;
   };
 
   /**
@@ -2618,12 +2594,18 @@ export default function Home() {
     const points = await loadLiveRunPoints(runId).catch(() => [] as LogDataPoint[]);
     if (points.length === 0) { alert(dialogText().recoverFailed); return; }
 
+    // The car this run was recorded on, resolved the way handleOpenSession resolves it.
+    const car = await resolveCarImage({
+      flashHistory: session.flashHistory, base: bins.baseBinaryBuffer,
+      tuned: bins.tunedBinaryBuffer, stored: bins.carBinaryBuffer,
+    });
     resetDerived();
     setActiveSessionId(sessionId);
-    /* The same bag handleOpenSession resolves, and for the same reason — this used to pass NO third
-       argument at all, not even the conditional one, so a crash recovery landed patch-off even for a
-       session whose `tuneSettings` could have said otherwise. A recovered run is a run that was in
-       progress against a patched car; it must come back describing that car. */
+    /* The same two answers handleOpenSession resolves, and for the same reasons. This used to pass
+       NO third argument at all, so a crash recovery landed patch-off even for a session whose
+       records could have said otherwise. A recovered run is a run that was in progress against a
+       patched car; its replay reads what the records say the drive ran, and its toggles start where
+       `seedToggles` puts any reopen. */
     const armed = session.tuneSettings
       ? {
         applyPatch: session.tuneSettings.applyPatch,
@@ -2633,22 +2615,10 @@ export default function Home() {
         // The retired RF GATE drop, as the record has it. No toggle takes it; the log replay below
         // does, because a drive recorded on that floor ran through it.
         applyRfKorrGateDrop: session.tuneSettings.applyRfKorrGateDrop,
-        writeWarmup: session.tuneSettings.writeWarmup,
-        restoreWotFuel: session.tuneSettings.restoreWotFuel ?? false,
-        // Absent reads false, and here that is a fact rather than a default: no session predating
-        // these fields could have carried a restore, because neither writer existed.
-        restoreVe: session.tuneSettings.restoreVe ?? false,
-        restoreWarmup: session.tuneSettings.restoreWarmup ?? false,
-        writeRfKorr: storedWriteRfKorr(session.tuneSettings),
-        // Absent writeVe reads TRUE: sessions from before the field always wrote the map, and the
-        // reopened workspace must rebuild the same bytes. See TuneSettings.writeVe.
-        writeVe: session.tuneSettings.writeVe ?? true,
       }
       : armedPatchesFromHistory(session) ?? undefined;
-    // The toggles follow the car's last real flash, as in handleOpenSession.
-    const car = armedPatchesFromHistory(session);
     const map = await binaryFileState.loadFromBuffer(
-      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', car ? { ...armed, ...car } : armed);
+      bins.baseBinaryBuffer, session.baseFileName ?? 'base.bin', seedToggles(session), car.image);
     if (!map) return;
 
     // Adopted as the run's buffer, so a later flush appends to this drive rather than starting a
@@ -2658,19 +2628,24 @@ export default function Home() {
        effect that pushes `lambdaLimits` into the hook has not run in this scope, so without this the
        recovered drive would be filtered through the OUTGOING session's binary. Both gates — the
        full-load one and the rf_korr floor — from the bytes as the DME ran them, as there. A patch
-       the record is silent on — every one, for a Re-tune child that crashed before its first SAVE —
-       is read off the BASE, which is what that car runs (bytesAsRecorded). */
+       the record is silent on — every one, for a child with no settings that crashed before its
+       first SAVE — is read off the BASE, which is what that car runs (bytesAsRecorded). */
     const asRun = bytesAsRecorded(bins.baseBinaryBuffer, armed);
+    // The session's own filters when it has them — a NEXT child carries its parent's from creation,
+    // and after the reload that preceded this the workspace holds only the defaults. Otherwise the
+    // live ones, as before.
+    const recoveredConfig = session.tuneSettings?.filterConfig;
+    const recoveredTable = session.tuneSettings?.interpolationTable;
     const processed = logFileState.loadRawLog(
-      points, 'recovered-log.csv', undefined, undefined,
+      points, 'recovered-log.csv', recoveredConfig, recoveredTable,
       new BinaryParser(asRun).readLambdaLimits());
     if (processed) {
       // Same stale-scope reason as the archived rebuild: `loadFromBuffer` above only scheduled
-      // the binary swap, so the egtTables memo still describes whatever was loaded before. The
-      // filter config and table are NOT reloaded here, so the live ones are the right ones.
+      // the binary swap, so the egtTables memo still describes whatever was loaded before — and
+      // `loadRawLog` only scheduled the config it adopted, so it is passed explicitly too.
       veCalc.runCalculation(map, processed,
-        veCalcOptionsFor(filterConfig, readEgtTables(asRun),
-          readRfPtKorrCurves(bins.baseBinaryBuffer), interpolationTable,
+        veCalcOptionsFor(recoveredConfig ?? filterConfig, readEgtTables(asRun),
+          readRfPtKorrCurves(bins.baseBinaryBuffer), recoveredTable ?? interpolationTable,
           ancestorHighDeltaGuard(sessionId, sessionDb.sessions)));
       comparison.applyDefaultsAfterCalculation();
       goToTab('new');
@@ -2682,40 +2657,76 @@ export default function Home() {
     cancelPendingFilterCompute();
   };
 
-  /** Starts a new session whose BASE is another session's TUNED (continue) or BASE (retry). */
-  const handleNewFrom = async (session: TuningSession, which: NewFromWhich) => {
-    const bins = await sessionDb.loadBinaries(session.id);
-    const buffer = which === 'tuned' ? bins?.tunedBinaryBuffer : bins?.baseBinaryBuffer;
-    if (!buffer) { alert(dialogText().noBinaryOfKind(which)); return; }
+  /**
+   * NEXT — the one way to continue a session: a new draft whose BASE is the parent's CAR IMAGE,
+   * carrying the parent's switches and filter settings. The inheritance itself is `nextStart`
+   * (lib/db/carImage.ts); this gathers what it inherits FROM.
+   *
+   * The parent's CURRENT state, from wherever it is current. Open: the workspace — its toggles as
+   * switched, its filters as tuned, and its in-memory car image, which after a PRACTICE write is the
+   * rehearsed bytes, so a rehearsal continues the way a real one would. Not open: what reopening it
+   * would show — its car image resolved from its records, its toggles seeded by the same rule, its
+   * stored filters (or the workspace's, when it never stored any; the child gets what it would have
+   * shown either way).
+   *
+   * `from` is passed by the post-write confirm, whose closure still holds the car image as it was
+   * BEFORE the write it has just made.
+   *
+   * MODE is not carried: the child starts on VE, as every branch always has. A child is usually the
+   * next stage of a campaign, and the stage after an EGT run is a VE run — `deriveRoute` reads the
+   * parent's process to say so.
+   */
+  const handleNext = async (parent: TuningSession, from?: { carImage: ArrayBuffer }) => {
+    const parentOpen = parent.id === activeSessionId && !!binaryBuffer;
+    let carImage: ArrayBuffer;
+    let toggles: { applyPatch: boolean; applyWotDisable: boolean; applyTankVentDisable: boolean; applyRfKorrHold: boolean };
+    let config = filterConfig;
+    let table = interpolationTable;
+    if (parentOpen) {
+      carImage = from?.carImage ?? binaryFileState.carImage ?? binaryBuffer!;
+      toggles = { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold };
+    } else {
+      const bins = await sessionDb.loadBinaries(parent.id);
+      if (!bins) { alert(dialogText().noStoredBinary); return; }
+      carImage = from?.carImage ?? (await resolveCarImage({
+        flashHistory: parent.flashHistory, base: bins.baseBinaryBuffer,
+        tuned: bins.tunedBinaryBuffer, stored: bins.carBinaryBuffer,
+      })).image;
+      toggles = sessionToggles(parent, carImage);
+      config = parent.tuneSettings?.filterConfig ?? filterConfig;
+      table = parent.tuneSettings?.interpolationTable ?? interpolationTable;
+    }
+    const start = nextStart(parent, { carImage, toggles, filterConfig: config, interpolationTable: table });
 
     const created = await handleNewSession();
     if (!created) return;
     resetDerived();
 
-    const fileName = which === 'tuned'
-      ? (session.binaryFileName ?? 'tuned.bin')
-      : (session.baseFileName ?? 'base.bin');
-    // No toggle overrides: detection off these bytes is correct for a fresh BASE.
-    const map = await binaryFileState.loadFromBuffer(buffer, fileName);
+    const fileName = `${fileSafe(parent.label)}_CAR.bin`;
+    // The inherited toggles as overrides, not detected: they are the parent's intent, and where they
+    // differ from these bytes the hub offers WRITE PATCH-ON / OFF in the child straight away — the
+    // write the parent was about to make, now made from the session that will drive on it.
+    const map = await binaryFileState.loadFromBuffer(start.base, fileName, {
+      applyPatch: start.settings.applyPatch,
+      applyWotDisable: start.settings.applyWotDisable,
+      applyTankVentDisable: start.settings.applyTankVentDisable,
+      applyRfKorrHold: start.settings.applyRfKorrHold,
+    });
     if (!map) return;
-
-    // Taking a session's TUNED makes this its child. Taking its BASE does not: those are the bytes
-    // that session itself started from, so this is a sibling retrying from the same point, and it
-    // inherits the same origin. Claiming descent from a tune we never used would put it a level too
-    // deep in the tree and imply it carries that tune's corrections.
-    const baseOrigin: BaseOrigin = which === 'tuned'
-      ? { kind: 'session', sessionId: session.id, which: 'tuned' }
-      : (session.baseOrigin ?? { kind: 'upload', fileName });
+    logFileState.adopt(start.settings.filterConfig, start.settings.interpolationTable);
 
     await sessionDb.setBase({
       sessionId: created.id,
-      baseOrigin,
-      baseBinaryBuffer: buffer.slice(0),   // copied, so deleting the parent can't strand this one
+      baseOrigin: start.origin,
+      baseBinaryBuffer: start.base.slice(0),   // its own copy, so deleting the parent can't strand this one
       baseFileName: fileName,
+      // Persisted now, so reopening the child before its first SAVE shows what it inherited. No
+      // TUNED and no sha256 go with them — the list offers nothing the child does not have.
+      tuneSettings: start.settings,
     });
-    // The same landing CONTINUE makes, and for the same reason: a branch is the start of a job,
-    // and the first thing it needs is the hub — connect, write the patch, start a run. The map is
-    // one tap away and is where you go once there is something to look at.
+    // The same landing CONTINUE makes, and for the same reason: a new session is the start of a
+    // job, and the first thing it needs is the hub — connect, write the patch, start a run. The map
+    // is one tap away and is where you go once there is something to look at.
     //
     // Below 900px the tab alone is not enough. The session list lives in the MAP pane, so setting
     // the tab and stopping left the driver looking at a fresh session's CURRENT MAP with no sign
@@ -2730,10 +2741,10 @@ export default function Home() {
   /** Saves the draft's tune. The only way to persist a session without a cable.
    *
    *  Requires a derived tune, and the button is hidden without one. saveTune means "this session
-   *  produced a TUNED": it sets sha256, which is what makes the TUNED download and "Use as base ->
-   *  TUNED" offer bytes. This used to fall back to `newMap || currentMap`, so saving a session that
+   *  produced a TUNED": it sets sha256, which is what makes the TUNED download offer bytes. The
+   *  bytes are what WRITE would send now — built from the car image, like every build. This used to fall back to `newMap || currentMap`, so saving a session that
    *  held nothing but a BASE recorded a tune it never derived — and the BASE, dressed as a TUNED,
-   *  then became downloadable and branchable. There is nothing else for Save to persist either: the
+   *  then became downloadable. There is nothing else for Save to persist either: the
    *  BASE is already stored by setBase the moment it is chosen.
    *
    *  A flash is the other way to get a TUNED, and it deliberately does NOT require one — writing an
@@ -2848,10 +2859,13 @@ export default function Home() {
     goToTab('startup');
   };
 
-  // --- DME connection flow (CONNECTION -> READ -> START TUNE -> STOP -> WRITE / Re-tune) ---
+  // --- DME connection flow (CONNECTION -> READ -> START TUNE -> STOP -> WRITE / NEXT) ---
 
   const handleDmeConnect = async () => {
-    await dmeLink.connect(binaryBuffer ?? undefined);
+    // PRACTICE serves the bytes it is given, and the bytes a car holds are the CAR IMAGE, not the
+    // BASE: after a write — real or rehearsed — the mock then answers the lineage check with what
+    // the session believes it put there, exactly as the ECU would.
+    await dmeLink.connect(binaryFileState.carImage ?? binaryBuffer ?? undefined);
   };
 
   const handleDmeRead = async () => {
@@ -2866,7 +2880,10 @@ export default function Home() {
     if (!target) return;
     resetDerived();
     const fileName = `DME_Read_${Date.now()}.bin`;
-    await binaryFileState.loadFromBuffer(buffer, fileName);
+    // A READ is the one moment the car is known rather than resolved: the bytes just read are the
+    // BASE and the car image both, and the record says so (carBinaryBuffer) so a draft that had
+    // written before this read does not resolve its car from that older flash.
+    await binaryFileState.loadFromBuffer(buffer, fileName, undefined, buffer);
     await sessionDb.setBase({
       sessionId: target.id,
       baseOrigin: {
@@ -2878,6 +2895,7 @@ export default function Home() {
       },
       baseBinaryBuffer: buffer.slice(0),
       baseFileName: fileName,
+      carBinaryBuffer: buffer.slice(0),
     });
     goToTab('current');
   };
@@ -3240,11 +3258,17 @@ export default function Home() {
   };
 
   const handleDmeWrite = async () => {
-    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, writeExtras);
+    // What the car holds before this write — the image the build starts from, the one the lineage
+    // check expects to find in the ECU, and the one the spot check diffs against.
+    const carBefore = binaryFileState.carImage ?? binaryFileState.binaryBuffer;
+    const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, writeExtras, carBefore);
     if (!patchedBuffer) return;
     // Pin the settings that produced these exact bytes. Reading the toggles again after the write
     // would record whatever they say ~4 minutes later, which is not necessarily what went to the ECU.
     const flashedSettings = buildSettings();
+    // The one question every part of this handler asks: did these bytes carry a derived table? It
+    // names the confirm, decides whether the session is archived and how the flash is filed.
+    const claimsTune = writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras);
 
     // Lineage, before anything else and before the erase.
     //
@@ -3257,8 +3281,13 @@ export default function Home() {
     //
     // Eight bytes, not a re-read: see lib/lineage/preflight.ts for why, and for what the CRC
     // comparison does and does not prove.
+    //
+    // Against the CAR IMAGE, not the BASE. The question is "is the ECU holding what this session
+    // believes it is", and after a patch-only write that is the bytes that write sent — comparing
+    // with the BASE asked a question whose answer was "no" by construction, and every reopen of a
+    // patched draft had to be told to "write anyway".
     const lineage = await checkLineage(
-      binaryFileState.binaryBuffer,
+      carBefore,
       () => dmeLink.readDataChecksums(),
     );
     if (lineage.blocking) {
@@ -3284,7 +3313,7 @@ export default function Home() {
         // The same question the filename and the flash record ask, asked once — a dialog that
         // said "no tune" over a derived table would be the label defect in the one place it is
         // most expensive.
-        tuned: writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras),
+        tuned: claimsTune,
         patchOn: applyPatch || applyWotDisable,
         drift,
         // Stated here rather than left to the selector alone. The mode changes what "verified"
@@ -3310,10 +3339,10 @@ export default function Home() {
     if (!confirmed) return;
 
     // The windows QUICK verify will read back — bytes that MUST differ once programmed, computed
-    // against the image the car held when it was read. Empty means this write changes nothing the
-    // spot check could see; FULL ignores it and reads everything.
-    const spotCheck = binaryFileState.binaryBuffer
-        ? diffWindows(new Uint8Array(binaryFileState.binaryBuffer), new Uint8Array(patchedBuffer))
+    // against the image the car holds now. Empty means this write changes nothing the spot check
+    // could see; FULL ignores it and reads everything.
+    const spotCheck = carBefore
+        ? diffWindows(new Uint8Array(carBefore), new Uint8Array(patchedBuffer))
         : [];
     const outcome = await dmeLink.write(patchedBuffer, verifyMode, spotCheck);
     // Before either branch, and on both of them. A write that failed part-way on an already-erased
@@ -3336,138 +3365,73 @@ export default function Home() {
       // One flash, so one hash and one timestamp, taken here and used by whichever branch runs below.
       const sha256 = await sha256Hex(patchedBuffer);   // the bytes actually sent, not the stored ones
       const flashedAt = Date.now();
+      // Read through the snapshot, not `dmeLink.mockMode`: this handler was built several renders
+      // ago and a write takes minutes. See DmeLinkSnapshot.
+      const practice = dmeLink.readLinkState().mockMode;
 
-      // The key-off power-cycle ends the DME's diagnostic session, so the serial connection goes
-      // stale either way. Both branches below say so and then disconnect; they differ in what the
-      // session becomes and where you go next. The key-cycle steps themselves live in dialog-text,
-      // quoted into both messages there, so the two cannot drift apart or out of language.
-      if (!newMap) {
-        // No derived map. Two different flashes arrive here and they are NOT the same event:
-        //
-        //   - arming a bare BASE for the log run (WRITE PATCH-ON), which carries no tune, and
-        //   - finalising a session (WRITE PATCH-OFF), where the tune is already inside the bytes.
-        //
-        // `finalizeArmedRef` separated them — and WRITE CAL is now a third arrival: no derived
-        // map, but calibration edits inside the bytes. Those bytes ARE a tune (buildFileName's
-        // own claimsTune says so), so the record and the reloaded filename both read the extras
-        // that built this exact buffer rather than the absence of a map.
-        //
-        // Deliberately NOT saveSessionTune and NOT archive either way:
-        //  - saveSessionTune would record a TUNED whose map is just the BASE's, which is precisely
-        //    the "BASE dressed as a TUNED" that handleSaveSession's doc describes removing.
-        //  - archive would end the session before it has tuned anything — !isArchived is what makes
-        //    the hub offer START TUNE, so archiving here would strand the whole point of the step.
-        //    (A finalize is already archived; archiving again would be a no-op.)
-        // Only the flash history grows, which is exactly what happened: bytes went to the ECU.
-        if (target) await sessionDb.recordFlash(target.id, {
-          at: flashedAt, sha256, settings: flashedSettings,
-          tuned: finalizeArmedRef.current || writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras),
-          verifyMode: verification.mode,
-          // Read through the snapshot, not `dmeLink.mockMode`: this handler was built several
-          // renders ago and a write takes minutes. See DmeLinkSnapshot.
-          practice: dmeLink.readLinkState().mockMode,
-        });
-
-        /**
-         * ...and KEEP the bytes, when they are a tune.
-         *
-         * The paragraph above explains why a bare PATCH-ON flash must not be
-         * saved as a TUNED: those bytes are the BASE, and storing them would be
-         * "a BASE dressed as a TUNED". Calibration edits are the other case and
-         * the same reasoning inverts — the bytes differ from the BASE by the
-         * values the operator typed, and they are now in the ECU.
-         *
-         * Without this the session recorded that a tune had gone out and kept
-         * nothing of it: the TUNED badge lit, the row offered no download, and
-         * FINALIZE answered "no tune to finalize" about a car that was running
-         * those very bytes.
-         *
-         * `veMapSnapshot` is left off rather than faked — nothing was derived,
-         * and an earlier save's map is preserved by the repository.
-         */
-        // DRAFT only, and with a BASE — the same guard the tuned branch below
-        // uses, and it is load-bearing: an archived session's TUNED is already
-        // stored and must not be rewritten, because its earlier flash record
-        // points at those exact bytes. FINALIZE re-flashes an archived session
-        // and would otherwise have overwritten the thing it was finalising.
-        if (target?.status === 'draft' && target.baseOrigin
-          && (writeExtras.calibrationEdits?.edits.length ?? 0) > 0 && patchedBuffer) {
+      /*
+       * Two kinds of write arrive here, and `claimsTune` is the whole difference between them.
+       *
+       *   A TUNE — a derived table went out (ALPHA-N, RF KORR, SHAPE, IDLE, LLS, calibration edits;
+       *   writeClaimsTune). The bytes are now in an ECU, so the session becomes a record of what was
+       *   flashed: its TUNED is stored (from a draft) and it is archived. Leaving it a draft let it
+       *   be tuned on, which drifts its TUNED away from the bytes its own flash history points at;
+       *   NEXT is the way to continue, on the car image.
+       *
+       *   CONFIGURATION — the logic patches only, either way: PATCH-ON before a log run, PATCH-OFF
+       *   to finalize. No TUNED is stored (it would be the BASE dressed as one) and a draft stays a
+       *   draft: archiving it would end the session before it has tuned anything. Only the history
+       *   and the car image move, which is exactly what happened.
+       *
+       * The record's `tuned` is the claim OR the session already being archived: an archived
+       * session's tune is in the car, and a patch-off write over it is that tune reaching the road
+       * — which is what the FINAL badge reads (isTuneOnTheRoad). This replaces the flag FINALIZE
+       * used to set by hand.
+       */
+      if (target) {
+        if (claimsTune && target.status === 'draft' && target.baseOrigin) {
           await sessionDb.saveSessionTune({
             sessionId: target.id,
             binaryFileName: binaryFileState.buildFileName(newMap, writeExtras),
             tunedBinaryBuffer: patchedBuffer,
+            // Left off rather than faked when nothing was derived — an earlier save's map is kept by
+            // the repository.
+            veMapSnapshot: newMap ?? undefined,
             tuneSettings: flashedSettings,
             log: logFileState.rawLogData,
+            // Dated at the flash: these are the settings it sent, not an intent newer than it.
+            settingsAt: flashedAt,
           });
         }
-
-        alert(dialogText().patchWriteDone(verification));
-        await dmeLink.disconnect();
-
-        // The ECU now holds these bytes, so the workspace has to as well — otherwise patchStatus
-        // still describes the pre-patch BASE, the drift never clears, and the hub would keep
-        // offering the same write forever. Toggles are passed through rather than re-detected so
-        // the reload cannot bounce them.
-        await binaryFileState.loadFromBuffer(
-          patchedBuffer,
-          // WITH the extras that built this buffer: calibration edits make it a Tune_, and a
-          // reloaded file whose name denies its own bytes is the lie buildFileName exists to end.
-          binaryFileState.buildFileName(null, writeExtras),
-          // All six, matching the bag handleOpenSession resolves. `applyTankVentDisable` was
-          // missing and got away with it because that patch leaves a trace uploadBinary re-detects
-          // — but it is the same omission class the clear() comment in useBinaryFile records as
-          // having already shipped once, and a bag that is right by accident is not right.
-          { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold,
-            writeWarmup, restoreWotFuel,
-            restoreVe, restoreWarmup, writeRfKorr,
-            writeVe: binaryFileState.writeVe },
-        );
-        goToTab('current');
-        return;
-      }
-
-      // saveSessionTune returns the updated record; `target` is a pre-save snapshot whose
-      // binaryFileName is still unset for a draft, and re-tuning below needs that name.
-      let flashed: TuningSession | null = target;
-      if (target) {
-        // A draft's tune isn't in the DB yet; an archived session's already is and must not be
-        // rewritten — only its flash history grows. That is also what makes FINALIZE safe: it
-        // re-flashes an archived session patch-off without touching the TUNED its earlier flash
-        // record already points at.
-        if (target.status === 'draft' && target.baseOrigin) {
-          flashed = await sessionDb.saveSessionTune({
-            sessionId: target.id,
-            binaryFileName: binaryFileState.buildFileName(newMap, writeExtras),
-            tunedBinaryBuffer: patchedBuffer,
-            veMapSnapshot: newMap,
-            tuneSettings: flashedSettings,
-            log: logFileState.rawLogData,
-          });
-        }
+        // The flash record and, for a real flash, the bytes as the car image — one transaction.
         await sessionDb.recordFlash(target.id, {
-          at: flashedAt, sha256, settings: flashedSettings, tuned: true,
-          verifyMode: verification.mode, practice: dmeLink.readLinkState().mockMode,
-        });
-        // These bytes are now in the ECU, so this session is a record of what was flashed, not a
-        // workspace: archive it. Leaving it a draft let you keep tuning it afterwards, which would
-        // drift its TUNED away from the bytes its own flash history points at — and the list would
-        // show DRAFT and "flashed" at the same time. Continue via "Use as base -> TUNED".
-        await sessionDb.archive(target.id);
+          at: flashedAt, sha256, settings: flashedSettings,
+          tuned: claimsTune || target.status === 'archived',
+          verifyMode: verification.mode, practice,
+        }, patchedBuffer);
+        if (claimsTune) await sessionDb.archive(target.id);
       }
+      // The ECU now holds these bytes, and so does the session's idea of it — PRACTICE included,
+      // so a rehearsal walks the same gate a real write does. The BASE stays the BASE and the
+      // toggles stay as they are: the build from the new car image with the same toggles IS the
+      // new car image, so the ring reads "nothing to write" by itself. (The workspace used to be
+      // reloaded with the sent bytes as its BASE, in memory only — every reopen then showed the
+      // patch missing again.)
+      binaryFileState.setCarImage(patchedBuffer);
 
       // Post-write instruction: the DME must be power-cycled to reinitialize with the new data.
-      alert(dialogText().writeDone(verification));
-
+      alert(claimsTune ? dialogText().writeDone(verification) : dialogText().patchWriteDone(verification));
       await dmeLink.disconnect();
 
-      // Re-tune: the next session starts from exactly the bytes now in the ECU. Asked here because
-      // this is the moment you decide — otherwise you'd have to find the row and open its New From
-      // menu. Same code path, so the BASE is still a copy and still provably the parent's TUNED.
-      if (flashed?.binaryFileName && confirm(dialogText().retuneConfirm)) {
-        await handleNewFrom(flashed, 'tuned');
+      // NEXT, offered at the moment it is decided: the next session starts from exactly the bytes
+      // now in the ECU. Asked only after a tune, which is what archived this session — a patch
+      // write leaves it the open draft, and its next step is the drive the patches were for.
+      // `carImage` explicitly: this closure still holds the car image from before the write.
+      if (claimsTune && target && confirm(dialogText().nextConfirm)) {
+        await handleNext({ ...target, status: 'archived' }, { carImage: patchedBuffer });
         return;
       }
-      goToTab('startup');
+      goToTab(claimsTune ? 'startup' : 'current');
     } else {
       // A failed write used to show nothing at all — no alert, no dialog — leaving only the small red
       // notice line and a WRITE button that still looked ready. That is the most consequential moment
@@ -3663,51 +3627,62 @@ export default function Home() {
     goToTab('current');
   };
 
-  /** What the ring offers while the link is connected and idle — derived from the workspace on every
-   *  render, never stored.
+  /** Do the bytes IN THE CAR carry the patches a run needs? `patchStatus` is read off the CAR IMAGE
+   *  (useBinaryFile), so these answer for the ECU rather than for the BASE the derivations read —
+   *  which is the question the START TUNE preflight asks before a drive.
    *
-   *  A tune to flash outranks everything: that's what lets STOP drop the connection for the key cycle
-   *  and still come back to WRITE. Then a BASE with no tune yet means record one. Nothing loaded means
-   *  fetch a BASE. Because it's read off the data, it cannot disagree with the data — the whole class
-   *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
-   *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
-   */
-  /** Do the loaded bytes already carry the patches the toggles are asking for? Derived, like
-   *  everything else here, rather than tracked: patchStatus is read out of the binary itself, so this
-   *  compares "what is in the ECU" against "what you have armed" without storing either.
-   *
-   *  applyPatch is seeded on load from mapOff && tempLimit (uploadBinary), so the comparison has to
-   *  use the same pair — testing mapOff alone would call a half-patched BIN patched. */
+   *  PATCH is two bytes agreeing (testing mapOff alone would call a half-patched BIN patched), and
+   *  TANK VENT is two bytes since 2026-10-18 — the valve gain and K_TE_TMOT, which stops the purge
+   *  adaptation the shut valve does not (TANK_VENT_TMOT) — so "shut" means both. */
   const bytesPatched = !!patchStatus && patchStatus.mapOff && patchStatus.tempLimit;
-  const bytesWotDisabled = !!patchStatus && patchStatus.wotDisabled;
-  /** TANK VENT is two bytes since 2026-10-18 — the valve gain and K_TE_TMOT, which stops the purge
-   *  adaptation the shut valve does not (TANK_VENT_TMOT) — and "in the ECU" means BOTH. Its drift is
-   *  `tankVentDrift`: in only whole, out only clean, so the pre-2026-10-18 car (valve shut, K_TE_TMOT
-   *  stock, toggle seeded ON from the valve byte) is offered WRITE PATCH-ON instead of called done. */
   const bytesTankVentShut = !!patchStatus && patchStatus.tankVentDisabled && patchStatus.tankVentLearnStopped;
-  const bytesRfKorrHeld = !!patchStatus && patchStatus.rfKorrHeld;
-  const bytesRfGateDropped = !!patchStatus && patchStatus.rfKorrGateDropped;
-  // All of them, because all of them are things that have to come back OFF before the car is handed
-  // back to the road. TANK VENT was missing here while being listed in the write confirm and the
-  // flash record, so a tune logged with the purge valve shut had no route to a patch-off write at
-  // all: no drift, no WRITE PATCH-OFF, nothing to finalize with. K HOLD is the same kind of switch.
-  // A BIN carrying the retired RF GATE drop is drift whatever the toggles say: no write puts the
-  // drop back, so the next one changes those six words either way.
-  const patchDrift = !!patchStatus && (bytesPatched !== applyPatch
-    || bytesWotDisabled !== applyWotDisable
-    || tankVentDrift({ valveShut: patchStatus.tankVentDisabled, learnStopped: patchStatus.tankVentLearnStopped },
-      applyTankVentDisable)
-    || bytesRfKorrHeld !== applyRfKorrHold
-    || bytesRfGateDropped);
 
-  /** A draft is a workspace, so drift in either direction there is you arming something. An archived
-   *  session is a record, and the only legitimate reason to send it to the ECU again is finalising —
-   *  taking the patches off. Without this, reopening an archived session whose log could not be
-   *  replayed would raise drift by accident (its stored settings say PATCH ON, its BASE bytes are
-   *  unpatched) and the hub would offer a patch write in place of READ, which is the one thing that
-   *  state actually needs. */
-  const patchWriteAllowed = !isArchived
-    || (!applyPatch && !applyWotDisable && !applyTankVentDisable && !applyRfKorrHold);
+  /**
+   * THE WRITE GATE — the BIN the next WRITE would send, against the BIN in the car, byte for byte.
+   *
+   *     pending build = buildImage(car image + every armed row + checksum)
+   *     WRITE enabled  ⇔  pending build ≠ car image
+   *
+   * One comparison where there were three rules. The ring used to be live when some toggle was ON
+   * (`anythingArmed`), so switching a patch OFF never counted and WRITE PATCH-OFF was disabled even
+   * on FINALIZE; "drift" compared the toggles with whatever image the workspace had loaded, never
+   * with the car, so a re-write of the same toggles after a patch set gained a byte was unreachable;
+   * and an archived session could only write with every patch off. Bytes answer all three at once:
+   * an OFF over a car that holds the patch changes bytes, a new byte in a patch set changes bytes
+   * (the pre-2026-10-18 TANK VENT car is offered WRITE PATCH-ON because K_TE_TMOT differs), and a
+   * build identical to the car is nothing to write whatever the toggles say.
+   *
+   * It rests on one property, pinned by `verify:car-image`: building an image with the toggles its
+   * own bytes report, and nothing else armed, returns that image byte for byte — or the ring would
+   * offer writes that change nothing.
+   *
+   * Only while the ring can be pressed — connected and idle, with a session — because it is a 64 KB
+   * build and a checksum: cheap once per toggle, pointless on every flush of a live run. A build that
+   * THROWS is reported as a change, so WRITE stays pressable and the same error surfaces on the press
+   * that would have surfaced before, instead of taking the page down during render.
+   */
+  const carBytes = binaryFileState.carImage ?? binaryBuffer;
+  const gateLive = dmeLink.state === 'connected' && !!currentSession;
+  const pendingBuild = useMemo(() => {
+    if (!gateLive || !binaryBuffer || !carBytes) return null;
+    try {
+      return buildImage({
+        source: carBytes, base: binaryBuffer, newMap,
+        toggles: {
+          applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold,
+          writeWarmup, restoreWotFuel, restoreVe, restoreWarmup,
+          writeVe: binaryFileState.writeVe,
+        },
+        extras: writeExtras,
+      });
+    } catch (e) {
+      console.error('The pending build failed', e);
+      return 'failed' as const;
+    }
+  }, [gateLive, binaryBuffer, carBytes, newMap, applyPatch, applyWotDisable, applyTankVentDisable,
+    applyRfKorrHold, writeWarmup, restoreWotFuel, restoreVe, restoreWarmup, binaryFileState.writeVe,
+    writeExtras]);
+  const writeChangesCar = pendingBuild === 'failed' || (!!pendingBuild && !sameBytes(pendingBuild, carBytes));
 
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
    *  render, never stored.
@@ -3718,18 +3693,20 @@ export default function Home() {
    *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
    *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
    *
-   *  'writePatch' sits between them and covers the two steps that have no derived map but still have
-   *  bytes worth sending: arming the patch before the first log run, and taking a finished tune back
-   *  off patch afterwards. It outranks 'tune' on purpose — with the patch not yet in the ECU, START
-   *  TUNE would record STFT through the DME's own map correction, which is the wrong next step.
-   *  Unlike 'tune' it is NOT gated on !isArchived: finalising is exactly an archived session's job. */
+   *  'writePatch' sits between them and covers the steps that have no derived map but still have
+   *  bytes worth sending: arming the patch before the first log run, taking a finished tune back off
+   *  patch afterwards, and re-writing a patch set the car holds only part of. It outranks 'tune' on
+   *  purpose — with the patch not yet in the ECU, START TUNE would record STFT through the DME's own
+   *  map correction, which is the wrong next step. Its condition is the write gate itself
+   *  (`writeChangesCar`), and unlike 'tune' it is NOT gated on !isArchived: finalising is exactly an
+   *  archived session's job, and any patch change on a written session is a change to its car. */
   const idleAction: 'read' | 'tune' | 'write' | 'writePatch' =
     /**
      * IDLE first, because almost none of the chain below is about it.
      *
      * An idle run derives no map, so `newMap` is never set; its own write is SEALED, so there is no
-     * idle artifact to offer; and its profile `requires` nothing, so `patchDrift` must NOT outrank
-     * the run the way it outranks START TUNE. That last one is the trap: the VE ordering exists
+     * idle artifact to offer; and its profile `requires` nothing, so a pending patch write
+     * (`writeChangesCar`) must NOT outrank the run the way it outranks START TUNE. That last one is the trap: the VE ordering exists
      * because logging STFT through the DME's own map correction is the wrong next step, and the
      * patches change FUELLING while this measures AIR. Left in the VE chain, an unpatched car would
      * have offered WRITE PATCH where the operator was standing at the bonnet waiting to record.
@@ -3761,9 +3738,9 @@ export default function Home() {
        * the whole chain falls through to `tune`. Adding a second mode whose artifact is not a VE
        * map reproduced the identical defect the IDLE branch was written to fix.
        *
-       * The other two reasons carry over unchanged. Its profile `requires` nothing, so `patchDrift`
-       * must not outrank the run and send the operator to WRITE PATCH while they are waiting to
-       * record. And the CALIBRATION edits survive, because that tab is in this mode's set too.
+       * The other two reasons carry over unchanged. Its profile `requires` nothing, so a pending
+       * patch write must not outrank the run and send the operator to WRITE PATCH while they are
+       * waiting to record. And the CALIBRATION edits survive, because that tab is in this mode's set too.
        *
        * Gated on the proposal EXISTING, not on it being armed — same as IDLE. An unarmed row
        * leaves the ring disabled with the manifest's reason under it, which is the house rule:
@@ -3786,7 +3763,7 @@ export default function Home() {
         // branch above: bytes worth sending, no VE derivation, so without this the ring would
         // offer START TUNE over an armed edit and the only way to flash it would not exist.
         : (calEdits.armedEdits.length > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
-          : (patchDrift && patchWriteAllowed && currentMap && currentSession) ? 'writePatch'
+          : (writeChangesCar && currentMap && currentSession) ? 'writePatch'
             : (currentMap && currentSession && !isArchived) ? 'tune'
               : 'read';
 
@@ -4393,10 +4370,6 @@ export default function Home() {
     // left the row reading "no idle run yet" until something else re-rendered the memo.
     idleTunedCells, idleHasRows, binaryFileState.setTunedIdleTv, idleProposal, logProcess]);
 
-  /** Whether the next write would carry anything at all. The ring's WRITE gates on it: an empty
-   *  write is not an action, and offering it is how a flash comes back byte-identical. */
-  const writeCarriesSomething = anythingArmed(manifestGroups);
-
   /** How the three groups are hung around the dial. PATCH left, WRITE right, level with each other
    *  so the ring is flanked by the two decisions taken on every campaign; RESTORE sits under WRITE
    *  because it is used a handful of times a year, not every flash. */
@@ -4438,18 +4411,19 @@ export default function Home() {
       case 'resetting': return { label: 'RESET', Icon: Loader2, onClick: () => { }, disabled: true, spin: true };
       case 'connected':
         switch (idleAction) {
-          // Gated on the manifest, not on having a derivation. Every table is behind a toggle
-          // now, so a map can exist with nothing armed — and offering WRITE there produces a flash
-          // that comes back byte-identical to the BASE, which reads as a failed write rather than
-          // as an empty one. The reason is rendered under the ring, since a disabled ring that
-          // cannot say why is the control that gets reported as broken.
+          // Gated on the BYTES, not on the manifest and not on having a derivation: live exactly
+          // when the BIN this would send differs from the BIN in the car (`writeChangesCar`). A
+          // write that changes nothing comes back byte-identical and reads as a failed write; a
+          // write that only turns something OFF changes bytes and is offered. The reason is
+          // rendered under the ring when it is dead, since a disabled ring that cannot say why is
+          // the control that gets reported as broken.
           case 'write': return {
             label: 'WRITE', Icon: Zap, onClick: handleDmeWrite,
-            disabled: !writeCarriesSomething, spin: false,
+            disabled: !writeChangesCar, spin: false,
           };
           case 'writePatch': return {
             label: writePatchLabel, Icon: Zap, onClick: handleDmeWrite,
-            disabled: !writeCarriesSomething, spin: false,
+            disabled: !writeChangesCar, spin: false,
           };
           // Tuning is a draft-only act: an archived session must never re-derive its own map.
           // Labelled for where it goes. handleStartTune refuses both stationary runs and routes to
@@ -4735,8 +4709,8 @@ export default function Home() {
                     TWO lines below 900px, one above it, and both are reserved rather than grown.
                     The intent here has always been "one line, truncated" — but the paragraph inside
                     had picked up `whitespace-pre-line max-h-[56px] overflow-y-auto`, which wraps.
-                    At 375 the message this line exists to carry — "Nothing armed — open WRITE on
-                    the hub and switch on what this flash should carry." — is 28px of text in a 14px
+                    At 375 the message this line existed to carry then — "Nothing armed — open WRITE
+                    on the hub and switch on what this flash should carry." — is 28px of text in a 14px
                     box whose child scrolls, so on connect the hub grew a 14px sliver you could drag
                     up and down (operator, 2026-08-25). One line is not a width this message fits in
                     on a phone, and `title` is a hover tooltip on a device with no hover, so
@@ -4772,18 +4746,18 @@ export default function Home() {
                     // not store them is the most expensive thing this line can say, and it used to be
                     // displaced by a caution about the cable. A refused calibration comes next: it is
                     // why the IDLE tab is dark, and without it that reads as a broken build.
-                    // Last, below the faults: a ring that will not move because nothing is armed
-                    // is not an error, it is an instruction. Without it the disabled WRITE is the
-                    // control that gets reported as broken.
-                    const nothingArmed = dmeLink.state === 'connected'
+                    // Last, below the faults: a ring that will not move because the car already holds
+                    // these bytes is not an error, it is an instruction — it says what to change.
+                    // Without it the disabled WRITE is the control that gets reported as broken.
+                    const carHoldsThis = dmeLink.state === 'connected'
                       && (idleAction === 'write' || idleAction === 'writePatch')
-                      && !writeCarriesSomething
-                      ? 'Nothing armed — open WRITE on the hub and switch on what this flash should carry.'
+                      && !writeChangesCar
+                      ? manifestText.carHoldsThis
                       : null;
                     /**
                      * The ring has gone stale, which is what a VE write does to it.
                      *
-                     * Below the faults and above "nothing armed", because it is neither: it is a
+                     * Below the faults and above "car holds this", because it is neither: it is a
                      * derivation that is no longer true of these bytes, and the operator's next
                      * move. Shown only in LLS mode — the three tables it rests on are not in the
                      * bundled catalog, so asking anywhere else would force a 6 MB fetch on a
@@ -4807,7 +4781,7 @@ export default function Home() {
                         ? `IDLE UNAVAILABLE: ${idleTablesRefusal}` : null)
                       ?? warning
                       ?? ringStale
-                      ?? nothingArmed;
+                      ?? carHoldsThis;
                     if (!notice) return null;
                     // Two levels now, not three. The third was the near-white `info` tone, which
                     // existed only for the measurement line dropped above — with nothing quiet left
@@ -5989,8 +5963,8 @@ export default function Home() {
                      *
                      * Stored through saveResearch rather than saveSessionTune because there are no
                      * TUNED bytes: this run proposes calibration changes and writes nothing. No
-                     * sha256 means the list never offers FINAL, Finalize or From TUNED for it, which
-                     * is right and needs no special case anywhere.
+                     * sha256 means the list never offers a TUNED download for it, which is right and
+                     * needs no special case anywhere.
                      *
                      * Inertia samples are not LogDataPoints and deliberately cannot be — see
                      * InertiaSample. They are mapped onto the log record's shape here, at the one
@@ -6100,7 +6074,7 @@ export default function Home() {
                         />
                       </div>
                     ) : undefined}
-                    onNewFrom={handleNewFrom}
+                    onNext={(s) => void handleNext(s)}
                     onRename={sessionDb.rename}
                     onDelete={sessionDb.remove}
                     onUploadBase={handleUploadBase}

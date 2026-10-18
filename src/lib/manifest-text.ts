@@ -103,6 +103,10 @@ interface ManifestCopy {
     /** CALIBRATION tab edits riding the WRITE group. `owner` is the armed writer's row label. */
     calLockedByWriter: (owner: string) => string;
     calEditNote: string;
+
+    /** Under a dead WRITE ring: the build equals the car image byte for byte, so there is nothing
+     *  to send. Names what to change — one line on a desk, two at 375 (the notice slot's budget). */
+    carHoldsThis: string;
 }
 
 const EN: ManifestCopy = {
@@ -234,6 +238,8 @@ const EN: ManifestCopy = {
         + 'Disarm it, or revert this edit — writing both into one flash is not a request with an answer.',
     calEditNote: 'A CALIBRATION tab edit. ON: the next download / flash carries these cells. '
         + 'OFF: the edit is kept on screen and nothing is written. Revert it from the tab itself.',
+
+    carHoldsThis: 'The car holds exactly these bytes — change a WRITE or PATCH row to write.',
 };
 
 const JA: ManifestCopy = {
@@ -369,6 +375,8 @@ const JA: ManifestCopy = {
         + '要求には答えがありません。',
     calEditNote: 'CALIBRATION タブの編集です。ON: 次のダウンロード / フラッシュにこのセルが'
         + '入ります。OFF: 編集は画面に残り、何も書かれません。取り消しはタブ側の REVERT から。',
+
+    carHoldsThis: '車にはこのバイトがそのまま入っています — 書くなら WRITE か PATCH の行を変えてください。',
 };
 
 export const MANIFEST_TEXT: Record<DialogLang, ManifestCopy> = { ja: JA, en: EN };

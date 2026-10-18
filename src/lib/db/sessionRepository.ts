@@ -89,6 +89,19 @@ export interface SetBaseInput {
     baseOrigin: BaseOrigin;
     baseBinaryBuffer: ArrayBuffer;
     baseFileName: string;
+    /**
+     * The bytes the car holds, when the caller KNOWS them — a READ, where they are the bytes just
+     * read. Omitted, the record carries none, and the car image resolves from the flash history or
+     * falls back to this BASE (lib/db/carImage.ts). An upload knows nothing about the car, so it
+     * passes nothing; a NEXT child has no flash yet, so its BASE is its car without being told.
+     */
+    carBinaryBuffer?: ArrayBuffer | null;
+    /**
+     * Settings to persist with the BASE — NEXT's inheritance: the parent's switches and filters, so
+     * reopening the child before its first SAVE shows them. Stamped `settingsAt` now. Omitted, the
+     * session's existing settings are left exactly as they were.
+     */
+    tuneSettings?: TuneSettings;
 }
 
 /** Attaches the BASE bytes + their provenance to a draft. The bytes are copied in full even when
@@ -109,13 +122,17 @@ export async function setSessionBase(input: SetBaseInput): Promise<TuningSession
             baseSha256,
             baseFileName: input.baseFileName,
             baseSize: input.baseBinaryBuffer.byteLength,
+            ...(input.tuneSettings ? { tuneSettings: input.tuneSettings, settingsAt: Date.now() } : {}),
         };
         store.put(updated);
 
+        // A new BASE starts a new car image: the one stored for the old BASE described bytes this
+        // session no longer starts from. Only a caller that knows the car (a READ) names one.
         const bins: SessionBinariesRecord = {
             sessionId: input.sessionId,
             baseBinaryBuffer: input.baseBinaryBuffer,
             tunedBinaryBuffer: null,
+            carBinaryBuffer: input.carBinaryBuffer ?? null,
         };
         tx.objectStore(SESSION_BINARIES_STORE).put(bins);
         await txDone(tx);
@@ -139,6 +156,9 @@ export interface SaveTuneInput {
     veMapSnapshot?: VEMap;
     tuneSettings: TuneSettings;
     log: LogDataPoint[] | null;
+    /** When these settings were taken — `TuningSession.settingsAt`. Defaults to now; a write passes
+     *  the flash's own timestamp, because the settings it saves are the ones it sent. */
+    settingsAt?: number;
 }
 
 /** Records the tuned output of a draft: the bytes, the map, and the settings that produced them.
@@ -152,9 +172,9 @@ export interface SaveTuneInput {
  *  RAW FILTER and every other setting the log would be re-derived through — the session was read-only
  *  before anyone had looked at the map it produced.
  *
- *  A flash is what ends a session, and only a flash: see handleDmeWrite, which calls this and then
- *  archive(). At that point the bytes are in an ECU, re-deriving would drift the record away from
- *  them, and "Use as base -> TUNED" is the way to continue. */
+ *  A flash that carries a tune is what ends a session, and only that: see handleDmeWrite, which
+ *  calls this and then archive(). At that point the bytes are in an ECU, re-deriving would drift the
+ *  record away from them, and NEXT — a new session on the car image — is the way to continue. */
 /**
  * What a save should STORE, given what it was handed and what is already there.
  *
@@ -206,6 +226,7 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             // snapshot `useComparison` reads for its `db:` diff.
             veMapSnapshot: input.veMapSnapshot ?? existing.veMapSnapshot,
             tuneSettings: input.tuneSettings,
+            settingsAt: input.settingsAt ?? Date.now(),
             hasLog,
             logPointCount: input.log?.length ?? 0,
             // Derived here rather than passed in, alongside the two fields above that already work
@@ -241,14 +262,14 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
  *
  * A separate entry point from `saveTune`, not a flag on it, because the two record different kinds
  * of thing. `saveTune` exists to say "this session produced TUNED bytes" — it sets `sha256`, which
- * is what makes the download and the "Use as base" branch offer anything. An inertia run produces
+ * is what makes the TUNED download offer anything. An inertia run produces
  * no bytes at all: it proposes calibration changes for a person to read and decide on, and writes
  * nothing. Giving it a sha256 would put a downloadable TUNED on a session that never made one,
  * which is exactly the "BASE dressed as a TUNED" this repository already refuses elsewhere.
  *
  * So the record is BASE + log + the process label, and nothing more. The session list needs no
- * special case: `canFromTuned` is `!!session.sha256`, so an inertia session simply never offers
- * FINAL, Finalize or From TUNED. It stays a draft for the same reason — nothing was flashed.
+ * special case: the TUNED download is keyed on `sha256`, so an inertia session simply never offers
+ * one. It stays a draft for the same reason — nothing was flashed.
  *
  * The log is stored in the same store as every other, keyed the same way. It is EgasMeasurement
  * rather than LogDataPoint, which is why the caller serialises it: the two sample types are
@@ -327,10 +348,36 @@ export function archiveSession(id: string): Promise<TuningSession> {
     return patchSession(id, s => ({ ...s, status: 'archived' }));
 }
 
-/** Appends what was actually flashed. Options can differ from tuneSettings (PATCH on for logging,
- *  off for the final flash), so the record stores the bytes' real hash rather than assuming. */
-export function appendFlashRecord(id: string, record: FlashRecord): Promise<TuningSession> {
-    return patchSession(id, s => ({ ...s, flashHistory: [...s.flashHistory, record] }));
+/**
+ * Appends what was actually flashed — and, for a real flash, keeps the bytes as the CAR IMAGE.
+ *
+ * Options can differ from tuneSettings (PATCH on for logging, off for the final flash), so the
+ * record stores the bytes' real hash rather than assuming.
+ *
+ * One transaction for both, because they are one fact: a record whose car image did not land would
+ * be resolved from its hash instead, and a car image without its record would outlive the history
+ * that dates it. `carImage` is ignored for a PRACTICE record — the mock moved no bytes in any car —
+ * and for a session with no binaries record, which has no BASE to belong to.
+ */
+export async function appendFlashRecord(
+    id: string, record: FlashRecord, carImage?: ArrayBuffer | null,
+): Promise<TuningSession> {
+    const keep = carImage && !record.practice ? carImage.slice(0) : null;
+    return withDb(async db => {
+        const tx = db.transaction(keep ? [SESSIONS_STORE, SESSION_BINARIES_STORE] : [SESSIONS_STORE], 'readwrite');
+        const store = tx.objectStore(SESSIONS_STORE);
+        const existing = await promisify<TuningSession | undefined>(store.get(id));
+        if (!existing) throw new Error(`Session ${id} not found`);
+        const updated: TuningSession = { ...existing, flashHistory: [...existing.flashHistory, record] };
+        store.put(updated);
+        if (keep) {
+            const binStore = tx.objectStore(SESSION_BINARIES_STORE);
+            const bins = await promisify<SessionBinariesRecord | undefined>(binStore.get(id));
+            if (bins) binStore.put({ ...bins, carBinaryBuffer: keep });
+        }
+        await txDone(tx);
+        return updated;
+    });
 }
 
 /** Appends an adaptation reset. Unlike flashHistory this array is optional (see the schema), so it

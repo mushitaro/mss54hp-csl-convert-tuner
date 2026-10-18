@@ -175,7 +175,7 @@ export function describeSave({ phase }: SaveStatus): SaveLook {
             return {
                 label: 'Archived',
                 title: 'This session has been flashed and archived, so its stored tune is the one that went to '
-                    + 'the ECU and must not change. Continue from it with "Use as base → TUNED".',
+                    + 'the ECU and must not change. Continue from it with Actions → NEXT in the session list.',
                 disabled: true, tone: 'done',
             };
         case 'logging':

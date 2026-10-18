@@ -27,12 +27,13 @@
  *     page.tsx veCalcOptionsFor         the options object                            (page.tsx ~655)
  *     useVeCalculation.runCalculation   K HOLD check → annotate → tune rf_korr → calculateNewVEMap
  *                                                                                     (useVeCalculation.ts ~158)
- *     useBinaryFile.buildPatchedBuffer  VE grid, logic patches both ways, checksum    (useBinaryFile.ts ~324)
  *
  * So a change INSIDE any of those functions moves the hash here, and a change to the composition
- * in the hooks does not — until that composition moves into one pure function the app and a
- * headless caller both run, and this imports it. Re-measure the golden from the app whenever
- * a hash change here is intended (see GOLDEN).
+ * in the hooks does not. The LAST step is no longer re-composed: the build moved into one pure
+ * function, lib/binary-engine/buildImage.ts, which `useBinaryFile.buildPatchedBuffer` (DOWNLOAD
+ * TUNED, SAVE, WRITE) and the hub's write gate all run — and this imports it, so the golden now
+ * pins that function's composition directly. Re-measure the golden from the app whenever a hash
+ * change here is intended (see GOLDEN).
  *
  * ## Inputs
  *
@@ -51,15 +52,15 @@ import { VECalculator } from '../src/lib/ve-calculator/calculator.ts';
 import { tuneRfKorrTable } from '../src/lib/ve-calculator/rfKorrTuner.ts';
 import { readEgtTables } from '../src/lib/ve-calculator/egtTables.ts';
 import { readRfPtKorrCurves } from '../src/lib/ve-calculator/chargeTemp.ts';
-import { writtenVeGrid } from '../src/lib/ve-calculator/composeVeGrid.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
-import { BinaryPatcher, readLogicPatches, bytesAsRun } from '../src/lib/binary-engine/patcher.ts';
+import { readLogicPatches, bytesAsRun } from '../src/lib/binary-engine/patcher.ts';
+import { buildImage } from '../src/lib/binary-engine/buildImage.ts';
 import { analyzeDataChecksum } from '../src/lib/checksum/dmeDataChecksum.ts';
 import { APP_CONFIG, MAP_DIMENSIONS } from '../src/config/constants.ts';
 
 const M = {
     parseLogFile, processLogData, DEFAULT_FILTER_CONFIG, VECalculator, tuneRfKorrTable, readEgtTables,
-    readRfPtKorrCurves, writtenVeGrid, BinaryParser, BinaryPatcher, readLogicPatches, bytesAsRun,
+    readRfPtKorrCurves, BinaryParser, readLogicPatches, bytesAsRun, buildImage,
     analyzeDataChecksum, APP_CONFIG, MAP_DIMENSIONS,
 };
 
@@ -160,16 +161,18 @@ const result = calc.calculateNewVEMap(map, annotated,
 const newMap = result.newMap;
 
 // --- DOWNLOAD TUNED: buildPatchedBuffer(newMap, no overrides, extras all null) -----------------
-const patcher = new M.BinaryPatcher(base);
-const written = M.writtenVeGrid(newMap?.data ?? null, null);
-if (written) patcher.setVETableData(written);
-if (toggles.applyPatch) patcher.disableMapCorrection(); else patcher.enableMapCorrection();
-patcher.setWOTThreshold(toggles.applyWotDisable);
-patcher.setTankVentDisable(toggles.applyTankVentDisable);
-// K HOLD or stock — never the retired drop, which no build writes (buildPatchedBuffer ~431).
-patcher.setRfKorrGateFloor(toggles.applyRfKorrHold ? 'hold' : 'stock');
-patcher.applyChecksumCorrection();
-const tuned = new Uint8Array(patcher.getBuffer());
+// The app's own build, called as the hook calls it. A fresh session has never written, so its car
+// image is its BASE: the build starts from the same image it falls back to.
+const tuned = new Uint8Array(M.buildImage({
+    source: base, base, newMap,
+    toggles: {
+        applyPatch: toggles.applyPatch, applyWotDisable: toggles.applyWotDisable,
+        applyTankVentDisable: toggles.applyTankVentDisable, applyRfKorrHold: !!toggles.applyRfKorrHold,
+        // A first load's defaults: every derived row off, ALPHA-N armed (useBinaryFile.uploadBinary).
+        writeWarmup: false, restoreWotFuel: false, restoreVe: false, restoreWarmup: false, writeVe: true,
+    },
+    extras: {},
+}));
 const hash = crypto.createHash('sha256').update(tuned).digest('hex');
 
 // --- what the run did ----------------------------------------------------------------------------

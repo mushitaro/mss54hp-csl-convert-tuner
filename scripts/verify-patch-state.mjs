@@ -12,8 +12,10 @@
  *
  *   1. `bytesAsRun` reconstructs the running calibration from BASE + armed toggles, and with nothing
  *      armed returns the BASE untouched — no reference-car constants leaked into a stock image.
- *   2. `armedPatchesFromHistory` can answer "what is armed" for the sessions `tuneSettings` cannot
- *      describe: a BASE flashed patch-on before the first log, and a research run.
+ *   2. `armedPatchesFromHistory` can answer "what did the drive run" for the sessions `tuneSettings`
+ *      cannot describe: a BASE flashed patch-on before the first log, and a research run. (It no
+ *      longer seeds a reopened workspace's TOGGLES — those are read off the car image's bytes, see
+ *      verify:car-image — but the log replay and the list's PATCH word still ask it.)
  *
  * And one the K HOLD patch added: the rf_korr floor `readEgtTables` reads off the as-run bytes is
  * the held one when K HOLD was armed, so a held drive is not replayed through BMW's gate.

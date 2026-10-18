@@ -2,10 +2,14 @@
  * What the next write carries — the shapes and the two derivations, without any JSX.
  *
  * Separated from the component so it can be tested directly: `armedLabels` is what the hub row
- * SAYS, and `anythingArmed` is what the central ring's WRITE is GATED on, and those two must never
- * come apart. If the summary can list a table the gate does not count — or the reverse — the hub
+ * SAYS, and `anythingArmed` is the same question asked of every group at once, and those two must
+ * never come apart. If the summary can list a table the count does not — or the reverse — the hub
  * is telling the driver one thing and doing another, which is the exact failure the manifest was
  * built to end.
+ *
+ * Neither is the WRITE gate any more. The ring is live when the BIN the write would send differs
+ * from the BIN in the car, byte for byte (page.tsx `writeChangesCar`, lib/db/carImage.ts) — a
+ * question about bytes, which "is any row ON" could never answer for a row switched OFF.
  */
 
 /** A row inside one group's menu. */
@@ -62,8 +66,8 @@ export function armedLabels(group: ManifestGroup): string[] {
         .map(r => r.label);
 }
 
-/** Whether ANY group contributes something. The central ring's WRITE gates on this — an empty
- *  write produces a flash that reads back byte-identical to the BASE, which looks like a failure. */
+/** Whether ANY group contributes something. It used to gate the central ring's WRITE; the ring now
+ *  asks the bytes instead (see the header), and this stays the summary's own consistency check. */
 export function anythingArmed(groups: ManifestGroup[]): boolean {
     return groups.some(g => armedLabels(g).length > 0);
 }

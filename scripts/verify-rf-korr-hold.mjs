@@ -11,10 +11,12 @@
  * log carries no rf_korr step for the lambda loop's fixed-slope ramp to turn into a fake VE error.
  *
  * The expensive failure is not the hold going in, it is the hold STAYING in. A held image comes
- * back into the app as the post-write reload, as the stored image FINALIZE builds from, and as the
- * BASE of a new session parented on a TUNED built held. In each, "the six as loaded" are 2000, and
- * a restore that wrote those back would ship the hold — no cold-exhaust enrichment, more part-load
- * advance — in the BIN meant for the road. So restore-from-held is pinned here three ways.
+ * back into the app as the CAR IMAGE a held write leaves — every later build starts from it,
+ * FINALIZE's included — and as the BASE of a NEXT session started from that car. In each, "the six
+ * as loaded" are 2000, and a restore that wrote those back would ship the hold — no cold-exhaust
+ * enrichment, more part-load advance — in the BIN meant for the road. So restore-from-held is
+ * pinned here three ways. (That a build from the car image restores the BASE's OWN six when the
+ * BASE has them is verify:car-image.)
  *
  * Run against the community partial in public/mock, whose floor is BMW's 700/550/650/650/650/800:
  * the plausibility check and the latch read real calibration, not a fabricated one.
@@ -95,16 +97,17 @@ console.log('\n[restore takes it back out — the release BIN must not carry the
     p.setRfKorrGateFloor('hold');
     p.setRfKorrGateFloor('stock');
     check('hold then stock in one build is byte-identical', diff(p.getBuffer(), BASE).length === 0);
-    // The three ordinary ways a held image comes back in, all of which build from it with the
-    // hold off: the reload after a write, FINALIZE, and a session parented on a held TUNED.
+    // The ordinary ways a held image comes back in, all of which build from it with the hold off:
+    // the car image after a held write (FINALIZE builds from it), and a NEXT child of that car.
     check('bytesAsRun(held image, nothing armed) reads the stock floor',
         eq(floorOf(bytesAsRun(held, NONE)), STOCK), JSON.stringify(floorOf(bytesAsRun(held, NONE))));
 }
 
 console.log('\n[a replay the record is silent on reads the BASE as stored, not the stock floor]');
 {
-    // A Re-tune child from a held TUNED: its BASE is held, it has no settings and no flash, and the
-    // car already runs those bytes. A crash before its first SAVE replays through `armed` undefined.
+    // A child whose BASE is a held car image and whose record says nothing about the hold — a
+    // session from before NEXT persisted what it inherits, with no settings and no flash, whose car
+    // already runs those bytes. A crash before its first SAVE replays through `armed` undefined.
     const heldTuned = patchOnImage(BASE, { applyPatch: true, applyWotDisable: false, applyTankVentDisable: true, applyRfKorrHold: true });
     check('the held TUNED reads back held (else this tests nothing)', readLogicPatches(heldTuned).applyRfKorrHold === true);
     const silent = bytesAsRecorded(heldTuned, undefined);
@@ -215,7 +218,7 @@ console.log('\n[the PATCH-ON image with K HOLD is flashable, and says what it is
     check('nothing moved outside PATCH, TEV, the floor and the checksum slots', stray.length === 0,
         stray.map(i => i.toString(16)).join(','));
 
-    // FINALIZE: the stored held image, every patch off. Stock floor, flashable, reads as stock.
+    // FINALIZE: the held car image, every patch off. Stock floor, flashable, reads as stock.
     const fin = patchOnImage(on, NONE);
     check('FINALIZE from a held image writes the stock floor', eq(floorOf(fin), STOCK), JSON.stringify(floorOf(fin)));
     check('...validates', analyzeDataChecksum(u8(fin)).every(s => s.isValid));

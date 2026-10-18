@@ -46,6 +46,13 @@ export function isRoadState(flash: FlashRecord): boolean {
 const realFlashes = (session: Pick<TuningSession, 'flashHistory'>): FlashRecord[] =>
     session.flashHistory.filter(f => !f.practice);
 
+/** The last flash that reached a car, or undefined. What the car image (lib/db/carImage.ts) is
+ *  resolved from when no bytes were stored for it, and what a draft's saved settings are dated
+ *  against when deciding whether they are still the operator's intent. */
+export function lastRealFlash(session: Pick<TuningSession, 'flashHistory'>): FlashRecord | undefined {
+    return realFlashes(session).at(-1);
+}
+
 /**
  * Is this session's tune in the ECU, in its road state?
  *
@@ -153,8 +160,11 @@ export function patchOnFlash(session: Pick<TuningSession, 'flashHistory'>): Arme
 }
 
 /**
- * Which logic patches the ECU is holding — the reopened workspace's toggles, and the fallback for a
- * session whose `tuneSettings` cannot say what its drive ran.
+ * Which logic patches the ECU is holding, as the last real flash recorded them — the fallback for a
+ * session whose `tuneSettings` cannot say what its drive ran, and what the list's PATCH word reads.
+ *
+ * Not the reopened workspace's toggles any more: those are read off the CAR IMAGE's bytes
+ * (lib/db/carImage.ts), which answers the same question exactly where this answers it as flags.
  *
  * `tuneSettings` is written in exactly one place — `saveTune` — so it exists only once a session has
  * derived a VE map. Two ordinary states never reach it: a BASE armed with WRITE PATCH-ON before the

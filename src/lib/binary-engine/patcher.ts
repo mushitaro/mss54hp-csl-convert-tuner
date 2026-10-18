@@ -36,9 +36,36 @@ export class BinaryPatcher extends BinaryParser {
      */
     private readonly original: Uint8Array;
 
-    constructor(buffer: ArrayBuffer) {
+    /**
+     * The image a restore falls back to when `original` holds the patch itself — or null.
+     *
+     * A build no longer has to start from the BASE. The hub's WRITE starts from the CAR IMAGE, the
+     * bytes the last real flash left in the ECU (lib/db/carImage.ts), because the question it asks
+     * is "what would this write change in the car", and the answer has to be no change at all when
+     * nothing was switched. But the car image of a session that wrote PATCH-ON holds the patch, so
+     * restoring from it alone would land on this file's community fallbacks — `k_rf_cfg = 0x12`, a
+     * 69 °C LTFT floor, the CSL WOT threshold table — instead of the car's own bytes, which the
+     * BASE still has. That is the defect `original` was introduced to end, coming back one image
+     * later.
+     *
+     * So a restore asks three images in order, each only when the one before carries the patch:
+     *
+     *     original (the image this build starts from)  ->  fallback (the BASE)  ->  stated stock value
+     *
+     * The first step is what keeps a no-change build byte-identical to where it started: a byte
+     * that is not the patch is kept whatever the BASE says, so building X with the toggles X's own
+     * bytes report returns X (verify:car-image). Null keeps the two-step rule every caller had
+     * before — `bytesAsRun`, `patchOnImage` and the download of a draft that was never written all
+     * start from the BASE, where the two images are the same.
+     *
+     * A view, not a copy: it is only read, and only inside the build that constructed this.
+     */
+    private readonly fallback: Uint8Array | null;
+
+    constructor(buffer: ArrayBuffer, fallback?: ArrayBuffer | null) {
         super(buffer.slice(0)); // Clone buffer to avoid mutating original source if needed
         this.original = new Uint8Array(buffer.slice(0));
+        this.fallback = fallback && fallback.byteLength === buffer.byteLength ? new Uint8Array(fallback) : null;
     }
 
     /**
@@ -97,10 +124,22 @@ export class BinaryPatcher extends BinaryParser {
      *  - **BASE already patch-on.** Its own byte IS the patch, so restoring it would make the
      *    toggle inert and there would be no way back off a patched binary. The documented stock
      *    value is the only thing left to go on, and it is used only here.
+     *
+     * With a `fallback` image (a build from the car image), "already patch-on" asks that image next
+     * before reaching for the stated value — see `fallback`.
      */
     private restoreByte(address: number, patchedValue: number, stockFallback: number): void {
         const asLoaded = this.original[address];
-        this.setUint8(address, asLoaded === patchedValue ? stockFallback : asLoaded);
+        if (asLoaded !== patchedValue) { this.setUint8(address, asLoaded); return; }
+        const beneath = this.fallback?.[address];
+        this.setUint8(address, beneath !== undefined && beneath !== patchedValue ? beneath : stockFallback);
+    }
+
+    /** `count` big-endian words at `address` of an image, for the table restores below. */
+    private static words(image: Uint8Array, address: number, count: number): number[] {
+        const out: number[] = [];
+        for (let i = 0; i < count; i++) out.push((image[address + i * 2] << 8) | image[address + i * 2 + 1]);
+        return out;
     }
 
     public disableMapCorrection(): void {
@@ -395,17 +434,19 @@ export class BinaryPatcher extends BinaryParser {
         const DISABLED_RAW = 1023;   // 102.3 %, above anything the throttle can report
 
         // As loaded, so a restore has something true to go back to.
-        const asLoaded: number[] = [];
-        for (let i = 0; i < 16; i++) {
-            asLoaded.push((this.original[addr + i * 2] << 8) | this.original[addr + i * 2 + 1]);
-        }
-        const wasDisabled = asLoaded.every(v => v > 1000);
+        const asLoaded = BinaryPatcher.words(this.original, addr, 16);
+        const isDisabled = (t: number[]) => t.every(v => v > 1000);
+        // The BASE's sixteen, when this build starts from an image that carries the patch — see
+        // `fallback`. Only taken when they are not disabled themselves.
+        const beneath = this.fallback ? BinaryPatcher.words(this.fallback, addr, 16) : null;
 
         const raws = disable
             ? asLoaded.map(() => DISABLED_RAW)
-            : wasDisabled
-                ? CSL_STOCK_WOT_THRESHOLD_MAP.flat().map(v => Math.round(v * 10))
-                : asLoaded;
+            : !isDisabled(asLoaded)
+                ? asLoaded
+                : beneath && !isDisabled(beneath)
+                    ? beneath
+                    : CSL_STOCK_WOT_THRESHOLD_MAP.flat().map(v => Math.round(v * 10));
 
         raws.forEach((raw, i) => this.setUint16(addr + i * 2, raw));
     }
@@ -424,10 +465,11 @@ export class BinaryPatcher extends BinaryParser {
      * The restore is the same rule as `setWOTThreshold`: write back what the binary was loaded with,
      * and fall back to `RF_KORR_GATE_FLOOR.STOCK_RAW` only when the loaded curve is this app's own
      * work and so has nothing true to say. HOLD has to be in that fallback, not only the drop. A held
-     * image comes back into the app three ordinary ways — the post-write reload, a FINALIZE from the
-     * stored image, and a new session parented on a TUNED that was built held — and in each the
-     * "loaded" six are 2000. Writing those back would carry the hold into the release BIN, with the
-     * cold-exhaust enrichment gone and nothing on the hub to say so.
+     * image comes back into the app two ordinary ways — the CAR IMAGE a write left held, which every
+     * later build starts from, and the BASE of a NEXT session started from that car — and in each
+     * the "loaded" six are 2000. Writing those back would carry the hold into the release BIN, with
+     * the cold-exhaust enrichment gone and nothing on the hub to say so. A build from the car image
+     * asks the BASE first (`fallback`), so the car's own six come back when the BASE still has them.
      *
      * It matters more here than for one byte, because the app READS this curve back: `readEgtTables`
      * builds `EgtTables.rfKorrMin` from these exact bytes and `gateOpen` / `rfKorrActive` /
@@ -440,22 +482,23 @@ export class BinaryPatcher extends BinaryParser {
         const n = RF_KORR_GATE_FLOOR.POINTS;
 
         // As loaded, so a restore has something true to go back to.
-        const asLoaded: number[] = [];
-        for (let i = 0; i < n; i++) {
-            asLoaded.push((this.original[addr + i * 2] << 8) | this.original[addr + i * 2 + 1]);
-        }
+        const asLoaded = BinaryPatcher.words(this.original, addr, n);
         // The same two tests the parser's detectors make — exact for held, the stock-free gap for
         // the drop — so a restore recognises its own work exactly when the hub reports it.
-        const wasHeld = asLoaded.every(v => v === RF_KORR_GATE_FLOOR.HELD_RAW);
-        const wasDropped = asLoaded.every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
+        const isOurs = (t: number[]) => t.every(v => v === RF_KORR_GATE_FLOOR.HELD_RAW)
+            || t.every(v => v <= RF_KORR_GATE_FLOOR.DROPPED_MAX_RAW);
+        // The BASE's six, when the image this build starts from is held or dropped — see `fallback`.
+        const beneath = this.fallback ? BinaryPatcher.words(this.fallback, addr, n) : null;
 
         const raws = mode === 'hold'
             ? asLoaded.map(() => RF_KORR_GATE_FLOOR.HELD_RAW)
             : mode === 'drop'
                 ? asLoaded.map(() => RF_KORR_GATE_FLOOR.DROPPED_RAW)
-                : (wasHeld || wasDropped)
-                    ? [...RF_KORR_GATE_FLOOR.STOCK_RAW]
-                    : asLoaded;
+                : !isOurs(asLoaded)
+                    ? asLoaded
+                    : beneath && !isOurs(beneath)
+                        ? beneath
+                        : [...RF_KORR_GATE_FLOOR.STOCK_RAW];
 
         raws.forEach((raw, i) => this.setUint16(addr + i * 2, raw));
     }
@@ -607,8 +650,9 @@ export function patchOnImage(base: ArrayBuffer, patches: LogicPatches): ArrayBuf
  *
  * TANK VENT is the valve byte alone, which is how `useBinaryFile` seeds the toggle: a BASE carrying
  * the pre-2026-10-18 patch (valve shut, K_TE_TMOT stock) reads as TANK VENT on, and the next build
- * from that flag writes the second byte too. Whether the bytes hold the WHOLE patch is the hub's
- * question (`getTankVentLearnStopped`, page.tsx's patch drift), not this one's.
+ * from that flag writes the second byte too. Whether the bytes hold the WHOLE patch is not asked
+ * here or anywhere else as a flag any more: the hub compares the build with the car image byte for
+ * byte (lib/db/carImage.ts), and that build differs by exactly the missing K_TE_TMOT.
  */
 export function readLogicPatches(image: ArrayBuffer): LogicPatches {
     const parser = new BinaryParser(image);
@@ -622,28 +666,33 @@ export function readLogicPatches(image: ArrayBuffer): LogicPatches {
 }
 
 /**
- * Whether the TANK VENT bytes disagree with the toggle — i.e. whether the next write changes them.
+ * What the logic-patch bytes of an image say, one flag per byte group — the hub's readouts.
  *
- *     armed      drift unless BOTH bytes are patched   (valve 0x00 AND K_TE_TMOT 0xFF)
- *     not armed  drift if EITHER byte is patched
- *
- * The bytes count as "in" only whole and as "out" only clean, because a write from either toggle
- * position moves whichever half is out of line: `setTankVentDisable(true)` writes both, `(false)`
- * restores both. So a half-patched BIN is drift both ways.
- *
- * The half that matters is every car patched before 2026-10-18: valve shut, K_TE_TMOT stock. Its
- * toggle seeds ON from the valve byte (`readLogicPatches`, `useBinaryFile`), and this reads it as
- * drift, so the hub offers WRITE PATCH-ON — and that write leaves the purge learning stopped too.
- * Comparing the valve byte alone, as the hub did before, called that car done.
- *
- * Pure and here, beside the writer whose effect it predicts, so `verify:tankvent-patch` can ask it
- * the question page.tsx asks.
+ * `readLogicPatches` answers "which toggles does this image seed"; this answers "what is in these
+ * bytes", which is a finer question: TANK VENT is two bytes and the readouts name each, and PATCH
+ * is reported as its two halves so a half-applied patch is not called on. Read off the CAR IMAGE
+ * in page.tsx (`useBinaryFile.patchStatus`), because every consumer of it means "what the ECU is
+ * holding" — the START TUNE preflight, the RF KORR licence, the as-run replay's retired drop.
  */
-export function tankVentDrift(
-    bytes: { valveShut: boolean; learnStopped: boolean },
-    armed: boolean,
-): boolean {
-    return armed
-        ? !(bytes.valveShut && bytes.learnStopped)
-        : (bytes.valveShut || bytes.learnStopped);
+export interface PatchStatus {
+    mapOff: boolean;
+    tempLimit: boolean;
+    wotDisabled: boolean;
+    tankVentDisabled: boolean;
+    tankVentLearnStopped: boolean;
+    rfKorrHeld: boolean;
+    rfKorrGateDropped: boolean;
+}
+
+export function readPatchStatus(image: ArrayBuffer): PatchStatus {
+    const parser = new BinaryParser(image);
+    return {
+        mapOff: parser.getMapCorrectionStatus(),
+        tempLimit: parser.getTempThreshold() >= 99,
+        wotDisabled: parser.getWOTThresholdStatus(),
+        tankVentDisabled: parser.getTankVentDisabled(),
+        tankVentLearnStopped: parser.getTankVentLearnStopped(),
+        rfKorrHeld: parser.getRfKorrGateFloorHeld(),
+        rfKorrGateDropped: parser.getRfKorrGateFloorDropped(),
+    };
 }

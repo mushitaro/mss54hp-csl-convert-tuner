@@ -1,6 +1,6 @@
 /**
- * The check that runs immediately before a flash: is the calibration in the ECU the one this tune
- * was actually built on?
+ * The check that runs immediately before a flash: is the calibration in the ECU the one this
+ * session believes is there — its CAR IMAGE (lib/db/carImage.ts)?
  *
  * ## Why this exists
  *
@@ -15,12 +15,17 @@
  * one silently reverts every byte of the first, because both wrote a whole image built from a BASE
  * that predates the other. Nothing in either session's own view of itself can show this.
  *
- * The fix is not to make writes partial — the ECU does not offer that. It is to require that a
- * tune's BASE is what is in the car right now, which makes the workflow serial:
+ * The fix is not to make writes partial — the ECU does not offer that. It is to require that what
+ * the session believes is in the car IS in the car right now, which makes the workflow serial:
  *
  * ```
- * flash -> re-READ -> that read becomes the BASE of the next session
+ * flash -> the bytes sent become the session's car image -> NEXT makes them the next session's BASE
  * ```
+ *
+ * The image compared is the car image, not the BASE. A session that wrote PATCH-ON holds a car that
+ * differs from its BASE by exactly that write, and comparing with the BASE asked a question whose
+ * answer was "no" by construction — every reopen of a patched draft had to be told "write anyway".
+ * For a session that never wrote, the car image IS the BASE, and nothing changes.
  *
  * ## Why checksums and not the bytes
  *
@@ -34,7 +39,7 @@
 import { readStoredChecksums } from '../checksum/dmeDataChecksum';
 
 export type LineageVerdict =
-    /** The ECU holds the BASE this tune was built on. Safe to write. */
+    /** The ECU holds the car image this session expects. Safe to write. */
     | 'match'
     /** The ECU holds something else. Writing would discard whatever that is. */
     | 'diverged'
@@ -45,7 +50,7 @@ export interface LineagePreflight {
     verdict: LineageVerdict;
     /** What the car reported. Null when the read failed. */
     inEcu: { slave: number; master: number } | null;
-    /** What the session's BASE holds. */
+    /** What the session's car image holds. */
     expected: { slave: number; master: number } | null;
     /**
      * Whether this result should stop the flash.
@@ -62,16 +67,16 @@ export interface LineagePreflight {
 const hex = (n: number) => `0x${n.toString(16).toUpperCase().padStart(4, '0')}`;
 
 /**
- * Compares what the ECU holds against the BASE a tune was derived from.
+ * Compares what the ECU holds against the image the session expects there — its car image.
  *
  * `readFromEcu` is passed in rather than a link, so this stays testable without a transport and
  * cannot accidentally acquire the ability to write anything.
  */
 export async function checkLineage(
-    baseImage: ArrayBuffer | null,
+    expectedImage: ArrayBuffer | null,
     readFromEcu: () => Promise<{ slave: number; master: number }>,
 ): Promise<LineagePreflight> {
-    if (!baseImage || baseImage.byteLength !== 65536) {
+    if (!expectedImage || expectedImage.byteLength !== 65536) {
         return {
             verdict: 'unknown', inEcu: null, expected: null, blocking: true,
             summary: 'This session has no stored BASE image to compare against, so there is no way '
@@ -80,7 +85,7 @@ export async function checkLineage(
         };
     }
 
-    const expected = readStoredChecksums(new Uint8Array(baseImage));
+    const expected = readStoredChecksums(new Uint8Array(expectedImage));
 
     let inEcu: { slave: number; master: number };
     try {

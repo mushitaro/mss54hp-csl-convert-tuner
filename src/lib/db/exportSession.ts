@@ -29,8 +29,10 @@ export interface SessionBundle {
     session: TuningSession;
     /** Null when the session holds no samples of either kind. */
     log: SessionLogRecord | null;
-    /** Null when no BASE has been set yet. `tuned` is null until the session has one. */
-    binaries: { base: string; tuned: string | null } | null;
+    /** Null when no BASE has been set yet. `tuned` is null until the session has one. `car` is the
+     *  stored CAR IMAGE (SessionBinariesRecord.carBinaryBuffer), present only when one is stored —
+     *  an added field, so `format` stays 1, the same rule the sync wire follows. */
+    binaries: { base: string; tuned: string | null; car?: string } | null;
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -58,6 +60,7 @@ export async function buildSessionBundle(session: TuningSession): Promise<Sessio
         binaries: binaries ? {
             base: toBase64(new Uint8Array(binaries.baseBinaryBuffer)),
             tuned: binaries.tunedBinaryBuffer ? toBase64(new Uint8Array(binaries.tunedBinaryBuffer)) : null,
+            ...(binaries.carBinaryBuffer ? { car: toBase64(new Uint8Array(binaries.carBinaryBuffer)) } : {}),
         } : null,
     };
 }

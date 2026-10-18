@@ -208,10 +208,40 @@ export function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
     return out;
 }
 
-/** ArrayBuffers cannot survive JSON, so the two images travel base64'd inside the binaries part. */
-interface WireBinaries {
+/**
+ * ArrayBuffers cannot survive JSON, so the images travel base64'd inside the binaries part.
+ *
+ * `car` is the session's CAR IMAGE (SessionBinariesRecord.carBinaryBuffer) and is OPTIONAL in both
+ * directions: a copy stored before it existed has no such key, and a session without a stored car
+ * image sends none. Either way the receiving side resolves the car from the flash history, exactly
+ * as it does for a local record from before the field — so an old copy still restores, and loses
+ * nothing it ever had.
+ */
+export interface WireBinaries {
     base: string;
     tuned: string | null;
+    car?: string | null;
+}
+
+/** The binaries record as it goes up. Exported for `verify:car-image`, which pins that the car
+ *  image travels and that a record without one sends no key for it. */
+export function toWireBinaries(binaries: SessionBinariesRecord): WireBinaries {
+    return {
+        base: toBase64(new Uint8Array(binaries.baseBinaryBuffer)),
+        tuned: binaries.tunedBinaryBuffer ? toBase64(new Uint8Array(binaries.tunedBinaryBuffer)) : null,
+        ...(binaries.carBinaryBuffer ? { car: toBase64(new Uint8Array(binaries.carBinaryBuffer)) } : {}),
+    };
+}
+
+/** ...and as it comes back, in either shape it has ever had. A copy stored before the car image
+ *  existed has no `car`, and restores with none — the car is then resolved from the history. */
+export function fromWireBinaries(wire: WireBinaries, sessionId: string): SessionBinariesRecord {
+    return {
+        sessionId,
+        baseBinaryBuffer: fromBase64(wire.base).buffer as ArrayBuffer,
+        tunedBinaryBuffer: wire.tuned ? fromBase64(wire.tuned).buffer as ArrayBuffer : null,
+        carBinaryBuffer: wire.car ? fromBase64(wire.car).buffer as ArrayBuffer : null,
+    };
 }
 
 /**
@@ -299,10 +329,7 @@ export async function syncSession(session: TuningSession): Promise<SyncResult> {
         getSessionBinaries(session.id),
     ]);
 
-    const wireBinaries: WireBinaries | null = binaries ? {
-        base: toBase64(new Uint8Array(binaries.baseBinaryBuffer)),
-        tuned: binaries.tunedBinaryBuffer ? toBase64(new Uint8Array(binaries.tunedBinaryBuffer)) : null,
-    } : null;
+    const wireBinaries: WireBinaries | null = binaries ? toWireBinaries(binaries) : null;
 
     // Sent when there is EITHER kind of sample, matching `saveResearchRun`'s own rule: a run whose
     // projection came out empty must not take its raw samples down with it.
@@ -384,11 +411,7 @@ export async function restoreSession(id: string): Promise<TuningSession> {
         : null;
     const wire = body.binariesGz ? await gunzipJson<WireBinaries>(fromBase64(body.binariesGz)) : null;
 
-    const binaries: SessionBinariesRecord | null = wire ? {
-        sessionId: session.id,
-        baseBinaryBuffer: fromBase64(wire.base).buffer as ArrayBuffer,
-        tunedBinaryBuffer: wire.tuned ? fromBase64(wire.tuned).buffer as ArrayBuffer : null,
-    } : null;
+    const binaries: SessionBinariesRecord | null = wire ? fromWireBinaries(wire, session.id) : null;
 
     // Guard against a session record that claims a tune whose bytes did not come with it — the one
     // inconsistency a partial restore could produce, and the one that would let the app offer to

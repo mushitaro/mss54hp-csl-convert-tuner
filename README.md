@@ -135,7 +135,13 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
   measured rather than assumed and shown live as **HZ** next to the sample count, and the run's mean
   rate is stored with the session and listed beside its point count.
 - **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
-- **WRITE** — flashes the tuned BIN (checksum corrected, then verified — QUICK or FULL, see Safety)
+- **WRITE** — flashes the tuned BIN (checksum corrected, then verified — QUICK or FULL, see Safety).
+  Each session knows the BIN in its car — the bytes of its last real flash, or its BASE if it never
+  wrote — and WRITE is offered only when the BIN it would send differs from that one, byte for byte.
+  Switching a patch OFF counts as a change; switching nothing does not. A write that carries a derived
+  table closes the session; a patch-only write leaves it open. To continue, **NEXT** (in a session's
+  Actions) starts a new session whose BASE is the BIN in the car, with its switches and filter
+  settings carried over.
 
 ### What the next write contains
 
@@ -153,7 +159,8 @@ opening anything**.
   the WOT threshold, and **K HOLD** — the `rf_korr` gate floor raised out of reach so the
   DME applies 1.000 everywhere, which keeps the VE log clear of the exhaust-temperature enrichment
   and the lambda ramp that follows each step of it. K HOLD arms with PATCH and can be turned off on
-  its own (for the DRREL and full-load VE runs); FINALIZE puts the stock floor back. These change
+  its own (for the DRREL and full-load VE runs); FINALIZE switches the patches off and the WRITE that
+  follows puts the stock floor back. These change
   what the DME *does*, not what a table says.
 - **RESTORE** — putting a table back to the bytes the binary was loaded with. One row per table,
   each named in the ECU's own vocabulary, and locked against the write of the same table: whichever

@@ -229,6 +229,20 @@ export function useLogFile() {
     return null;
   };
 
+  /**
+   * Adopts a session's filter config and RO table with no log to run them on.
+   *
+   * `loadRawLog` adopts them when a stored drive comes back with them; a session that has settings
+   * and no drive — a NEXT child before its first run, which inherits its parent's — would otherwise
+   * open on whatever the previous workspace held, and its first drive would be filtered through
+   * that. `clear` deliberately keeps the config (it describes the operator's setup, not the log), so
+   * this is the only path that replaces it without a log.
+   */
+  const adopt = (config?: LogFilterConfig, table?: InterpolationPoint[]) => {
+    if (config) publishConfig(config);
+    if (table) publishTable(table);
+  };
+
   const clear = () => {
     publishFile(null);
     publishRaw(null);
@@ -257,6 +271,7 @@ export function useLogFile() {
     loadRawLog,
     reprocess,
     reprocessWithTable,
+    adopt,
     clear,
   };
 }

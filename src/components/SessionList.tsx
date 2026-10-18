@@ -12,11 +12,11 @@ import { GuideStatic } from '@/components/GuideCarousel';
 /**
  * The ACTIONS sheet's explanations, in the reader's language.
  *
- * The LABELS are not in here and must not be: From TUNED, From BASE, Finalize, Download BASE,
- * Delete session are the instrument's vocabulary — the same words in both languages, and the
- * chain a label-is-a-promise depends on. What follows a label is an explanation, which is the
- * class of text that follows the reader (house rule; the app resolves it from navigator.language
- * in one place).
+ * The LABELS are not in here and must not be: NEXT, Finalize, Download BASE, Delete session are
+ * the instrument's vocabulary — the same words in both languages, and the chain a
+ * label-is-a-promise depends on. What follows a label is an explanation, which is the class of
+ * text that follows the reader (house rule; the app resolves it from navigator.language in one
+ * place). Finalize's tooltip is an explanation too, so it lives here with its hint.
  *
  * The download rows have no explanation at all. They were shipped with one — "(what it started
  * from)", "(what WRITE would send)" — and the operator's answer was the correct one: they
@@ -24,20 +24,20 @@ import { GuideStatic } from '@/components/GuideCarousel';
  */
 const SHEET_TEXT = {
     ja: {
-        fromTuned: '（このチューンの続きから）',
-        fromBase: '（同じ出発点でやり直す）',
-        finalize: '（パッチを外して WRITE へ）',
+        next: '（車に入っている BIN から。スイッチとフィルタ設定を引き継ぐ）',
+        finalize: '（4 つのパッチを外して WRITE へ）',
+        finalizeTitle: 'このセッションを開き、PATCH・WOT TH・TANK VENT・K HOLD を OFF にします。'
+            + 'ハブで WRITE を押すまで何も送りません。',
         empty: 'まだ何も保存されていません',
     },
     en: {
-        fromTuned: '(continue from this tune)',
-        fromBase: '(retry from the same start)',
-        finalize: '(patch off, then WRITE)',
+        next: '(from the BIN in the car, switches and filter settings carried over)',
+        finalize: '(four patches off, then WRITE)',
+        finalizeTitle: 'Opens this session and switches PATCH, WOT TH, TANK VENT and K HOLD off. '
+            + 'Nothing is sent until you press WRITE on the hub.',
         empty: 'Nothing stored yet',
     },
 } as const;
-
-export type NewFromWhich = 'tuned' | 'base';
 
 /** Any of the logic patches on. They are one state everywhere they are read — a BIN with only
  *  TANK VENT shut is not stock either, and neither is one whose rf_korr floor is held or carries
@@ -67,7 +67,9 @@ interface Props {
      * that is per width.
      */
     beforeNew?: React.ReactNode;
-    onNewFrom: (session: TuningSession, which: NewFromWhich) => void;
+    /** NEXT: a new session whose BASE is this one's CAR IMAGE, with its switches and filter
+     *  settings carried over (page.tsx handleNext, lib/db/carImage.ts nextStart). */
+    onNext: (session: TuningSession) => void;
     onRename: (id: string, label: string) => void;
     onDelete: (id: string) => void;
     /** Sets a base-less draft's BASE from a file. Lives on the row because that is the session it
@@ -146,7 +148,7 @@ interface Props {
     /** Per-session upload state, keyed by session id. Shown on the same cell as the action, because
      *  "did that land?" is asked about one row, not about the app. */
     uploadState?: Record<string, UploadState>;
-    /** Arms this session's stored TUNED for a patch-off flash. Does not write — the hub does. */
+    /** Opens this session and switches its four patches off. Does not write — the hub does. */
     onFinalize: (session: TuningSession) => void;
     /**
      * Which session the rest of the app is currently showing.
@@ -328,16 +330,27 @@ export const OriginBadge: React.FC<{ session: TuningSession; parent?: TuningSess
     //
     // The comparison is only possible when both hashes exist; absent is not a mismatch, and a
     // session whose parent predates `baseSha256` must not be accused of anything.
-    const parentHash = o.which === 'tuned' ? parent?.sha256 : parent?.baseSha256;
-    const comparable = !!parent && !!session.baseSha256 && !!parentHash;
-    const mismatched = comparable && parentHash !== session.baseSha256;
+    //
+    // NEXT ('car') copies the parent's CAR IMAGE, which is either its BASE (it never wrote) or the
+    // bytes one of its flashes sent — and every flash record carries the sha256 of what it sent.
+    // So the child is accounted for when its BASE is any of those; a PRACTICE flash counts, since a
+    // rehearsal continues from the rehearsed bytes. Only a car image GUESSED from an old record
+    // matches none of them, and that is worth the mark: the child's BASE is not provably anything
+    // the parent sent.
+    const parentHashes: string[] = !parent ? []
+        : o.which === 'tuned' ? (parent.sha256 ? [parent.sha256] : [])
+            : o.which === 'base' ? (parent.baseSha256 ? [parent.baseSha256] : [])
+                : [...(parent.baseSha256 ? [parent.baseSha256] : []), ...parent.flashHistory.map(f => f.sha256)];
+    const comparable = !!parent && !!session.baseSha256 && parentHashes.length > 0;
+    const mismatched = comparable && !parentHashes.includes(session.baseSha256!);
     // "#3 · TUNED" rather than a timestamp: which tune this grew out of is the point, and two
-    // sessions minutes apart are indistinguishable by date.
+    // sessions minutes apart are indistinguishable by date. A NEXT child reads "from #3" alone —
+    // it continues the session, not one of its files.
     return (
         <span className="inline-flex items-center gap-1 text-[9px] font-mono text-indigo-400/70" title={parent ? parent.label : 'parent deleted'}>
             <GitBranch className="w-2.5 h-2.5 shrink-0" />
             <span className="truncate max-w-[200px]">
-                from {parent ? `#${parent.seq ?? '?'}` : '(deleted)'} · {o.which.toUpperCase()}
+                from {parent ? `#${parent.seq ?? '?'}` : '(deleted)'}{o.which === 'car' ? '' : ` · ${o.which.toUpperCase()}`}
             </span>
             {/* Only the exception speaks.
                 ────────────────────────────────────────────────────────────────────────────────
@@ -433,7 +446,7 @@ const Contents: React.FC<{ session: TuningSession }> = ({ session }) => {
 };
 
 export const SessionList: React.FC<Props> = ({
-    sessions, loading, error, onOpen, onNewSession, onNewFrom, onRename, onDelete, onUploadBase,
+    sessions, loading, error, onOpen, onNewSession, onNext, onRename, onDelete, onUploadBase,
     onDownloadBase, onDownloadTuned, onDownloadPatchOn, onInspectBase,
     onDownloadLog, onLoadLogFile, canLoadLogFile = false, loadedLogName, loadedLogPoints, onClearLog,
     onUploadLog, uploadState, onFinalize,
@@ -591,21 +604,18 @@ export const SessionList: React.FC<Props> = ({
                             // WORKSPACE. A row that is not the open one is asking to become it, so
                             // the workspace's current contents do not gate it — opening clears them.
                             const isArchivedRow = session.status === 'archived';
-                            // Real writes and rehearsals counted apart — see flashState.ts. A ✔ is a
-                            // claim about the car, so only a real flash may put one there.
-                            // Each branch is offered only where its bytes actually exist. Gating the
-                            // menu on sha256 alone meant it always showed both, so "From TUNED" was
-                            // offered for a session that had never produced one — and a session with
-                            // only a BASE could not be branched from at all, though retrying from the
-                            // same start is exactly what it is good for.
-                            const canFromTuned = !!session.sha256;
-                            const canFromBase = !!session.baseOrigin;
+                            // NEXT continues from the bytes in this session's car, and every session
+                            // with a BASE has a car image — its last real flash, or the BASE itself.
+                            // It replaced From TUNED (offered a SAVEd tune nobody had written) and
+                            // From BASE (a sibling that inherited none of this session's settings).
+                            const canNext = !!session.baseOrigin;
                             // What is in the ECU *now* — see flashState.ts, which owns the rule and
                             // is where the harness asks it questions.
                             const isFinal = isTuneOnTheRoad(session);
-                            // Nothing to finalize without stored TUNED bytes, and nothing to finalize
-                            // if that tune is already in the ECU with the patches off.
-                            const canFinalize = canFromTuned && !isFinal;
+                            // FINALIZE only switches the patches off; the hub's write gate decides
+                            // whether that changes anything in the car. So any session with a BASE
+                            // may take it, except one already FINAL.
+                            const canFinalize = !!session.baseOrigin && !isFinal;
                             /** The PATCH-ON image this session actually wrote, if it wrote one. From the
                              *  flash history rather than `tuneSettings` — see patchOnFlash. */
                             const wrotePatchOn = patchOnFlash(session);
@@ -699,7 +709,7 @@ export const SessionList: React.FC<Props> = ({
                                                 {isFinal && (
                                                     <span
                                                         className="text-[8px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded px-1 py-px shrink-0"
-                                                        title="This session's tune was flashed with PATCH, WOT TH and TANK VENT all off — it is in the ECU in its road state."
+                                                        title="This session's tune was flashed with PATCH, WOT TH, TANK VENT and K HOLD all off — it is in the ECU in its road state."
                                                     >
                                                         FINAL
                                                     </span>
@@ -781,9 +791,9 @@ export const SessionList: React.FC<Props> = ({
                                                     Only while nothing has been DERIVED from them:
                                                     with a stored tune, swapping the BASE would
                                                     leave a record whose tune came from bytes the
-                                                    session no longer names. Branch instead —
-                                                    Actions -> From BASE. A log survives the swap
-                                                    and re-derives, so it does not gate this. */}
+                                                    session no longer names. Continue instead —
+                                                    Actions -> NEXT. A log survives the swap and
+                                                    re-derives, so it does not gate this. */}
                                                 {isDraft && session.baseOrigin && !session.sha256 && (
                                                     <span className="group/re relative inline-flex items-center gap-1 cursor-pointer text-[9px] font-bold uppercase tracking-widest text-slate-600 hover:text-blue-400">
                                                         <Upload className="w-2.5 h-2.5" /> Replace BIN
@@ -841,8 +851,8 @@ export const SessionList: React.FC<Props> = ({
                                                     </span>
                                                 )}
                                                 {/* A draft with no BASE is unusable until one is picked, so the ways to pick
-                                                    one sit right on it: a file here, the DME via the main button, or another
-                                                    session via "Use as base" on its row. */}
+                                                    one sit right on it: a file here, or the DME via the main button. (Another
+                                                    session's car is NEXT on that session's row, which makes a new draft.) */}
                                                 {isDraft && !session.baseOrigin && (
                                                     <>
                                                         <span className="group/up relative inline-flex items-center gap-1 cursor-pointer text-[9px] font-bold uppercase tracking-widest text-blue-400 hover:text-blue-300">
@@ -972,8 +982,8 @@ export const SessionList: React.FC<Props> = ({
                                             </button>
                                         )}
                                         {/* Was "Use as base ▾", which named only half of what is in here now.
-                                            Finalize does NOT start a session — it arms this one's stored TUNED
-                                            for a patch-off flash — so leaving it under a trigger that promised
+                                            Finalize does NOT start a session — it switches this one's patches
+                                            off for the hub to write — so leaving it under a trigger that promised
                                             "Start a NEW tuning session" would have been the same kind of lie the
                                             entries themselves are careful to avoid. The group headings carry the
                                             distinction the trigger used to. */}
@@ -981,7 +991,7 @@ export const SessionList: React.FC<Props> = ({
                                             and DELETE there whatever else this session can do. On a
                                             desk it appears only when there is a branch or a finalize
                                             to offer — the columns and the trash carry the rest. */}
-                                        <div className={(canFromTuned || canFromBase || canFinalize) ? 'contents' : 'contents min-[1280px]:hidden'}>
+                                        <div className={(canNext || canFinalize) ? 'contents' : 'contents min-[1280px]:hidden'}>
                                             <button
                                                 onClick={() => openMenu(session)}
                                                 className="ml-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-indigo-400 transition-colors px-2 py-1 rounded hover:bg-slate-800"
@@ -1017,37 +1027,33 @@ export const SessionList: React.FC<Props> = ({
                                                     <div className="px-3 pt-1.5 pb-1 mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-400 border-b border-slate-800 min-[1280px]:hidden">
                                                         {session.label}
                                                     </div>
-                                                    {(canFromTuned || canFromBase) && (
-                                                        <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
-                                                            New session
-                                                        </div>
-                                                    )}
-                                                    {canFromTuned && (
-                                                        <button
-                                                            onClick={() => { setMenuFor(null); onNewFrom(session, 'tuned'); }}
-                                                            className={SHEET_ROW}
-                                                        >
-                                                            From TUNED <span className="text-slate-600">{st.fromTuned}</span>
-                                                        </button>
-                                                    )}
-                                                    {canFromBase && (
-                                                        <button
-                                                            onClick={() => { setMenuFor(null); onNewFrom(session, 'base'); }}
-                                                            className={SHEET_ROW}
-                                                        >
-                                                            From BASE <span className="text-slate-600">{st.fromBase}</span>
-                                                        </button>
+                                                    {canNext && (
+                                                        <>
+                                                            <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
+                                                                New session
+                                                            </div>
+                                                            {/* Allowed to wrap, unlike its neighbours: the hint
+                                                                says what carries over, and at 375 that is two
+                                                                lines — cut to one it would hide the half that
+                                                                says the switches and filters come along. */}
+                                                            <button
+                                                                onClick={() => { setMenuFor(null); onNext(session); }}
+                                                                className={`${SHEET_ROW} !whitespace-normal`}
+                                                            >
+                                                                NEXT <span className="text-slate-600">{st.next}</span>
+                                                            </button>
+                                                        </>
                                                     )}
                                                     {canFinalize && (
                                                         <>
-                                                            {(canFromTuned || canFromBase) && <div className="my-1 border-t border-slate-800" />}
+                                                            {canNext && <div className="my-1 border-t border-slate-800" />}
                                                             <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
                                                                 This session
                                                             </div>
                                                             <button
                                                                 onClick={() => { setMenuFor(null); onFinalize(session); }}
                                                                 className={SHEET_ROW}
-                                                                title="Loads this tune with PATCH and WOT TH off, ready for the hub to write. Nothing is sent until you press WRITE."
+                                                                title={st.finalizeTitle}
                                                             >
                                                                 Finalize <span className="text-slate-600">{st.finalize}</span>
                                                             </button>

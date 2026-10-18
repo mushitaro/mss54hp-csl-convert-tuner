@@ -277,13 +277,33 @@ WRITE → ファイル生成
    ↓ はい
 TUNE_ADAPTATION_CLEAR + VANOS_ADAPTATION_CLEAR
    ↓
-新しいキャンペーンを、この READ から分岐して開始
+新しいキャンペーンを NEXT で開始（BASE = 今書いた BIN）
    ↓
 前キャンペーンの証拠は「BASE が違う」として自動的に無効化
 ```
 
 **適応クリアを聞くのは省略できない。** `MD_LLRA` は不揮発なので、クリアしないと
 次の層 1 測定はフラッシュ前の学習値を読む。
+
+### 車の BIN と書き込みの判定（実装済み）
+
+各セッションは「車に入っている BIN」（CAR IMAGE）を持つ。最後の実フラッシュで送ったバイト列そのもの
+で、書いていなければ BASE。PRACTICE の書き込みは数えない。
+
+```
+次の WRITE が送る BIN = 車の BIN + 武装した行（ALPHA-N・パッチの ON/OFF・RESTORE・CALIBRATION …）+ チェックサム
+WRITE を出す        ⇔ その BIN ≠ 車の BIN（1 バイトでも違えば）
+```
+
+- パッチを **OFF にするのも変更**として数える（Finalize の後の WRITE が押せる）。
+  パッチの組に 1 バイト増えた場合（`K_TE_TMOT`）も、組み立てた BIN が違うので自動で WRITE が出る。
+- 同じスイッチのまま組み立てると車の BIN とバイト単位で一致する（`verify:car-image` が固定）。
+  一致すればハブは「車にはこのバイトがそのまま入っている」と出して WRITE を止める。
+- 書き込み後は BASE を差し替えない。車の BIN だけが進み、導出とログの再生は BASE を読み続ける。
+  派生テーブル（ALPHA-N など）を運んだ WRITE だけがセッションを閉じ（archived）、パッチだけの
+  WRITE ではドラフトのまま。
+- 続きは **NEXT** の 1 つだけ：新しいドラフトの BASE = 親の車の BIN、スイッチとフィルタ設定は親から
+  引き継ぐ。Finalize は PATCH・WOT TH・TANK VENT・K HOLD を OFF にするだけで、書くのは通常の WRITE。
 
 ---
 

@@ -19,14 +19,16 @@
  *   - turning it OFF really restores, both bytes, to what the BIN was loaded with — or to stock when
  *     the BIN arrived patched — because the whole safety story is that the valve and the functional
  *     check come back;
- *   - a BIN carrying the pre-2026-10-18 patch (valve shut, K_TE_TMOT stock) seeds the toggle ON and
- *     reads as needing a write, and the write that follows leaves it whole with a valid checksum;
+ *   - a BIN carrying the pre-2026-10-18 patch (valve shut, K_TE_TMOT stock) seeds the toggle ON, and
+ *     the write from that toggle leaves it whole with a valid checksum. Whether the hub OFFERS that
+ *     write is the write gate's question — the build against the car image, byte for byte — and is
+ *     pinned in verify:car-image beside the gate, where it moved from the retired `tankVentDrift`;
  *   - every builder that takes the toggle (bytesAsRun, bytesAsRecorded, patchOnImage) moves both.
  *
  * Synthetic images plus public/mock only.
  */
 import { readFileSync } from 'node:fs';
-import { BinaryPatcher, bytesAsRun, bytesAsRecorded, patchOnImage, readLogicPatches, tankVentDrift }
+import { BinaryPatcher, bytesAsRun, bytesAsRecorded, patchOnImage, readLogicPatches }
     from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
 import { TANK_VENT_GAIN, TANK_VENT_TMOT } from '../src/config/constants.ts';
@@ -149,9 +151,8 @@ console.log('\n[the old patch: valve shut, K_TE_TMOT stock — every car patched
     // The seed: useBinaryFile arms the toggle from the valve byte, the same question this asks.
     const seeded = readLogicPatches(buf(old)).applyTankVentDisable;
     check('the toggle seeds ON — loading it does not lose the patch', seeded === true);
-    check('...and with it ON the hub reads drift: a write is needed', tankVentDrift(s, seeded) === true);
 
-    // The write that drift offers: WRITE PATCH-ON, built through the same patcher.
+    // The write the gate offers for it (verify:car-image): WRITE PATCH-ON, built through the same patcher.
     const written = new Uint8Array(patchOnImage(buf(old), {
         applyPatch: false, applyWotDisable: false, applyTankVentDisable: true,
     }));
@@ -160,24 +161,12 @@ console.log('\n[the old patch: valve shut, K_TE_TMOT stock — every car patched
     check('K_TE_TMOT is now 0xFF and the valve still shut', written[TMOT] === 0xFF && written[GA] === 0x00);
     check('the checksum validates', analyzeDataChecksum(written).every(x => x.isValid),
         JSON.stringify(analyzeDataChecksum(written)));
-    check('reloaded, the bytes agree with the toggle — no more drift', tankVentDrift(status(written), true) === false);
+    check('written, the bytes hold the whole patch', JSON.stringify(status(written)) === JSON.stringify({ valveShut: true, learnStopped: true }));
 
     // FINALIZE from the old patch: OFF restores the valve and leaves its own 0x75 alone.
     const fin = new Uint8Array(patchOnImage(buf(old), { applyPatch: false, applyWotDisable: false, applyTankVentDisable: false }));
     check('FINALIZE on the old patch: gain back to 0x80, K_TE_TMOT still 0x75', fin[GA] === 0x80 && fin[TMOT] === 0x75);
     check('...and it validates', analyzeDataChecksum(fin).every(x => x.isValid));
-}
-
-console.log('\n[drift is "in only whole, out only clean"]');
-{
-    const S = (valveShut, learnStopped) => ({ valveShut, learnStopped });
-    check('armed, whole: no drift', tankVentDrift(S(true, true), true) === false);
-    check('armed, stock: drift', tankVentDrift(S(false, false), true) === true);
-    check('armed, temperature byte only: drift', tankVentDrift(S(false, true), true) === true);
-    check('off, stock: no drift', tankVentDrift(S(false, false), false) === false);
-    check('off, whole: drift (FINALIZE has bytes to move)', tankVentDrift(S(true, true), false) === true);
-    check('off, valve only: drift', tankVentDrift(S(true, false), false) === true);
-    check('off, temperature byte only: drift', tankVentDrift(S(false, true), false) === true);
 }
 
 console.log('\n[every builder that takes the toggle moves both bytes]');
@@ -198,7 +187,8 @@ console.log('\n[every builder that takes the toggle moves both bytes]');
     check('patchOnImage armed: exactly 0xBED and 0xBF1 outside the checksum', hex(movedOn) === hex([TMOT, GA]), hex(movedOn));
     check('...with a valid checksum', analyzeDataChecksum(on).every(x => x.isValid));
 
-    // The delivered image: FINALIZE rebuilds from the stored patched one with every toggle off.
+    // The delivered image: every toggle off over the patched one — FINALIZE's write, built from the
+    // car image that holds the patch.
     const road = new Uint8Array(patchOnImage(buf(on), NONE));
     check('the road BIN restores both to stock', road[GA] === 0x80 && road[TMOT] === 0x75, `0x${road[GA].toString(16)} / 0x${road[TMOT].toString(16)}`);
     check('...byte-identical to the BASE', diff(MOCK, road).length === 0, hex(diff(MOCK, road)));

@@ -54,7 +54,7 @@ import { useDialogLang } from '@/hooks/useDialogLang';
 const TEXT = {
     ja: {
         settings: 'フィルター設定',
-        locked: '固定 — このセッションは ECU に書き込み済みで、その ECU に入っているバイト列はこの設定から作られました。ここを動かすと記録が実物と食い違います。別のフィルターで調整するには「Use as base」で新しいセッションを開始してください。（保存しただけなら固定されません。）',
+        locked: '固定 — このセッションは ECU に書き込み済みで、その ECU に入っているバイト列はこの設定から作られました。ここを動かすと記録が実物と食い違います。別のフィルターで調整するには、セッション一覧の Actions → NEXT で新しいセッションを開始してください（フィルター設定は引き継がれ、そこで変えられます）。（保存しただけなら固定されません。）',
         immediate: '変更は即時反映されます',
         info: '説明を表示',
 
@@ -168,7 +168,7 @@ const TEXT = {
     },
     en: {
         settings: 'Filter Settings',
-        locked: 'Locked — this session has been written to the ECU, and the bytes in it were built from these settings. Changing them here would make the record disagree with the car. Use as base to start a new session and tune with different filters. (Saving alone does not lock anything.)',
+        locked: 'Locked — this session has been written to the ECU, and the bytes in it were built from these settings. Changing them here would make the record disagree with the car. Start a new session with Actions → NEXT in the session list — it carries these filters over, and there they can be changed. (Saving alone does not lock anything.)',
         immediate: 'Adjustments apply immediately',
         info: 'Show explanation',
 

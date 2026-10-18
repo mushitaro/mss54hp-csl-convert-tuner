@@ -16,7 +16,9 @@ export type { ManifestGroup, ManifestRow } from '@/lib/writeManifest';
  *
  * So each group is one wing row — its name, and beneath it the names of whatever is armed. Tap to
  * open its menu of toggles; the summary answers "what will the next write contain" without opening
- * anything. Nothing armed, nothing listed, and the central ring's WRITE stays unpressable.
+ * anything. Nothing armed, nothing listed. Whether the central ring's WRITE can be pressed is not
+ * decided here: it compares the BIN that write would send with the BIN in the car (page.tsx,
+ * `writeChangesCar`), so a row switched OFF over a car that holds it is a write too.
  *
  * ## Where the values come from
  *

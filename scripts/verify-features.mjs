@@ -159,11 +159,13 @@ console.log('\n[the tab arrangements MODE stands up]');
     }
 }
 
-console.log('\n[the hub summary and the WRITE gate are the same answer]');
+console.log('\n[the hub summary and the any-armed count are the same answer]');
 {
-    // These two must never come apart: the collapsed row SAYS armedLabels, the central ring is
-    // GATED on anythingArmed. If a table can appear in one and not the other, the hub is telling
-    // the driver one thing and doing another — the failure the manifest exists to end.
+    // These two must never come apart: the collapsed row SAYS armedLabels, and anythingArmed is the
+    // same question over every group. (The central ring is no longer gated on either: it compares
+    // the BIN a write would send with the BIN in the car, byte for byte — verify:car-image.) If a
+    // table can appear in one and not the other, the hub is telling the driver one thing and doing
+    // another — the failure the manifest exists to end.
     const row = (o) => ({ id: o.label, kind: 'toggle', ...o });
     const g = (rows) => ({ id: 'g', title: 'WRITE', caption: '', rows });
 
@@ -184,11 +186,11 @@ console.log('\n[the hub summary and the WRITE gate are the same answer]');
         armedLabels(g([{ id: 'i', label: 'IDLE', kind: 'sealed' }, { id: 'n', label: 'INERTIA', kind: 'info' },
             { id: 'r', label: 'MAP', kind: 'readout', status: 'OFF' }])).length === 0);
 
-    check('the gate is false when nothing is armed anywhere',
+    check('anythingArmed is false when nothing is armed anywhere',
         !anythingArmed([g([row({ label: 'VE' })]), g([row({ label: 'WOT FUEL', checked: true, disabled: true })])]));
     check('...and true as soon as any group contributes',
         anythingArmed([g([row({ label: 'VE' })]), g([row({ label: 'WOT FUEL', checked: true })])]));
-    check('the gate agrees with the summaries it is built from',
+    check('anythingArmed agrees with the summaries it is built from',
         [[], [row({ label: 'A', checked: true })], [row({ label: 'B', disabled: true, checked: true })]]
             .every(rows => anythingArmed([g(rows)]) === (armedLabels(g(rows)).length > 0)));
 }

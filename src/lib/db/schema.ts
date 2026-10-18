@@ -26,11 +26,16 @@ export const SESSION_LOGS_STORE = 'sessionLogs';
 export const SESSION_BINARIES_STORE = 'sessionBinaries';
 
 /** Where a session's BASE bytes came from. Without this a session can't be judged: a tune only
- *  means something relative to what it started from. */
+ *  means something relative to what it started from.
+ *
+ *  `which` names the parent's image the bytes are a copy of. `'car'` is NEXT — the parent's CAR
+ *  IMAGE, the bytes its ECU holds (lib/db/carImage.ts) — and is the only one written now.
+ *  `'tuned'` and `'base'` are the retired From TUNED / From BASE branches; their records keep
+ *  parsing and keep rendering as they always did. */
 export type BaseOrigin =
     | { kind: 'upload'; fileName: string }
     | { kind: 'dme'; vin?: string; aif?: string; softwareVersion?: string; readAt: number }
-    | { kind: 'session'; sessionId: string; which: 'tuned' | 'base' };
+    | { kind: 'session'; sessionId: string; which: 'tuned' | 'base' | 'car' };
 
 /** Everything that turns a BASE + log into the TUNED bytes. Stored so the derivation can be
  *  replayed exactly — `processLogData` is pure, but the hook feeds it whatever is in state, and
@@ -278,7 +283,9 @@ export interface TuningSession {
     /** Denormalised from baseOrigin for tree building. Decorative: the bytes are self-contained,
      *  so a dangling parent only degrades the label, never the session. */
     parentSessionId?: string;
-    /** Proves the BASE really is the parent's TUNED output (=== parent.sha256). */
+    /** Hash of the BASE bytes. For a child of another session it is what the origin badge checks
+     *  against the parent's image `baseOrigin.which` names — its TUNED, its BASE, or for NEXT the
+     *  bytes one of its flashes sent. */
     baseSha256?: string;
     baseFileName?: string;
     baseSize?: number;
@@ -288,6 +295,21 @@ export interface TuningSession {
     sha256?: string;                 // TUNED bytes — the reproduction check compares against this
     veMapSnapshot?: VEMap;           // TUNED map. Read by useComparison for the `db:` diff variants
     tuneSettings?: TuneSettings;
+    /**
+     * When `tuneSettings` were last written, as this device's `Date.now()`.
+     *
+     * The one thing that tells a draft's saved settings apart from what its car holds: settings
+     * saved AFTER the last real flash are the operator's pending intent and a reopen keeps them;
+     * settings older than it describe a car the flash has since changed, and a reopen reads the car
+     * image instead (`settingsAreCurrent`, lib/db/carImage.ts). Compared against `FlashRecord.at`,
+     * which is the same clock.
+     *
+     * Written by `saveTune` and by NEXT, which persists the settings a child inherits. A write pins
+     * it at the flash's own timestamp. Optional, and absent on every session saved before it
+     * existed — those read as older than any flash they have, which is how they reopened before.
+     * Additive, so no DB_VERSION bump.
+     */
+    settingsAt?: number;
     hasLog: boolean;
     logPointCount: number;
 
@@ -388,6 +410,21 @@ export interface SessionBinariesRecord {
     sessionId: string;
     baseBinaryBuffer: ArrayBuffer;
     tunedBinaryBuffer: ArrayBuffer | null;   // null until the session has been tuned
+    /**
+     * The CAR IMAGE: the exact bytes of this session's last REAL flash — or, after a READ, the bytes
+     * read, which are the BASE.
+     *
+     * Kept because nothing else holds them. The BASE is what the session started from and the TUNED
+     * is what SAVE built; a patch-only write is neither, and a write after a reopen can be neither
+     * too. Without these the hub could not know what is in the ECU, and every reopen of a session
+     * that wrote PATCH-ON offered the same write again and asked the lineage check to "write anyway".
+     *
+     * Written in the same transaction as the flash record it belongs to (`appendFlashRecord`), never
+     * by a PRACTICE write. Optional and additive — no DB_VERSION bump, per the note at the top of
+     * this file — and absent on every record from before it: those are resolved from the flash
+     * history's sha256 instead (`resolveCarImage`). Travels with the session through sync.
+     */
+    carBinaryBuffer?: ArrayBuffer | null;
 }
 
 export function openDb(): Promise<IDBDatabase> {

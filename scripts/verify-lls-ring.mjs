@@ -652,10 +652,13 @@ console.log('\n[the artifact is named, in all four places that name it]');
     const hook = readFileSync('src/hooks/useBinaryFile.ts', 'utf8');
     check('the filename prefix uses it', /claimsTune = writeClaimsTune\(/.test(hook),
         'buildFileName still has its own copy');
+    // The write handler asks it ONCE, as `claimsTune`, and both of its readers take that answer.
+    check('the write handler asks it once',
+        /const claimsTune = writeClaimsTune\(/.test(page), 'the handler asks something else');
     check('the confirmation dialog uses it',
-        /tuned: writeClaimsTune\(/.test(page), 'the dialog still asks Boolean(newMap)');
-    check('the flash record uses it',
-        /tuned: finalizeArmedRef\.current \|\| writeClaimsTune\(/.test(page), 'the record still asks separately');
+        /tuned: claimsTune,/.test(page), 'the dialog still asks Boolean(newMap)');
+    check('the flash record uses it (an archived session\'s tune is already in the car)',
+        /tuned: claimsTune \|\| target\.status === 'archived'/.test(page), 'the record still asks separately');
     check('the hub label names LLS and IDLE above the patch state',
         page.indexOf("'WRITE LLS'") > 0 && page.indexOf("'WRITE IDLE'") > 0
         && page.indexOf("'WRITE LLS'") < page.indexOf("'WRITE PATCH-ON'"),

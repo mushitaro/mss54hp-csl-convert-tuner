@@ -52,7 +52,7 @@ const TEXT = {
         bannerReference: 'TINT VS SUBJECT',
         gridHint: '値そのものの表・グラフです。見出しはこの項目の形（定数・カーブ・マップ）を示します。',
         archivedLabel: 'ARCHIVED',
-        archivedHint: 'このセッションは書き込み済みの記録なので編集できません。続きを作るには、セッション一覧の FROM TUNED から新しいセッションとして開いてください。',
+        archivedHint: 'このセッションは書き込み済みの記録なので編集できません。続きを作るには、セッション一覧の Actions → NEXT で新しいセッションとして開いてください。',
         constantCell: '値',
         constantEditHint: '押すと下の行で編集できます。数値を打つか、スライダーで動かします。',
         clearConstant: '編集をやめて、加算・倍率の操作に戻します。数値を押すと編集に戻れます。',
@@ -86,7 +86,7 @@ const TEXT = {
         bannerReference: 'TINT VS SUBJECT',
         gridHint: 'The values themselves. The label says which shape this item is — a constant, a curve or a map.',
         archivedLabel: 'ARCHIVED',
-        archivedHint: 'This session is a record of bytes already written, so it cannot be edited. To carry it forward, open it as a new session with FROM TUNED in the session list.',
+        archivedHint: 'This session is a record of bytes already written, so it cannot be edited. To carry it forward, open it as a new session with Actions → NEXT in the session list.',
         constantCell: 'value',
         constantEditHint: 'Press to edit it in the row below — type a number, or drag the slider.',
         clearConstant: 'Stop editing and go back to the add / scale ops. Press the number to come back.',
@@ -218,8 +218,8 @@ export function ValuePane({
      * recorded them, and then had nowhere to send them — WRITE is gated on
      * `!isArchived` and SAVE reports 'archived'. The edit went in and stopped.
      *
-     * The way to carry an archived tune forward is FROM TUNED in the session
-     * list, which opens it as a new draft, and the lock says so.
+     * The way to carry an archived tune forward is NEXT in the session list,
+     * which opens a new draft on the car's bytes, and the lock says so.
      */
     archived?: boolean;
 }) {
