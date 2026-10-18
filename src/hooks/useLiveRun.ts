@@ -2,9 +2,8 @@
 
 import { useCallback, useRef, useSyncExternalStore } from 'react';
 import {
-    stepHighLoadClock, heldSeconds, EMPTY_HIGH_LOAD_CLOCK, type HighLoadClock,
-} from '@/lib/log-engine/highLoadClock';
-import { timeScaleSeconds } from '@/lib/log-engine/filter';
+    stepPullClock, pullReading, EMPTY_PULL_CLOCK, type PullClock, type PullReading,
+} from '@/lib/log-engine/pullClock';
 import type { LogDataPoint } from '@/lib/types';
 import type { LogExchange } from '@/lib/log-engine/logProfile';
 import { sampleRateHzFromTimes } from '@/lib/log-engine/rate';
@@ -32,21 +31,21 @@ export interface LiveReadout {
     /** Measured sample rate, or null before the first window closes. */
     hz: number | null;
     /**
-     * Seconds the current high-load pull has been held, or null while below the filling floor.
+     * How long the pedal has been held — the PULL readout — or null before the first hold.
      *
      * Stepped HERE rather than in the component that draws it, because the clock must not miss a
-     * sample: a dip below the floor resets it, and a subscriber that renders on a coalesced
-     * snapshot can skip the dipping sample entirely — which would leave the dashboard reporting a
-     * pull the filter has already thrown away. Every sample passes through this hook; renders do
-     * not. See highLoadClock.ts.
+     * sample: the one where the pedal leaves the band ends the hold, and a subscriber that renders
+     * on a coalesced snapshot can skip it entirely — which would leave the strip counting a hold
+     * that is already over. Every sample passes through this hook; renders do not. See pullClock.ts.
      *
-     * A duration, not a verdict. Whether it is long enough is `highLoadSettleSec`, which lives in
-     * the filter config, and comparing them is the drawing component's job.
+     * This slot held the high-load settle clock until 2026-10-18, when the strip stopped showing it
+     * (operator: only how long the pull was held is needed). The filter still runs that clock on its
+     * own — highLoadClock.ts.
      */
-    heldSec: number | null;
+    pull: PullReading | null;
 }
 
-const EMPTY_READOUT: LiveReadout = { sample: null, count: 0, hz: null, heldSec: null };
+const EMPTY_READOUT: LiveReadout = { sample: null, count: 0, hz: null, pull: null };
 
 /**
  * A datalog in progress: the samples, their durability, and the pace of everything downstream.
@@ -85,8 +84,8 @@ export function useLiveRun(input: {
 
     /** Every sample of the run, in order. Memory only until SAVE — see the recovery store below. */
     const samplesRef = useRef<LogDataPoint[]>([]);
-    /** The high-load settle clock, advanced once per sample — see LiveReadout.heldSec. */
-    const highLoadRef = useRef<HighLoadClock>(EMPTY_HIGH_LOAD_CLOCK);
+    /** The PULL clock, advanced once per sample — see LiveReadout.pull. */
+    const pullRef = useRef<PullClock>(EMPTY_PULL_CLOCK);
     /** What this run's samples are made of, so the RATE row compares against what this run can
      *  reach rather than what the profile hopes for. Null outside a run. */
     const exchangesRef = useRef<LogExchange[] | null>(null);
@@ -228,15 +227,13 @@ export function useLiveRun(input: {
             hzPublishedAtRef.current = point.time;
         }
 
-        // The unit is decided from the samples themselves, exactly as the batch filter decides it,
-        // so a millisecond log and a seconds log both produce seconds here.
-        const spu = timeScaleSeconds(samplesRef.current);
-        highLoadRef.current = stepHighLoadClock(highLoadRef.current, point.rf, point.time, spu);
+        // Seconds as they come: both live links stamp `performance.now() / 1000` from run start.
+        pullRef.current = stepPullClock(pullRef.current, { time: point.time, wdk: point.wdk1 });
         publishReadout({
             sample: point,
             count: samplesRef.current.length,
             hz: hzValueRef.current,
-            heldSec: heldSeconds(highLoadRef.current, point.time, spu),
+            pull: pullReading(pullRef.current),
         });
         scheduleFlush();
         void persist(false);   // own throttle, an order of magnitude slower than the UI flush
@@ -262,7 +259,7 @@ export function useLiveRun(input: {
         hzWindowRef.current = [];
         hzValueRef.current = null;
         hzPublishedAtRef.current = 0;
-        highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
+        pullRef.current = EMPTY_PULL_CLOCK;
         publishReadout(EMPTY_READOUT);
         if (run.sessionId) {
             void beginLiveRun({ sessionId: run.sessionId, mock: run.mock })
@@ -296,7 +293,7 @@ export function useLiveRun(input: {
         exchangesRef.current = null;
         queueRef.current = [];
         runIdRef.current = null;
-        highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
+        pullRef.current = EMPTY_PULL_CLOCK;
         publishReadout(EMPTY_READOUT);
     }, []);
 
@@ -304,9 +301,9 @@ export function useLiveRun(input: {
      *  restarting. */
     const adopt = useCallback((points: LogDataPoint[]) => {
         samplesRef.current = points;
-        highLoadRef.current = EMPTY_HIGH_LOAD_CLOCK;
+        pullRef.current = EMPTY_PULL_CLOCK;
         publishReadout({
-            sample: points[points.length - 1] ?? null, count: points.length, hz: null, heldSec: null,
+            sample: points[points.length - 1] ?? null, count: points.length, hz: null, pull: null,
         });
     }, []);
 

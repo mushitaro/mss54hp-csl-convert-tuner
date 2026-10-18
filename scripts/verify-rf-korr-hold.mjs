@@ -22,7 +22,7 @@
 import { readFileSync } from 'node:fs';
 import { BinaryPatcher, bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, rfKorrFloorMode } from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
-import { APP_CONFIG, TANK_VENT_GAIN, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
+import { APP_CONFIG, TANK_VENT_GAIN, TANK_VENT_TMOT, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
 import { readEgtTables, RfKorrLatch, gateOpen, rfKorrActive, rfKorrAt } from '../src/lib/ve-calculator/egtTables.ts';
 import { analyzeDataChecksum } from '../src/lib/checksum/dmeDataChecksum.ts';
 import { isRoadState, isTuneOnTheRoad } from '../src/lib/db/flashState.ts';
@@ -208,7 +208,9 @@ console.log('\n[the PATCH-ON image with K HOLD is flashable, and says what it is
         back.applyPatch && back.applyTankVentDisable && back.applyRfKorrHold && !back.applyRfKorrGateDrop && !back.applyWotDisable,
         JSON.stringify(back));
     const inSlot = (i) => (i >= 0x3FFC && i <= 0x3FFE) || (i >= 0xBFFC && i <= 0xBFFE);
-    const known = new Set([APP_CONFIG.MSS54HP.ADDRESS_MAP_CONFIG, APP_CONFIG.MSS54HP.ADDRESS_TEMP_LIMIT, TANK_VENT_GAIN.ADDRESS]);
+    // TEV is two bytes: the valve gain and K_TE_TMOT (TANK_VENT_TMOT).
+    const known = new Set([APP_CONFIG.MSS54HP.ADDRESS_MAP_CONFIG, APP_CONFIG.MSS54HP.ADDRESS_TEMP_LIMIT,
+        TANK_VENT_GAIN.ADDRESS, TANK_VENT_TMOT.ADDRESS]);
     const stray = diff(BASE, on).filter(i => !inSlot(i) && !known.has(i) && !(i >= Y && i < Y + N * 2));
     check('nothing moved outside PATCH, TEV, the floor and the checksum slots', stray.length === 0,
         stray.map(i => i.toString(16)).join(','));

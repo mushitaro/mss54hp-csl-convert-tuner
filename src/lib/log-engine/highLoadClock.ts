@@ -1,6 +1,10 @@
 /**
  * The high-load settle clock, as ONE implementation used by the filter and by the live readout.
  *
+ * The live readout stopped showing it on 2026-10-18 — the operator asked for how long the pull was
+ * held and nothing else, which is the pedal clock in pullClock.ts — so the filter is now its only
+ * caller. What follows is why it was extracted, and still holds for the filter.
+ *
  * The filter drops a high-load sample until the pull has been held for `highLoadSettleSec`, because
  * entering the region makes the DME's `rf_korr` step off a lagging TABG while the lambda trim walks
  * after it — until it lands, `trim x rf_korr` reads high. Two same-day drives disagreed by 5.2 % at
@@ -92,8 +96,8 @@ export function stepHighLoadClock(
 /**
  * How long the pull has been held, in seconds, or null while below the floor.
  *
- * This is the number the driver needs, and it is read off the same state the filter drops samples
- * from — so "counting" on the dashboard and "kept" in the derivation cannot disagree.
+ * Read off the same state the filter drops samples from, so a reading of it and "kept" in the
+ * derivation cannot disagree.
  */
 export function heldSeconds(
     clock: HighLoadClock,

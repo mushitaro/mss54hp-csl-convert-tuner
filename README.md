@@ -147,7 +147,10 @@ opening anything**.
 - **WRITE** — the derived tables: `ALPHA-N` (the measured map, with `SHAPE` as a mode on it) and
   `WARMUP`. Each row states what it would write and, where it cannot, why.
 - **PATCH** — the logic switches the ECU is left holding: MAP compensation, the LTFT window, the
-  tank vent, the WOT threshold, and **K HOLD** — the `rf_korr` gate floor raised out of reach so the
+  tank vent (two bytes: `K_TE_TVTE_GA = 0` shuts the purge valve, and `K_TE_TMOT = 0xFF` keeps the
+  tank-vent state machine out of purge, so the purge adaptation TEA — a correction on the injection
+  time that no log carries — stays 1.000 instead of hiding up to 21 % of the low-load lambda error),
+  the WOT threshold, and **K HOLD** — the `rf_korr` gate floor raised out of reach so the
   DME applies 1.000 everywhere, which keeps the VE log clear of the exhaust-temperature enrichment
   and the lambda ramp that follows each step of it. K HOLD arms with PATCH and can be turned off on
   its own (for the DRREL and full-load VE runs); FINALIZE puts the stock floor back. These change

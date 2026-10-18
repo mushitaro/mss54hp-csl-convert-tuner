@@ -396,11 +396,62 @@ export const LAMBDA_SHUTDOWN = {
  * enforced by the toggle rather than by where the constant lives.
  *
  * Stock is 0x80 = 1.0 with the XDF's x/128 conversion. Zero holds the valve shut.
+ *
+ * It is HALF of TANK VENT. The other half is `TANK_VENT_TMOT` below: this byte shuts the valve,
+ * that one stops the purge adaptation the valve being shut does not stop.
  */
 export const TANK_VENT_GAIN = {
     ADDRESS: 0xBF1,
     STOCK_RAW: 0x80,
     DISABLED_RAW: 0x00,
+} as const;
+
+/**
+ * `K_TE_TMOT` — the coolant temperature above which the tank-vent state machine purges, slave
+ * `0x0BED`, one byte, °C = raw − 48. The second half of TANK VENT (2026-10-18).
+ *
+ * What the DME does with it — `FUN_000263DA` (slave 0x0263DA), the tank-vent state machine:
+ *
+ *     TMOT > K_TE_TMOT  ->  purge phase, and in it the purge adaptation TEA learns:
+ *         TEA_REGLER1  = 1 s low-pass of LA_F_REGLER1                (the bank-1 lambda trim)
+ *         TEA1_F      += TEA_REGLER1's moves away from 1.0,
+ *                        clamped to [KF_TEA_FMIN_N_RF 0.75, K_TEA_FMAX 1.04]
+ *         TEA1_F_KORR  = 1 + (TEA1_F − 1) × TEA_F_SETZ,  TEA_F_SETZ = KF_TEA_FSETZ_N_RF(N, RF)
+ *     otherwise         ->  no purge; TEA takes its forget branch and TEA1_F_KORR stays 1.000
+ *
+ *     TI_F_ADAPT = LA_F_REGLER × LAA_F × TEA_F_KORR                   (slave 0x01DC16-0x01DC36)
+ *
+ * TEA1_F_KORR multiplies the injection time beside the trim, so whatever TEA has learned is lambda
+ * error the trim no longer shows. It is slave-only RAM (0xFFE812) and no block this app logs carries
+ * it: the logged STFT the VE write reads is short by that factor, and nothing in the log says so.
+ *
+ * Why `TANK_VENT_GAIN` alone does not stop it: K_TE_TVTE_GA's only reader is `tetv_calc` (slave
+ * 0x026ED6), which makes the valve DUTY. This state machine never reads it — with the valve shut it
+ * still enters purge above 69 °C, and TEA still learns, now from a trim that holds no vapour at all.
+ *
+ * How much it can hide. KF_TEA_FSETZ_N_RF is 0.55-0.83 at RF 0.3-0.4 and 0.05 at RF >= 0.54, so
+ * with TEA1_F at a clamp:
+ *
+ *     RF 0.17-0.46 (the low-load VE rows)   (0.75 − 1) × 0.83 = −21 %    (1.04 − 1) × 0.83 = +3.3 %
+ *     RF >= 0.54                            (0.75 − 1) × 0.05 = −1.25 %  (1.04 − 1) × 0.05 = +0.2 %
+ *
+ * The patch: 0xFF = 207 °C, a coolant temperature no engine reaches. The only reader is
+ * `FUN_000263DA` — eight compares, at slave 0x0265E6, 0x026670, 0x02676C, 0x026818, 0x0268FE,
+ * 0x0269CA, 0x026B82 and 0x026C06 — so the state machine never enters purge, TEA takes its forget
+ * branch every pass, and TEA1_F_KORR stays at the 1.000 it starts from (TEA1_F = 1.0 at power-up,
+ * `FUN_00026E4C`). The cost is the tank-vent functional check, and its OBD readiness, which never
+ * runs: TUNING ONLY like the valve byte, written and restored by the same toggle
+ * (`BinaryPatcher.setTankVentDisable`).
+ *
+ * Stock 0x75 = 69 °C, read at offset 0x0BED of the car's BIN and of
+ * `public/mock/csl-0401-community-patch-v1.partial.bin`. The 64 KB partial puts slave at
+ * 0x0000-0x7FFF, so the slave address is the offset, and the slave checksum the byte sits under is
+ * corrected by the same `applyChecksumCorrection` every other patch byte relies on.
+ */
+export const TANK_VENT_TMOT = {
+    ADDRESS: 0x0BED,
+    STOCK_RAW: 0x75,
+    DISABLED_RAW: 0xFF,
 } as const;
 
 /**

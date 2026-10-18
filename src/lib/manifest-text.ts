@@ -221,7 +221,8 @@ const EN: ManifestCopy = {
 
     needBinary: 'Load a binary first.',
     tankVentNote: 'Armed by PATCH. Holds the evaporative purge valve shut (K_TE_TVTE_GA = 0 at '
-        + 'slave 0xBF1). Purged vapour is fuel the DME did not inject, so the lambda trim absorbs '
+        + 'slave 0xBF1) and stops the purge learning the logs cannot see. Purged vapour is fuel the '
+        + 'DME did not inject, so the lambda trim absorbs '
         + 'it — and that trim is the only input the VE correction has. TUNING ONLY: the canister '
         + 'saturates, and DTC 24 is the code for a valve that will not open. Turn PATCH off and '
         + 'write once more before driving the tune. The filename carries _TEVOFF while it is armed.',
@@ -353,8 +354,8 @@ const JA: ManifestCopy = {
         + '参照値に戻すには、これを arm してください。',
 
     needBinary: 'まずバイナリを読み込んでください。',
-    tankVentNote: 'PATCH と同時に arm されます。蒸発ガスのパージバルブを閉じたままにします'
-        + '（slave 0xBF1 の K_TE_TVTE_GA = 0）。パージされた蒸気は DME が噴射していない燃料なので、'
+    tankVentNote: 'PATCH と同時に arm されます。蒸発ガスのパージバルブを閉じたままにし'
+        + '（slave 0xBF1 の K_TE_TVTE_GA = 0）、ログに出ないパージ学習も止めます。パージされた蒸気は DME が噴射していない燃料なので、'
         + 'ラムダトリムがそれを吸収します — そしてそのトリムが VE 補正の唯一の入力です。'
         + 'チューニング専用: キャニスターは飽和し、DTC 24 は「バルブが開かない」のコードです。'
         + 'チューンで走る前に PATCH を切ってもう一度書き込んでください。arm されている間、'

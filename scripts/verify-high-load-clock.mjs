@@ -1,5 +1,6 @@
 /**
- * The settle clock the dashboard reads and the filter drops samples with — one state machine.
+ * The settle clock the filter drops samples with — one state machine (the dashboard read it too,
+ * until the live strip dropped it on 2026-10-18).
  *
  * It was extracted from `processLogData` so the driver can see it. That only helps if the two agree
  * forever, so this pins the machine itself and `verify:settle` pins that the filter still behaves

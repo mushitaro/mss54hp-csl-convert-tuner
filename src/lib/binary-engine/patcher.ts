@@ -1,5 +1,5 @@
 import { BinaryParser } from './parser';
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP, TANK_VENT_GAIN,
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, CSL_STOCK_WOT_THRESHOLD_MAP, TANK_VENT_GAIN, TANK_VENT_TMOT,
     COMMUNITY_WOT_FUEL_RAW, WOT_FUEL_ROWS, CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP,
     RF_KORR_GATE_FLOOR } from '@/config/constants';
 import type { VEMap } from '@/lib/types';
@@ -331,9 +331,16 @@ export class BinaryPatcher extends BinaryParser {
     }
 
     /**
-     * Holds the tank-vent (evaporative purge) valve shut, or puts it back to stock.
+     * Holds the tank-vent (evaporative purge) valve shut and stops the purge adaptation, or puts
+     * both back.
      *
-     * One byte. `K_TE_TVTE_GA` is the gain on the duty that `tetv_calc` computes, and its only
+     * Two bytes, one toggle:
+     *
+     *     K_TE_TVTE_GA  slave 0xBF1   0x80 -> 0x00   valve duty = 0          (TANK_VENT_GAIN)
+     *     K_TE_TMOT     slave 0xBED   0x75 -> 0xFF   purge never entered,    (TANK_VENT_TMOT)
+     *                                                TEA1_F_KORR stays 1.000
+     *
+     * The valve byte: `K_TE_TVTE_GA` is the gain on the duty that `tetv_calc` computes, and its only
      * reader in the binary is that function; with the gain at zero the result falls to K_TE_TV_MIN
      * and the `<= K_TE_TV_MIN` branch forces exactly zero, so this is "shut", not "minimum duty".
      *
@@ -342,18 +349,31 @@ export class BinaryPatcher extends BinaryParser {
      * the whole VE correction from. Session #902 measured the valve open for 82.8 % of a drive. The
      * trims from a run like that are correct for a reason the VE map cannot reproduce.
      *
+     * The temperature byte, added 2026-10-18 because the valve byte alone left half the problem in
+     * place: the tank-vent state machine never reads the gain, so above 69 °C coolant it still
+     * entered purge with the valve shut, and the purge adaptation TEA learned from the trim there —
+     * up to −21 % / +3.3 % of the lambda error at RF 0.17-0.46, folded into TEA1_F_KORR, which
+     * multiplies the injection time and is not in any log. At 0xFF the state machine never enters
+     * purge and TEA1_F_KORR stays 1.000, so the trim carries the whole error again. The arithmetic and
+     * the eight compares are on `TANK_VENT_TMOT`.
+     *
      * TUNING ONLY, and the toggle that reaches this says so. Restoring is the same call with
-     * `disable = false`, and it goes through `restoreByte`: a binary whose gain was 0x40 — purge at
-     * half gain, which is legitimate calibration and not "sort of disabled" — gets its 0x40 back
-     * rather than this app's idea of stock. `TANK_VENT_GAIN.STOCK_RAW` remains the answer for a
-     * binary that arrived already shut, which is the only case with nothing else to go on.
+     * `disable = false`, and BOTH bytes go through `restoreByte`: a binary whose gain was 0x40 —
+     * purge at half gain, which is legitimate calibration and not "sort of disabled" — gets its 0x40
+     * back rather than this app's idea of stock, and a K_TE_TMOT of its own comes back the same way.
+     * The STOCK_RAW values remain the answer for a binary that arrived already patched, which is the
+     * only case with nothing else to go on. A car carrying only the valve byte — every car patched
+     * before the second byte existed — therefore restores to 0x80 / its own 0x75, and is patched to
+     * 0x00 / 0xFF, so either direction leaves it whole.
      */
     public setTankVentDisable(disable: boolean): void {
         if (disable) {
             this.setUint8(TANK_VENT_GAIN.ADDRESS, TANK_VENT_GAIN.DISABLED_RAW);
+            this.setUint8(TANK_VENT_TMOT.ADDRESS, TANK_VENT_TMOT.DISABLED_RAW);
             return;
         }
         this.restoreByte(TANK_VENT_GAIN.ADDRESS, TANK_VENT_GAIN.DISABLED_RAW, TANK_VENT_GAIN.STOCK_RAW);
+        this.restoreByte(TANK_VENT_TMOT.ADDRESS, TANK_VENT_TMOT.DISABLED_RAW, TANK_VENT_TMOT.STOCK_RAW);
     }
 
     /**
@@ -476,6 +496,10 @@ export type RfKorrFloorMode = 'stock' | 'drop' | 'hold';
 export interface LogicPatches {
     applyPatch: boolean;
     applyWotDisable: boolean;
+    /** TANK VENT — both of its bytes, the valve gain and K_TE_TMOT, follow this one flag in every
+     *  builder here (`setTankVentDisable`), so a true writes both and a false restores both. A flag on
+     *  record from before K_TE_TMOT joined cannot say the car ran without it; nothing in the app reads
+     *  either byte back to interpret a log, so the replay is unaffected either way. */
     applyTankVentDisable: boolean;
     /** `kl_rf_korr_rf_min` held at 2.000 — K HOLD, see `RF_KORR_GATE_FLOOR`. Optional because
      *  every session stored before it predates it, and absent has to keep meaning "stock floor". */
@@ -580,6 +604,11 @@ export function patchOnImage(base: ArrayBuffer, patches: LogicPatches): ArrayBuf
  * and dropped — because either one means this BASE is not stock. PATCH is two bytes agreeing —
  * the map correction off AND the temperature limit raised — because either alone is a half-applied
  * patch and not the state WRITE PATCH-ON leaves.
+ *
+ * TANK VENT is the valve byte alone, which is how `useBinaryFile` seeds the toggle: a BASE carrying
+ * the pre-2026-10-18 patch (valve shut, K_TE_TMOT stock) reads as TANK VENT on, and the next build
+ * from that flag writes the second byte too. Whether the bytes hold the WHOLE patch is the hub's
+ * question (`getTankVentLearnStopped`, page.tsx's patch drift), not this one's.
  */
 export function readLogicPatches(image: ArrayBuffer): LogicPatches {
     const parser = new BinaryParser(image);
@@ -590,4 +619,31 @@ export function readLogicPatches(image: ArrayBuffer): LogicPatches {
         applyRfKorrHold: parser.getRfKorrGateFloorHeld(),
         applyRfKorrGateDrop: parser.getRfKorrGateFloorDropped(),
     };
+}
+
+/**
+ * Whether the TANK VENT bytes disagree with the toggle — i.e. whether the next write changes them.
+ *
+ *     armed      drift unless BOTH bytes are patched   (valve 0x00 AND K_TE_TMOT 0xFF)
+ *     not armed  drift if EITHER byte is patched
+ *
+ * The bytes count as "in" only whole and as "out" only clean, because a write from either toggle
+ * position moves whichever half is out of line: `setTankVentDisable(true)` writes both, `(false)`
+ * restores both. So a half-patched BIN is drift both ways.
+ *
+ * The half that matters is every car patched before 2026-10-18: valve shut, K_TE_TMOT stock. Its
+ * toggle seeds ON from the valve byte (`readLogicPatches`, `useBinaryFile`), and this reads it as
+ * drift, so the hub offers WRITE PATCH-ON — and that write leaves the purge learning stopped too.
+ * Comparing the valve byte alone, as the hub did before, called that car done.
+ *
+ * Pure and here, beside the writer whose effect it predicts, so `verify:tankvent-patch` can ask it
+ * the question page.tsx asks.
+ */
+export function tankVentDrift(
+    bytes: { valveShut: boolean; learnStopped: boolean },
+    armed: boolean,
+): boolean {
+    return armed
+        ? !(bytes.valveShut && bytes.learnStopped)
+        : (bytes.valveShut || bytes.learnStopped);
 }

@@ -286,6 +286,17 @@ p50 がマップより低いのは `TETV = map × K_TE_TVTE_GA × TE_F_VENTIL` �
 パッチ無しのログでは上のとおり救済にならない、どの位置にも意味の無いツマミだった。
 パッチが唯一の答えで、TETV チャンネル自体は残してある（パッチが効いていたことの走行ごとの証明）。
 
+**2 バイト目 `K_TE_TMOT` `0x0BED`：`0x75`（69 °C）→ `0xFF`（207 °C）— パージ学習 TEA も止める（2026-10-18）。**
+`TMOT > K_TE_TMOT` ならタンク換気の状態機械（slave `0x0263DA`）はパージ相に入り、そこで
+`TEA1_F_KORR = 1 + (TEA1_F − 1) × KF_TEA_FSETZ_N_RF(N, RF)` が学習される（`TEA1_F` は `LA_F_REGLER1` の
+1 秒ローパスが 1.0 から離れた分の積分で、`KF_TEA_FMIN_N_RF` 0.75〜`K_TEA_FMAX` 1.04 に収まる）。これは
+`TI_F_ADAPT = LA_F_REGLER × LAA_F × TEA_F_KORR`（slave `0x01DC16`）で噴射時間に掛かる。状態機械は
+`K_TE_TVTE_GA` を読まないので、バルブを閉じても 69 °C を超えればパージ相に入り、λ 誤差のうち RF 0.17–0.46
+（低負荷の VE 行）で −21 % / +3.3 %、RF ≥ 0.54 で −1.25 % / +0.2 % までがトリムから、どのログにも無い
+`TEA1_F_KORR`（slave RAM `0xFFE812`）へ移る。`0xFF` なら読み手（slave `0x0265E6` から `0x026C06` までの比較 8 か所、
+すべて状態機械の中）がパージ相に入らない側に倒れ、TEA は忘却側を通り、`TEA1_F_KORR` は起動時の 1.000 のまま。
+代償はタンク換気の機能検査（とその OBD レディネス）が走らないこと。同じ TANK VENT トグルで書き、同じく戻る。
+
 **⚠ 走り込む前に戻すこと。** キャニスタがパージされなくなり、飽和すれば燃料臭。
 `DTC_24_TANK_VENT_VALVE`（slave `0x60CA`、CTL バイト `0x27` — 他の evap 3 種は `0x00`）は
 まさに「開かないバルブ」の符号。ファイル名に `_TEVOFF` が付き、セッションにも記録される。
@@ -1600,7 +1611,8 @@ BASE を複製
   → Warmup / WOT（任意）
   → MAP / LTFT パッチ
   → WOT しきい値
-  → K_TE_TVTE_GA（タンク換気。ON/OFF どちらも書く — OFF は純正 0x80 を書き戻す）
+  → K_TE_TVTE_GA 0xBF1 と K_TE_TMOT 0xBED（タンク換気。ON/OFF どちらも書く — ON は 0x00 / 0xFF、
+                               OFF は読み込んだ値、それがパッチ値なら純正 0x80 / 0x75）
   → kl_rf_korr_rf_min Y 0xE90C（K HOLD。ON/OFF どちらも書く — ON は 2000 × 6、
                                OFF は読み込んだ 6 点、それが K HOLD か旧 RF GATE の 0.400 なら純正値。
                                旧 RF GATE の下限は、どのビルドも書かない）

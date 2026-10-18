@@ -224,7 +224,7 @@ export const processLogData = (
     const excluded = cfg.excludeTimeRanges ?? [];
 
     const highLoadSettleSec = cfg.highLoadSettleSec ?? 0;
-    // ONE clock, shared with the live readout — see highLoadClock.ts for why that matters.
+    // ONE clock, extracted so a live readout could share it — see highLoadClock.ts.
     // The resume fields keep their own names and shape: a stored resume has to replay identically,
     // and `verify:incremental` compares them field by field.
     let highLoad: HighLoadClock = {

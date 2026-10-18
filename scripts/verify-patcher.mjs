@@ -17,7 +17,7 @@
  */
 import { BinaryPatcher, patchOnImage, readLogicPatches } from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, CSL_STOCK_WOT_THRESHOLD_MAP, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, TANK_VENT_TMOT, CSL_STOCK_WOT_THRESHOLD_MAP, RF_KORR_GATE_FLOOR } from '../src/config/constants.ts';
 import { analyzeDataChecksum } from '../src/lib/checksum/dmeDataChecksum.ts';
 
 let fails = 0;
@@ -35,6 +35,7 @@ const fresh = (overrides = {}) => {
     b[MAP_CFG] = 0x01;
     b[TEMP_LIMIT] = 128;          // 80 °C
     b[TANK_VENT_GAIN.ADDRESS] = 0x40;   // purge at half gain — legitimate calibration
+    b[TANK_VENT_TMOT.ADDRESS] = 0x70;   // purge from 64 °C rather than 69 — its own, not the patch
     for (let i = 0; i < 16; i++) { b[WOT_THR + i * 2] = 0x01; b[WOT_THR + i * 2 + 1] = 0x90; }  // 40.0 %
     for (const [addr, val] of Object.entries(overrides)) b[Number(addr)] = val;
     return b;
@@ -142,6 +143,19 @@ console.log('\n[tank vent: a half-gain calibration is not "sort of disabled"]');
     p.setTankVentDisable(false);
     const after = new Uint8Array(p.getBuffer());
     check('a shut valve falls back to stock gain', after[TANK_VENT_GAIN.ADDRESS] === TANK_VENT_GAIN.STOCK_RAW);
+}
+{
+    // TANK VENT's second byte, K_TE_TMOT, under the same rule: its own 64 °C comes back, and only
+    // the patch's own 0xFF falls back to the stock 69 °C.
+    const p = patcherOn(fresh());
+    p.setTankVentDisable(true);
+    check('ON writes K_TE_TMOT = 0xFF', new Uint8Array(p.getBuffer())[TANK_VENT_TMOT.ADDRESS] === 0xFF);
+    p.setTankVentDisable(false);
+    check('OFF puts its own 64 °C back', new Uint8Array(p.getBuffer())[TANK_VENT_TMOT.ADDRESS] === 0x70);
+    const q = patcherOn(fresh({ [TANK_VENT_TMOT.ADDRESS]: TANK_VENT_TMOT.DISABLED_RAW }));
+    q.setTankVentDisable(false);
+    check('a BIN that arrives at 0xFF falls back to 69 °C',
+        new Uint8Array(q.getBuffer())[TANK_VENT_TMOT.ADDRESS] === TANK_VENT_TMOT.STOCK_RAW);
 }
 
 console.log('\n[rf_korr floor: twelve bytes, same rule — and HOLD is the patch\'s own work]');

@@ -197,6 +197,8 @@ const expectLocked = [
     ['k_rf_cfg', 'app-managed'],
 
     ['K_TE_TVTE_GA', 'app-managed'],
+    // TANK VENT's second byte (2026-10-18): setTankVentDisable writes it in both directions too.
+    ['K_TE_TMOT', 'app-managed'],
     // Joined the app-managed set with the RF GATE patch: buildPatchedBuffer writes this curve in
     // BOTH directions on every build, so a CALIBRATION edit here would be overwritten silently.
     ['kl_rf_korr_rf_min', 'app-managed'],

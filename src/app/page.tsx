@@ -35,9 +35,9 @@ import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
 import LlsPanel from '@/components/LlsPanel';
 import { WriteManifest, ManifestCorner, anythingArmed, type ManifestGroup } from '@/components/WriteManifest';
 import {
-  enabledTabs, featureEnabled, enabledDriveViews, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
+  enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
   writeRowInMode,
-  type TabId, type FeatureName, type DriveView,
+  type TabId, type FeatureName,
 } from '@/lib/features';
 import { CompareBar, type CompareOption } from '@/components/CompareBar';
 import { CalibrationTab } from '@/components/calibration/CalibrationTab';
@@ -106,7 +106,7 @@ import type { HighDeltaGuard } from '@/lib/ve-calculator/highDeltaGuard';
 import { withLambdaRamp } from '@/lib/log-engine/lambdaGates';
 import { readRfPtKorrCurves, type RfPtKorrCurves } from '@/lib/ve-calculator/chargeTemp';
 import { BinaryParser } from '@/lib/binary-engine/parser';
-import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, type LogicPatches } from '@/lib/binary-engine/patcher';
+import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, tankVentDrift, type LogicPatches } from '@/lib/binary-engine/patcher';
 import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
@@ -1876,26 +1876,6 @@ export default function Home() {
    * popover in the footer — three surfaces that are nowhere near each other in this tree, with one
    * proposal between them. See shapeWorkspace for why they are apart.
    */
-  /**
-   * Which drive target the strip is showing. Never two at once — see LiveDriveStrip.
-   *
-   * Page state rather than the strip's own, so it survives the pane switch that unmounts the map on
-   * a phone: swapping to GRAPH and back must not silently put the driver on the other target.
-   */
-  const [driveView, setDriveView] = React.useState<DriveView>('ve');
-  /** What this build may offer. RF KORR is in here only where that feature renders — the strip
-   *  sits inside the STABLE lambda tab, so the tab registry alone never gated it. */
-  const driveViews = React.useMemo(() => enabledDriveViews(featurePreview), [featurePreview]);
-  /**
-   * The view actually in force — DERIVED, not stored, so it cannot disagree with what this build
-   * has. `useIsPreviewBuild` answers false on the server snapshot and the truth after hydration, so
-   * the list legitimately changes once on load; an effect syncing state to it would be a render
-   * chain, and a stored value would keep whatever it was set to before the list narrowed.
-   *
-   * `driveViews` is never empty — `ve` maps to the trunk — so `[0]` needs no guard.
-   */
-  const activeDriveView = driveViews.includes(driveView) ? driveView : driveViews[0];
-
   const shape = useShapeWorkspace({
     tuned: newMap, base: currentMap, anchored: shapeAnchors, applied: appliedShape,
     // What this drive still WANTS, which is what says whether the surface has settled. SHAPE is a
@@ -3700,7 +3680,11 @@ export default function Home() {
    *  use the same pair — testing mapOff alone would call a half-patched BIN patched. */
   const bytesPatched = !!patchStatus && patchStatus.mapOff && patchStatus.tempLimit;
   const bytesWotDisabled = !!patchStatus && patchStatus.wotDisabled;
-  const bytesTankVentShut = !!patchStatus && patchStatus.tankVentDisabled;
+  /** TANK VENT is two bytes since 2026-10-18 — the valve gain and K_TE_TMOT, which stops the purge
+   *  adaptation the shut valve does not (TANK_VENT_TMOT) — and "in the ECU" means BOTH. Its drift is
+   *  `tankVentDrift`: in only whole, out only clean, so the pre-2026-10-18 car (valve shut, K_TE_TMOT
+   *  stock, toggle seeded ON from the valve byte) is offered WRITE PATCH-ON instead of called done. */
+  const bytesTankVentShut = !!patchStatus && patchStatus.tankVentDisabled && patchStatus.tankVentLearnStopped;
   const bytesRfKorrHeld = !!patchStatus && patchStatus.rfKorrHeld;
   const bytesRfGateDropped = !!patchStatus && patchStatus.rfKorrGateDropped;
   // All of them, because all of them are things that have to come back OFF before the car is handed
@@ -3711,7 +3695,8 @@ export default function Home() {
   // drop back, so the next one changes those six words either way.
   const patchDrift = !!patchStatus && (bytesPatched !== applyPatch
     || bytesWotDisabled !== applyWotDisable
-    || bytesTankVentShut !== applyTankVentDisable
+    || tankVentDrift({ valveShut: patchStatus.tankVentDisabled, learnStopped: patchStatus.tankVentLearnStopped },
+      applyTankVentDisable)
     || bytesRfKorrHeld !== applyRfKorrHold
     || bytesRfGateDropped);
 
@@ -5839,25 +5824,16 @@ export default function Home() {
                       Here rather than only on the graph pane, because on a phone those are two
                       panes and the one you watch while driving to a cell is this one. Session #924
                       spent forty minutes and put no samples at all into the cells it was driven for:
-                      nothing on screen said which cell the car was in or whether the pull had been
-                      held long enough to count. See LiveDriveStrip.
+                      nothing on screen said which row the car was in or how long the pull had been
+                      held. See LiveDriveStrip.
 
-                      `interpolationTable` and `highLoadSettleSec` come from the SESSION's own
-                      settings, not from defaults — a session stores what it was built with, and a
-                      readout aimed at a different number than the derivation uses is worse than
-                      no readout. */}
+                      `interpolationTable` comes from the SESSION's own settings, not from defaults
+                      — a session stores what it was built with, and an AQ readout computed with a
+                      different table than the derivation uses is worse than no readout. */}
                   {dmeLink.state === 'tuning' && (
                     <LiveDriveStrip
                       feed={liveRun.readout}
                       interpolationTable={interpolationTable}
-                      settleSec={filterConfig.highLoadSettleSec}
-                      view={activeDriveView}
-                      views={driveViews}
-                      onViewChange={setDriveView}
-                      hitMap={hitMap}
-                      rpmAxis={currentMap?.xAxis}
-                      loadAxis={currentMap?.yAxis}
-                      coverageOk={filterConfig.coverageOk ?? COVERAGE_OK_DEFAULT}
                     />
                   )}
                   {/* `relative` for the same reason the TUNED tab needs it: the readout is an

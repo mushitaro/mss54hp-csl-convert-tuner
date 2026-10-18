@@ -178,6 +178,7 @@ const JA = {
             : '') +
         (a.tankVentOff
             ? `\n⚠ TANK VENT: SHUT — タンク換気を無効にしたまま書き込みます。\n`
+            + '  ログに出ないパージ学習も止めます。\n'
             + '  目的はチューニング走行中の再現性です。この BIN はそのまま走り続けるためのものではありません。\n'
             + '  キャニスタがパージされなくなり、飽和すれば燃料臭や DTC 24（タンク換気バルブ）の原因になります。\n'
             + '  ログを取り終えたら TANK VENT を OEM に戻してもう一度書き込んでください。\n'
@@ -435,6 +436,7 @@ const EN: NativeDialogText = {
             : '') +
         (a.tankVentOff
             ? `\n⚠ TANK VENT: SHUT — writing with tank ventilation disabled.\n`
+            + '  It also stops the purge learning the logs cannot see.\n'
             + '  This is for reproducibility during a tuning run. It is not a BIN to keep driving.\n'
             + '  The charcoal canister stops being purged; once saturated it can cause a fuel smell,\n'
             + '  and DTC 24 (tank-venting valve) is the code for a valve that will not open.\n'

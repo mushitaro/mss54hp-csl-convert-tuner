@@ -180,7 +180,7 @@ export function useBinaryFile() {
   // toggle below. `rfKorrGateDropped` has no toggle any more — RF GATE is retired — and is kept
   // because a BIN that arrives carrying the drop will be written back to stock, which is a change
   // the hub has to be able to name.
-  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; rfKorrHeld: boolean; rfKorrGateDropped: boolean } | null>(null);
+  const [patchStatus, setPatchStatus] = useState<{ mapOff: boolean; tempLimit: boolean; wotDisabled: boolean; tankVentDisabled: boolean; tankVentLearnStopped: boolean; rfKorrHeld: boolean; rfKorrGateDropped: boolean } | null>(null);
   const [applyPatch, setApplyPatch] = useState<boolean>(false);
 
   // [EXPERIMENTAL] UI Controls
@@ -265,6 +265,12 @@ export function useBinaryFile() {
       // Detectable in the bytes, exactly like the WOT threshold — so a BIN that came off the car
       // with purge already disabled says so on the hub instead of quietly looking stock.
       const isTankVentDisabled = parser.getTankVentDisabled();
+      // TANK VENT's second byte, K_TE_TMOT at 0xFF: purge never entered, TEA never learns. Reported
+      // beside the valve byte and NOT used to seed the toggle — see getTankVentLearnStopped. A car
+      // patched before this byte existed has the valve shut and K_TE_TMOT stock; it seeds ON from the
+      // valve byte, and page.tsx reads the missing half as drift, so the hub offers WRITE PATCH-ON
+      // and that write leaves both bytes patched.
+      const isTankVentLearnStopped = parser.getTankVentLearnStopped();
       // Detectable the same way, and it has to be: this curve is an INPUT to every later
       // derivation (readEgtTables -> EgtTables.rfKorrMin -> gateOpen / RfKorrLatch / rfKorrCensus),
       // so a BASE that arrives held — the post-write reload, a TUNED built held — must say so
@@ -278,6 +284,7 @@ export function useBinaryFile() {
         tempLimit: isTempHigh,
         wotDisabled: isWotDisabled,
         tankVentDisabled: isTankVentDisabled,
+        tankVentLearnStopped: isTankVentLearnStopped,
         rfKorrHeld: isRfKorrHeld,
         rfKorrGateDropped: isRfKorrGateDropped,
       });
@@ -415,9 +422,10 @@ export function useBinaryFile() {
     // [EXPERIMENTAL] WOT Threshold Patch (Independent of Logic Patch)
     patcher.setWOTThreshold(useWotDisable);
 
-    // Tank ventilation. Written unconditionally in BOTH directions, like the WOT threshold above
-    // and unlike the derived maps: `false` restores the stock gain rather than leaving whatever
-    // was there. That is what makes turning the toggle off an actual restore — the whole safety
+    // Tank ventilation — the valve gain and K_TE_TMOT, two bytes on one toggle (setTankVentDisable).
+    // Written unconditionally in BOTH directions, like the WOT threshold above and unlike the derived
+    // maps: `false` restores both rather than leaving whatever was there — the valve AND the purge
+    // learning come back. That is what makes turning the toggle off an actual restore — the whole safety
     // story here is that the valve goes back, and a patch that only ever writes one way could not
     // deliver it. Before applyChecksumCorrection, with everything else.
     patcher.setTankVentDisable(useTankVentDisable);

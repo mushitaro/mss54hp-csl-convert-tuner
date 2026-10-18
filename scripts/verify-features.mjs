@@ -7,7 +7,7 @@
  * asserted directly, because production's privacy policy says sessions never leave the device;
  * the stage is the code-side half of that sentence.
  */
-import { FEATURES, featureEnabled, enabledTabs, DRIVE_TARGETS, enabledDriveViews,
+import { FEATURES, featureEnabled, enabledTabs,
     MODE_FEATURES, MODE_TABS, SHARED_TABS,
     MODE_WRITES, writeRowInMode } from '../src/lib/features.ts';
 import { selectableModes, LOG_PROFILES } from '../src/lib/log-engine/logProfile.ts';
@@ -158,32 +158,6 @@ console.log('\n[the tab arrangements MODE stands up]');
             MODE_TABS[mode][1]);
     }
 }
-
-console.log('\n' + '[the live drive targets, which a tab set cannot speak for]');
-{
-    // A tab is not the only surface a feature owns. LiveDriveStrip renders inside `lambda`, which
-    // is STABLE, and one of its buttons used to switch the readout onto RF KORR's target -- so the
-    // tab registry, which had already correctly closed the rfkorr TAB, said nothing about it. The
-    // cues make it more than cosmetic: useDriveCues fires only in the RF KORR view, so a driver on
-    // a production build who pressed that button got the cue behaviour of a feature that is not in
-    // their build, at speed, with a phone on the dash.
-    for (const [view, feature] of Object.entries(DRIVE_TARGETS)) {
-        check(`'${view}' names a feature that exists`, feature in FEATURES, feature);
-    }
-    // Pinned as a literal for the same reason the tab set is: giving a live target to a second
-    // feature has to show up as a diff here, where it reads as the decision it is.
-    const production = enabledDriveViews(false).sort();
-    check('production offers the VE target and nothing else',
-        JSON.stringify(production) === JSON.stringify(['ve']), production.join(', '));
-    check('preview offers every declared target',
-        enabledDriveViews(true).length === Object.keys(DRIVE_TARGETS).length,
-        enabledDriveViews(true).join(', '));
-    // The clamp at the call site takes [0] with no null check, and the strip labels its three
-    // readouts by the selected view. An empty list would render an undefined label.
-    check('no variant is left with no target at all',
-        enabledDriveViews(false).length > 0 && enabledDriveViews(true).length > 0);
-}
-
 
 console.log('\n[the hub summary and the WRITE gate are the same answer]');
 {

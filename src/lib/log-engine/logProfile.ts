@@ -766,7 +766,7 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
  * tabs that do not exist, collapsing the strip to STARTUP with no way back but the corner. That is
  * the trap the removed IDLE MODE switch sprang, and MODE would have shipped it. `MODE_FEATURES`
  * names the owner of each mode so the registry answers for this surface the way it answers for
- * tabs and for the live drive targets.
+ * tabs.
  *
  * The order is the operating one rather than the record's. VE is what almost every session is, and
  * the two stationary runs follow it — a driver picking IDLE has stopped the car to do it.

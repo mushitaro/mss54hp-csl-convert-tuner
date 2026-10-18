@@ -1,4 +1,4 @@
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, RF_KORR_GATE_FLOOR, LAMBDA_SHUTDOWN, COMMUNITY_WOT_FUEL_RAW,
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, TANK_VENT_TMOT, RF_KORR_GATE_FLOOR, LAMBDA_SHUTDOWN, COMMUNITY_WOT_FUEL_RAW,
     CSL_STOCK_MAP_DATA, CSL_STOCK_WARMUP_MAP } from '@/config/constants';
 import type { LambdaLimits } from '@/lib/log-engine/lambdaGates';
 import type { LtftLearnWindow } from '@/lib/log-engine/trimNeutrality';
@@ -34,6 +34,23 @@ export class BinaryParser {
      */
     public getTankVentDisabled(): boolean {
         return this.getUint8(TANK_VENT_GAIN.ADDRESS) === TANK_VENT_GAIN.DISABLED_RAW;
+    }
+
+    /**
+     * Whether this binary has the purge adaptation stopped: `K_TE_TMOT` at 0xFF (207 °C), so the
+     * tank-vent state machine never enters purge and TEA never learns — see `TANK_VENT_TMOT`.
+     *
+     * Asked separately from `getTankVentDisabled` rather than folded into it, because the two bytes
+     * answer different questions on a real fleet. Every car patched before 2026-10-18 carries the
+     * valve byte alone, and folding them would read that car as NOT patched — the toggle would seed
+     * OFF on load and the next build would quietly open its valve. Kept apart, the valve byte seeds
+     * the toggle and this one says whether the patch in the car is the whole of it.
+     *
+     * Exact equality, like the valve byte: anything below 0xFF is a temperature the coolant can
+     * reach, i.e. a calibration rather than this app's patch.
+     */
+    public getTankVentLearnStopped(): boolean {
+        return this.getUint8(TANK_VENT_TMOT.ADDRESS) === TANK_VENT_TMOT.DISABLED_RAW;
     }
 
     /** The six words of `kl_rf_korr_rf_min`'s Y block, raw. */

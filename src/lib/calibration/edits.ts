@@ -2,7 +2,7 @@ import type { EcuNumericDef } from '@/lib/ecu-items/types';
 import { quantise } from '@/lib/ecu-items/quantise';
 import { SEALED_CAL_SYMBOLS } from '@/lib/idle/seal';
 import { findEcuItem } from '@/lib/ecu-items/catalog';
-import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, WOT_FUEL_ROWS, COMMUNITY_WOT_FUEL_RAW, MAP_DIMENSIONS, RF_KORR_GATE_FLOOR } from '@/config/constants';
+import { APP_CONFIG, EXPERIMENTAL_CONFIG, TANK_VENT_GAIN, TANK_VENT_TMOT, WOT_FUEL_ROWS, COMMUNITY_WOT_FUEL_RAW, MAP_DIMENSIONS, RF_KORR_GATE_FLOOR } from '@/config/constants';
 import type { CalParamDef } from './types';
 import type { DecodedRun } from './decode';
 
@@ -200,6 +200,7 @@ export function managedSpans(): RunSpan[] {
         { address: APP_CONFIG.MSS54HP.ADDRESS_MAP_CONFIG, length: 1, owner: 'PATCH' },     // k_rf_cfg
         { address: APP_CONFIG.MSS54HP.ADDRESS_TEMP_LIMIT, length: 1, owner: 'PATCH' },     // K_LAA_TMOT_MIN
         { address: TANK_VENT_GAIN.ADDRESS, length: 1, owner: 'TANK VENT' },                // K_TE_TVTE_GA
+        { address: TANK_VENT_TMOT.ADDRESS, length: 1, owner: 'TANK VENT' },                // K_TE_TMOT
         { address: EXPERIMENTAL_CONFIG.ADDRESS_WOT_THRESHOLD_MAP, length: 16 * 2, owner: 'WOT LIMIT' }, // KF_BZ_WDK_VL z
         { address: RF_KORR_GATE_FLOOR.VALUES_ADDRESS, length: RF_KORR_GATE_FLOOR.POINTS * 2,
           owner: 'K HOLD' },                                                           // kl_rf_korr_rf_min y

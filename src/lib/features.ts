@@ -96,54 +96,11 @@ export function featureEnabled(name: FeatureName, isPreview: boolean): boolean {
 }
 
 /**
- * The LIVE DRIVE TARGETS — the per-run readout on LAMBDA that says what this drive still owes.
- *
- * ## Why this is here and not in the component
- *
- * A tab is not the only surface a feature owns. `lambda` is stable, `LiveDriveStrip` renders
- * unconditionally inside it, and until this existed one of its buttons switched the readout onto
- * RF KORR's target — a feature the production build cannot show or write. The registry above gates
- * TABS, so it had nothing to say about a control inside a stable one.
- *
- * That is not a small leak. `useDriveCues` fires the audio and haptic cues only in the RF KORR
- * view, so a driver on a production build who pressed that button got the cue behaviour of a
- * feature that is not in their build, at speed, with a phone on the dash.
- *
- * So the views are declared HERE, each naming the feature that owns it, and the list a variant may
- * offer is derived the same way the tab set is. `satisfies` makes the mapping total and checks
- * every value against a real `FeatureName`: a view whose feature was renamed stops compiling, and
- * a new view cannot be added without saying who owns it.
- *
- * `ve` maps to the trunk, so the list is never empty — a build with no drive target at all would
- * have no LAMBDA tab either.
- */
-export const DRIVE_TARGETS = {
-    /** Samples still needed in THIS cell of (rpm x aq_rel_rf). Clock is dwell in the cell. */
-    ve: 've',
-    /** Seconds still needed above the filling floor. Clock is the settle timer. */
-    rfkorr: 'rfKorr',
-} as const satisfies Record<string, FeatureName>;
-
-/** Which drive target the strip is showing. Never two at once — see LiveDriveStrip. */
-export type DriveView = keyof typeof DRIVE_TARGETS;
-
-/**
- * The drive views this variant may offer, in declaration order.
- *
- * Always non-empty (see above), so callers can take `[0]` as the fallback without a null check —
- * which is what makes the clamp at the call site a derived value rather than an effect.
- */
-export function enabledDriveViews(isPreview: boolean): DriveView[] {
-    return (Object.keys(DRIVE_TARGETS) as DriveView[])
-        .filter(view => featureEnabled(DRIVE_TARGETS[view], isPreview));
-}
-
-/**
  * MODE — which of the three runs a session can be started as, and who owns each.
  *
- * The third surface this registry has had to speak for, and it arrived by the same route as
- * DRIVE_TARGETS above: a tab is not the only thing a feature owns. MODE hides tabs, so a variant
- * that offered IDLE while the IDLE tab was closed would collapse the strip to STARTUP alone and
+ * A surface this registry has to speak for beyond tabs: a tab is not the only thing a feature
+ * owns. MODE hides tabs, so a variant that offered IDLE while the IDLE tab was closed would
+ * collapse the strip to STARTUP alone and
  * leave no way back except finding the corner again — which is exactly the trap the removed IDLE
  * MODE switch sprang, and it would have shipped to production.
  *
