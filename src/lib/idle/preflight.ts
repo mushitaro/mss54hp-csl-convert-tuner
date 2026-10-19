@@ -27,6 +27,7 @@
  */
 
 import type { IdleSample } from '@/lib/dme-link/types';
+import { followedIntakeCamTargetDegKw } from '@/lib/dme-link/ramMap';
 import type { IdleTables } from './idleTables';
 
 export type PreflightStatus = 'ok' | 'fail' | 'unknown';
@@ -133,7 +134,10 @@ export function evaluateIdlePreflight(
     const lrwSt = m(s => s.mdResLrwSt);
     const lws = m(s => s.lwsLrw);
     const evanIst = m(s => s.evan1Ist);
-    const evanSoll = m(s => s.evan1Soll);
+    // The target the controller FOLLOWS, derived per sample from EVAN1_ST and EVAN_SOLL out of one
+    // telegram, because EVAN1_SOLL itself is slave RAM. `?? null` for runs stored before
+    // 2026-10-19: they carry no evanSoll, and the evan1Soll they do carry is a cruise-control byte.
+    const evanSoll = m(s => followedIntakeCamTargetDegKw(s.evan1St, s.evanSoll ?? null, tables.evanDruckDegKw));
     const evanSt = m(s => s.evan1St);
     // Derived rather than read: MD_RES lives at 0xFFD8CA, 74 bytes below the pair, and
     // `md_res_calc` 0x017D44-0x017D5E computes exactly this maximum. Taking it from the two operands
@@ -301,16 +305,20 @@ export function evaluateIdlePreflight(
             consequence: {
                 ja: `暖機アイドルの吸気カム実位置。健全なら K_EVAN1_SOLL_MAX = ${tables.evanSollMaxDegKw.toFixed(1)} degKW、`
                     + `K_EVAN1_DRUCK = ${tables.evanDruckDegKw.toFixed(1)} degKW 付近なら上のラッチが一度も成立していない。`
-                    + '**併記した目標（EVAN1_SOLL）が 2 つの故障を切り分ける**: 目標も '
+                    + '**併記した目標が 2 つの故障を切り分ける**: 目標も '
                     + `${tables.evanDruckDegKw.toFixed(1)} なら目標が固定されている（ラッチ未成立）、`
                     + `目標が ${tables.evanSollMaxDegKw.toFixed(1)} なのに実位置が届いていないならカムが機械的に渋い。`
-                    + 'しきい値は較正から読んでいる。',
+                    + '目標は制御器が実際に追う EVAN1_SOLL だが、これは slave の RAM で読めないので、'
+                    + 'slave 0x024848 の書き方どおりに EVAN1_ST と EVAN_SOLL から組み立てている'
+                    + '（bit3 が落ちていれば K_EVAN1_DRUCK、立っていれば EVAN_SOLL）。しきい値は較正から読んでいる。',
                 en: `The intake cam's actual position at warm idle. Healthy is K_EVAN1_SOLL_MAX = ${tables.evanSollMaxDegKw.toFixed(1)} degKW; `
                     + `near K_EVAN1_DRUCK = ${tables.evanDruckDegKw.toFixed(1)} degKW means the latch above never armed. `
                     + '**The target shown beside it separates the two failures**: a target also at '
                     + `${tables.evanDruckDegKw.toFixed(1)} means the target is pinned (latch never armed), while a target `
                     + `of ${tables.evanSollMaxDegKw.toFixed(1)} that the position does not reach means the cam is `
-                    + 'mechanically sticky. Both thresholds are read from the calibration.',
+                    + 'mechanically sticky. That target is EVAN1_SOLL, the one the controller follows; it is slave '
+                    + 'RAM and cannot be read, so it is rebuilt the way slave 0x024848 writes it, from EVAN1_ST and '
+                    + 'EVAN_SOLL (bit3 down: K_EVAN1_DRUCK; up: EVAN_SOLL). Both thresholds are read from the calibration.',
             },
         },
         {

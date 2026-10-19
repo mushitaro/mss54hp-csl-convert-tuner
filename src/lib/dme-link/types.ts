@@ -522,11 +522,14 @@ export interface IdleSample {
      *
      * `evan1St` bit 3 is the one that matters: it arms only while the intake cam is at or below
      * 55.0 degKW, warm idle commands 60.0, so its only chance is the moment just after a start. Down
-     * means `evan1Soll` is pinned 7.5 degKW away and `TI_SYNCn` is blocked for the whole run — and
-     * NO fault code is set, because the position diagnostic is gated off below 1300 rpm.
+     * means the followed target is pinned at K_EVAN1_DRUCK, 7.5 degKW away, and `TI_SYNCn` is
+     * blocked for the whole run — and NO fault code is set, because the position diagnostic is
+     * gated off below 1300 rpm.
      *
-     * `evan1IstFilt` rather than `evan1Ist` is what the latch compares, so it is the one to judge
-     * the threshold against; both are here because the raw position is what a driver recognises.
+     * `evanSoll` is `EVAN_SOLL` (0xFF81E4), the map's target, from the same telegram. The target the
+     * controller follows is derived from it and `evan1St` (`followedIntakeCamTargetDegKw`): the
+     * slave's own `EVAN1_SOLL` and `EVAN1_IST_FILT` are slave RAM and have no DS2 route, so the
+     * latch threshold is judged against `evan1Ist`, the other filter of the same cam edges.
      */
     evan1Ist: number | null;
     avan1Ist: number | null;
@@ -534,8 +537,7 @@ export interface IdleSample {
     avan1St: number | null;
     vanEdSt: number | null;
     vanAdapSt: number | null;
-    evan1IstFilt: number | null;
-    evan1Soll: number | null;
+    evanSoll: number | null;
 
     /**
      * The air of the day — the two indices into `RF_PT_KORR`. Survey lane.

@@ -49,7 +49,7 @@ import {
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
-    IDLE_VANOS_RAM_READ, IDLE_VANOS_TARGET_RAM_READ,
+    IDLE_VANOS_RAM_READ,
     KNOCK_AGE_RAM_READ, KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ,
 } from '@/lib/dme-link/ramMap';
 import { type FieldKey, LOG_FIELD_REGISTRY } from '@/lib/field-registry/registry';
@@ -569,8 +569,12 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // NOT a DS2 block. Selection 0x23 is named in the notes as carrying evan1_ist and does
             // not — see the derivation in ramMap.ts. RAM is the only route, and it is the better
             // one anyway, because it reaches EVAN1_ST itself rather than a position to infer from.
-            { kind: 'ram', name: 'EVAN1_IST/EVAN1_ST/VAN_ED_ST', ...IDLE_VANOS_RAM_READ, every: IDLE_SURVEY_LANE_EVERY },
-            { kind: 'ram', name: 'EVAN1_IST_FILT/EVAN1_SOLL', ...IDLE_VANOS_TARGET_RAM_READ, every: IDLE_SURVEY_LANE_EVERY },
+            //
+            // ONE read. The slave's filtered position and followed target (EVAN1_IST_FILT,
+            // EVAN1_SOLL) are slave RAM; a second read at master 0xFFEB6C used to stand in for them
+            // and returned cruise-control bytes. The followed target is derived from EVAN1_ST and
+            // EVAN_SOLL in this telegram instead — see followedIntakeCamTargetDegKw.
+            { kind: 'ram', name: 'EVAN1_IST/EVAN_SOLL/EVAN1_ST/VAN_ED_ST', ...IDLE_VANOS_RAM_READ, every: IDLE_SURVEY_LANE_EVERY },
             // The air of the day — TAN and P_UMG, the two indices into RF_PT_KORR. Survey lane,
             // because it is weather: the correction moves over minutes, not over samples.
             //

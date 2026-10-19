@@ -13,8 +13,8 @@ const IGNITION_CSV_KEYS = [
 ] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
 
 /** The knock sums with the gear, the manifold air and the cams — sparse the same way, read the
- *  same way. `noiseSt` and the VANOS status bytes are bitfields, written as plain numbers for that
- *  reason: a `0x02` cell is a string to the CSV reader and would come back as nothing. */
+ *  same way. `noiseSt` and the VANOS status bytes are bitfields written as plain numbers, so `pick`
+ *  reads them; only the two in `HEX_CSV_KEYS` go out as hex. */
 const AIR_KNOCK_CSV_KEYS = [
     'gear', 'noiseSt', 'krDtzSum', 'krDtzSum1', 'kaDtzSum', 'kaDtzSum1',
     'rfPSaug', 'rfDiagF', 'rfKorrDme', 'pSaug', 'pSaugM',
@@ -32,6 +32,26 @@ const pick = (row: Record<string, unknown>, key: AliasKey): number | undefined =
     for (const header of APP_CONFIG.CSV_ALIASES[key]) {
         const v = row[header];
         if (typeof v === 'number' && Number.isFinite(v)) return v;
+    }
+    return undefined;
+};
+
+/**
+ * The bitfields the serializer writes as hex — `0x81` — because one bit is the whole reading:
+ * LLS_ST bit 7, MD_DYN_ST bit 6. Papa's `dynamicTyping` turns only decimal text into numbers, so
+ * `0x81` arrives as a string and `pick` alone read both columns back as nothing.
+ */
+export const HEX_CSV_KEYS = ['llsSt', 'mdDynSt'] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
+
+/** `0x` and one to eight hex digits, the whole cell. `parseInt(_, 16)` takes the prefix itself. */
+const HEX_CELL = /^\s*0x[0-9a-f]{1,8}\s*$/i;
+
+/** `pick` for a `HEX_CSV_KEYS` column: a plain number, or a `0x` cell read as hex. */
+const pickHex = (row: Record<string, unknown>, key: (typeof HEX_CSV_KEYS)[number]): number | undefined => {
+    for (const header of APP_CONFIG.CSV_ALIASES[key]) {
+        const v = row[header];
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string' && HEX_CELL.test(v)) return parseInt(v.trim(), 16);
     }
     return undefined;
 };
@@ -196,9 +216,10 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         if (ambientTemp !== undefined) point.ambientTemp = ambientTemp;
         const vehicleSpeed = pick(row, 'vehicleSpeed');
         if (vehicleSpeed !== undefined) point.vehicleSpeed = vehicleSpeed;
-        const llsSt = pick(row, 'llsSt');
+        // Hex on the way out (see the serializer), so hex on the way back in.
+        const llsSt = pickHex(row, 'llsSt');
         if (llsSt !== undefined) point.llsSt = llsSt;
-        const mdDynSt = pick(row, 'mdDynSt');
+        const mdDynSt = pickHex(row, 'mdDynSt');
         if (mdDynSt !== undefined) point.mdDynSt = mdDynSt;
         const mdFw = pick(row, 'mdFw');
         if (mdFw !== undefined) point.mdFw = mdFw;

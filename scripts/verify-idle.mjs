@@ -30,7 +30,8 @@ import { tuneIdleFeedforward, idleCensus, rejectSample } from '../src/lib/idle/t
 import { learnGain, defaultGainKgHPerNm } from '../src/lib/idle/gain.ts';
 import { LOG_PROFILES, expectedHz, idleTorqueAgrees, IDLE_TORQUE_TRUTH_GATE, IDLE_SURVEY_LANE_EVERY, LATCHED_BIT_LANE_EVERY } from '../src/lib/log-engine/logProfile.ts';
 import { evaluateIdlePreflight, LWS_RESERVE_BREAKPOINT_DEG } from '../src/lib/idle/preflight.ts';
-import { IDLE_TORQUE_RAM_READ, AMBIENT_CHARGE_RAM_READ, Mss54HpRamSignals } from '../src/lib/dme-link/ramMap.ts';
+import { IDLE_TORQUE_RAM_READ, AMBIENT_CHARGE_RAM_READ, IDLE_VANOS_RAM_READ, Mss54HpRamSignals,
+    followedIntakeCamTargetDegKw } from '../src/lib/dme-link/ramMap.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + d)); if (!c) fails++; };
@@ -107,7 +108,7 @@ check('above it the duty responds', llsTvAt(tables, 780, 14.0) > tables.tvMin + 
             laFRegler1: 1, laFRegler2: 1, laaF1: 1, laaF2: 1, laaRegler1: 1, laaRegler2: 1,
             lwsLrw: 0, mdResKath: 0, mdResLrwRoh: 0, mdResLrwSt: 1, mdResLrw: 0,
             evan1Ist: 60, avan1Ist: 2, evan1St: 0x88, avan1St: 0x88, vanEdSt: 0,
-            vanAdapSt: 0, evan1IstFilt: 60, evan1Soll: 60,
+            vanAdapSt: 0, evanSoll: 60,
         }], bent.tables).tests.find(t => t.id === 'ML_SOLL vs authority floor')?.thresholdIsInference === true);
 }
 
@@ -568,7 +569,12 @@ console.log('\n[the run profile]');
 // the rev limiter's memory (a bit-constant -30720), the slave word is unreachable on this image,
 // and the additive store's state is settled by the coupled init instead — see ramMap. A read that
 // costs 1.6 % of the rate to record a rev-limiter word is worse than no read.
-check('IDLE is 2.63 Hz', near(expectedHz(LOG_PROFILES.IDLE.exchanges), 2.63, 0.02), expectedHz(LOG_PROFILES.IDLE.exchanges));
+//
+// 2.68: the same mistake once more, found 2026-10-19. The four-byte read at 0xFFEB6C that was to
+// carry EVAN1_IST_FILT and EVAN1_SOLL read the MASTER's RAM, where those bytes are cruise control;
+// both symbols are slave RAM. It is gone, and the followed target is derived from the VANOS group
+// instead — see [the VANOS target is the slave's] below.
+check('IDLE is 2.68 Hz', near(expectedHz(LOG_PROFILES.IDLE.exchanges), 2.68, 0.02), expectedHz(LOG_PROFILES.IDLE.exchanges));
 check('the fallback is 3.00 Hz', near(expectedHz(LOG_PROFILES.IDLE.fallback), 3.00, 0.02), expectedHz(LOG_PROFILES.IDLE.fallback));
 check('IDLE needs no patch armed', LOG_PROFILES.IDLE.requires.length === 0);
 
@@ -666,7 +672,7 @@ console.log('\n[the preflight verdict fires when it should, and blocks when it m
         // (0x024376), so a test that compares the byte for equality passes against 0x08 and is
         // caught here. Only a bit3 mask is right.
         evan1Ist: 60.0, avan1Ist: 2.0, evan1St: 0x88, avan1St: 0x88,
-        vanEdSt: 0x00, vanAdapSt: 0x00, evan1IstFilt: 60.0, evan1Soll: 60.0,
+        vanEdSt: 0x00, vanAdapSt: 0x00, evanSoll: 60.0,
     };
     const run = (over) => evaluateIdlePreflight(Array.from({ length: 8 }, () => ({ ...base, ...over })), tables);
     const statusOf = (v, id) => v.tests.find(x => x.id.startsWith(id))?.status;
@@ -772,10 +778,28 @@ console.log('\n[the preflight verdict fires when it should, and blocks when it m
         statusOf(run({ evan1Ist: tables.evanSollMaxDegKw - 1.0 }), 'EVAN1_IST') === 'ok');
     check('...and the failure is not fatal — it changes what the run means, it is not a bad read',
         run({ evan1Ist: tables.evanDruckDegKw, evan1St: 0x80 }).blocked === false);
-    // The reason EVAN1_SOLL rides in the same verdict: it is what separates a pinned target from a
-    // sticky cam, and the panel shows it beside the position for exactly that.
-    check('the target is reported beside the position',
-        run({ evan1Soll: 52.5 }).tests.find(x => x.id === 'EVAN1_IST')?.against === 52.5);
+    // The reason the followed target rides in the same verdict: it is what separates a pinned
+    // target from a sticky cam. It is DERIVED — EVAN1_SOLL is slave RAM — the way slave 0x024848
+    // writes it: bit3 down K_EVAN1_DRUCK, bit3 up and bit2 down EVAN_SOLL, bit2 up a DS2 override.
+    const against = (over) => run(over).tests.find(x => x.id === 'EVAN1_IST')?.against;
+    check('the followed target is reported beside the position: EVAN_SOLL while the latch is armed',
+        against({ evan1St: 0x88, evanSoll: 60.0 }) === 60.0, against({ evan1St: 0x88, evanSoll: 60.0 }));
+    check('...K_EVAN1_DRUCK while it is down, whatever the map says — the pinned case',
+        against({ evan1St: 0x80, evanSoll: 60.0 }) === tables.evanDruckDegKw,
+        against({ evan1St: 0x80, evanSoll: 60.0 }));
+    check('...so a pinned target and a sticky cam read differently with the same position',
+        against({ evan1Ist: 52.5, evan1St: 0x80 }) === 52.5
+        && against({ evan1Ist: 52.5, evan1St: 0x88 }) === 60.0);
+    check('...and nothing under a DS2 test override (bit2), which lives in slave RAM too',
+        against({ evan1St: 0x8C }) === null, against({ evan1St: 0x8C }));
+    check('...and nothing without EVAN1_ST, rather than a guess',
+        against({ evan1St: null }) === null, against({ evan1St: null }));
+    // A run stored before 2026-10-19 carries evan1Soll (a cruise-control byte) and no evanSoll.
+    const stored = { ...base, evan1Soll: 51.2 };
+    delete stored.evanSoll;
+    const old = evaluateIdlePreflight(Array.from({ length: 8 }, () => stored), tables)
+        .tests.find(x => x.id === 'EVAN1_IST')?.against;
+    check('...and an old run\'s evan1Soll is never read: no evanSoll, no target', old === null, old);
 
     // An absent channel is not a pass. On the fallback profile none of these arrive at all, and a
     // verdict that read silence as agreement would be the exact failure this whole feature exists
@@ -792,6 +816,83 @@ console.log('\n[the preflight verdict fires when it should, and blocks when it m
         blind.tests.filter(x => x.status === 'ok').length === 0, blind.tests.map(x => x.status).join(' '));
     check('...and unknown does not block either — it is a gap, not a failure',
         blind.anyUnknown === true && blind.blocked === false && blind.anyFail === false);
+}
+
+console.log('\n[the VANOS target is the slave\'s]');
+{
+    // EVAN1_IST_FILT and EVAN1_SOLL are SLAVE RAM (slave 0xFFEB6C / 0xFFEB6E). The idle run read
+    // them through segment 0x04, which is the MASTER's RAM at the same CPU address — and there those
+    // bytes are cruise control: fgr_init (master 0x0135D8) does `clr.b $ffeb6c` at 0x013622. Slave
+    // RAM has no DS2 route on this image, so the followed target is DERIVED and the filtered
+    // position is not read at all. Every claim below is checked against the shipped calibration
+    // graph, not against a comment — the graph and not the decompiled C, because main carries the
+    // graph and not the C (release-scope.mjs), and this suite runs on main.
+    const graph = JSON.parse(fs.readFileSync(new URL('../public/data/calibration-graph.json', import.meta.url), 'utf8'));
+    const node = (name) => graph.nodes.find(n => [].concat(graph.nameIndex[name] ?? []).includes(n.id));
+    const fn = (id) => graph.nodes.find(n => n.id === id);
+    check('EVAN1_IST_FILT is a slave symbol at 0xFFEB6C',
+        node('EVAN1_IST_FILT')?.bank === 'slave' && node('EVAN1_IST_FILT')?.addr === 0xFFEB6C,
+        JSON.stringify(node('EVAN1_IST_FILT')));
+    check('EVAN1_SOLL is a slave symbol at 0xFFEB6E',
+        node('EVAN1_SOLL')?.bank === 'slave' && node('EVAN1_SOLL')?.addr === 0xFFEB6E,
+        JSON.stringify(node('EVAN1_SOLL')));
+    check('...while the master\'s 0xFFEB6C is cruise control: fgr_init clears it',
+        fn('f:master:0135d8')?.name === 'fgr_init'
+        && (fn('f:master:0135d8')?.stmts ?? []).some(s => s.out === 'DAT_00ffeb6c' && s.expr === '0'));
+
+    // The general form, so the next one is caught at the map rather than on the car. Segment 0x04
+    // is the master's private RAM (0xFFD000-0xFFEFFF); the slave has its own RAM at the same CPU
+    // addresses. A signal there that the graph names ONLY in the slave bank is slave RAM being read
+    // at the master's address. (Segment 0x01 is the dual-port RAM both CPUs share, so a slave name
+    // there is the same byte.)
+    const ram = graph.nodes.filter(n => n.t === 'ram');
+    const namesIn = (bank, sig) => ram.filter(n => n.bank === bank
+        && n.addr >= sig.address && n.addr < sig.address + sig.size).map(n => n.name);
+    const slaveOnly = Object.entries(Mss54HpRamSignals)
+        .filter(([, sig]) => sig.segment === 0x04)
+        .filter(([, sig]) => namesIn('slave', sig).length > 0 && namesIn('master', sig).length === 0)
+        .map(([name, sig]) => `${name} 0x${sig.address.toString(16)} = slave ${namesIn('slave', sig).join('/')}`);
+    check('no segment-0x04 signal sits on a slave-only symbol', slaveOnly.length === 0, slaveOnly.join('; '));
+    const fgr = (a, n) => a < 0xFFEB70 && a + n > 0xFFEB6C;
+    check('nothing in the map reads master 0xFFEB6C-0xFFEB6F',
+        !Object.values(Mss54HpRamSignals).some(s => s.segment === 0x04 && fgr(s.address, s.size)));
+    check('...and no IDLE exchange does',
+        !LOG_PROFILES.IDLE.exchanges.some(x => x.kind === 'ram' && x.segment === 0x04 && fgr(x.address, x.count)));
+
+    // The derivation, against the writer it copies. FUN_00024848 (slave 0x024848) ends — each
+    // branch returns, so the order is the precedence:
+    //   bit3 clear -> K_EVAN1_DRUCK; else bit2 clear -> EVAN_SOLL; else EVAN1_SOLL_DS2 * 10.
+    const writes = (fn('f:slave:024848')?.stmts ?? []).filter(s => s.out === 'EVAN1_SOLL')
+        .map(s => `${s.guards.join(' && ') || 'else'} -> ${s.expr}`);
+    check('the slave writes EVAN1_SOLL from exactly those three, in that order',
+        JSON.stringify(writes) === JSON.stringify([
+            '(EVAN1_ST & 8) == 0 -> K_EVAN1_DRUCK',
+            '(EVAN1_ST & 4) == 0 -> EVAN_SOLL',
+            'else -> EVAN1_SOLL_DS2 * 10',
+        ]), JSON.stringify(writes));
+    const writers = [...new Set(graph.edges.filter(e => e.d === 'r:slave:ffeb6e' && e.k === 'write').map(e => e.s))].sort();
+    check('...and nothing else writes it but the init',
+        JSON.stringify(writers) === JSON.stringify(['f:slave:024240', 'f:slave:024848']), JSON.stringify(writers));
+    check('...and EVAN_SOLL, which it copies, is the dual-port word the idle run reads',
+        node('EVAN_SOLL')?.addr === Mss54HpRamSignals.EVAN_SOLL.address
+        && Mss54HpRamSignals.EVAN_SOLL.segment === 0x01);
+    const D = tables.evanDruckDegKw;
+    check('followedIntakeCamTargetDegKw: bit3 down is K_EVAN1_DRUCK whatever EVAN_SOLL says',
+        followedIntakeCamTargetDegKw(0x80, 60.0, D) === D && followedIntakeCamTargetDegKw(0x00, null, D) === D);
+    check('...bit3 up and bit2 down is EVAN_SOLL, with the other bits ignored',
+        followedIntakeCamTargetDegKw(0x88, 60.0, D) === 60.0 && followedIntakeCamTargetDegKw(0xFB, 57.5, D) === 57.5);
+    check('...bit2 up is a DS2 override held in slave RAM, so null',
+        followedIntakeCamTargetDegKw(0x0C, 60.0, D) === null);
+    check('...and no EVAN1_ST is null, not a guess',
+        followedIntakeCamTargetDegKw(null, 60.0, D) === null);
+    // One moment: EVAN1_ST and EVAN_SOLL have to come out of the same telegram.
+    const vanos = LOG_PROFILES.IDLE.exchanges.filter(x => x.kind === 'ram'
+        && x.segment === IDLE_VANOS_RAM_READ.segment && x.address === IDLE_VANOS_RAM_READ.address);
+    check('the IDLE run reads the VANOS group once', vanos.length === 1, vanos.length);
+    check('...and it carries EVAN1_ST, EVAN_SOLL and EVAN1_IST together',
+        [Mss54HpRamSignals.EVAN1_ST, Mss54HpRamSignals.EVAN_SOLL, Mss54HpRamSignals.EVAN1_IST].every(s =>
+            s.segment === vanos[0]?.segment && s.address >= vanos[0].address
+            && s.address + s.size <= vanos[0].address + vanos[0].count));
 }
 
 console.log('\n[LLS_ST bit 7 — which table TI_F_STAT comes from]');

@@ -437,8 +437,9 @@ export class MockDmeLink implements DmeLink {
                 // EVAN1_ST is 0x88 rather than 0x08 on purpose — the slave also sets bit7 (a timer
                 // flag, 0x024376) — so a consumer that compares the byte for equality with 8, or
                 // treats it as a boolean, passes against 0x08 and fails here. Only a bit3 test works.
+                // EVAN_SOLL at K_EVAN1_SOLL_MAX, which with bit3 up is also the followed target.
                 evan1Ist: 60.0, avan1Ist: 2.0, evan1St: 0x88, avan1St: 0x88,
-                vanEdSt: 0x00, vanAdapSt: 0x00, evan1IstFilt: 60.0, evan1Soll: 60.0,
+                vanEdSt: 0x00, vanAdapSt: 0x00, evanSoll: 60.0,
             };
             this.idleSlowLane = { ...this.idleSlowLane, ...this.idleSurveyLane };
         }
@@ -494,8 +495,7 @@ export class MockDmeLink implements DmeLink {
             avan1St: carried.avan1St,
             vanEdSt: carried.vanEdSt,
             vanAdapSt: carried.vanAdapSt,
-            evan1IstFilt: carried.evan1IstFilt,
-            evan1Soll: carried.evan1Soll,
+            evanSoll: carried.evanSoll,
             // Held at a standard day rather than modelled. This rig simulates AIR, not weather:
             // 20 degC and 1013 mbar put RF_PT_KORR at 1.000, which is the condition the Alpha-N
             // table's own numbers are written for — so a practice run rehearses the arithmetic
@@ -558,12 +558,12 @@ export class MockDmeLink implements DmeLink {
         evan1Ist: number | null; avan1Ist: number | null;
         evan1St: number | null; avan1St: number | null;
         vanEdSt: number | null; vanAdapSt: number | null;
-        evan1IstFilt: number | null; evan1Soll: number | null;
+        evanSoll: number | null;
     } = {
         laFRegler1: null, laFRegler2: null, laaF1: null, laaF2: null, laaRegler1: null, laaRegler2: null,
         lwsLrw: null, mdResKath: null, mdResLrwRoh: null, mdResLrwSt: null, mdResLrw: null,
         evan1Ist: null, avan1Ist: null, evan1St: null, avan1St: null,
-        vanEdSt: null, vanAdapSt: null, evan1IstFilt: null, evan1Soll: null,
+        vanEdSt: null, vanAdapSt: null, evanSoll: null,
     };
     private idleSlowLane: {
         llsTv: number | null; llrQvs: number | null; llrQsoll: number | null;
@@ -578,7 +578,7 @@ export class MockDmeLink implements DmeLink {
         evan1Ist: number | null; avan1Ist: number | null;
         evan1St: number | null; avan1St: number | null;
         vanEdSt: number | null; vanAdapSt: number | null;
-        evan1IstFilt: number | null; evan1Soll: number | null;
+        evanSoll: number | null;
     } = {
         llsTv: null, llrQvs: null, llrQsoll: null, engineState: null, kkosSt: null, llsSt: null,
         wdkWord: null, wdkSoll: null, egasSoll: null, egasMaxWdk: null,
@@ -586,7 +586,7 @@ export class MockDmeLink implements DmeLink {
         laFRegler1: null, laFRegler2: null, laaF1: null, laaF2: null, laaRegler1: null, laaRegler2: null,
         lwsLrw: null, mdResKath: null, mdResLrwRoh: null, mdResLrwSt: null, mdResLrw: null,
         evan1Ist: null, avan1Ist: null, evan1St: null, avan1St: null,
-        vanEdSt: null, vanAdapSt: null, evan1IstFilt: null, evan1Soll: null,
+        vanEdSt: null, vanAdapSt: null, evanSoll: null,
     };
 
     /**

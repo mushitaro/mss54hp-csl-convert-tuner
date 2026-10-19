@@ -69,7 +69,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         ['knockAge1', M.KNOCK_AGE_1], ['knockAge2', M.KNOCK_AGE_2], ['knockAge3', M.KNOCK_AGE_3],
         ['knockAge4', M.KNOCK_AGE_4], ['knockAge5', M.KNOCK_AGE_5], ['knockAge6', M.KNOCK_AGE_6],
         // The knock sums with the gear, and the manifold air, by the same rule. NOISE_ST goes out
-        // as a plain number, not hex like LLS_ST: a `0x02` cell does not survive the reader.
+        // as a plain number; only LLS_ST and MD_DYN_ST are hex, and the reader takes those back
+        // by name (HEX_CSV_KEYS in parser.ts).
         ['gear', M.GEAR], ['noiseSt', M.NOISE_ST],
         ['krDtzSum', M.KR_DTZ_SUM], ['krDtzSum1', M.KR_DTZ_SUM1],
         ['kaDtzSum', M.KA_DTZ_SUM], ['kaDtzSum1', M.KA_DTZ_SUM1],
@@ -107,7 +108,8 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasAmbientTemp) row[M.AMBIENT_TEMP] = p.ambientTemp ?? '';
         if (hasTempSubstituted) row[M.AMBIENT_TEMP_SUBSTITUTED] = p.ambientTempFromCan === false ? 1 : 0;
         if (hasSpeed) row[M.VEHICLE_SPEED] = p.vehicleSpeed ?? '';
-        // Hex, because it is a bitfield and bit 7 is the only part anyone reads.
+        // Hex, because it is a bitfield and bit 7 is the only part anyone reads. The reader parses
+        // it back (HEX_CSV_KEYS in parser.ts); a hex column it does not list comes back as nothing.
         if (hasLlsSt) row[M.LLS_ST] = p.llsSt === undefined ? '' : '0x' + (p.llsSt & 0xFF).toString(16).toUpperCase().padStart(2, '0');
         // Hex for the same reason as LLS_ST — bit 6 is the whole reading.
         if (hasMdDynSt) row[M.MD_DYN_ST] = p.mdDynSt === undefined ? '' : '0x' + (p.mdDynSt & 0xFF).toString(16).toUpperCase().padStart(2, '0');

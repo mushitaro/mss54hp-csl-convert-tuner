@@ -21,7 +21,7 @@ import {
     IDLE_TORQUE_RAM_READ, IDLE_ACTUATOR_RAM_READ, ENGINE_STATE_RAM_READ, COMPRESSOR_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
-    IDLE_VANOS_RAM_READ, IDLE_VANOS_TARGET_RAM_READ, AMBIENT_CHARGE_RAM_READ,
+    IDLE_VANOS_RAM_READ, AMBIENT_CHARGE_RAM_READ,
     Mss54HpRamSignals, decodeRamSignal, isRamReadInRange,
 } from './ramMap';
 import {
@@ -2355,7 +2355,7 @@ export class WebSerialDmeLink implements DmeLink {
         evan1Ist: number | null; avan1Ist: number | null;
         evan1St: number | null; avan1St: number | null;
         vanEdSt: number | null; vanAdapSt: number | null;
-        evan1IstFilt: number | null; evan1Soll: number | null;
+        evanSoll: number | null;
         intakeTemp: number | null; ambientPressure: number | null;
         chargeTemp: number | null; altitude: number | null;
         ambientPressureSubstituted: boolean | undefined;
@@ -2366,7 +2366,7 @@ export class WebSerialDmeLink implements DmeLink {
         laFRegler1: null, laFRegler2: null, laaF1: null, laaF2: null, laaRegler1: null, laaRegler2: null,
         lwsLrw: null, mdResKath: null, mdResLrwRoh: null, mdResLrwSt: null, mdResLrw: null,
         evan1Ist: null, avan1Ist: null, evan1St: null, avan1St: null,
-        vanEdSt: null, vanAdapSt: null, evan1IstFilt: null, evan1Soll: null,
+        vanEdSt: null, vanAdapSt: null, evanSoll: null,
         intakeTemp: null, ambientPressure: null, chargeTemp: null, altitude: null,
         ambientPressureSubstituted: undefined as boolean | undefined,
     };
@@ -2403,7 +2403,7 @@ export class WebSerialDmeLink implements DmeLink {
         let { lwsLrw, mdResKath, mdResLrwRoh, mdResLrwSt, mdResLrw } = carried;
         let { intakeTemp, ambientPressure, chargeTemp, altitude, ambientPressureSubstituted } = carried;
         let { evan1Ist, avan1Ist, evan1St, avan1St, vanEdSt, vanAdapSt } = carried;
-        let { evan1IstFilt, evan1Soll } = carried;
+        let { evanSoll } = carried;
         if (slowLaneDue) {
             // Best-effort, one at a time: a DME that refuses the actuator window should still give
             // up the engine state, and losing a diagnostic must not cost the sample its torque.
@@ -2494,8 +2494,9 @@ export class WebSerialDmeLink implements DmeLink {
                 altitude = d.altitude ?? null;
                 ambientPressureSubstituted = d.ambientPressureSubstituted;
             } catch { /* stays null */ }
-            // The cams, the latch and the blocked-balance flag in ONE telegram — see the read's own
-            // note. Split apart they would be three facts about three moments.
+            // The cams, the latch, the blocked-balance flag and the map's target in ONE telegram —
+            // see the read's own note. Split apart they would be facts about different moments, and
+            // the followed target is derived from EVAN1_ST and EVAN_SOLL together.
             try {
                 const v = await this.pollRamChunk(IDLE_VANOS_RAM_READ);
                 const a = IDLE_VANOS_RAM_READ.address;
@@ -2505,12 +2506,7 @@ export class WebSerialDmeLink implements DmeLink {
                 avan1St = decodeRamSignal(Mss54HpRamSignals.AVAN1_ST, v, a);
                 vanEdSt = decodeRamSignal(Mss54HpRamSignals.VAN_ED_ST, v, a);
                 vanAdapSt = decodeRamSignal(Mss54HpRamSignals.VAN_ADAP_ST, v, a);
-            } catch { /* stays null */ }
-            try {
-                const vt = await this.pollRamChunk(IDLE_VANOS_TARGET_RAM_READ);
-                const a = IDLE_VANOS_TARGET_RAM_READ.address;
-                evan1IstFilt = decodeRamSignal(Mss54HpRamSignals.EVAN1_IST_FILT, vt, a);
-                evan1Soll = decodeRamSignal(Mss54HpRamSignals.EVAN1_SOLL, vt, a);
+                evanSoll = decodeRamSignal(Mss54HpRamSignals.EVAN_SOLL, v, a);
             } catch { /* stays null */ }
         }
         if (slowLaneDue || surveyDue) {
@@ -2522,7 +2518,7 @@ export class WebSerialDmeLink implements DmeLink {
                 lwsLrw, mdResKath, mdResLrwRoh, mdResLrwSt, mdResLrw,
                 intakeTemp, ambientPressure, chargeTemp, altitude, ambientPressureSubstituted,
                 evan1Ist, avan1Ist, evan1St, avan1St, vanEdSt, vanAdapSt,
-                evan1IstFilt, evan1Soll,
+                evanSoll,
             };
         }
 
@@ -2553,7 +2549,7 @@ export class WebSerialDmeLink implements DmeLink {
             lwsLrw, mdResKath, mdResLrwRoh, mdResLrwSt, mdResLrw,
             intakeTemp, ambientPressure, chargeTemp, altitude, ambientPressureSubstituted,
             evan1Ist, avan1Ist, evan1St, avan1St, vanEdSt, vanAdapSt,
-            evan1IstFilt, evan1Soll,
+            evanSoll,
             mdLlriSource: 'ram',
         };
     }

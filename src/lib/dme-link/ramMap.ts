@@ -612,6 +612,7 @@ export const Mss54HpRamSignals = {
      * mechanical stop — so the only window in which it can ever arm is the 52.5 degKW command just
      * after start. On a car whose cam cannot get there it never arms, EVAN1_SOLL stays pinned at
      * 52.5, and cylinder-individual idle balance is blocked for as long as the engine runs.
+     * (`EVAN1_IST_FILT` and `EVAN1_SOLL` are slave RAM and cannot be read — see after AVAN_SOLL.)
      */
     EVAN1_ST: { segment: 0x01, address: 0x00FF81F0, size: 1, signed: false, scale: 1, unit: '' },
     /** The exhaust side's status byte, adjacent to the one above. */
@@ -642,8 +643,8 @@ export const Mss54HpRamSignals = {
      * degrees added BEFORE the x10. Two substitutions it does not show: while EVAN1_ST bit 3 is down
      * the controller follows K_EVAN1_DRUCK (52.5) instead (`EVAN1_SOLL`, slave-only RAM, is the
      * value actually followed — the same function writes it at 0x024B00), and with EVAN1_ST bit 2 a
-     * DS2 test value. NOISE_ST bit 0 would switch the map to KL_EVAN1_SOLL_NOISE; K_NOISE_CFG = 2
-     * here, so it never does.
+     * DS2 test value. `followedIntakeCamTargetDegKw` puts the two back. NOISE_ST bit 0 would switch
+     * the map to KL_EVAN1_SOLL_NOISE; K_NOISE_CFG = 2 here, so it never does.
      */
     EVAN_SOLL: { segment: 0x01, address: 0x00FF81E4, size: 2, signed: true, scale: 0.1, unit: '°KW' },
     /**
@@ -655,13 +656,41 @@ export const Mss54HpRamSignals = {
      */
     AVAN_SOLL: { segment: 0x01, address: 0x00FF81E8, size: 2, signed: true, scale: 0.1, unit: '°KW' },
 
-    /** The FILTERED intake position — the exact quantity the latch compares, so it is the one to
-     *  judge the threshold against rather than the raw position beside it. */
-    EVAN1_IST_FILT: { segment: 0x04, address: 0x00FFEB6C, size: 2, signed: true, scale: 0.1, unit: '°KW' },
-    /** The intake cam TARGET. Read next to the position because the two separate the two failures
-     *  that look identical from the position alone: a target pinned at 52.5 (latch never armed) and
-     *  a cam that cannot reach a target of 60.0 (mechanically stuck). */
-    EVAN1_SOLL: { segment: 0x04, address: 0x00FFEB6E, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    // NOT HERE: `EVAN1_IST_FILT` and `EVAN1_SOLL`. Both are SLAVE RAM, at slave 0xFFEB6C and
+    // 0xFFEB6E, and slave RAM is not served on this image (see the header: segments 0x08/0x0A/0x0B/
+    // 0x0C answer error 0x07). Until 2026-10-19 the idle run read them through segment 0x04, which
+    // is the MASTER's RAM at the same CPU address — and there those four bytes are cruise control:
+    //
+    //     master 0x013622  42 39 00 FF EB 6C   clr.b  $ffeb6c       fgr_init (0x0135D8)
+    //     master 0x015896  53 39 00 FF EB 6C   subq.b #1,$ffeb6c    the FGR countdown (0x0156D0)
+    //
+    // Every master access to 0xFFEB6C-0xFFEB6F is a byte op inside the fgr functions 0x0135D8-
+    // 0x015C9C; not one is a word. Read as a signed word x 0.1 they gave 0.0 while cruise control
+    // was off and 51.2 "degKW" with its countdown at 2 — numbers that look like cam angles and are not.
+    // The slave's word accesses to the same addresses are the VANOS:
+    //
+    //     slave 0x0240DC  33 C0 00 FF EB 6C    move.w d0,$ffeb6c    EVAN1_IST_FILT = mean of 6 edges
+    //     slave 0x0244BA  32 39 00 FF EB 6C    move.w $ffeb6c,d1    the latch compare (FUN_0002433c)
+    //     slave 0x024B00  33 D2 00 FF EB 6E    move.w (a2),$ffeb6e  EVAN1_SOLL = EVAN_SOLL (a2 = 0xFF81E4)
+    //
+    // What replaces them, from the 26-byte group the idle run already reads:
+    //   - the followed target is DERIVED, exactly, from EVAN1_ST and EVAN_SOLL — see
+    //     `followedIntakeCamTargetDegKw` below for the slave's three writers.
+    //   - the filtered position has no route at all, and EVAN1_IST stands in for it. Both are filters
+    //     of the same per-edge positions (`FUN_00024d60`, slave 0x024D60, on every cam edge):
+    //
+    //         p              = EVAN1_ADAP + EVAN1_FPOS + EVAN1_GPOS
+    //         EVAN1_IST      = (p + EVAN1_IST) >> 1              dual-port 0xFF81DC — readable
+    //         EVAN1_IST_FILT = mean of the last six p             slave 0xFFEB6C — not
+    //
+    //     where EVAN1_GPOS is the coarse angle from which crank tooth the cam edge fell on,
+    //     EVAN1_FPOS the fine angle from the edge's time inside that tooth, and EVAN1_ADAP the
+    //     learned offset of the cam's end stop. So on a cam sitting still the two agree to within
+    //     the edge-to-edge jitter. The preflight judges EVAN1_IST with 2.0 degKW of tolerance
+    //     (EVAN_POSITION_TOLERANCE_DEG_KW), inside the 2.5 / 5.0 degKW that separate the latch
+    //     threshold (K_EVAN1_DRUCK + K_EVAN1_DRUCK_HYS = 55.0) from the commanded 52.5 and 60.0.
+    // `verify:idle` fails any segment-0x04 signal that the calibration graph names only in the
+    // slave bank, so this cannot recur unnoticed.
 
     // ---- Knock control: how long ago each cylinder was last retarded ----------------------------
     //
@@ -881,6 +910,35 @@ export const NOISE_ST_UNUSED_BITS = 0x7C;
 /** What `KNOCK_AGE_n` holds when the cylinder has not knocked within its memory — the DME's own
  *  init value and saturation, 0x4FB. A healthy drive reads exactly this on all six. */
 export const KNOCK_AGE_SATURATED = 0x4FB;
+
+/**
+ * The intake cam target the slave's controller FOLLOWS — `EVAN1_SOLL`, slave RAM and unreadable —
+ * rebuilt from two bytes that can be read. `FUN_00024848` (slave 0x024848) ends:
+ *
+ *     EVAN1_ST bit 3 clear   EVAN1_SOLL = K_EVAN1_DRUCK         0x024B0C  move.w $0008981e,$ffeb6e
+ *     else bit 2 clear       EVAN1_SOLL = EVAN_SOLL             0x024B00  move.w (a2),$ffeb6e
+ *     else                   EVAN1_SOLL = EVAN1_SOLL_DS2 * 10   0x024AF4  move.w d0,$ffeb6e
+ *
+ * and nothing else writes it once the engine runs (`FUN_00024240`, the init, seeds it with
+ * K_EVAN1_SOLL_ERSATZ). EVAN1_ST (0xFF81F0) and EVAN_SOLL (0xFF81E4) arrive in the same 26-byte
+ * telegram, so the result describes one moment. The third case is a tester's override held in
+ * slave RAM (EVAN1_SOLL_DS2, 0xFFEB78), so it gives null: no number available here would be it.
+ *
+ * @param evan1St `EVAN1_ST` as read — a bitfield; only bits 3 and 2 are consulted.
+ * @param evanSoll `EVAN_SOLL`, degKW.
+ * @param evanDruckDegKw `K_EVAN1_DRUCK` from the calibration, degKW (52.5 on this car).
+ */
+export function followedIntakeCamTargetDegKw(
+    evan1St: number | null,
+    evanSoll: number | null,
+    evanDruckDegKw: number,
+): number | null {
+    if (evan1St === null || !Number.isFinite(evan1St)) return null;
+    const st = Math.round(evan1St);
+    if ((st & 0x08) === 0) return evanDruckDegKw;
+    if ((st & 0x04) !== 0) return null;
+    return evanSoll;
+}
 
 /** `P_UMG_BYTE`'s zero point, in mbar. `mbar = raw * 3 + this`. */
 export const P_UMG_BYTE_OFFSET_MBAR = 498.5;
@@ -1108,7 +1166,10 @@ export const IDLE_STEERING_RAM_READ = {
  * One read rather than several because the diagnosis is a JOINT reading: the position says where
  * the cam is, `EVAN1_ST` bit 3 says whether the latch ever armed, and `VAN_ED_ST` bit 4 says
  * whether the idle balance is consequently blocked. Split across telegrams they would be three
- * facts about three moments, and the whole point is that they are one fact about one.
+ * facts about three moments, and the whole point is that they are one fact about one. `EVAN_SOLL`
+ * is in it too, and with `EVAN1_ST` it gives the target the controller follows — see
+ * `followedIntakeCamTargetDegKw`. That is the whole VANOS read: the filtered position and the
+ * followed target themselves are slave RAM (see the note after AVAN_SOLL).
  *
  * Survey lane. Cam position at a settled idle is a steady-state fact — and on the failure this
  * exists to catch it is not merely steady but permanent, since the latch cannot arm again until
@@ -1119,16 +1180,6 @@ export const IDLE_VANOS_RAM_READ = {
     address: Mss54HpRamSignals.AVAN1_IST.address,
     count: (Mss54HpRamSignals.VAN_ADAP_ST.address + Mss54HpRamSignals.VAN_ADAP_ST.size)
         - Mss54HpRamSignals.AVAN1_IST.address,
-} as const;
-
-/** Four bytes in the other window: the filtered position the latch actually compares, and the
- *  target beside it. Two exchanges rather than one only because the two halves of this diagnosis
- *  live in different RAM segments. */
-export const IDLE_VANOS_TARGET_RAM_READ = {
-    segment: Mss54HpRamSignals.EVAN1_IST_FILT.segment,
-    address: Mss54HpRamSignals.EVAN1_IST_FILT.address,
-    count: (Mss54HpRamSignals.EVAN1_SOLL.address + Mss54HpRamSignals.EVAN1_SOLL.size)
-        - Mss54HpRamSignals.EVAN1_IST_FILT.address,
 } as const;
 
 /**
@@ -1355,7 +1406,6 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         { name: 'IDLE_RESERVE_RAM_READ', ...IDLE_RESERVE_RAM_READ },
         { name: 'IDLE_STEERING_RAM_READ', ...IDLE_STEERING_RAM_READ },
         { name: 'IDLE_VANOS_RAM_READ', ...IDLE_VANOS_RAM_READ },
-        { name: 'IDLE_VANOS_TARGET_RAM_READ', ...IDLE_VANOS_TARGET_RAM_READ },
         { name: 'KNOCK_AGE_RAM_READ', ...KNOCK_AGE_RAM_READ },
         { name: 'KNOCK_SUM_RAM_READ', ...KNOCK_SUM_RAM_READ },
         { name: 'MANIFOLD_AIR_RAM_READ', ...MANIFOLD_AIR_RAM_READ },
@@ -1449,11 +1499,9 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     mustCover(IDLE_VANOS_RAM_READ, 'IDLE_VANOS_RAM_READ', [
         ['AVAN1_IST', R.AVAN1_IST], ['EVAN1_IST', R.EVAN1_IST], ['EVAN1_ST', R.EVAN1_ST],
         ['AVAN1_ST', R.AVAN1_ST], ['VAN_ED_ST', R.VAN_ED_ST], ['VAN_ADAP_ST', R.VAN_ADAP_ST],
-        // The targets the VE log reads out of the same telegram.
+        // The targets both runs read out of the same telegram — and EVAN_SOLL beside EVAN1_ST is
+        // what followedIntakeCamTargetDegKw needs from ONE moment.
         ['EVAN_SOLL', R.EVAN_SOLL], ['AVAN_SOLL', R.AVAN_SOLL],
-    ]);
-    mustCover(IDLE_VANOS_TARGET_RAM_READ, 'IDLE_VANOS_TARGET_RAM_READ', [
-        ['EVAN1_IST_FILT', R.EVAN1_IST_FILT], ['EVAN1_SOLL', R.EVAN1_SOLL],
     ]);
     mustCover(KNOCK_AGE_RAM_READ, 'KNOCK_AGE_RAM_READ', [
         ['KNOCK_AGE_1', R.KNOCK_AGE_1], ['KNOCK_AGE_2', R.KNOCK_AGE_2], ['KNOCK_AGE_3', R.KNOCK_AGE_3],
