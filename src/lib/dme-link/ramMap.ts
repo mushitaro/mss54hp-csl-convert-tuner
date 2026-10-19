@@ -630,7 +630,66 @@ export const Mss54HpRamSignals = {
      *  that look identical from the position alone: a target pinned at 52.5 (latch never armed) and
      *  a cam that cannot reach a target of 60.0 (mechanically stuck). */
     EVAN1_SOLL: { segment: 0x04, address: 0x00FFEB6E, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+
+    // ---- Knock control: how long ago each cylinder was last retarded ----------------------------
+    //
+    // The question is "is knock retard what the driver feels", and the obvious channel cannot
+    // answer it at any price this link can pay. The retard itself is `KR[c]` at 0xFFE836 + 2c
+    // (−0.1 deg per count, `knock_related_3_` writes it as −`0xFFE85C[c]`), and on this
+    // calibration it is a ONE-SECOND event: a knock adds KL_KR_DTZ_AB = 3.0 deg (6.0 for a strong
+    // one, capped at K_KR_DTZ_MAX 10.0) and KL_KR_DTZ_AUF gives back 0.2 deg per combustion at
+    // 2000 rpm and 0.1 at 3000, every combustion (KL_KR_ANZ_AUF = 1). At 2500 rpm a cylinder fires
+    // ~21 times a second, so a 3-degree step is gone in 0.7-1.4 s. Seeing that needs a read on
+    // every sample, and the cheapest one there is costs ~52 ms of a ~226 ms VE sample — the rate
+    // drops by about a fifth. Block 19's `tz1`..`tz6` carry the same retard for free, but the VE
+    // profile reads that block one sample in eight, which misses most one-second events.
+    //
+    // These six words remember instead of sampling. 0xFFE874 + 2c counts the COMBUSTIONS of
+    // cylinder c+1 since its last knock, and the DME keeps it for us:
+    //
+    //   knock_related_3_ (master 0x029926), run from task_segm once per segment:
+    //     knock bit set (KM_TEL_ST[c] & 0x1000) and kr_st == 4 (knock control active)
+    //         -> FUN_000296fa: retard step                    -> counter[c] = 0
+    //     otherwise
+    //         -> FUN_00029670: recovery step                  -> counter[c] += 1, stops at 0x4FB
+    //   FUN_000297fe (knock control init): counter[c] = 0x4FB
+    //
+    // `kr_st` is 0xFFE834 — the byte the master's responder puts at selection 4 offset 14, where
+    // the reference catalog has `kr_st`. It is 4 only above KL_KR_RF_MIN (0.22 at 1500-3000 rpm
+    // here, far under the band in question), above K_KR_TMOT_MIN (60 degC) and in VL/TL/LL; at 8
+    // the DME is not acting on knock, KR is forced to 0 and the counters only count up. Cylinders
+    // 3 and 4 also take the counting path while KM_FEN_SCHIEB is set.
+    //
+    // `km_evaluate_knock` (master 0x029342) sets bit 0x1000 when the cylinder's knock integral
+    // `KM_TEL_MW` exceeds `KD_MEM * KD_KFAKT >> 10`, and the window flags are reset once per
+    // cylinder per cycle (FUN_000280a0), so "one count" is one combustion of that cylinder.
+    //
+    // The retard step and the reset are the same event on THIS car, and that is a calibration
+    // fact, not a structural one. The step is skipped when `KL_KR_ANZ_AB * 5 < counter` — a lone
+    // knock after a long quiet spell ignored as noise — but KL_KR_ANZ_AB is 255 at every speed
+    // here, 255 * 5 = 1275 = 0x4FB, and the counter can never exceed that. So every reset IS a
+    // retard of that cylinder. A different calibration could reset without retarding.
+    //
+    // Read on the block-19 lane, every ~2 s: in that time a cylinder at 2500 rpm fires ~42 times,
+    // and the counter saturates at 1275 (~60 s), so no knock can fall between two reads unseen. A
+    // reading of n says the last retard was n combustions — n * 120 / rpm seconds — before the
+    // read, and with the curves above, how much of it was still applied.
+    //
+    // NO DME SYMBOL. The graph carries this as `DAT_00ffe874`; `KNOCK_AGE_n` is this file's name
+    // for it, not a Funktionsrahmen one. Indexed by cylinder NUMBER: `knock_related_3_` uses
+    // `zyl_firing_order_table[..] - 1` and sums [0..2] into KR_DTZ_SUM1, which is bank 1.
+    // Unsigned; anything above 1275 is not this counter, and slowLane.ts drops it.
+    KNOCK_AGE_1: { segment: 0x04, address: 0x00FFE874, size: 2, signed: false, scale: 1, unit: '' },
+    KNOCK_AGE_2: { segment: 0x04, address: 0x00FFE876, size: 2, signed: false, scale: 1, unit: '' },
+    KNOCK_AGE_3: { segment: 0x04, address: 0x00FFE878, size: 2, signed: false, scale: 1, unit: '' },
+    KNOCK_AGE_4: { segment: 0x04, address: 0x00FFE87A, size: 2, signed: false, scale: 1, unit: '' },
+    KNOCK_AGE_5: { segment: 0x04, address: 0x00FFE87C, size: 2, signed: false, scale: 1, unit: '' },
+    KNOCK_AGE_6: { segment: 0x04, address: 0x00FFE87E, size: 2, signed: false, scale: 1, unit: '' },
 } as const satisfies Record<string, RamSignal>;
+
+/** What `KNOCK_AGE_n` holds when the cylinder has not knocked within its memory — the DME's own
+ *  init value and saturation, 0x4FB. A healthy drive reads exactly this on all six. */
+export const KNOCK_AGE_SATURATED = 0x4FB;
 
 /** `P_UMG_BYTE`'s zero point, in mbar. `mbar = raw * 3 + this`. */
 export const P_UMG_BYTE_OFFSET_MBAR = 498.5;
@@ -1001,6 +1060,22 @@ export const SLEW_TORQUE_RAM_READ = {
         - Mss54HpRamSignals.MD_FW.address,
 } as const;
 
+/**
+ * Twelve bytes, `KNOCK_AGE_1`..`_6` — combustions since each cylinder's last knock retard.
+ *
+ * On the block-19 lane, and that is the point of choosing these words over `KR[c]` beside them:
+ * a counter that saturates at ~60 s of combustions can be read every eight samples without
+ * missing anything, where the retard it describes is gone in about a second. One read costs
+ * ~64 ms; one in eight is ~8 ms a sample, 3.5 % of a VE sample, where the same twelve bytes on
+ * every sample would be 28 %. See the signal block for the derivation.
+ */
+export const KNOCK_AGE_RAM_READ = {
+    segment: Mss54HpRamSignals.KNOCK_AGE_1.segment,
+    address: Mss54HpRamSignals.KNOCK_AGE_1.address,
+    count: (Mss54HpRamSignals.KNOCK_AGE_6.address + Mss54HpRamSignals.KNOCK_AGE_6.size)
+        - Mss54HpRamSignals.KNOCK_AGE_1.address,
+} as const;
+
 export const RAM_PROBE_READS: readonly { name: string; segment: number; address: number; count: number }[] = [
     { name: 'MD_IND_NE', segment: Mss54HpRamSignals.MD_IND_NE.segment, address: Mss54HpRamSignals.MD_IND_NE.address, count: 2 },
     { name: 'MD_IND_OPT_KORR', segment: Mss54HpRamSignals.MD_IND_OPT_KORR.segment, address: Mss54HpRamSignals.MD_IND_OPT_KORR.address, count: 2 },
@@ -1047,6 +1122,7 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         { name: 'IDLE_STEERING_RAM_READ', ...IDLE_STEERING_RAM_READ },
         { name: 'IDLE_VANOS_RAM_READ', ...IDLE_VANOS_RAM_READ },
         { name: 'IDLE_VANOS_TARGET_RAM_READ', ...IDLE_VANOS_TARGET_RAM_READ },
+        { name: 'KNOCK_AGE_RAM_READ', ...KNOCK_AGE_RAM_READ },
         ...RAM_PROBE_READS.map(r => ({ name: `RAM_PROBE_READS.${r.name}`, segment: r.segment, address: r.address, count: r.count })),
     ];
     for (const r of reads) {
@@ -1140,6 +1216,10 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     ]);
     mustCover(IDLE_VANOS_TARGET_RAM_READ, 'IDLE_VANOS_TARGET_RAM_READ', [
         ['EVAN1_IST_FILT', R.EVAN1_IST_FILT], ['EVAN1_SOLL', R.EVAN1_SOLL],
+    ]);
+    mustCover(KNOCK_AGE_RAM_READ, 'KNOCK_AGE_RAM_READ', [
+        ['KNOCK_AGE_1', R.KNOCK_AGE_1], ['KNOCK_AGE_2', R.KNOCK_AGE_2], ['KNOCK_AGE_3', R.KNOCK_AGE_3],
+        ['KNOCK_AGE_4', R.KNOCK_AGE_4], ['KNOCK_AGE_5', R.KNOCK_AGE_5], ['KNOCK_AGE_6', R.KNOCK_AGE_6],
     ]);
 })();
 

@@ -4,9 +4,11 @@ import {
     IDLE_VALVE_STATE_RAM_READ, KELVIN_OFFSET_C,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
+    KNOCK_AGE_RAM_READ, KNOCK_AGE_SATURATED,
     Mss54HpRamSignals, P_UMG_BYTE_OFFSET_MBAR, P_UMG_ED_SUBSTITUTING, TAN_OFFSET_C, decodeRamSignal,
     type RamSignal,
 } from './ramMap';
+import { IGNITION_ANGLE_KEYS } from './liveValueBlocks';
 
 /**
  * The channels a VE sample carries forward between slow-lane reads.
@@ -271,3 +273,62 @@ export function decodeSlewTorque(bytes: Uint8Array, address: number): Partial<Sl
     put('mdDpDelta', Mss54HpRamSignals.MD_DP_DELTA);
     return out;
 }
+
+/**
+ * The ignition side of a sample: the six final angles block 19 carries, and the six knock counters
+ * the RAM read beside it carries.
+ *
+ * Not in `SlowLaneChannels` and not carried, for the slew channels' reason and one of their own.
+ * An angle is not state that holds still between reads: a knock retard on this calibration is
+ * gone in about a second, so a reading stamped onto the next seven samples would report a
+ * one-second event as two. And a knock counter grows by one every combustion — the value it held
+ * at the last read is wrong on every sample after it, by an amount nothing here knows. So both are
+ * written on the sample that read them and nowhere else, and an absent value means "not read on
+ * this sample".
+ */
+export type IgnitionChannels = Pick<
+    LiveMeasurement,
+    | 'ignitionAngle1' | 'ignitionAngle2' | 'ignitionAngle3'
+    | 'ignitionAngle4' | 'ignitionAngle5' | 'ignitionAngle6'
+    | 'knockAge1' | 'knockAge2' | 'knockAge3' | 'knockAge4' | 'knockAge5' | 'knockAge6'
+>;
+
+/** The six angles out of a decoded block 19, keeping only the ones the block was long enough to
+ *  hold — a short block leaves the cylinder absent rather than at 0 degrees, which is an angle. */
+export function ignitionFromBlock19(
+    op: Partial<Record<(typeof IGNITION_ANGLE_KEYS)[number], number | null>>,
+): Partial<IgnitionChannels> {
+    const out: Partial<IgnitionChannels> = {};
+    for (const key of IGNITION_ANGLE_KEYS) {
+        const v = op[key];
+        if (v !== null && v !== undefined) out[key] = v;
+    }
+    return out;
+}
+
+const KNOCK_AGE_SIGNALS = [
+    ['knockAge1', Mss54HpRamSignals.KNOCK_AGE_1], ['knockAge2', Mss54HpRamSignals.KNOCK_AGE_2],
+    ['knockAge3', Mss54HpRamSignals.KNOCK_AGE_3], ['knockAge4', Mss54HpRamSignals.KNOCK_AGE_4],
+    ['knockAge5', Mss54HpRamSignals.KNOCK_AGE_5], ['knockAge6', Mss54HpRamSignals.KNOCK_AGE_6],
+] as const;
+
+/**
+ * The twelve-byte knock telegram, decoded — all six or none.
+ *
+ * The counter cannot exceed `KNOCK_AGE_SATURATED` (the DME stops it there and initialises it
+ * there), so a word above it is not this counter, and one impossible word is evidence against the
+ * other five being it either: the six are one array at one address. Dropping the whole telegram
+ * keeps a wrong address from leaving five plausible-looking columns behind. A short read drops
+ * the same way, so a cylinder is never silently missing from a reading that claims the others.
+ */
+export function decodeKnockAge(bytes: Uint8Array, address: number): Partial<IgnitionChannels> {
+    const out: Partial<IgnitionChannels> = {};
+    for (const [key, sig] of KNOCK_AGE_SIGNALS) {
+        const v = decodeRamSignal(sig, bytes, address);
+        if (v === null || !Number.isInteger(v) || v < 0 || v > KNOCK_AGE_SATURATED) return {};
+        out[key] = v;
+    }
+    return out;
+}
+
+export const KNOCK_AGE_ADDRESS = KNOCK_AGE_RAM_READ.address;

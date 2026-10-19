@@ -133,6 +133,20 @@ export const APP_CONFIG = {
         MD_LS_DELTA: 'Tip-in Allowance',
         MD_DP_DELTA: 'Dashpot Allowance',
         PRESSURE_DECODE_GAP: 'Pressure Decode Gap',
+        // Testo's own headers for the six angles ("Ignition angle cyl. n" on 12050B13), so a log
+        // exported here reads as the same channel in either tool.
+        IGNITION_ANGLE_1: 'Ignition angle cyl. 1',
+        IGNITION_ANGLE_2: 'Ignition angle cyl. 2',
+        IGNITION_ANGLE_3: 'Ignition angle cyl. 3',
+        IGNITION_ANGLE_4: 'Ignition angle cyl. 4',
+        IGNITION_ANGLE_5: 'Ignition angle cyl. 5',
+        IGNITION_ANGLE_6: 'Ignition angle cyl. 6',
+        KNOCK_AGE_1: 'Knock Age 1',
+        KNOCK_AGE_2: 'Knock Age 2',
+        KNOCK_AGE_3: 'Knock Age 3',
+        KNOCK_AGE_4: 'Knock Age 4',
+        KNOCK_AGE_5: 'Knock Age 5',
+        KNOCK_AGE_6: 'Knock Age 6',
     },
 
     /**
@@ -220,6 +234,22 @@ export const APP_CONFIG = {
         mdLsDelta: ['tip-in allowance', 'md_ls_delta'] as string[],
         mdDpDelta: ['dashpot allowance', 'md_dp_delta'] as string[],
         pressureDecodeGap: ['pressure decode gap'] as string[],
+        // Testo's list names these (`Ignition angle cyl. n`, symbol TZn, telegram 12050B13), so for
+        // once the first spelling is read off Testo rather than this app's serializer — they are
+        // the same string. The reference catalog's lowercase symbol is accepted as well.
+        ignitionAngle1: ['ignition angle cyl. 1', 'tz1'] as string[],
+        ignitionAngle2: ['ignition angle cyl. 2', 'tz2'] as string[],
+        ignitionAngle3: ['ignition angle cyl. 3', 'tz3'] as string[],
+        ignitionAngle4: ['ignition angle cyl. 4', 'tz4'] as string[],
+        ignitionAngle5: ['ignition angle cyl. 5', 'tz5'] as string[],
+        ignitionAngle6: ['ignition angle cyl. 6', 'tz6'] as string[],
+        // A RAM counter with no DME symbol, so this app's header is the only name it has.
+        knockAge1: ['knock age 1'] as string[],
+        knockAge2: ['knock age 2'] as string[],
+        knockAge3: ['knock age 3'] as string[],
+        knockAge4: ['knock age 4'] as string[],
+        knockAge5: ['knock age 5'] as string[],
+        knockAge6: ['knock age 6'] as string[],
     },
 
     /**

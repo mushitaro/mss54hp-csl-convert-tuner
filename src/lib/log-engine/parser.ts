@@ -4,6 +4,14 @@ import type { LogDataPoint } from '@/lib/types';
 
 type AliasKey = keyof typeof APP_CONFIG.CSV_ALIASES;
 
+/** The twelve ignition-side columns, read the same optional way as every other. One list, because
+ *  twelve near-identical stanzas is how one of them ends up reading the wrong key. */
+const IGNITION_CSV_KEYS = [
+    'ignitionAngle1', 'ignitionAngle2', 'ignitionAngle3',
+    'ignitionAngle4', 'ignitionAngle5', 'ignitionAngle6',
+    'knockAge1', 'knockAge2', 'knockAge3', 'knockAge4', 'knockAge5', 'knockAge6',
+] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
+
 /**
  * First aliased header that carries a number on this row.
  *
@@ -197,6 +205,13 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         if (ltft2 !== undefined) point.ltft2 = ltft2;
         const gap = pick(row, 'pressureDecodeGap');
         if (gap !== undefined) point.pressureDecodeDisagreesMbar = gap;
+        // The ignition side. Sparse in a fast VE log by construction — block 19 and the knock
+        // counters are read one sample in eight — so a blank cell is "not read on this row" and
+        // stays undefined rather than becoming 0, which would be an angle and a fresh knock.
+        for (const key of IGNITION_CSV_KEYS) {
+            const v = pick(row, key);
+            if (v !== undefined) point[key] = v;
+        }
         // Written by the serializer only on a run where the substitution happened, so an ABSENT
         // column means "from CAN" and a present one carries the per-sample truth. Undefined stays
         // undefined: an old log knows nothing about where its outside temperature came from.

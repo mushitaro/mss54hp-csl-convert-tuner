@@ -5,8 +5,9 @@ import {
 } from './types';
 import {
     RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange, SLEW_TORQUE_RAM_READ,
-    LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
+    LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ, KNOCK_AGE_RAM_READ,
 } from './ramMap';
+import { IGNITION_ANGLE_KEYS } from './liveValueBlocks';
 import {
     AdaptationSnapshot, AdaptationReading, AdaptationFieldDef,
     STANDARD_ADAPTATIONS_BLOCK, OBSERVATION_ADAPTATIONS_BLOCK, isClearedByTuneReset,
@@ -35,6 +36,20 @@ const MOCK_FLASH_SLOTS_USED = 12;
 
 function delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * A base ignition angle, degrees before TDC, shaped like this calibration's KF_TZ_GRUND.
+ *
+ * A four-term fit to the stock map over 900-4400 rpm and RF 0.2-1.0 (rms 3 deg) — the shape, not
+ * the calibration: more advance with speed, less with filling. It is not read out of the loaded
+ * binary because nothing downstream computes with it; it exists so PRACTICE has six plausible
+ * columns where a car has six real ones. Clamped to the 0..60 deg K_TZ_MAX allows.
+ */
+function mockBaseIgnitionAngle(rpm: number, rfPct: number | undefined): number {
+    const n = Math.max(0, rpm) / 1000;
+    const r = Math.max(0, rfPct ?? 0) / 100;
+    return Math.min(60, Math.max(0, 7.8 + 11.3 * n - 0.16 * r - 6.6 * n * r));
 }
 
 const ADAPTATION_FIELDS: AdaptationFieldDef[] = [
@@ -614,6 +629,12 @@ export class MockDmeLink implements DmeLink {
             || address === LLS_DUTY_RAM_READ.address) {
             throw new DmeLinkError('PRACTICE does not simulate the idle-valve ring; run this on the car');
         }
+        // Knock control too. Served from the zero-filled buffer below, the six counters would
+        // read 0 — every cylinder retarded this very combustion — which is a knock storm no car
+        // reported. Refused, so the channel is absent rather than alarming.
+        if (address === KNOCK_AGE_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate knock control; run this on the car');
+        }
         await delay(20);
         const out = new Uint8Array(count);
         const sample = this.inertiaBench.sample((performance.now() - this.measurementStartTime) / 1000);
@@ -690,7 +711,7 @@ export class MockDmeLink implements DmeLink {
         // The simulated drive, computed from this DME's own calibration — see mockDrive.ts. It is
         // the only mode in which the EGT correction can be rehearsed: the idle pattern below never
         // reaches the correction's 55-80 %RF gate, so rf_korr in it is 1.000 forever.
-        if (this.driveReady) return this.drive.sample(t);
+        if (this.driveReady) return this.withIgnition(this.drive.sample(t));
 
         // Fallback: the old idle pattern, for a binary with no usable EGT tables (the generated
         // placeholder, or an image whose bytes do not match the catalog). Telemetry-shaped, and
@@ -715,7 +736,7 @@ export class MockDmeLink implements DmeLink {
         const purging = Math.sin(t * 0.1) > 0;
         const tankVent = purging ? 7.4 + Math.sin(t * 0.6) * 0.5 : 0;
 
-        return {
+        return this.withIgnition({
             time: t,
             rpm: Math.max(0, rpm),
             rawLoad: Math.max(0, rawLoad),
@@ -775,7 +796,27 @@ export class MockDmeLink implements DmeLink {
             // A healthy valve: bit 0 is what lls_tv_init leaves, bit 7 clear. That is the case the
             // ti_load_factor branch question actually turns on, so a rehearsal has to get it right.
             llsSt: 0x01,
-        };
+        });
+    }
+
+    /**
+     * The six final ignition angles block 19 would carry with this sample.
+     *
+     * The base angle, plus each cylinder's own learned knock adaptation — which is what
+     * `tz_related_2_` adds at steady state, where the transient retard is 0 and `min(KA, 0)` is
+     * KA. So the six differ by exactly what this simulated DME has learned, and a mock RESET ADAPT
+     * visibly brings them together: the one cylinder-to-cylinder spread PRACTICE can rehearse
+     * honestly. No knock retard on top — inventing a knock event would put a fault on screen no
+     * car reported, and the knock counters are refused for the same reason.
+     */
+    private withIgnition(sample: LiveMeasurement): LiveMeasurement {
+        const base = mockBaseIgnitionAngle(sample.rpm, sample.rf);
+        const out: LiveMeasurement = { ...sample };
+        IGNITION_ANGLE_KEYS.forEach((key, c) => {
+            const ka = Math.min(0, this.adaptations.get(`ka_adap_tz[${c}]`) ?? 0);
+            out[key] = Math.round((base + ka) * 10) / 10;
+        });
+        return out;
     }
 
     private snapshot(): AdaptationSnapshot {

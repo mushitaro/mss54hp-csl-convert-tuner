@@ -3113,6 +3113,20 @@ export default function Home() {
           llsTv: sample.llsTv,
           mlSoll: sample.mlSoll,
           mlSollLls: sample.mlSollLls,
+          // The ignition side, for the same reason again. Absent on the samples that did not read
+          // block 19 or the knock counters, which is most of them on the fast VE list.
+          ignitionAngle1: sample.ignitionAngle1,
+          ignitionAngle2: sample.ignitionAngle2,
+          ignitionAngle3: sample.ignitionAngle3,
+          ignitionAngle4: sample.ignitionAngle4,
+          ignitionAngle5: sample.ignitionAngle5,
+          ignitionAngle6: sample.ignitionAngle6,
+          knockAge1: sample.knockAge1,
+          knockAge2: sample.knockAge2,
+          knockAge3: sample.knockAge3,
+          knockAge4: sample.knockAge4,
+          knockAge5: sample.knockAge5,
+          knockAge6: sample.knockAge6,
         };
         // Record it, price the rate, pace the flush and the recovery write. Nothing in there
         // renders anything — see useLiveRun for why that matters at four samples a second.

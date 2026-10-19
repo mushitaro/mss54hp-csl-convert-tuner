@@ -60,6 +60,15 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     const hasTempSubstituted = points.some(p => p.ambientTempFromCan === false);
     const hasDecodeGap = points.some(p =>
         (p.pressureDecodeDisagreesMbar ?? 0) > PRESSURE_DECODE_TOLERANCE_MBAR);
+    // The ignition side, one flag per column like every channel above: a run that never read the
+    // knock counters has no such columns, while one that did keeps its blank rows blank.
+    const ignition = ([
+        ['ignitionAngle1', M.IGNITION_ANGLE_1], ['ignitionAngle2', M.IGNITION_ANGLE_2],
+        ['ignitionAngle3', M.IGNITION_ANGLE_3], ['ignitionAngle4', M.IGNITION_ANGLE_4],
+        ['ignitionAngle5', M.IGNITION_ANGLE_5], ['ignitionAngle6', M.IGNITION_ANGLE_6],
+        ['knockAge1', M.KNOCK_AGE_1], ['knockAge2', M.KNOCK_AGE_2], ['knockAge3', M.KNOCK_AGE_3],
+        ['knockAge4', M.KNOCK_AGE_4], ['knockAge5', M.KNOCK_AGE_5], ['knockAge6', M.KNOCK_AGE_6],
+    ] as const).filter(([key]) => points.some(p => p[key] !== undefined));
 
     const rows = points.map(p => {
         const row: Record<string, number | string> = {
@@ -95,6 +104,7 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasMdLsDelta) row[M.MD_LS_DELTA] = p.mdLsDelta ?? '';
         if (hasMdDpDelta) row[M.MD_DP_DELTA] = p.mdDpDelta ?? '';
         if (hasDecodeGap) row[M.PRESSURE_DECODE_GAP] = p.pressureDecodeDisagreesMbar ?? '';
+        for (const [key, header] of ignition) row[header] = p[key] ?? '';
         return row;
     });
 

@@ -10,6 +10,7 @@ import {
     decodeAmbientCharge, decodeAmbientTemp, decodeIdleValveState, decodeSlewState, decodeSlewTorque,
     decodeLlsAir, decodeLlsIntegrator, decodeLlsDuty, type LlsRingChannels,
     mergeSlowLane, type SlowLaneChannels, type SlewChannels,
+    KNOCK_AGE_ADDRESS, decodeKnockAge, ignitionFromBlock19, type IgnitionChannels,
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
 import {
@@ -2607,6 +2608,10 @@ export class WebSerialDmeLink implements DmeLink {
         // are: they run on the same lane and a single variable would let whichever decoded last
         // erase the other two. NOT carried between samples — see LlsRingChannels.
         let llsRing: Partial<LlsRingChannels> | null = null;
+        // The six angles (block 19) and the six knock counters (RAM), two exchanges on one lane.
+        // Separate locals for the reason the slew pair has them; NOT carried — see IgnitionChannels.
+        let ignitionAngles: Partial<IgnitionChannels> | null = null;
+        let knockAge: Partial<IgnitionChannels> | null = null;
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
@@ -2649,6 +2654,12 @@ export class WebSerialDmeLink implements DmeLink {
                     }
                     if (exchange.address === LLS_DUTY_ADDRESS) {
                         llsRing = { ...(llsRing ?? {}), ...decodeLlsDuty(bytes, exchange.address) };
+                        continue;
+                    }
+                    if (exchange.address === KNOCK_AGE_ADDRESS) {
+                        // Before the lambda fall-through below, like every other telegram: twelve
+                        // bytes of counters decoded as a trim would land nowhere, but silently.
+                        knockAge = decodeKnockAge(bytes, exchange.address);
                         continue;
                     }
                     if (exchange.address === AMBIENT_TEMP_ADDRESS) {
@@ -2696,6 +2707,9 @@ export class WebSerialDmeLink implements DmeLink {
                     tankVentDiag: op.tankVentDiag ?? undefined,
                     lambdaFreeze: op.lambdaFreeze ?? undefined,
                 };
+                // Out of the same 90 bytes, and NOT into the carry above: an angle read now is not
+                // the angle seven samples from now. See IgnitionChannels.
+                ignitionAngles = ignitionFromBlock19(op);
                 // The RAM claim, re-checked against the block that is the authority for it — for
                 // free, on every slow-lane sample, for the whole drive. Reported, never acted on:
                 // switching the source mid-run would leave one log holding two measurements.
@@ -2753,6 +2767,8 @@ export class WebSerialDmeLink implements DmeLink {
             ...slewState,
             ...slewTorque,
             ...llsRing,
+            ...ignitionAngles,
+            ...knockAge,
         };
     }
 

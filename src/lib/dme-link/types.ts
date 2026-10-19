@@ -207,6 +207,35 @@ export interface LiveMeasurement {
      */
     pressureDecodeDisagreesMbar?: number;
     /**
+     * `tz1`..`tz6` — the angle each cylinder was last fired at, degrees crank BEFORE TDC.
+     *
+     * The final one: after knock retard, knock adaptation, the transient retards, torque
+     * intervention and the TZ_MIN / K_TZ_MAX clamps — what `FUN_0002b18c` turns into the spark
+     * edge. DS2 selection 19 payload 22..33, signed 0.1 deg; see OPERATING_MEASUREMENTS_BLOCK.
+     *
+     * Present ONLY on a sample that read block 19 — every sample of the fallback, one in eight of
+     * the fast VE list — and never carried to the samples between. Undefined means "not read on
+     * this sample", which is what happened.
+     */
+    ignitionAngle1?: number;
+    ignitionAngle2?: number;
+    ignitionAngle3?: number;
+    ignitionAngle4?: number;
+    ignitionAngle5?: number;
+    ignitionAngle6?: number;
+    /**
+     * Combustions of cylinder n since knock control last retarded it; 1275 means none it still
+     * remembers (about a minute at 2500 rpm). RAM 0xFFE874 + 2(n-1), read on the block-19 lane —
+     * see KNOCK_AGE_RAM_READ. Same rule as the angles: written on the sample that read it, never
+     * carried, because the count it held a second ago is not the count it holds now.
+     */
+    knockAge1?: number;
+    knockAge2?: number;
+    knockAge3?: number;
+    knockAge4?: number;
+    knockAge5?: number;
+    knockAge6?: number;
+    /**
      * Where `stft1`/`stft2` came from on THIS sample.
      *
      * The VE profile reads them out of four bytes of master RAM instead of the 90-byte block 19 they

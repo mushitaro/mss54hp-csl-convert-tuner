@@ -60,10 +60,17 @@ console.log('\n[the production channel set, as a literal]');
     // The debug channels that survive because they share a telegram with a tuning one. Stated
     // rather than hidden: they ARE in a production log, and a check claiming otherwise would be
     // the kind of tidy fiction this file exists to prevent.
+    //
+    // The six ignition angles joined on 2026-10-19, and on purpose: they are debug by the
+    // category's test (nothing in the derivation reads them), and they are in a production log
+    // anyway because block 19 carries `tetv`. That is the cheapest place an ignition question can
+    // be answered from, and it costs the production rate nothing.
     const ridingAlong = recorded.filter(k => rel(k) === 'debug');
     check('debug channels riding along on a kept exchange',
         JSON.stringify(ridingAlong) === JSON.stringify(
-            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1'].sort()),
+            ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1',
+                'ignitionAngle1', 'ignitionAngle2', 'ignitionAngle3',
+                'ignitionAngle4', 'ignitionAngle5', 'ignitionAngle6'].sort()),
         ridingAlong.join(', '));
 
     /*
@@ -109,9 +116,11 @@ console.log('\n[the exchanges a production run drops]');
     // on 2026-08-30: MD_DYN_ST and the four torque words answer whether KF_MD_LS_KOMF ever bound,
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named
     // one by one rather than counted, so adding an exchange has to state which side it is on.
-    check('exactly the four debug-only exchanges',
+    // KNOCK AGE joined on 2026-10-19 for the same reason: whether knock control retarded a
+    // cylinder is asked of a drive, and nothing in the derivation reads it.
+    check('exactly the five debug-only exchanges',
         JSON.stringify(gone.sort()) === JSON.stringify(
-            ['LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M'].sort()),
+            ['KNOCK AGE', 'LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M'].sort()),
         gone.join(', '));
     console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);

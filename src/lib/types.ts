@@ -150,6 +150,25 @@ export interface LogDataPoint {
     mdFwFilter?: number;
     mdLsDelta?: number;
     mdDpDelta?: number;
+    /**
+     * `tz1`..`tz6` — the angle each cylinder was last fired at, degrees before TDC, AFTER knock
+     * retard (DS2 selection 19 payload 22..33). Diagnostics for the ignition side, never an input
+     * to the VE derivation. Absent on the samples that did not read block 19; see LiveMeasurement.
+     */
+    ignitionAngle1?: number;
+    ignitionAngle2?: number;
+    ignitionAngle3?: number;
+    ignitionAngle4?: number;
+    ignitionAngle5?: number;
+    ignitionAngle6?: number;
+    /** Combustions of cylinder n since knock control last retarded it, 1275 = none remembered.
+     *  RAM 0xFFE874 + 2(n-1), on the block-19 lane. Absent on the samples that did not read it. */
+    knockAge1?: number;
+    knockAge2?: number;
+    knockAge3?: number;
+    knockAge4?: number;
+    knockAge5?: number;
+    knockAge6?: number;
     /** `V` — road speed, km/h. The second half of the `rf_korr` gate, and since 2026-09-09 it is
      *  actually evaluated: `rfKorrActive` refuses the correction below `k_rf_korr_v_min` (20 km/h).
      *  A log recorded before this channel existed therefore earns no rf_korr at all and falls back

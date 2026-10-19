@@ -50,8 +50,10 @@ import {
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
     IDLE_VANOS_RAM_READ, IDLE_VANOS_TARGET_RAM_READ,
+    KNOCK_AGE_RAM_READ,
 } from '@/lib/dme-link/ramMap';
 import { type FieldKey, LOG_FIELD_REGISTRY } from '@/lib/field-registry/registry';
+import { IGNITION_ANGLE_KEYS } from '@/lib/dme-link/liveValueBlocks';
 import { featureEnabled, MODE_FEATURES, type ModeId } from '@/lib/features';
 
 /** Milliseconds of wire time for one byte, at 9600 8E1.
@@ -248,6 +250,9 @@ export function describeExchanges(exchanges: readonly LogExchange[]): string {
         })
         .join(' + ');
 }
+
+/** `tz1`..`tz6`, as the log channels block 19 provides. */
+const IGNITION_ANGLES: readonly FieldKey[] = IGNITION_ANGLE_KEYS;
 
 /** A block read, spelled out. */
 const block = (selection: number, every?: number): LogExchange =>
@@ -599,8 +604,22 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
                 provides: ['stft1', 'stft2', 'ltft1', 'ltft2'] },
             // Three debug bytes and `tetv`, which is tuning — so this stays in production, and the
             // three ride in free. It also carries the truth gate, which is not a channel at all.
+            //
+            // And the six ignition angles, debug, riding in the same way: a production VE log
+            // records them because `tetv` keeps this exchange. One sample in eight, because that is
+            // the rate this block already comes at; they are not carried to the seven between.
             { ...block(19, LAMBDA_SLOW_LANE_EVERY),
-                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
+                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze', ...IGNITION_ANGLES] },
+            // How long ago knock control last retarded each cylinder — twelve bytes, and the one
+            // channel that says whether a felt loss was knock. On block 19's lane ON PURPOSE: the
+            // same sample index carries both, so a counter of 12 stands beside the angle that
+            // cylinder was fired at on that read. A counter remembers ~60 s of combustions, so one
+            // read in eight misses nothing; the retard itself is gone in a second and would need
+            // every sample — 28 % of the VE sample instead of 3.5 %. See KNOCK_AGE_RAM_READ.
+            //
+            // Debug throughout, so a production run drops it.
+            { kind: 'ram', name: 'KNOCK AGE', ...KNOCK_AGE_RAM_READ, every: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['knockAge1', 'knockAge2', 'knockAge3', 'knockAge4', 'knockAge5', 'knockAge6'] },
             // Ambient pressure, its two diagnostic bytes, the DME's altitude, intake air
             // temperature and the DME's own modelled charge temperature — sixteen bytes, one
             // telegram, on the same slow lane. This is what separates a real VE error from a
@@ -658,7 +677,8 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // blocks carry tuning channels — which is the point of stating it rather than assuming it.
         fallback: [
             { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
-            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze'] },
+            { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
+                ...IGNITION_ANGLES] },
         ],
         // The lambda trim is the whole input, and PATCH is what stops the DME hiding the error the
         // trim is supposed to reveal: k_rf_cfg turns MAP compensation off and K_LAA_TMOT_MIN stops

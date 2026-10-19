@@ -36,7 +36,12 @@ export type FieldKey =
     // The tip-in / dashpot slew limiter, on the same lane. Diagnostics for the drivability tables,
     // never an input to the VE derivation — see their entries.
     | 'mdDynSt' | 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta'
-    | 'frRegler' | 'llsTv' | 'mlSoll' | 'mlSollLls';
+    | 'frRegler' | 'llsTv' | 'mlSoll' | 'mlSollLls'
+    // The ignition side: the final angle per cylinder (block 19, free) and how long ago knock
+    // control last retarded each cylinder (twelve bytes of RAM on the block-19 lane).
+    | 'ignitionAngle1' | 'ignitionAngle2' | 'ignitionAngle3'
+    | 'ignitionAngle4' | 'ignitionAngle5' | 'ignitionAngle6'
+    | 'knockAge1' | 'knockAge2' | 'knockAge3' | 'knockAge4' | 'knockAge5' | 'knockAge6';
 
 /** Where a number came from: a DS2 block and byte offset, or this app's own arithmetic. */
 export type FieldSource = { selection: number; offset: number } | 'derived';
@@ -495,6 +500,94 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         source: 'derived', unit: 'Nm', format: v => v.toFixed(1),
         relevance: 'debug', color: '#9B84E8',
     },
+    /**
+     * `tz1`..`tz6` — the angle each cylinder was last fired at, AFTER knock retard.
+     *
+     * `debug`, on the category's own test: nothing in the derivation reads an ignition angle. They
+     * are what you switch on to ask whether the ignition side is what the driver feels — and a
+     * production log still records them, because they ride on block 19 beside `tetv`.
+     *
+     * Read them against each other. K_TZ_MCS_Z is 0 on every cylinder of this calibration, so at
+     * one instant the six differ only by knock retard, the learned knock adaptation and a
+     * cylinder-selective torque intervention: one cylinder below the rest is that cylinder being
+     * retarded. All six moving together is the map, a transient retard or an intervention — this
+     * channel cannot say which, and KNOCK AGE beside it says whether it was knock.
+     *
+     * One decimal, because that is the DME's own resolution: 0.1 deg per count.
+     */
+    ignitionAngle1: {
+        key: 'ignitionAngle1', symbol: 'tz1', name: 'Ignition angle, cylinder 1 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 22 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF', // slate-300 — a measurement, not a verdict
+    },
+    ignitionAngle2: {
+        key: 'ignitionAngle2', symbol: 'tz2', name: 'Ignition angle, cylinder 2 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 24 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF',
+    },
+    ignitionAngle3: {
+        key: 'ignitionAngle3', symbol: 'tz3', name: 'Ignition angle, cylinder 3 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 26 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF',
+    },
+    ignitionAngle4: {
+        key: 'ignitionAngle4', symbol: 'tz4', name: 'Ignition angle, cylinder 4 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 28 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF',
+    },
+    ignitionAngle5: {
+        key: 'ignitionAngle5', symbol: 'tz5', name: 'Ignition angle, cylinder 5 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 30 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF',
+    },
+    ignitionAngle6: {
+        key: 'ignitionAngle6', symbol: 'tz6', name: 'Ignition angle, cylinder 6 (before TDC, after knock retard)',
+        source: { selection: 19, offset: 32 }, unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#C6C6CF',
+    },
+    /**
+     * Combustions since knock control last retarded this cylinder. 1275 = none it remembers.
+     *
+     * The DME's own counter (RAM 0xFFE874 + 2(n-1), see KNOCK_AGE_RAM_READ): zeroed by every knock
+     * retard, plus one per combustion, held at 1275. So it answers on a read every two seconds what
+     * the retard itself would need four reads a second to show — a value under ~40 at 2500 rpm
+     * means that cylinder was retarded since the previous read, and `n * 120 / rpm` is how many
+     * seconds ago. Written in CAPITALS with spaces because the DME has no symbol for it that is
+     * known; the graph calls it `DAT_00ffe874`.
+     *
+     * `debug`, and so not recorded in a production build: the exchange carries nothing else, and
+     * production drops an exchange that is debug throughout.
+     */
+    knockAge1: {
+        key: 'knockAge1', symbol: 'KNOCK AGE 1', name: 'Cylinder 1: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F', // M-red 300 — knock is the one hazard on this list
+    },
+    knockAge2: {
+        key: 'knockAge2', symbol: 'KNOCK AGE 2', name: 'Cylinder 2: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    knockAge3: {
+        key: 'knockAge3', symbol: 'KNOCK AGE 3', name: 'Cylinder 3: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    knockAge4: {
+        key: 'knockAge4', symbol: 'KNOCK AGE 4', name: 'Cylinder 4: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    knockAge5: {
+        key: 'knockAge5', symbol: 'KNOCK AGE 5', name: 'Cylinder 5: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    knockAge6: {
+        key: 'knockAge6', symbol: 'KNOCK AGE 6', name: 'Cylinder 6: combustions since its last knock retard (1275 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#F87A7F',
+    },
 };
 
 export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as FieldKey[])
@@ -638,6 +731,13 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     tankVent: true, tankVentCheckState: false, tankVentDiag: false,
     // Off until it means something. Turn it on for the full-load experiment described in its entry.
     lambdaFreeze: false,
+    // Off, all twelve. They answer one question — is the ignition side what the driver feels —
+    // which is asked of a drive afterwards rather than watched from the seat, and twelve columns
+    // on by default would be more than the whole tuning set.
+    ignitionAngle1: false, ignitionAngle2: false, ignitionAngle3: false,
+    ignitionAngle4: false, ignitionAngle5: false, ignitionAngle6: false,
+    knockAge1: false, knockAge2: false, knockAge3: false,
+    knockAge4: false, knockAge5: false, knockAge6: false,
 };
 
 /** For a derived channel, the logged channel whose presence decides whether the column belongs. */

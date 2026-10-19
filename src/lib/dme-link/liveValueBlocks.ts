@@ -154,8 +154,91 @@ export const OPERATING_MEASUREMENTS_BLOCK = {
          *  because 40-fr-adaptation-bug.md makes it the confound of record for anything measured
          *  at idle, and a Terra-program DME leaves a standing error in exactly this region. */
         frRegler: { symbol: 'fr_regler', offset: 79, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+
+        // --- ignition angle, per cylinder ---------------------------------------------------
+        //
+        // `tz1`..`tz6` — the angle each cylinder was LAST FIRED at, degrees crank before TDC.
+        // Six more fields out of the same 90-byte response; the bytes were arriving and being
+        // discarded.
+        //
+        // WHY: under K HOLD the 7.5-10 % x 2200-2700 rpm band runs at RF ~0.74 where it ran at
+        // 0.87-0.95, so `kfs_wint(KF_TZ_GRUND, N, RF)` reads a lighter, more advanced row (+1.1 deg
+        // median, up to +2.4, inferred). The operator feels a sudden loss and recovery at WDK
+        // 20-30 % in 5th/6th. Whether the ignition side is doing that cannot be inferred from a
+        // map; it has to be read.
+        //
+        // WHERE, and not from one source. Three agree, and the third is the binary itself:
+        //
+        //  1. The reference catalog (DmeLiveValueCatalog.cs, selection 19): `I15 tz1..tz6` at
+        //     22, 24, 26, 28, 30, 32, 0.1 degKW.
+        //  2. Testo's own MSS54 channel list (ecudata/MSS54DS0_DATATABLE_results.txt) puts
+        //     `TZ1`..`TZ8`, "Ignition angle cyl. n", Deg. KW, on telegram 12050B13 — this block.
+        //  3. The master's responder, decomp/master/030b84.txt case 0x18 (the case whose response
+        //     length is exactly 90 and whose other master-written fields — v 0, v_asc 2, servo
+        //     48/50/52, asc_ay/ax 60/61, sls_st_bandende 63, lls_tv 75, md_llri 77, fr_regler 79,
+        //     edk_aus 81, can_fst 83 — sit at exactly the catalog's offsets). It writes V and
+        //     V_ASC, zeroes payload 4..21, then copies `TZ[0]`..`TZ[7]` high byte first into
+        //     payload 22..37, then zeroes 38..47 (the slave's tetv/la_f_regler/lank range).
+        //
+        // So unlike tetv and la_f_regler above, these bytes are NOT zeroed by the master and
+        // filled by the slave: the master writes them itself, from its own RAM (`TZ`, 0xFF81FC,
+        // eight words). There is no slave-fill question to settle for them. TZ[6]/TZ[7] at 34..37
+        // are not read: `tz_related_2_` only loops `zyl_count` cylinders, so on this six-cylinder
+        // car they hold the zero `FUN_00010c68` initialised them to.
+        //
+        // WHICH ANGLE: the final one. `tz_related_2_` (master 0x02AEE4) builds, per cylinder c,
+        //
+        //     TZ_STAT  = K_TZ_MCS + TZ_SA_OFFSET + TZ_ZWB          (TZ_ZWB = ramped TZ_GRUND+TZ_TKORR)
+        //     s        = K_TZ_MCS_Z[c] + TZ_STAT + TZ_OFFSET_Z[c]
+        //     s       += min(KA[c], TZ_DYN_OFFSET) + KR[c]         only in VL|TL|LL
+        //     TZ_VE[c] = s
+        //     s        = min(s, TZ_MD[c])                          torque intervention, if MD_ST_TZ
+        //     TZ[c]    = clamp(s, TZ_MIN, K_TZ_MAX)
+        //
+        // and then hands TZ[c] to `FUN_0002b18c`, which turns it into the TPU spark end angle
+        // (`PSP1_END_ANGLE`). This is the number the coil fired at — after knock retard (KR,
+        // 0xFFE836 + 2c), the learned knock adaptation (KA, 0xFFE88C + 2c), the transient retards
+        // (TZ_DYN_OFFSET = min of the dynamic-knock and dynamic-torque ramps), the torque
+        // intervention and both clamps. Not TZ_GRUND (0xFFE606), which is the map alone.
+        //
+        // INDEX = cylinder number - 1, not firing order. `knock_related_3_` indexes KR by
+        // `zyl_firing_order_table[..] - 1`, and sums KR[0..2] into KR_DTZ_SUM1 and KR[3..5] into
+        // KR_DTZ_SUM2 — bank 1 is cylinders 1-3. tz_related_2_ uses the same c for KR and TZ.
+        //
+        // SCALE 0.1 deg, SIGNED, positive = before TDC. Three proofs, none of them the catalog:
+        // TZ is clamped against K_TZ_MAX, which the XDF scales x/10 deg (60.0 on this car); it is
+        // assembled from KF_TZ_GRUND, also signed x/10; and `fsp_capture_freeze_frame` (master
+        // 0x034CC4) stores `clamp(TZ[0] + 640, 0, 1270) / 5` — the OBD PID 0x0E encoding
+        // `A/2 - 64` deg before TDC — which is exactly TZ/10.
+        //
+        // What it shows about knock, and what it does not: K_TZ_MCS_Z is 0 on all eight
+        // cylinders of this calibration, so at one instant the six values differ only by KR[c],
+        // the learned KA[c] (slow — readable at RESET ADAPT, selection 0x16) and a
+        // cylinder-selective torque intervention. A knock retard on one cylinder therefore reads
+        // as that cylinder sitting below the others. A retard on ALL of them — knock everywhere,
+        // the dynamic retard, a torque intervention — moves the six together and is not
+        // distinguishable from the map here; `KNOCK_AGE_RAM_READ` in ramMap.ts is the channel that
+        // says whether knock control did it.
+        //
+        // NOT CARRIED between samples. The VE profile reads this block one sample in eight, and
+        // a knock retard on this calibration recovers in about a second (KL_KR_DTZ_AUF 0.2 -> 0.1
+        // deg per combustion over 2000 -> 3000 rpm); stamping one reading onto the next seven
+        // samples would turn a one-second event into a two-second one. See IgnitionChannels.
+        ignitionAngle1: { symbol: 'tz1', offset: 22, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        ignitionAngle2: { symbol: 'tz2', offset: 24, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        ignitionAngle3: { symbol: 'tz3', offset: 26, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        ignitionAngle4: { symbol: 'tz4', offset: 28, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        ignitionAngle5: { symbol: 'tz5', offset: 30, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        ignitionAngle6: { symbol: 'tz6', offset: 32, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
     },
 };
+
+/** The six ignition-angle channels in cylinder order — one name list for the decoder, the link,
+ *  the CSV and the checks, so a seventh place cannot drift from the other six. */
+export const IGNITION_ANGLE_KEYS = [
+    'ignitionAngle1', 'ignitionAngle2', 'ignitionAngle3',
+    'ignitionAngle4', 'ignitionAngle5', 'ignitionAngle6',
+] as const;
 
 /**
  * Selection 83 (0x53) "EGAS Measurements" (52 bytes) — the drivability block.
@@ -264,6 +347,14 @@ export function decodeOperatingMeasurementsBlock(payload: Uint8Array) {
         tankVentCheckState: decodeField(payload, f.tankVentCheckState),
         tankVentDiag: decodeField(payload, f.tankVentDiag),
         lambdaFreeze: decodeField(payload, f.lambdaFreeze),
+        // Signed: a cat-heating retard runs past TDC, and a negative angle read as unsigned would
+        // be a 6500-degree advance.
+        ignitionAngle1: decodeField(payload, f.ignitionAngle1),
+        ignitionAngle2: decodeField(payload, f.ignitionAngle2),
+        ignitionAngle3: decodeField(payload, f.ignitionAngle3),
+        ignitionAngle4: decodeField(payload, f.ignitionAngle4),
+        ignitionAngle5: decodeField(payload, f.ignitionAngle5),
+        ignitionAngle6: decodeField(payload, f.ignitionAngle6),
     };
 }
 
