@@ -12,6 +12,15 @@ const IGNITION_CSV_KEYS = [
     'knockAge1', 'knockAge2', 'knockAge3', 'knockAge4', 'knockAge5', 'knockAge6',
 ] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
 
+/** The knock sums with the gear, the manifold air and the cams — sparse the same way, read the
+ *  same way. `noiseSt` and the VANOS status bytes are bitfields, written as plain numbers for that
+ *  reason: a `0x02` cell is a string to the CSV reader and would come back as nothing. */
+const AIR_KNOCK_CSV_KEYS = [
+    'gear', 'noiseSt', 'krDtzSum', 'krDtzSum1', 'kaDtzSum', 'kaDtzSum1',
+    'rfPSaug', 'rfDiagF', 'rfKorrDme', 'pSaug', 'pSaugM',
+    'evan1Ist', 'evanSoll', 'avan1Ist', 'avanSoll', 'evan1St', 'avan1St', 'vanEdSt', 'vanAdapSt',
+] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
+
 /**
  * First aliased header that carries a number on this row.
  *
@@ -209,6 +218,12 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         // counters are read one sample in eight — so a blank cell is "not read on this row" and
         // stays undefined rather than becoming 0, which would be an angle and a fresh knock.
         for (const key of IGNITION_CSV_KEYS) {
+            const v = pick(row, key);
+            if (v !== undefined) point[key] = v;
+        }
+        // Slow lanes as well, so a blank is "not read on this row": an absent knock sum is
+        // not 0 deg of retard and an absent gear is not neutral.
+        for (const key of AIR_KNOCK_CSV_KEYS) {
             const v = pick(row, key);
             if (v !== undefined) point[key] = v;
         }

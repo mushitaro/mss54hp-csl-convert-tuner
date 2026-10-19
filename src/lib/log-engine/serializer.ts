@@ -68,6 +68,18 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         ['ignitionAngle5', M.IGNITION_ANGLE_5], ['ignitionAngle6', M.IGNITION_ANGLE_6],
         ['knockAge1', M.KNOCK_AGE_1], ['knockAge2', M.KNOCK_AGE_2], ['knockAge3', M.KNOCK_AGE_3],
         ['knockAge4', M.KNOCK_AGE_4], ['knockAge5', M.KNOCK_AGE_5], ['knockAge6', M.KNOCK_AGE_6],
+        // The knock sums with the gear, and the manifold air, by the same rule. NOISE_ST goes out
+        // as a plain number, not hex like LLS_ST: a `0x02` cell does not survive the reader.
+        ['gear', M.GEAR], ['noiseSt', M.NOISE_ST],
+        ['krDtzSum', M.KR_DTZ_SUM], ['krDtzSum1', M.KR_DTZ_SUM1],
+        ['kaDtzSum', M.KA_DTZ_SUM], ['kaDtzSum1', M.KA_DTZ_SUM1],
+        ['rfPSaug', M.RF_P_SAUG], ['rfDiagF', M.RF_DIAG_F], ['rfKorrDme', M.RF_KORR_DME],
+        ['pSaug', M.P_SAUG], ['pSaugM', M.P_SAUG_M],
+        // The cams; the four status bytes as plain numbers for NOISE_ST's reason.
+        ['evan1Ist', M.INTAKE_CAM], ['evanSoll', M.INTAKE_CAM_TARGET],
+        ['avan1Ist', M.EXHAUST_CAM], ['avanSoll', M.EXHAUST_CAM_TARGET],
+        ['evan1St', M.INTAKE_VANOS_STATUS], ['avan1St', M.EXHAUST_VANOS_STATUS],
+        ['vanEdSt', M.VANOS_FAULT_STATUS], ['vanAdapSt', M.VANOS_ADAPTATION_STATUS],
     ] as const).filter(([key]) => points.some(p => p[key] !== undefined));
 
     const rows = points.map(p => {

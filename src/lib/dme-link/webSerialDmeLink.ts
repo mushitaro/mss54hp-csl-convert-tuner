@@ -11,6 +11,9 @@ import {
     decodeLlsAir, decodeLlsIntegrator, decodeLlsDuty, type LlsRingChannels,
     mergeSlowLane, type SlowLaneChannels, type SlewChannels,
     KNOCK_AGE_ADDRESS, decodeKnockAge, ignitionFromBlock19, type IgnitionChannels,
+    KNOCK_SUM_ADDRESS, decodeKnockSums, type KnockSumChannels,
+    MANIFOLD_AIR_ADDRESS, decodeManifoldAir, type ManifoldAirChannels,
+    VANOS_ADDRESS, decodeVanos, type VanosChannels,
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
 import {
@@ -2612,6 +2615,11 @@ export class WebSerialDmeLink implements DmeLink {
         // Separate locals for the reason the slew pair has them; NOT carried — see IgnitionChannels.
         let ignitionAngles: Partial<IgnitionChannels> | null = null;
         let knockAge: Partial<IgnitionChannels> | null = null;
+        // The knock sums with the gear, and the manifold air: one exchange each, NOT carried — see
+        // KnockSumChannels and ManifoldAirChannels.
+        let knockSums: Partial<KnockSumChannels> | null = null;
+        let manifoldAir: Partial<ManifoldAirChannels> | null = null;
+        let vanos: Partial<VanosChannels> | null = null;
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
@@ -2660,6 +2668,20 @@ export class WebSerialDmeLink implements DmeLink {
                         // Before the lambda fall-through below, like every other telegram: twelve
                         // bytes of counters decoded as a trim would land nowhere, but silently.
                         knockAge = decodeKnockAge(bytes, exchange.address);
+                        continue;
+                    }
+                    // Both before the lambda fall-through, for KNOCK AGE's reason: reaching it they
+                    // would decode to nothing, silently.
+                    if (exchange.address === KNOCK_SUM_ADDRESS) {
+                        knockSums = decodeKnockSums(bytes, exchange.address);
+                        continue;
+                    }
+                    if (exchange.address === MANIFOLD_AIR_ADDRESS) {
+                        manifoldAir = decodeManifoldAir(bytes, exchange.address);
+                        continue;
+                    }
+                    if (exchange.address === VANOS_ADDRESS) {
+                        vanos = decodeVanos(bytes, exchange.address);
                         continue;
                     }
                     if (exchange.address === AMBIENT_TEMP_ADDRESS) {
@@ -2769,6 +2791,9 @@ export class WebSerialDmeLink implements DmeLink {
             ...llsRing,
             ...ignitionAngles,
             ...knockAge,
+            ...knockSums,
+            ...manifoldAir,
+            ...vanos,
         };
     }
 

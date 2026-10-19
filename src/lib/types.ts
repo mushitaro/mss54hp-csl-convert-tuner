@@ -169,6 +169,34 @@ export interface LogDataPoint {
     knockAge4?: number;
     knockAge5?: number;
     knockAge6?: number;
+    /** `GANG`, `NOISE_ST` and the DME's knock sums (degrees, negative = retard; `...1` is cylinders
+     *  1-3). RAM 0xFF824F..0xFF825D, one sample in sixteen, absent on the samples that did not read it.
+     *  Diagnostics, never an input to the VE derivation. See LiveMeasurement. */
+    gear?: number;
+    noiseSt?: number;
+    krDtzSum?: number;
+    krDtzSum1?: number;
+    kaDtzSum?: number;
+    kaDtzSum1?: number;
+    /** The manifold sensor's air (`rf_p_saug`, %), the Alpha-N target minus it (`rf_diag_f`, %), the
+     *  DME's own `rf_korr`, and the two manifold pressures (mbar). RAM 0xFFEEA6..0xFFEECD, one sample
+     *  in eight, absent on the rest. Diagnostics, never an input to the VE derivation. */
+    rfPSaug?: number;
+    rfDiagF?: number;
+    rfKorrDme?: number;
+    pSaug?: number;
+    pSaugM?: number;
+    /** Intake and exhaust cam positions and their map targets (degrees crank), and the four VANOS
+     *  status bytes. RAM 0xFF81DA..0xFF81F3, one sample in eight, absent on the rest. Diagnostics,
+     *  never an input to the VE derivation. See LiveMeasurement. */
+    evan1Ist?: number;
+    evanSoll?: number;
+    avan1Ist?: number;
+    avanSoll?: number;
+    evan1St?: number;
+    avan1St?: number;
+    vanEdSt?: number;
+    vanAdapSt?: number;
     /** `V` — road speed, km/h. The second half of the `rf_korr` gate, and since 2026-09-09 it is
      *  actually evaluated: `rfKorrActive` refuses the correction below `k_rf_korr_v_min` (20 km/h).
      *  A log recorded before this channel existed therefore earns no rf_korr at all and falls back

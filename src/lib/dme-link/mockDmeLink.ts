@@ -6,6 +6,7 @@ import {
 import {
     RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange, SLEW_TORQUE_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ, KNOCK_AGE_RAM_READ,
+    KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ, IDLE_VANOS_RAM_READ,
 } from './ramMap';
 import { IGNITION_ANGLE_KEYS } from './liveValueBlocks';
 import {
@@ -634,6 +635,25 @@ export class MockDmeLink implements DmeLink {
         // reported. Refused, so the channel is absent rather than alarming.
         if (address === KNOCK_AGE_RAM_READ.address) {
             throw new DmeLinkError('PRACTICE does not simulate knock control; run this on the car');
+        }
+        // The knock sums beside them, for the same reason pointed the other way: zero-filled, they
+        // would decode as "no retard, no adaptation, neutral" — every check in decodeKnockSums
+        // passes on zeroes — which is a clean bill of health no car gave.
+        if (address === KNOCK_SUM_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate knock control; run this on the car');
+        }
+        // And the manifold model. The zero buffer would fail the m_norm gate and decode to nothing
+        // anyway; refused by name so a probe says why rather than returning forty plausible zeroes.
+        // Any number served here would be the answer to the question the channel exists to ask —
+        // does the manifold sensor's air follow RF — and only the car has that.
+        if (address === MANIFOLD_AIR_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate the manifold-pressure air model; run this on the car');
+        }
+        // The VANOS group too. Zero-filled it reads both cams at 0.0 against targets of 0.0 with
+        // EVAN1_ST bit 3 down — the latch-never-armed fault, served as if a car had reported it. The
+        // idle bench synthesises its own VANOS values without this path; nothing here should.
+        if (address === IDLE_VANOS_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate the VANOS cams; run this on the car');
         }
         await delay(20);
         const out = new Uint8Array(count);

@@ -5,6 +5,8 @@ import {
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     KNOCK_AGE_RAM_READ, KNOCK_AGE_SATURATED,
+    KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ, MANIFOLD_NORM_0401, GANG_MAX, NOISE_ST_UNUSED_BITS,
+    IDLE_VANOS_RAM_READ,
     Mss54HpRamSignals, P_UMG_BYTE_OFFSET_MBAR, P_UMG_ED_SUBSTITUTING, TAN_OFFSET_C, decodeRamSignal,
     type RamSignal,
 } from './ramMap';
@@ -332,3 +334,151 @@ export function decodeKnockAge(bytes: Uint8Array, address: number): Partial<Igni
 }
 
 export const KNOCK_AGE_ADDRESS = KNOCK_AGE_RAM_READ.address;
+
+/**
+ * The knock read beside KNOCK AGE: gear, the drive-by-noise cap, and the DME's knock sums.
+ *
+ * Not carried, for `IgnitionChannels`' reason: `KR_DTZ_SUM` is the retard applied at the moment of
+ * the read, and on this calibration a retard is given back within about a second, so stamping it
+ * onto the fifteen samples before the next read would report a one-second event as four. The gear and the noise bit
+ * ride in the same telegram and follow the same rule rather than splitting one read into two
+ * policies.
+ */
+export type KnockSumChannels = Pick<
+    LiveMeasurement,
+    'gear' | 'noiseSt' | 'krDtzSum' | 'krDtzSum1' | 'kaDtzSum' | 'kaDtzSum1'
+>;
+
+/**
+ * The manifold sensor's air beside the Alpha-N air, from one telegram.
+ *
+ * Not carried either. `rf_p_saug` follows the throttle within a segment; held across seven samples
+ * it would be compared with an RF from a different moment, which is the one comparison it exists to
+ * make without skew.
+ */
+export type ManifoldAirChannels = Pick<
+    LiveMeasurement,
+    'rfPSaug' | 'rfDiagF' | 'rfKorrDme' | 'pSaug' | 'pSaugM'
+>;
+
+/** The raw unsigned contents of one signal, or null when the buffer does not cover it. */
+function rawOf(sig: RamSignal, bytes: Uint8Array, address: number): number | null {
+    const at = sig.address - address;
+    if (at < 0 || at + sig.size > bytes.length) return null;
+    return sig.size === 1 ? bytes[at] : (bytes[at] << 8) | bytes[at + 1];
+}
+
+const signed16 = (raw: number) => (raw > 0x7FFF ? raw - 0x10000 : raw);
+
+/**
+ * The fifteen-byte knock telegram, decoded — all of it or none of it.
+ *
+ * Three checks, each a fact about how the DME writes these bytes rather than a band somebody chose:
+ *
+ *   - `KR_DTZ_SUM == KR_DTZ_SUM1 + KR_DTZ_SUM2` and the same for KA, in 16-bit arithmetic. That is
+ *     how `knock_related_3_` / `_4_` store them (add.w), on every path they take on six cylinders.
+ *     A read that landed elsewhere fails it, and so does the rare read torn by the segment task
+ *     rewriting the sums mid-copy — both are worth one read.
+ *   - `GANG <= 7`: nothing writes more (see GANG_MAX).
+ *   - `NOISE_ST & 0x7C == 0`: nothing writes those bits (see NOISE_ST_UNUSED_BITS).
+ *
+ * The last two matter because the first proves nothing on a drive with no knock, when all six sums
+ * are 0 and `0 == 0 + 0` holds at any address full of zeroes.
+ *
+ * Degrees are divided rather than multiplied out of tenths, so -30 reads -3 and not
+ * -3.0000000000000004 in a CSV.
+ */
+export function decodeKnockSums(bytes: Uint8Array, address: number): Partial<KnockSumChannels> {
+    const R = Mss54HpRamSignals;
+    const noise = rawOf(R.NOISE_ST, bytes, address);
+    const gang = rawOf(R.GANG, bytes, address);
+    const kr = rawOf(R.KR_DTZ_SUM, bytes, address);
+    const kr1 = rawOf(R.KR_DTZ_SUM1, bytes, address);
+    const kr2 = rawOf(R.KR_DTZ_SUM2, bytes, address);
+    const ka = rawOf(R.KA_DTZ_SUM, bytes, address);
+    const ka1 = rawOf(R.KA_DTZ_SUM1, bytes, address);
+    const ka2 = rawOf(R.KA_DTZ_SUM2, bytes, address);
+    if (noise === null || gang === null || kr === null || kr1 === null || kr2 === null
+        || ka === null || ka1 === null || ka2 === null) return {};
+    if ((noise & NOISE_ST_UNUSED_BITS) !== 0 || gang > GANG_MAX) return {};
+    if (((kr1 + kr2) & 0xFFFF) !== kr || ((ka1 + ka2) & 0xFFFF) !== ka) return {};
+    return {
+        gear: gang,
+        noiseSt: noise,
+        krDtzSum: signed16(kr) / 10,
+        krDtzSum1: signed16(kr1) / 10,
+        kaDtzSum: signed16(ka) / 10,
+        kaDtzSum1: signed16(ka1) / 10,
+    };
+}
+
+/**
+ * The forty-byte manifold telegram, decoded — only when `m_norm` and `m_norm_fakt` read exactly what
+ * `rf_init` computed from this calibration (10890 and 10813 on 0401; see `expectedManifoldNorm`).
+ *
+ * Two words that never change for the whole key cycle, sitting between the channels, are a better
+ * proof that the read landed where it was aimed than any band on the channels themselves: a manifold
+ * pressure of 950 mbar or a filling of 74 % is plausible at many addresses, 10890 followed by 10813
+ * is not. A different calibration of those two constants fails it, and loses the channels rather
+ * than mis-scaling them — the right way round. `norm` is a parameter so that can be shown.
+ */
+export function decodeManifoldAir(
+    bytes: Uint8Array,
+    address: number,
+    norm: { mNorm: number; mNormFakt: number } = MANIFOLD_NORM_0401,
+): Partial<ManifoldAirChannels> {
+    const R = Mss54HpRamSignals;
+    if (rawOf(R.M_NORM, bytes, address) !== norm.mNorm
+        || rawOf(R.M_NORM_FAKT, bytes, address) !== norm.mNormFakt) return {};
+    const korr = rawOf(R.RF_KORR, bytes, address);
+    const pm = rawOf(R.P_SAUG_M, bytes, address);
+    const p = rawOf(R.P_SAUG, bytes, address);
+    const rf = rawOf(R.RF_P_SAUG, bytes, address);
+    const diag = rawOf(R.RF_DIAG_F, bytes, address);
+    if (korr === null || pm === null || p === null || rf === null || diag === null) return {};
+    return {
+        rfPSaug: rf / 10,
+        rfDiagF: signed16(diag) / 10,
+        rfKorrDme: korr / 1024,
+        pSaug: p / 32,
+        pSaugM: pm / 32,
+    };
+}
+
+export const KNOCK_SUM_ADDRESS = KNOCK_SUM_RAM_READ.address;
+export const MANIFOLD_AIR_ADDRESS = MANIFOLD_AIR_RAM_READ.address;
+
+/**
+ * The two cams beside their targets, and the four status bytes that say which target the
+ * controller was actually following. Out of the 26-byte VANOS group the idle run already reads.
+ *
+ * Not carried: a cam position at one sample says nothing about the next seven at a different rpm.
+ */
+export type VanosChannels = Pick<
+    LiveMeasurement,
+    'evan1Ist' | 'evanSoll' | 'avan1Ist' | 'avanSoll' | 'evan1St' | 'avan1St' | 'vanEdSt' | 'vanAdapSt'
+>;
+
+/**
+ * The VANOS telegram, decoded — all eight or none, so a short read never leaves a target without
+ * the position it is judged against. No band on the values: the DME's own limits are calibration
+ * (0..60 and 0..45 degKW here) and the adaptation drives the targets past them on purpose, so any
+ * band chosen here would drop exactly the readings worth having.
+ */
+export function decodeVanos(bytes: Uint8Array, address: number): Partial<VanosChannels> {
+    const R = Mss54HpRamSignals;
+    const pairs = [
+        ['evan1Ist', R.EVAN1_IST], ['evanSoll', R.EVAN_SOLL], ['avan1Ist', R.AVAN1_IST], ['avanSoll', R.AVAN_SOLL],
+        ['evan1St', R.EVAN1_ST], ['avan1St', R.AVAN1_ST], ['vanEdSt', R.VAN_ED_ST], ['vanAdapSt', R.VAN_ADAP_ST],
+    ] as const;
+    const out: Partial<VanosChannels> = {};
+    for (const [key, sig] of pairs) {
+        const raw = rawOf(sig, bytes, address);
+        if (raw === null) return {};
+        // Tenths divided out, as for the knock sums, so 52.5 is 52.5 in a CSV.
+        out[key] = sig.size === 2 ? signed16(raw) / 10 : raw;
+    }
+    return out;
+}
+
+export const VANOS_ADDRESS = IDLE_VANOS_RAM_READ.address;

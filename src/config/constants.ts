@@ -147,6 +147,27 @@ export const APP_CONFIG = {
         KNOCK_AGE_4: 'Knock Age 4',
         KNOCK_AGE_5: 'Knock Age 5',
         KNOCK_AGE_6: 'Knock Age 6',
+        // RAM channels Testo's list does not carry, so this app's headers are the only names they
+        // have; the DME's symbols are accepted on the way back in (see CSV_ALIASES).
+        GEAR: 'Gear',
+        NOISE_ST: 'Noise Mode State',
+        KR_DTZ_SUM: 'Knock Retard Sum',
+        KR_DTZ_SUM1: 'Knock Retard Sum Bank 1',
+        KA_DTZ_SUM: 'Knock Adaptation Sum',
+        KA_DTZ_SUM1: 'Knock Adaptation Sum Bank 1',
+        RF_P_SAUG: 'Filling From MAP',
+        RF_DIAG_F: 'Filling Target Minus MAP',
+        RF_KORR_DME: 'EGT Correction DME',
+        P_SAUG: 'Manifold Pressure',
+        P_SAUG_M: 'Manifold Pressure Model',
+        INTAKE_CAM: 'Intake Cam',
+        INTAKE_CAM_TARGET: 'Intake Cam Target',
+        EXHAUST_CAM: 'Exhaust Cam',
+        EXHAUST_CAM_TARGET: 'Exhaust Cam Target',
+        INTAKE_VANOS_STATUS: 'Intake VANOS Status',
+        EXHAUST_VANOS_STATUS: 'Exhaust VANOS Status',
+        VANOS_FAULT_STATUS: 'VANOS Fault Status',
+        VANOS_ADAPTATION_STATUS: 'VANOS Adaptation Status',
     },
 
     /**
@@ -250,6 +271,29 @@ export const APP_CONFIG = {
         knockAge4: ['knock age 4'] as string[],
         knockAge5: ['knock age 5'] as string[],
         knockAge6: ['knock age 6'] as string[],
+        // RAM reads again: this app's header first, then the DME's own symbol.
+        gear: ['gear', 'gang'] as string[],
+        noiseSt: ['noise mode state', 'noise_st'] as string[],
+        krDtzSum: ['knock retard sum', 'kr_dtz_sum'] as string[],
+        krDtzSum1: ['knock retard sum bank 1', 'kr_dtz_sum1'] as string[],
+        kaDtzSum: ['knock adaptation sum', 'ka_dtz_sum'] as string[],
+        kaDtzSum1: ['knock adaptation sum bank 1', 'ka_dtz_sum1'] as string[],
+        rfPSaug: ['filling from map', 'rf_p_saug'] as string[],
+        rfDiagF: ['filling target minus map', 'rf_diag_f'] as string[],
+        rfKorrDme: ['egt correction dme', 'rf_korr'] as string[],
+        pSaug: ['manifold pressure', 'p_saug'] as string[],
+        pSaugM: ['manifold pressure model', 'p_saug_m'] as string[],
+        // Not Testo's `EVANOS1_IST` / `EVANOS1_SOLL`: those name telegram 12050B23, and the master's
+        // responder for that block carries no bank-1 cam word (see the VANOS note in ramMap.ts), so
+        // a column under that name is not proven to be these.
+        evan1Ist: ['intake cam', 'evan1_ist'] as string[],
+        evanSoll: ['intake cam target', 'evan_soll'] as string[],
+        avan1Ist: ['exhaust cam', 'avan1_ist'] as string[],
+        avanSoll: ['exhaust cam target', 'avan_soll'] as string[],
+        evan1St: ['intake vanos status', 'evan1_st'] as string[],
+        avan1St: ['exhaust vanos status', 'avan1_st'] as string[],
+        vanEdSt: ['vanos fault status', 'van_ed_st'] as string[],
+        vanAdapSt: ['vanos adaptation status', 'van_adap_st'] as string[],
     },
 
     /**

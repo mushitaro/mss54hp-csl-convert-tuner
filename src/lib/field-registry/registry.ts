@@ -41,7 +41,13 @@ export type FieldKey =
     // control last retarded each cylinder (twelve bytes of RAM on the block-19 lane).
     | 'ignitionAngle1' | 'ignitionAngle2' | 'ignitionAngle3'
     | 'ignitionAngle4' | 'ignitionAngle5' | 'ignitionAngle6'
-    | 'knockAge1' | 'knockAge2' | 'knockAge3' | 'knockAge4' | 'knockAge5' | 'knockAge6';
+    | 'knockAge1' | 'knockAge2' | 'knockAge3' | 'knockAge4' | 'knockAge5' | 'knockAge6'
+    // How deep the retard went (the DME's own sums), with the gear and the noise cap from the
+    // same fifteen bytes; and the manifold sensor's air beside the Alpha-N air, forty bytes.
+    | 'gear' | 'noiseSt' | 'krDtzSum' | 'krDtzSum1' | 'kaDtzSum' | 'kaDtzSum1'
+    | 'rfPSaug' | 'rfDiagF' | 'rfKorrDme' | 'pSaug' | 'pSaugM'
+    // The cams beside their map targets, and the status bytes that say which target was followed.
+    | 'evan1Ist' | 'evanSoll' | 'avan1Ist' | 'avanSoll' | 'evan1St' | 'avan1St' | 'vanEdSt' | 'vanAdapSt';
 
 /** Where a number came from: a DS2 block and byte offset, or this app's own arithmetic. */
 export type FieldSource = { selection: number; offset: number } | 'derived';
@@ -588,6 +594,156 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         source: 'derived', unit: '', format: v => v.toFixed(0),
         relevance: 'debug', color: '#F87A7F',
     },
+    /**
+     * The knock retard the DME is applying right now, summed over cylinders — negative is retard.
+     *
+     * The depth KNOCK AGE cannot give. On #978 the cylinders with a counter under 20 read a median
+     * 1.4 deg below the most advanced one; this says how much retard was still on at the read, and
+     * `KR_DTZ_SUM1` how much of it was cylinders 1-3 (bank 2 is the difference). A SUM: -3.0 is one
+     * cylinder at 3 deg or six at 0.5 — KNOCK AGE and tz1..tz6 beside it say which.
+     *
+     * `debug`: nothing in the derivation reads knock, and the exchange carries nothing else a tune
+     * is read from, so a production run drops it.
+     */
+    krDtzSum: {
+        key: 'krDtzSum', symbol: 'KR_DTZ_SUM', name: 'Knock retard now, all cylinders summed (negative = retard)',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    krDtzSum1: {
+        key: 'krDtzSum1', symbol: 'KR_DTZ_SUM1', name: 'Knock retard now, cylinders 1-3 summed (negative = retard)',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#F87A7F',
+    },
+    /** The learned knock adaptation, summed the same way. Slow — it moves over many retards — so
+     *  what it shows is whether a band has been taught to run retarded, not a single event. */
+    kaDtzSum: {
+        key: 'kaDtzSum', symbol: 'KA_DTZ_SUM', name: 'Learned knock adaptation, all cylinders summed (negative = retard)',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#F64A50',
+    },
+    kaDtzSum1: {
+        key: 'kaDtzSum1', symbol: 'KA_DTZ_SUM1', name: 'Learned knock adaptation, cylinders 1-3 summed (negative = retard)',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#F64A50',
+    },
+    /** `GANG` — the DME's calculated gear; 0 when standing or with the engine stopped. A ratio of rpm
+     *  to road speed, not a gearbox sensor, so a coasting clutch-in reads whatever the ratio says.
+     *  Free: it is the byte between NOISE_ST and the sums. */
+    gear: {
+        key: 'gear', symbol: 'GANG', name: 'Calculated gear (0 = neutral)',
+        source: 'derived', unit: '', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#B0B0BE',
+    },
+    /**
+     * `NOISE_ST` — bit 1 set means the drive-by-noise torque cap is on (4th gear, 46-54 km/h, capped
+     * at 260 Nm here). One byte in front of the gear, so it costs one byte. Hex like LLS_ST, because
+     * it is a bitfield.
+     */
+    noiseSt: {
+        key: 'noiseSt', symbol: 'NOISE_ST', name: 'Drive-by noise mode (bit 1 = torque capped)',
+        source: 'derived', unit: '', format: v => '0x' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0'),
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    /**
+     * `rf_p_saug` — the filling the DME computes from the MANIFOLD SENSOR, in the same units as `rf`.
+     *
+     * The channel that tells the air side from the fuel side when the lambda trim does not follow an
+     * RF change at matched rpm and RO: under the PATCH the fuel is sized from Alpha-N alone, and this
+     * is the same filling from a different sensor. Moving with RF means the air moved; holding while
+     * RF moves means it did not, and the fuel side has to explain the trim. Computed by the DME on
+     * every segment and read by nothing under the PATCH.
+     *
+     * `debug`: an investigation channel, not a tuning input — the derivation does not read it.
+     */
+    rfPSaug: {
+        key: 'rfPSaug', symbol: 'RF_P_SAUG', name: 'Relative filling from the manifold pressure sensor',
+        source: 'derived', unit: '%', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#3FB3E0',
+    },
+    /** `rf_diag_f` — the DME's own `rf_soll - rf_p_saug`, from the same segment as rf_p_saug. Adds back
+     *  to the Alpha-N target of that instant, which block 3's RF, read at another moment, cannot. */
+    rfDiagF: {
+        key: 'rfDiagF', symbol: 'RF_DIAG_F', name: 'Alpha-N target minus manifold-sensor filling',
+        source: 'derived', unit: '%', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#9B84E8',
+    },
+    /** `rf_korr` as the DME holds it — not RF KORR, which this app measures as rf / rf_soll. 1.000 is
+     *  no EGT correction; under K HOLD it should read exactly that, and this is where it is seen. */
+    rfKorrDme: {
+        key: 'rfKorrDme', symbol: 'RF_KORR', name: 'EGT correction factor as the DME holds it (1.000 = none)',
+        source: 'derived', unit: '', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#7E63DB',
+    },
+    /** `p_saug` — manifold absolute pressure, filtered. */
+    pSaug: {
+        key: 'pSaug', symbol: 'P_SAUG', name: 'Manifold pressure',
+        source: 'derived', unit: 'mbar', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#5E93B8',
+    },
+    /** `p_saug_m` — the pressure the DME's air-mass model is fed: P_SAUG less its offset map. */
+    pSaugM: {
+        key: 'pSaugM', symbol: 'P_SAUG_M', name: 'Manifold pressure used by the air-mass model',
+        source: 'derived', unit: 'mbar', format: v => v.toFixed(0),
+        relevance: 'debug', color: '#4C7A99',
+    },
+    /**
+     * The intake cam and the target KF_EVAN1_SOLL(N, AQ_REL) gave it. Two drives at matched rpm and
+     * RO with the cam in different places did not breathe the same air, and this pair is how a log
+     * says whether the cam was where the map sent it.
+     *
+     * Read the target with EVAN1_ST beside it: while bit 3 is down the controller follows
+     * K_EVAN1_DRUCK (52.5) and not this, so a cam parked at 52.5 under a target of 60.0 is the latch,
+     * not a cam that cannot reach.
+     *
+     * `debug`, off: nothing in the derivation reads a cam. The exchange carries nothing a tune is
+     * read from, so a production run drops it.
+     */
+    evan1Ist: {
+        key: 'evan1Ist', symbol: 'EVAN1_IST', name: 'Intake cam position',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#0A9BDB',
+    },
+    evanSoll: {
+        key: 'evanSoll', symbol: 'EVAN_SOLL', name: 'Intake cam target from the map (followed only with EVAN1_ST bit 3)',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#6CCBEF',
+    },
+    /** The exhaust cam and its KF_AVAN1_SOLL target. Until EVAN1_ST bit 4 sets, the target holds the
+     *  position the cam started from rather than the map. */
+    avan1Ist: {
+        key: 'avan1Ist', symbol: 'AVAN1_IST', name: 'Exhaust cam position',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#9B84E8',
+    },
+    avanSoll: {
+        key: 'avanSoll', symbol: 'AVAN_SOLL', name: 'Exhaust cam target from the map',
+        source: 'derived', unit: '°CA', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#CBBCF2',
+    },
+    /** Hex, like LLS_ST: bitfields. EVAN1_ST bit 3 = the oil-pressure latch armed (the map target is
+     *  followed), bit 2 = a DS2 test value instead; AVAN1_ST bit 2 the same for the exhaust;
+     *  VAN_ED_ST = fault bits; VAN_ADAP_ST bits 4/5 = the adaptation is driving a cam to its stop. */
+    evan1St: {
+        key: 'evan1St', symbol: 'EVAN1_ST', name: 'Intake VANOS status (bit 3 = target followed)',
+        source: 'derived', unit: '', format: v => '0x' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0'),
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    avan1St: {
+        key: 'avan1St', symbol: 'AVAN1_ST', name: 'Exhaust VANOS status',
+        source: 'derived', unit: '', format: v => '0x' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0'),
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    vanEdSt: {
+        key: 'vanEdSt', symbol: 'VAN_ED_ST', name: 'VANOS fault status',
+        source: 'derived', unit: '', format: v => '0x' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0'),
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    vanAdapSt: {
+        key: 'vanAdapSt', symbol: 'VAN_ADAP_ST', name: 'VANOS adaptation status (bits 4/5 = driving to the stop)',
+        source: 'derived', unit: '', format: v => '0x' + (v & 0xFF).toString(16).toUpperCase().padStart(2, '0'),
+        relevance: 'debug', color: '#B9A6EE',
+    },
 };
 
 export const TOGGLEABLE_FIELDS: FieldKey[] = (Object.keys(LOG_FIELD_REGISTRY) as FieldKey[])
@@ -738,6 +894,14 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     ignitionAngle4: false, ignitionAngle5: false, ignitionAngle6: false,
     knockAge1: false, knockAge2: false, knockAge3: false,
     knockAge4: false, knockAge5: false, knockAge6: false,
+    // Off, all eleven, for the reason the twelve above are: each answers a question asked of a
+    // drive afterwards — how deep was the retard, did the air follow RF — not watched from the seat.
+    gear: false, noiseSt: false, krDtzSum: false, krDtzSum1: false, kaDtzSum: false, kaDtzSum1: false,
+    rfPSaug: false, rfDiagF: false, rfKorrDme: false, pSaug: false, pSaugM: false,
+    // Off, the cams and their status too: whether a cam followed its target is read from a drive
+    // afterwards, against the same rpm and RO on another drive.
+    evan1Ist: false, evanSoll: false, avan1Ist: false, avanSoll: false,
+    evan1St: false, avan1St: false, vanEdSt: false, vanAdapSt: false,
 };
 
 /** For a derived channel, the logged channel whose presence decides whether the column belongs. */

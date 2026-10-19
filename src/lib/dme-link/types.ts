@@ -236,6 +236,47 @@ export interface LiveMeasurement {
     knockAge5?: number;
     knockAge6?: number;
     /**
+     * The knock read beside KNOCK AGE: `GANG` (calculated gear, 0 = neutral), `NOISE_ST` (bit 1 =
+     * the drive-by-noise torque cap is on), and the DME's own knock sums in degrees, negative =
+     * retard — `KR_DTZ_SUM` (knock retard, all six cylinders), `KR_DTZ_SUM1` (cylinders 1-3), and
+     * the same pair for the learned adaptation, `KA_DTZ_SUM`/`KA_DTZ_SUM1`. Bank 2 is SUM - SUM1.
+     * RAM 0xFF824F..0xFF825D, one sample in sixteen, always one that also read block 19 and
+     * KNOCK AGE; see KNOCK_SUM_RAM_READ. Written on the sample
+     * that read them and never carried: the retard recovers within about a second.
+     */
+    gear?: number;
+    noiseSt?: number;
+    krDtzSum?: number;
+    krDtzSum1?: number;
+    kaDtzSum?: number;
+    kaDtzSum1?: number;
+    /**
+     * The manifold sensor's air beside the Alpha-N air, one telegram (RAM 0xFFEEA6..0xFFEECD, see
+     * MANIFOLD_AIR_RAM_READ): `rf_p_saug` (the filling from the MAP sensor, %, same units as `rf`),
+     * `rf_diag_f` (rf_soll - rf_p_saug, %, signed), `rf_korr` as the DME holds it (1.000 = no EGT
+     * correction), `p_saug` and `p_saug_m` (mbar). Same rule as the knock read: written on the
+     * sample that read them, never carried.
+     */
+    rfPSaug?: number;
+    rfDiagF?: number;
+    rfKorrDme?: number;
+    pSaug?: number;
+    pSaugM?: number;
+    /**
+     * The cams and their targets, degrees crank: `EVAN1_IST`/`EVAN_SOLL` intake, `AVAN1_IST`/
+     * `AVAN_SOLL` exhaust, and the four VANOS status bytes (`EVAN1_ST` bit 3 down = the intake is
+     * held at K_EVAN1_DRUCK, not at EVAN_SOLL). The 26-byte group at 0xFF81DA the idle run reads,
+     * one sample in eight on the block-19 lane; written on the sample that read it, never carried.
+     */
+    evan1Ist?: number;
+    evanSoll?: number;
+    avan1Ist?: number;
+    avanSoll?: number;
+    evan1St?: number;
+    avan1St?: number;
+    vanEdSt?: number;
+    vanAdapSt?: number;
+    /**
      * Where `stft1`/`stft2` came from on THIS sample.
      *
      * The VE profile reads them out of four bytes of master RAM instead of the 90-byte block 19 they

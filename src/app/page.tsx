@@ -3127,6 +3127,27 @@ export default function Home() {
           knockAge4: sample.knockAge4,
           knockAge5: sample.knockAge5,
           knockAge6: sample.knockAge6,
+          // The knock sums with the gear, the manifold air and the cams. A slow lane each, absent
+          // on the other samples — and absent from the log altogether if this literal forgot them.
+          gear: sample.gear,
+          noiseSt: sample.noiseSt,
+          krDtzSum: sample.krDtzSum,
+          krDtzSum1: sample.krDtzSum1,
+          kaDtzSum: sample.kaDtzSum,
+          kaDtzSum1: sample.kaDtzSum1,
+          rfPSaug: sample.rfPSaug,
+          rfDiagF: sample.rfDiagF,
+          rfKorrDme: sample.rfKorrDme,
+          pSaug: sample.pSaug,
+          pSaugM: sample.pSaugM,
+          evan1Ist: sample.evan1Ist,
+          evanSoll: sample.evanSoll,
+          avan1Ist: sample.avan1Ist,
+          avanSoll: sample.avanSoll,
+          evan1St: sample.evan1St,
+          avan1St: sample.avan1St,
+          vanEdSt: sample.vanEdSt,
+          vanAdapSt: sample.vanAdapSt,
         };
         // Record it, price the rate, pace the flush and the recovery write. Nothing in there
         // renders anything — see useLiveRun for why that matters at four samples a second.

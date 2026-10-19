@@ -622,6 +622,38 @@ export const Mss54HpRamSignals = {
     /** VANOS adaptation status. In LLSYNC_AKTIV bit 3 as well, so a running adaptation and a failed
      *  latch produce the same blocked balance — this byte is how they are told apart. */
     VAN_ADAP_ST: { segment: 0x01, address: 0x00FF81F3, size: 1, signed: false, scale: 1, unit: '' },
+    /**
+     * `EVAN_SOLL` — the intake cam TARGET as the map gives it, inside the same 26 bytes as the
+     * positions. Read on a VE log so a drive can say whether the cams went where KF_EVAN1_SOLL sent
+     * them at each rpm and RO: two drives at matched rpm/RO with the cams in different places did
+     * not breathe the same air, and nothing else in the log shows it.
+     *
+     * Written by the SLAVE into the dual-port RAM, `FUN_00024848` (slave 0x024848, a2 = #$ff81e4):
+     *
+     *     t = KF_EVAN1_SOLL(N, AQ_REL)                     signed byte, whole degKW
+     *     t = (K_EVAN1_SOLL_OFFSET + t) * 10               ext.w / lsl.w #2 / add.w / add.w (0x0249D0)
+     *     t = rate-limited by EVAN_SOLL_DMAX; K_EVAN1_SOLL_ERSATZ instead under WDK_ZUSTAND 3,
+     *         LLS_ST bit 7 or SK_TI_CONTR bit 0; clamped to K_EVAN1_SOLL_MIN..MAX (cmp.w / ble,
+     *         bge — signed), except while VAN_ADAP_ST bit 4 drives it to the stop for adaptation
+     *     EVAN_SOLL = t                                    move.w ...,(a2); K_EVAN_POS_ABSTELL at key-off
+     *
+     * So 0.1 degKW, SIGNED, the scale of EVAN1_IST beside it: K_EVAN1_SOLL_MAX is compared with it
+     * directly and the XDF scales that constant x/10 (60.0 here), and K_EVAN1_SOLL_OFFSET is whole
+     * degrees added BEFORE the x10. Two substitutions it does not show: while EVAN1_ST bit 3 is down
+     * the controller follows K_EVAN1_DRUCK (52.5) instead (`EVAN1_SOLL`, slave-only RAM, is the
+     * value actually followed — the same function writes it at 0x024B00), and with EVAN1_ST bit 2 a
+     * DS2 test value. NOISE_ST bit 0 would switch the map to KL_EVAN1_SOLL_NOISE; K_NOISE_CFG = 2
+     * here, so it never does.
+     */
+    EVAN_SOLL: { segment: 0x01, address: 0x00FF81E4, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    /**
+     * `AVAN_SOLL` — the exhaust cam target, same shape: `FUN_00025aa0` (slave 0x025AA0, a2 =
+     * #$ff81e8) takes KF_AVAN1_SOLL(N, AQ_REL), adds K_AVAN1_SOLL_OFFSET, multiplies by ten, rate
+     * limits, and clamps signed to K_AVAN1_SOLL_MIN..MAX (x/10, 0.0..45.0 here). While EVAN1_ST bit 4
+     * is down the map is not consulted and the target holds AVAN1_KH_START, the position the cam
+     * started from; AVAN1_ST bit 2 is a DS2 test override.
+     */
+    AVAN_SOLL: { segment: 0x01, address: 0x00FF81E8, size: 2, signed: true, scale: 0.1, unit: '°KW' },
 
     /** The FILTERED intake position — the exact quantity the latch compares, so it is the one to
      *  judge the threshold against rather than the raw position beside it. */
@@ -685,7 +717,166 @@ export const Mss54HpRamSignals = {
     KNOCK_AGE_4: { segment: 0x04, address: 0x00FFE87A, size: 2, signed: false, scale: 1, unit: '' },
     KNOCK_AGE_5: { segment: 0x04, address: 0x00FFE87C, size: 2, signed: false, scale: 1, unit: '' },
     KNOCK_AGE_6: { segment: 0x04, address: 0x00FFE87E, size: 2, signed: false, scale: 1, unit: '' },
+
+    // ---- Knock control as sums: how DEEP the retard went, where KNOCK AGE says WHEN -------------
+    //
+    // WHY: session #978, the first drive with KNOCK AGE, caught cylinders being retarded. Of its 729
+    // counter reads, 93 had at least one cylinder under 20 combustions, and those cylinders sat a
+    // median 1.4 deg (mean 1.7) below the most advanced cylinder on the same block-19 read, where
+    // every cylinder at 20 or more sat a median 0.0 below it. The counters say THAT a cylinder was
+    // retarded and how long ago; they do not say by how much, and block 19's angles arrive one
+    // sample in eight. These words are the DME's own running total of the retard, at the moment of
+    // the read.
+    //
+    // `knock_related_3_` (master 0x029926) ends, on the zyl_count == 6 path (0x029C62):
+    //
+    //     KR_DTZ_SUM1 = KR[0] + KR[1] + KR[2]        move.w d0,(a5)        a5 = #$ff8254
+    //     KR_DTZ_SUM2 = KR[3] + KR[4] + KR[5]        move.w d0,$ff8256
+    //     KR_DTZ_SUM  = KR_DTZ_SUM1 + KR_DTZ_SUM2    add.w $ff8256,d0 / move.w d0,$ff8252
+    //
+    // and `knock_related_4_` (master 0x02A082, 0x02A2F0) does the same over KA[c] (0xFFE88C + 2c, the
+    // learned knock adaptation): KA_DTZ_SUM1 0xFF825A, KA_DTZ_SUM2 0xFF825C, then KA_DTZ_SUM 0xFF8258
+    // = SUM1 + SUM2. KR[c] (0xFFE836 + 2c) is the retard `tz_related_2_` adds to TZ[c] — see
+    // KNOCK_AGE_1 above. Its other paths keep the identity too: the inits clear all six
+    // (FUN_000297fe 0x029816, FUN_00029f94 0x029FAA), and the KA fallback sets SUM1 = SUM2 = SUM / 2
+    // of a SUM that is six equal words, so even. slowLane.ts checks `SUM == SUM1 + SUM2` on every
+    // read for that reason.
+    //
+    // SCALE 0.1 deg, SIGNED, negative = retard. KR[c] is written as `-(0xFFE85C[c])` here
+    // (K_KR_APPL_ENABLE = 0), in the TZ scale tz1..tz6 already use. The slave proves the scale of the
+    // sums without the catalog, twice, and reads them as `short` both times: `FUN_0001c756` tests
+    // `KA_DTZ_SUM1 + KR_DTZ_SUM1` against `TI_TZ_OFFSET_KATS * 10`, a whole-degree byte times ten,
+    // and `FUN_000154d2` divides `KR_DTZ_SUM + KA_DTZ_SUM` by zyl_count and adds the quotient to
+    // MD_ZW_OPT_KORR, an ignition angle, before the ignition-efficiency polynomial. Bank 1 is
+    // cylinders 1-3: KR is indexed by cylinder number (`zyl_firing_order_table[..] - 1`).
+    // Every store is a word: move.w / add.w / clr.w at the addresses above.
+    //
+    // A SUM IS NOT A MEAN. One cylinder retarded 3 deg reads -3.0 here, and so does 0.5 deg on all
+    // six. KNOCK AGE says which cylinders moved; tz1..tz6 say where each one ended up.
+    //
+    // NOT the bank-2 words as columns: KR_DTZ_SUM2 and KA_DTZ_SUM2 are read (the identity needs
+    // them) and are exactly SUM - SUM1, so a column of them would repeat the two beside it.
+    KR_DTZ_SUM: { segment: 0x01, address: 0x00FF8252, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    KR_DTZ_SUM1: { segment: 0x01, address: 0x00FF8254, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    KR_DTZ_SUM2: { segment: 0x01, address: 0x00FF8256, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    KA_DTZ_SUM: { segment: 0x01, address: 0x00FF8258, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    KA_DTZ_SUM1: { segment: 0x01, address: 0x00FF825A, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    KA_DTZ_SUM2: { segment: 0x01, address: 0x00FF825C, size: 2, signed: true, scale: 0.1, unit: '°KW' },
+    /**
+     * `NOISE_ST` — the drive-by-noise torque cap. One byte before GANG, so it costs one byte of the
+     * read that carries the sums and nothing else.
+     *
+     * `noise_st_calc` (master 0x01E0A4) sets bit 7 once the car has been in gear K_NOISE_GANG (4 on
+     * this car) between K_NOISE_V_MIN1 and K_NOISE_V_MAX1 (46-54 km/h) for longer than K_NOISE_T3,
+     * and with K_NOISE_CFG = 2 sets bit 1 alongside it; `Torque_Limitation` (master 0x016BAA) then
+     * caps the torque at KL_MD_BEGR_NOISE(V_ANTRIEB) — 260 Nm at 50-55 km/h. A torque cap at one gear
+     * and one speed band, which a driver feels as a loss and no other channel shows.
+     *
+     * Only ever written by `|0x80`, `&0x7F`, `&0xFC`, `|1`, `|2` and cleared at init (`gang_init`
+     * 0x01DF88, `clr.b`), so bits 2-6 are zero on every reading of the real byte. The address is the
+     * one the master's selection-4 responder (030b84 case 0x1b) puts at payload 23, where the
+     * reference catalog has `noise_st`.
+     */
+    NOISE_ST: { segment: 0x01, address: 0x00FF824F, size: 1, signed: false, scale: 1, unit: '' },
+
+    // ---- The manifold sensor's air, beside the Alpha-N air the fuel is sized from ---------------
+    //
+    // WHY: at matched rpm and RO, two drives whose RF differed by 10 % showed the same lambda trim.
+    // Injected fuel follows RF in steady part load, so either the air really did differ by that
+    // much between the drives — the AIR side — or something between RF and the injector moved with
+    // it and the trim never saw a change — the FUEL side. RF cannot tell those apart, because RF is
+    // the fuel side's own number. `rf_p_saug` can: it is the DME's estimate of the same filling made
+    // from a different sensor. If it moves with RF, the air moved; if it holds while RF moves, the
+    // air did not, and the explanation is on the fuel side.
+    //
+    // `rf_calc` (master 0x0218D0) computes it on every segment, before it decides what to fuel on:
+    //
+    //     rf_p_saug = m * m_norm_fakt / 0xFFFF        mulu.l / divu.l #$ffff, move.w to $ffeeca
+    //     RF        = rf_p_saug                        when not starting ...
+    //     RF        = rf_soll * rf_korr >> 10          ... then overwritten: k_rf_cfg bits 0 and 2
+    //                                                  are clear (0x02 on this car), and bit 4 — the
+    //                                                  MAP integral the PATCH removes — is clear too
+    //
+    // with m = saug_m - rg_m - tetv_m (`m_calc`, 0x0216E2) and saug_m = p_saug_m * hubvolumen / tan_m:
+    // the ideal gas law on the manifold pressure, less the residual gas and the purge flow. So under
+    // the PATCH nothing reads it for fuel, and it is computed anyway.
+    //
+    // `rf_diag` (master 0x021B48) then takes the difference itself, in the same segment:
+    //
+    //     rf_diag_f = rf_soll - rf_p_saug              sub.w $ffeeca,d0 / move.w d0,$ffeecc (0x021DE0)
+    //
+    // which is why the read runs two bytes past rf_p_saug. Block 3's RF is read more than half a
+    // second before this telegram on the samples that carry the whole slow lane; `rf_diag_f +
+    // rf_p_saug` is the Alpha-N target of the SAME moment, and times `rf_korr` (also in this
+    // telegram) it is the RF the fuel was sized from. Both airs, one instant, no skew.
+    //
+    // SCALES, each from its own writer or reader:
+    //   rf_p_saug   0.1 %, unsigned. RF is assigned from it with no scaling, and RF is block 3's `rf`
+    //               (0.1 %). `m` is floored at 0 by m_calc, so it never goes negative.
+    //   rf_diag_f   0.1 %, SIGNED. sub.w of two 0.1 % words; the compares after it are bge/ble.
+    //   rf_korr     1/1024, unsigned. rf_init stores #$400 (0x0218BC) = 1.000, and rf_calc multiplies
+    //               rf_soll by it then shifts right by ten. KF_RF_KORR_DRREL writes it (`rf_korr`,
+    //               0x021A70) and K HOLD's floor stops that, so under K HOLD this reads 1.000 exactly
+    //               — read here rather than inferred from rf / rf_soll.
+    //   p_saug      1/32 mbar, unsigned. `p_saug_init` (0x021580) copies P_UMG_FILTER (0xFFED3E,
+    //               1/32 mbar, above) into p_saug and p_saug_m; `p_saug_calc` (0x0215EA) compares it
+    //               unsigned (bcc) against K_P_UMG_ERSATZ, which the XDF scales x/32 (955 mbar).
+    //   p_saug_m    1/32 mbar, unsigned. `p_saug_m = p_saug - offset` (sub.w at 0x021682), the
+    //               offset out of kf_p_saug_m_kvd(N, p_kvd_ersatz) here (k_p_saug_m_cfg = 0xFF;
+    //               kf_p_saug_m_kad when it is 0): the pressure m_calc's gas law is actually fed.
+    // All six are words (move.w / mulu.w / sub.w at the addresses named).
+    RF_KORR: { segment: 0x04, address: 0x00FFEEA6, size: 2, signed: false, scale: 1 / 1024, unit: '' },
+    P_SAUG_M: { segment: 0x04, address: 0x00FFEEB0, size: 2, signed: false, scale: 1 / 32, unit: 'mbar' },
+    P_SAUG: { segment: 0x04, address: 0x00FFEEB2, size: 2, signed: false, scale: 1 / 32, unit: 'mbar' },
+    /**
+     * `m_norm` and `m_norm_fakt` — two words `rf_init` (master 0x02181C, run once at start) computes
+     * from K_RF_LUFTDICHTE and K_RF_HUBVOLUMEN and nothing ever writes again:
+     *
+     *     roh         = K_RF_LUFTDICHTE * K_RF_HUBVOLUMEN            mulu.w $8d21c,d2
+     *     m_norm      = (roh / 10000) * 30                           divs.l #$2710, *15*2, move.w $ffeeb4
+     *     m_norm_fakt = 153600000 / (roh >> 8)                       #$927c000 divs.l, move.w $ffeeb6
+     *
+     * They are not channels. They are the proof that the read landed where it was aimed: two
+     * constants fixed for the whole key cycle sit between p_saug and rf_p_saug, and slowLane.ts
+     * decodes the telegram only when both read exactly what the calibration says they must. See
+     * `expectedManifoldNorm`.
+     */
+    M_NORM: { segment: 0x04, address: 0x00FFEEB4, size: 2, signed: false, scale: 1, unit: '' },
+    M_NORM_FAKT: { segment: 0x04, address: 0x00FFEEB6, size: 2, signed: false, scale: 1, unit: '' },
+    RF_P_SAUG: { segment: 0x04, address: 0x00FFEECA, size: 2, signed: false, scale: 0.1, unit: '%' },
+    RF_DIAG_F: { segment: 0x04, address: 0x00FFEECC, size: 2, signed: true, scale: 0.1, unit: '%' },
 } as const satisfies Record<string, RamSignal>;
+
+/**
+ * What `rf_init` leaves in `m_norm` and `m_norm_fakt`, given the two calibration constants it reads
+ * — raw counts, as the XDF stores them (`x/1000`: 1136 is 1.136, 3201 is 3.201 L).
+ *
+ * Integer arithmetic the way the CPU does it: `divs.l` truncates, and `roh >> 8` is an arithmetic
+ * shift of a positive product.
+ */
+export function expectedManifoldNorm(luftdichteRaw: number, hubvolumenRaw: number): { mNorm: number; mNormFakt: number } {
+    const roh = luftdichteRaw * hubvolumenRaw;
+    return {
+        mNorm: (Math.trunc(roh / 10000) * 30) & 0xFFFF,
+        mNormFakt: Math.trunc(153600000 / Math.floor(roh / 256)) & 0xFFFF,
+    };
+}
+
+/**
+ * K_RF_LUFTDICHTE and K_RF_HUBVOLUMEN as the 0401 calibration holds them (master 0x8D21E / 0x8D21C,
+ * raw), and so what `m_norm` / `m_norm_fakt` read on this car: 10890 and 10813. Nothing in this app
+ * writes either constant; `verify:air-knock` re-reads them out of the shipped images.
+ */
+export const RF_INIT_CONSTANTS_0401 = { luftdichteRaw: 1136, hubvolumenRaw: 3201 } as const;
+export const MANIFOLD_NORM_0401 = expectedManifoldNorm(
+    RF_INIT_CONSTANTS_0401.luftdichteRaw, RF_INIT_CONSTANTS_0401.hubvolumenRaw);
+
+/** `GANG`'s ceiling. `gang_calc` (master 0x01DF9C) writes 0-6 and the SMG CAN path writes
+ *  `byte & 7`, so a value above this is not the gear. */
+export const GANG_MAX = 7;
+
+/** `NOISE_ST`'s bits that nothing writes — see the signal. Set on a reading means it is not the byte. */
+export const NOISE_ST_UNUSED_BITS = 0x7C;
 
 /** What `KNOCK_AGE_n` holds when the cylinder has not knocked within its memory — the DME's own
  *  init value and saturation, 0x4FB. A healthy drive reads exactly this on all six. */
@@ -1076,6 +1267,49 @@ export const KNOCK_AGE_RAM_READ = {
         - Mss54HpRamSignals.KNOCK_AGE_1.address,
 } as const;
 
+/**
+ * Fifteen bytes, `NOISE_ST` (0xFF824F) through `KA_DTZ_SUM2` (0xFF825D): the drive-by-noise cap,
+ * the gear, and both knock sums with their bank halves.
+ *
+ * One read because they are contiguous in the dual-port RAM, and the span is chosen by what it
+ * proves, not only by what it shows. GANG is the byte right after NOISE_ST and the sums follow it;
+ * reading the bank-2 words as well (two bytes past KA_DTZ_SUM1) is what lets the decode check
+ * `SUM == SUM1 + SUM2` for KR and for KA — the identity the DME writes them under, so a read that
+ * landed anywhere else fails it. On a drive with no knock all six are 0 and the identity proves
+ * nothing, which is why GANG <= 7 and NOISE_ST's never-written bits are checked too.
+ *
+ * GANG is `gang_calc`'s (master 0x01DF9C) ratio of N to V_ANTRIEB against K_GANG_GRENZE*, not a
+ * gearbox sensor: 0 whenever S_KRAFTSCHLUSS is clear (decided by road speed alone) or N is 0. Its
+ * address is the freeze-frame's (0x024B68 `move.b $ff8250` -> block 83 offset 49, `gang`).
+ *
+ * After KNOCK AGE, on every other block-19 sample — see the VE profile for why the order matters on
+ * #978 and KNOCK_SUM_LANE_EVERY for why not every one. (9 + 4 + 15) bytes on the wire plus one RAM
+ * turnaround: ~67 ms a read, ~4.2 ms a sample at 1/16.
+ */
+export const KNOCK_SUM_RAM_READ = {
+    segment: Mss54HpRamSignals.NOISE_ST.segment,
+    address: Mss54HpRamSignals.NOISE_ST.address,
+    count: (Mss54HpRamSignals.KA_DTZ_SUM2.address + Mss54HpRamSignals.KA_DTZ_SUM2.size)
+        - Mss54HpRamSignals.NOISE_ST.address,
+} as const;
+
+/**
+ * Forty bytes, `rf_korr` (0xFFEEA6) through `rf_diag_f` (0xFFEECD): both airs and the factor
+ * between them, in one telegram — see the MAP block in `Mss54HpRamSignals`.
+ *
+ * Twenty-eight bytes would cover p_saug_m..rf_p_saug alone. The ten in front buy `rf_korr`, which
+ * says directly whether the EGT correction was at 1.000, and the two behind buy `rf_diag_f`, which
+ * puts the Alpha-N target of the same instant beside rf_p_saug. Between them sit `ml_720[]` and
+ * `m_norm`/`m_norm_fakt`, read and not logged; the last two are the decode's address proof.
+ * ~96 ms a read, ~12 ms a sample at 1/8.
+ */
+export const MANIFOLD_AIR_RAM_READ = {
+    segment: Mss54HpRamSignals.RF_KORR.segment,
+    address: Mss54HpRamSignals.RF_KORR.address,
+    count: (Mss54HpRamSignals.RF_DIAG_F.address + Mss54HpRamSignals.RF_DIAG_F.size)
+        - Mss54HpRamSignals.RF_KORR.address,
+} as const;
+
 export const RAM_PROBE_READS: readonly { name: string; segment: number; address: number; count: number }[] = [
     { name: 'MD_IND_NE', segment: Mss54HpRamSignals.MD_IND_NE.segment, address: Mss54HpRamSignals.MD_IND_NE.address, count: 2 },
     { name: 'MD_IND_OPT_KORR', segment: Mss54HpRamSignals.MD_IND_OPT_KORR.segment, address: Mss54HpRamSignals.MD_IND_OPT_KORR.address, count: 2 },
@@ -1123,6 +1357,8 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         { name: 'IDLE_VANOS_RAM_READ', ...IDLE_VANOS_RAM_READ },
         { name: 'IDLE_VANOS_TARGET_RAM_READ', ...IDLE_VANOS_TARGET_RAM_READ },
         { name: 'KNOCK_AGE_RAM_READ', ...KNOCK_AGE_RAM_READ },
+        { name: 'KNOCK_SUM_RAM_READ', ...KNOCK_SUM_RAM_READ },
+        { name: 'MANIFOLD_AIR_RAM_READ', ...MANIFOLD_AIR_RAM_READ },
         ...RAM_PROBE_READS.map(r => ({ name: `RAM_PROBE_READS.${r.name}`, segment: r.segment, address: r.address, count: r.count })),
     ];
     for (const r of reads) {
@@ -1213,6 +1449,8 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     mustCover(IDLE_VANOS_RAM_READ, 'IDLE_VANOS_RAM_READ', [
         ['AVAN1_IST', R.AVAN1_IST], ['EVAN1_IST', R.EVAN1_IST], ['EVAN1_ST', R.EVAN1_ST],
         ['AVAN1_ST', R.AVAN1_ST], ['VAN_ED_ST', R.VAN_ED_ST], ['VAN_ADAP_ST', R.VAN_ADAP_ST],
+        // The targets the VE log reads out of the same telegram.
+        ['EVAN_SOLL', R.EVAN_SOLL], ['AVAN_SOLL', R.AVAN_SOLL],
     ]);
     mustCover(IDLE_VANOS_TARGET_RAM_READ, 'IDLE_VANOS_TARGET_RAM_READ', [
         ['EVAN1_IST_FILT', R.EVAN1_IST_FILT], ['EVAN1_SOLL', R.EVAN1_SOLL],
@@ -1220,6 +1458,16 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
     mustCover(KNOCK_AGE_RAM_READ, 'KNOCK_AGE_RAM_READ', [
         ['KNOCK_AGE_1', R.KNOCK_AGE_1], ['KNOCK_AGE_2', R.KNOCK_AGE_2], ['KNOCK_AGE_3', R.KNOCK_AGE_3],
         ['KNOCK_AGE_4', R.KNOCK_AGE_4], ['KNOCK_AGE_5', R.KNOCK_AGE_5], ['KNOCK_AGE_6', R.KNOCK_AGE_6],
+    ]);
+    mustCover(KNOCK_SUM_RAM_READ, 'KNOCK_SUM_RAM_READ', [
+        ['NOISE_ST', R.NOISE_ST], ['GANG', R.GANG],
+        ['KR_DTZ_SUM', R.KR_DTZ_SUM], ['KR_DTZ_SUM1', R.KR_DTZ_SUM1], ['KR_DTZ_SUM2', R.KR_DTZ_SUM2],
+        ['KA_DTZ_SUM', R.KA_DTZ_SUM], ['KA_DTZ_SUM1', R.KA_DTZ_SUM1], ['KA_DTZ_SUM2', R.KA_DTZ_SUM2],
+    ]);
+    mustCover(MANIFOLD_AIR_RAM_READ, 'MANIFOLD_AIR_RAM_READ', [
+        ['RF_KORR', R.RF_KORR], ['P_SAUG_M', R.P_SAUG_M], ['P_SAUG', R.P_SAUG],
+        ['M_NORM', R.M_NORM], ['M_NORM_FAKT', R.M_NORM_FAKT],
+        ['RF_P_SAUG', R.RF_P_SAUG], ['RF_DIAG_F', R.RF_DIAG_F],
     ]);
 })();
 

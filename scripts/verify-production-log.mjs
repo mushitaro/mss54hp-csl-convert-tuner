@@ -117,10 +117,15 @@ console.log('\n[the exchanges a production run drops]');
     // which is a drivability question asked against the maps afterwards, not a tuning input. Named
     // one by one rather than counted, so adding an exchange has to state which side it is on.
     // KNOCK AGE joined on 2026-10-19 for the same reason: whether knock control retarded a
-    // cylinder is asked of a drive, and nothing in the derivation reads it.
-    check('exactly the five debug-only exchanges',
+    // cylinder is asked of a drive, and nothing in the derivation reads it. The knock sums and the
+    // manifold air and the cams joined the same day, by the same test: how deep a retard went,
+    // whether the manifold sensor's air followed RF and whether the cams followed their targets are
+    // investigations, and the derivation reads none of them.
+    check('exactly the eight debug-only exchanges',
         JSON.stringify(gone.sort()) === JSON.stringify(
-            ['KNOCK AGE', 'LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M'].sort()),
+            ['KNOCK AGE', 'LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M',
+                'NOISE_ST/GANG/KR_DTZ_SUM/KA_DTZ_SUM', 'RF_KORR/P_SAUG/RF_P_SAUG',
+                'EVAN1_IST/EVAN_SOLL/AVAN1_IST/AVAN_SOLL'].sort()),
         gone.join(', '));
     console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);

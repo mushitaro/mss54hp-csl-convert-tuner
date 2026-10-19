@@ -50,7 +50,7 @@ import {
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
     SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
     IDLE_VANOS_RAM_READ, IDLE_VANOS_TARGET_RAM_READ,
-    KNOCK_AGE_RAM_READ,
+    KNOCK_AGE_RAM_READ, KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ,
 } from '@/lib/dme-link/ramMap';
 import { type FieldKey, LOG_FIELD_REGISTRY } from '@/lib/field-registry/registry';
 import { IGNITION_ANGLE_KEYS } from '@/lib/dme-link/liveValueBlocks';
@@ -321,6 +321,22 @@ export const AMBIENT_SLOW_LANE_EVERY = 32;
  * the rate. Reading it eight times faster would cost four times as much and tell nobody anything.
  */
 export const LATCHED_BIT_LANE_EVERY = 64;
+
+/**
+ * The knock sums' lane: one sample in sixteen, half the rate of block 19 they were meant to ride.
+ *
+ * A budget decision, made in order. The knock sums, the cams and the manifold air were asked for
+ * together on 2026-10-19 with ~10 % of the VE sample to spend between them. All three at one in
+ * eight cost 30.3 ms of a 234 ms sample, 13 %; the rule given was to slow the knock read first,
+ * before dropping anything, and at sixteen the three cost 26.1 ms, 11.2 %. The sums are the right
+ * one to slow: KNOCK AGE beside them already says, on every block-19 read, whether a cylinder was
+ * retarded since the last read, and the sums add how deep — a quantity a slower sampling still
+ * measures — where the cams and the manifold air are compared sample by sample against block 3.
+ *
+ * A multiple of LAMBDA_SLOW_LANE_EVERY on purpose: every sample that reads the sums also reads
+ * block 19 and the counters.
+ */
+export const KNOCK_SUM_LANE_EVERY = 16;
 
 /**
  * What has to be true on THIS car before a log's lambda trim may come from RAM.
@@ -620,6 +636,49 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // Debug throughout, so a production run drops it.
             { kind: 'ram', name: 'KNOCK AGE', ...KNOCK_AGE_RAM_READ, every: LAMBDA_SLOW_LANE_EVERY,
                 provides: ['knockAge1', 'knockAge2', 'knockAge3', 'knockAge4', 'knockAge5', 'knockAge6'] },
+            // How DEEP the retard went, where the counters above say when: the DME's own knock
+            // sums, with the gear and the drive-by-noise cap from the same fifteen bytes. See
+            // KNOCK_SUM_RAM_READ.
+            //
+            // AFTER the counters on purpose. #978 shows what the order does: a cylinder whose
+            // counter read 0-4 sat a median 0.3 deg below the top angle and one at 5-9 sat 2.6 deg
+            // below — which is what reading the counters one exchange after block 19 produces: a
+            // knock in that gap resets a counter before its retard can reach an angle block 19
+            // already returned. Read after the counters, the sum carries that retard too.
+            //
+            // One sample in SIXTEEN, not eight — see KNOCK_SUM_LANE_EVERY. Every sample that reads
+            // it also reads block 19 and the counters, so the three still stand side by side.
+            //
+            // Debug throughout, so a production run drops it. ~4.2 ms a sample.
+            { kind: 'ram', name: 'NOISE_ST/GANG/KR_DTZ_SUM/KA_DTZ_SUM', ...KNOCK_SUM_RAM_READ,
+                every: KNOCK_SUM_LANE_EVERY,
+                provides: ['noiseSt', 'gear', 'krDtzSum', 'krDtzSum1', 'kaDtzSum', 'kaDtzSum1'] },
+            // The two cams beside the targets KF_EVAN1_SOLL / KF_AVAN1_SOLL gave them, and the four
+            // status bytes that say which target the controller was following — the 26-byte group
+            // the idle run already reads. Two drives at matched rpm and RO with the cams in
+            // different places did not breathe the same air; this is how a log says whether they
+            // were where the map sent them. See EVAN_SOLL in ramMap.ts.
+            //
+            // Block 19's lane, so the cams sit on the same sample as the ignition angles.
+            //
+            // Debug throughout, so a production run drops it. ~10 ms a sample.
+            { kind: 'ram', name: 'EVAN1_IST/EVAN_SOLL/AVAN1_IST/AVAN_SOLL', ...IDLE_VANOS_RAM_READ,
+                every: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['evan1Ist', 'evanSoll', 'avan1Ist', 'avanSoll', 'evan1St', 'avan1St', 'vanEdSt', 'vanAdapSt'] },
+            // The manifold sensor's air beside the Alpha-N air: rf_p_saug, the DME's own
+            // rf_soll - rf_p_saug, rf_korr and both manifold pressures, forty bytes. The channel
+            // that tells the air side from the fuel side when the trim does not follow an RF change
+            // at matched rpm and RO — see MANIFOLD_AIR_RAM_READ.
+            //
+            // One sample in eight. Not next to block 3, although rf_p_saug is compared with block
+            // 3's RF: rf_diag_f in the same telegram gives rf_soll of the same instant, so the
+            // comparison does not need block 3's moment, and putting forty bytes between the RAM
+            // trim and block 19 would stretch the gap the lambda truth re-check straddles.
+            //
+            // Debug throughout, so a production run drops it. ~12 ms a sample.
+            { kind: 'ram', name: 'RF_KORR/P_SAUG/RF_P_SAUG', ...MANIFOLD_AIR_RAM_READ,
+                every: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['rfPSaug', 'rfDiagF', 'rfKorrDme', 'pSaug', 'pSaugM'] },
             // Ambient pressure, its two diagnostic bytes, the DME's altitude, intake air
             // temperature and the DME's own modelled charge temperature — sixteen bytes, one
             // telegram, on the same slow lane. This is what separates a real VE error from a
