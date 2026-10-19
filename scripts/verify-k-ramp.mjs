@@ -626,8 +626,9 @@ console.log('\n[the census and the cell detail]');
     const merged = withLambdaRamp(c, 7);
     check('withLambdaRamp puts the count in', merged.lambdaRamp === 7 && merged.fuelCut === 3);
     check('...on a copy: the filter\'s resume census is untouched', c.lambdaRamp === 0);
-    const tsx = fs.readFileSync(new URL('../src/components/DropCensus.tsx', import.meta.url), 'utf8');
-    check('DropCensus labels it "lambda ramp"', /lambdaRamp:\s*'lambda ramp'/.test(tsx));
+    // The census sheet and the assistant bridge both read their names and sentences from here.
+    const tsx = fs.readFileSync(new URL('../src/lib/log-engine/dropReasons.ts', import.meta.url), 'utf8');
+    check('the census labels it "lambda ramp"', /lambdaRamp:\s*'lambda ramp'/.test(tsx));
     // What happened, then what to do — in each language, and the instruction is the pedal.
     check('...with what happened and the cure, in each language',
         /lambdaRamp:\s*'The lambda trim was still ramping back from a fuel cut, a loop restart or an rf_korr step, so it read the seconds since then rather than the map\. After a lift-off or a tip-in, hold the pedal steady for a few seconds — the cell counts from there\.'/.test(tsx)

@@ -16,6 +16,7 @@ import { DriveSplitChip } from '@/components/DriveSplitNotice';
 import { TunedStatusBar } from '@/components/TunedStatusBar';
 import { activeExclusion } from '@/lib/log-engine/driveSplit';
 import { DropCensusLine } from '@/components/DropCensus';
+import { explainDrops } from '@/lib/log-engine/dropReasons';
 import {
   type ProcessId, LOG_PROFILES, expectedHz, describeExchanges, missingPatches, deriveRoute,
   selectableModes as selectableModesFor,
@@ -121,7 +122,7 @@ import { TUNE_ADAPTATION_CLEAR, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
-import { dialogText } from '@/lib/dialog-text';
+import { detectDialogLang, dialogText } from '@/lib/dialog-text';
 import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
 import { useAssistantBridge } from '@/hooks/useAssistantBridge';
 import type { TabFacade } from '@/lib/bridge/tools';
@@ -3852,7 +3853,9 @@ export default function Home() {
     status: () => {
       const pts = liveRun.samplesRef.current;
       const recording = dmeLink.state === 'tuning';
-      const leftOut = dropCensus ? Object.fromEntries(Object.entries(dropCensus).filter(([, n]) => n > 0)) : null;
+      // Each reason with what it means and what to do next time, in the dialogs' language — the same
+      // sentences the census sheet shows, so the assistant says what the screen would.
+      const leftOut = dropCensus ? explainDrops(dropCensus, detectDialogLang()) : null;
       const nextOnScreen = recording ? 'STOP'
         : dmeLink.state === 'connected' ? ({ read: 'READ', tune: 'START TUNE', write: 'WRITE', writePatch: 'WRITE PATCH' } as const)[idleAction]
           : 'CONNECTION';
@@ -3873,7 +3876,7 @@ export default function Home() {
           hz: liveRun.hzValueRef.current === null ? null : Math.round(liveRun.hzValueRef.current * 10) / 10,
           linkGaps: pts.filter(p => p.linkGapS !== undefined).length,
         } : null,
-        log: processedLog ? { valid: processedLog.validCount, leftOut: processedLog.droppedCount, why: leftOut } : null,
+        log: processedLog ? { valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut } : null,
         canStartLog: startRefusal() ?? 'yes',
       };
     },

@@ -8,20 +8,27 @@
  *                a slow-lane row, and says when there is nothing to cut
  *   the rules    stopping needs `confirmed: true`; starting refuses with the screen's own reason;
  *                only this build's views can be shown; an unknown tool is not answered
+ *   left out     tuner_status says, for each reason samples were left out, how many, its name and
+ *                what to do next time, in the dialogs' language — the census sheet's own sentences,
+ *                from the one module both read
  *   the client   ticket → socket with the ticket in the subprotocols → hello → answers, a handler's
  *                throw as ok:false; signed out retries slowly; no bridge configured stops; another
  *                tab taking over (4000) stops instead of fighting for the socket
  *   the ticket   the function's format: v1.<payload>.<HMAC-SHA256>, sixty seconds, this owner
  *
  * What a wrong answer costs: an assistant told "cylinder 3 knocked" about a knock that happened a
- * minute earlier, a log stopped by a misheard word, or a head unit and a laptop trading the bridge
- * every few seconds. Synthetic data only.
+ * minute earlier, a log stopped by a misheard word, a head unit and a laptop trading the bridge
+ * every few seconds, or a driver told "highLoadSettle" where the screen says "hold the pull longer".
+ * Synthetic data only.
  */
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
 import { BridgeClient, BRIDGE_PROTOCOL } from '../src/lib/bridge/bridgeClient.ts';
 import { mintTicket } from '../functions/api/bridge/ticket.ts';
+import { DROP_LABEL, DROP_WHY, explainDrops } from '../src/lib/log-engine/dropReasons.ts';
+import { EMPTY_CENSUS } from '../src/lib/log-engine/lambdaGates.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -172,6 +179,34 @@ console.log('\n[the rules a tool call meets]');
     check('a view is matched without case or spaces', shown === 'log');
     const m = await h.tuner_moment({ seconds_ago: 5, window_s: 10 });
     check('moment reads the facade\'s samples', m.source === 'live run' && m.at === 25, JSON.stringify({ s: m.source, at: m.at }));
+}
+
+console.log('\n[why samples were left out: how many, the name, what to do — in the reader\'s language]');
+{
+    const census = { ...EMPTY_CENSUS, coldEngine: 40, highLoadSettle: 312, fuelCut: 95 };
+    const en = explainDrops(census, 'en');
+    const ja = explainDrops(census, 'ja');
+    check('only the reasons that left something out, most first', JSON.stringify(Object.keys(en)) === JSON.stringify(['highLoadSettle', 'fuelCut', 'coldEngine']), Object.keys(en).join(','));
+    const e = en.highLoadSettle;
+    check('each is { samples, label, why }', JSON.stringify(Object.keys(e ?? {})) === JSON.stringify(['samples', 'label', 'why']), JSON.stringify(e));
+    check('...samples is the census count', e?.samples === 312, String(e?.samples));
+    check('...label is the sheet\'s name, not the key', e?.label === 'short pull', e?.label);
+    check('...why is the sheet\'s sentence: what to do next time', e?.why === DROP_WHY.en.highLoadSettle && /Hold the pull longer/.test(e.why), e?.why);
+    check('a Japanese reader: same reasons, counts and names, the Japanese sentence',
+        JSON.stringify(Object.keys(ja)) === JSON.stringify(Object.keys(en)) && ja.highLoadSettle?.samples === 312
+        && ja.highLoadSettle?.label === 'short pull' && /引きをもっと長く保持/.test(ja.highLoadSettle?.why ?? ''), ja.highLoadSettle?.why);
+    check('nothing left out: an empty answer, not a list of zeros', JSON.stringify(explainDrops(EMPTY_CENSUS, 'en')) === '{}');
+    const reasons = Object.keys(EMPTY_CENSUS).sort();
+    const missing = reasons.filter(r => !DROP_LABEL[r] || !DROP_WHY.en[r] || !DROP_WHY.ja[r]);
+    check('every reason the census counts has a name and a sentence in both languages',
+        missing.length === 0 && JSON.stringify(Object.keys(DROP_LABEL).sort()) === JSON.stringify(reasons), missing.join(','));
+    // One source: the sheet and the facade both read the module, and neither keeps a copy.
+    const sheet = readFileSync(new URL('../src/components/DropCensus.tsx', import.meta.url), 'utf8');
+    const page = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8');
+    check('the census sheet takes its names and sentences from dropReasons',
+        sheet.includes("from '@/lib/log-engine/dropReasons'") && !/const (LABEL|WHY)\b/.test(sheet));
+    check('tuner_status answers explainDrops in the dialogs\' language, beside valid and dropped',
+        page.includes('explainDrops(dropCensus, detectDialogLang())') && page.includes('{ valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut }'));
 }
 
 console.log('\n[the client: ticket, socket, hello, answers]');
