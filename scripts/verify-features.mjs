@@ -36,6 +36,11 @@ console.log('\n[sessionSync never reaches production — the privacy policy depe
 check("sessionSync stage is 'preview-only'", FEATURES.sessionSync.stage === 'preview-only', FEATURES.sessionSync.stage);
 check('...and it owns no tab', FEATURES.sessionSync.tabs.length === 0);
 
+console.log('\n[assistantBridge never reaches production — it needs a backend and sends off the device]');
+check("assistantBridge stage is 'preview-only'", FEATURES.assistantBridge.stage === 'preview-only', FEATURES.assistantBridge.stage);
+check('...and it owns no tab', FEATURES.assistantBridge.tabs.length === 0);
+check('...and production does not enable it', !featureEnabled('assistantBridge', false));
+
 console.log('\n[featureEnabled truth table]');
 {
     const byStage = (stage) => Object.entries(FEATURES).find(([, d]) => d.stage === stage)?.[0];

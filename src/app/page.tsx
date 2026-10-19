@@ -95,7 +95,7 @@ import { useAppDialogs } from '@/hooks/useAppDialogs';
 import { useEdgeFade } from '@/hooks/useEdgeFade';
 import { useFitScale } from '@/hooks/useFitScale';
 import { HubProgressRing, TRANSFER_PHASE_STYLE } from '@/components/HubProgressRing';
-import { AlertCircle, Download, FileCode, FileSpreadsheet, Zap, Play, Cpu, Trash2, Github, BookOpen, Medal, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud, Gauge } from 'lucide-react';
+import { AlertCircle, Download, FileCode, FileSpreadsheet, Zap, Play, Cpu, Trash2, Github, BookOpen, Medal, Shield, Square, Loader2, RotateCcw, RefreshCw, Eraser, PlugZap, Database, Upload, UploadCloud, Gauge, Bot } from 'lucide-react';
 import { PROJECT_REPO_URL } from '@/config/links';
 import { usePrivacyPolicyUrl } from '@/hooks/usePrivacyPolicyUrl';
 import { isFieldPresent } from '@/lib/field-registry/registry';
@@ -122,6 +122,13 @@ import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/l
 import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { dialogText } from '@/lib/dialog-text';
+import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
+import { useAssistantBridge } from '@/hooks/useAssistantBridge';
+import type { TabFacade } from '@/lib/bridge/tools';
+import { AssistantSection } from '@/components/AssistantSection';
+import { buildId } from '@/lib/session-sync/client';
+import { previewNoticeAcknowledged } from '@/lib/session-sync/preview-notice';
+import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHz } from '@/lib/log-engine/rate';
@@ -258,6 +265,10 @@ export default function Home() {
    */
   const liveRun = useLiveRun({ flush: (force, authoritative) => flushRef.current(force, authoritative) });
   const liveSamplesRef = liveRun.samplesRef;
+  /** When the last live sample arrived, on performance.now(). The assistant's "just now" is counted
+   *  back from the tab's clock, and a sample's own time says nothing about how long ago it came in —
+   *  during a link gap, the newest sample can be seconds old. */
+  const lastSampleAtRef = useRef(0);
   const liveExchangesRef = liveRun.exchangesRef;
   const hzValueRef = liveRun.hzValueRef;
   // Hub/wing cluster auto-fit: measures real available space vs. the cluster's natural size and
@@ -3025,6 +3036,9 @@ export default function Home() {
       setNarrowPane('map');
       return;
     }
+    // The link-gap cues need an AudioContext the browser has let run, and only a gesture does that.
+    // This press is the gesture, and it has to be spent before the first await below lets it lapse.
+    primeLinkCues();
     // Preflight, before a drive rather than after one. Overridable — see missingPatches for why —
     // but never silent, because the cost of finding out afterwards is the whole run.
     const missing = missingPatches(profile, { patched: bytesPatched, tankVentShut: bytesTankVentShut });
@@ -3063,7 +3077,7 @@ export default function Home() {
     // arming is for; the first sample's unthrottled flush releases it.
     pendingTabRef.current = 'lambda';
     dmeLink.startTuning(
-      (sample) => {
+      (sample, meta) => {
         const point: LogDataPoint = {
           time: sample.time,
           rpm: sample.rpm,
@@ -3149,6 +3163,11 @@ export default function Home() {
           vanEdSt: sample.vanEdSt,
           vanAdapSt: sample.vanAdapSt,
         };
+        // Not a channel: the link dropped before this sample and the run reconnected, and this is how
+        // long nothing was recorded. On the sample itself so the filter, the store and the CSV all
+        // see it (LogDataPoint.linkGapS).
+        if (meta.linkGapS !== undefined) point.linkGapS = meta.linkGapS;
+        lastSampleAtRef.current = performance.now();
         // Record it, price the rate, pace the flush and the recovery write. Nothing in there
         // renders anything — see useLiveRun for why that matters at four samples a second.
         liveRun.addSample(point);
@@ -3168,6 +3187,13 @@ export default function Home() {
       // What the link and the car between them settled on above — the fast list if the RAM lambda
       // trim checked out, the both-blocks fallback if it did not.
       exchanges,
+      // By ear, because the driver is driving. The notice line says the same in words; the hub does
+      // not change while the run reconnects — it is still a run, and STOP is still what it offers.
+      (event) => {
+        if (event.kind === 'lost') playLinkCue('lost');
+        else if (event.kind === 'resumed') playLinkCue('back');
+        else if (event.kind === 'gaveUp') playLinkCue('gaveUp');
+      },
     );
   };
 
@@ -3801,6 +3827,95 @@ export default function Home() {
           : (writeChangesCar && currentMap && currentSession) ? 'writePatch'
             : (currentMap && currentSession && !isArchived) ? 'tune'
               : 'read';
+
+  // ── ASSISTANT: what this tab answers its owner's assistant with (lib/bridge/tools.ts) ──────────
+  //
+  // Rebuilt every render and read through a ref, the way finishLog is: a call arriving mid-drive has
+  // to see THIS render's state, and the bridge must not be torn down because the page re-rendered.
+  // Every method reads what the page already holds; none of them touches the link, and none of them
+  // can reach CONNECTION, WRITE or a flash — a person does those on the screen.
+  const startRefusal = (): string | null => {
+    if (dmeLink.state === 'tuning') return 'A log is already recording.';
+    if (dmeLink.state !== 'connected') return 'The cable link is not connected. Connecting is done by a person on the screen (CONNECTION).';
+    if (logProcess === 'INERTIA' || logProcess === 'IDLE') return `${logProcess} records from its own panel on the screen, not from START TUNE.`;
+    // The hub's own answer, so the assistant can never start a log the screen would not offer:
+    // an armed write outranks a new run there, and does here.
+    if (idleAction !== 'tune') {
+      const next = idleAction === 'read' ? 'READ' : idleAction === 'write' ? 'WRITE' : 'WRITE PATCH';
+      return `The screen offers ${next} next, not START TUNE. That step is done by a person on the screen.`;
+    }
+    const missing = missingPatches(LOG_PROFILES[logProcess], { patched: bytesPatched, tankVentShut: bytesTankVentShut });
+    if (missing.length) return `START TUNE would ask first, because ${missing.join(', ')} is not in the car. Write it, or start from the screen.`;
+    return null;
+  };
+  const bridgeFacade: TabFacade = {
+    status: () => {
+      const pts = liveRun.samplesRef.current;
+      const recording = dmeLink.state === 'tuning';
+      const leftOut = dropCensus ? Object.fromEntries(Object.entries(dropCensus).filter(([, n]) => n > 0)) : null;
+      const nextOnScreen = recording ? 'STOP'
+        : dmeLink.state === 'connected' ? ({ read: 'READ', tune: 'START TUNE', write: 'WRITE', writePatch: 'WRITE PATCH' } as const)[idleAction]
+          : 'CONNECTION';
+      return {
+        app: 'MSS54HP CSL CONVERT /// TUNER — WORKS',
+        build: buildId() ?? null,
+        practice: dmeLink.mockMode,
+        link: dmeLink.state,
+        notice: dmeLink.error ?? (dmeLink.warning && dmeLink.warningKind !== 'info' ? dmeLink.warning : null),
+        program: dmeLink.identity?.softwareVersion ?? null,
+        mode: logProcess,
+        view: activeTab,
+        nextOnScreen,
+        run: pts.length ? {
+          recording,
+          samples: pts.length,
+          seconds: pts.length > 1 ? Math.round((pts[pts.length - 1].time - pts[0].time) * 10) / 10 : 0,
+          hz: liveRun.hzValueRef.current === null ? null : Math.round(liveRun.hzValueRef.current * 10) / 10,
+          linkGaps: pts.filter(p => p.linkGapS !== undefined).length,
+        } : null,
+        log: processedLog ? { valid: processedLog.validCount, leftOut: processedLog.droppedCount, why: leftOut } : null,
+        canStartLog: startRefusal() ?? 'yes',
+      };
+    },
+    samples: () => {
+      const pts = liveRun.samplesRef.current;
+      if (dmeLink.state === 'tuning' && pts.length) {
+        const age = lastSampleAtRef.current ? (performance.now() - lastSampleAtRef.current) / 1000 : 0;
+        return { points: pts, live: true, nowLogTime: pts[pts.length - 1].time + age };
+      }
+      const raw = processedLog?.rawData;
+      if (!raw?.length) return null;
+      // A Testo CSV counts milliseconds; the moment is cut in seconds.
+      const scale = timeScaleSeconds(raw);
+      const points = scale === 1 ? raw : raw.map(p => ({ ...p, time: p.time * scale }));
+      return { points, live: false, nowLogTime: points[points.length - 1].time };
+    },
+    startRefusal,
+    startLog: () => { void handleStartTune(); },
+    running: () => dmeLink.state === 'tuning',
+    stopLog: () => { void handleStopTune(); },
+    views: () => TABS.filter(t => t.enabled).map(t => t.id),
+    show: (view) => { goToTab(view as TabId); setNarrowPane('map'); },
+  };
+  const assistantAllowed = isPreviewBuild && featureEnabled('assistantBridge', isPreviewBuild) && previewNoticeAcknowledged();
+  const assistant = useAssistantBridge({
+    allowed: assistantAllowed,
+    facade: bridgeFacade,
+    hello: { build: buildId() ?? null, variant: isPreviewBuild ? 'preview' : null },
+  });
+  /** Switching on says first what will be sent and where; switching off just switches off. */
+  const toggleAssistant = async (next: boolean) => {
+    if (!next) { assistant.setOn(false); return; }
+    const t = dialogText();
+    const go = await ask({
+      title: t.titleAssistantOn, icon: <Bot className="w-3 h-3" />,
+      body: t.assistantOn(), confirmLabel: t.btnAssistantOn, cancelLabel: t.btnCancel,
+    });
+    if (go) assistant.setOn(true);
+  };
+  const assistantSection = assistantAllowed
+    ? <AssistantSection on={assistant.on} status={assistant.status} onToggle={(next) => void toggleAssistant(next)} />
+    : undefined;
 
   /**
    * Which campaign shape the next WRITE belongs to. Derived, never stored — see deriveRoute.
@@ -5173,6 +5288,20 @@ export default function Home() {
               {badgeLabel}
             </span>
           )}
+          {/* AI — ASSISTANT is on. Beside the badge for the reason SIGN IN is: a fact about this
+              build's reach, and the one part of a phone's header always on screen. A span, not a
+              button: the switch lives in the SYNC panel, and a second switch here would be the
+              second door to one control. Sky when the assistant can reach this tab, slate while it
+              cannot — the driver hears the difference only by asking, so the head unit shows it. */}
+          {assistant.on && (
+            <span
+              title={assistant.status.state === 'live' ? 'ASSISTANT: connected' : `ASSISTANT: ${assistant.status.detail ?? assistant.status.state}`}
+              className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap ${assistant.status.state === 'live'
+                ? 'text-sky-300 bg-sky-500/15' : 'text-slate-500 bg-slate-500/10'}`}
+            >
+              AI
+            </span>
+          )}
           {/* SIGN IN — the preview's owner-gate session has ended. Beside the badge because it is a
               fact about this BUILD's reach (its store), not about the car, and on a phone this is
               the one part of the header that is always on screen. Rendered only when pressing it
@@ -6106,6 +6235,7 @@ export default function Home() {
                           onReauth={reauthAllowed ? reauth : undefined}
                           privacyUrl={privacyUrl}
                           onRestored={() => void sessionDb.refresh()}
+                          assistant={assistantSection}
                         />
                       </div>
                     ) : undefined}
@@ -6642,6 +6772,7 @@ export default function Home() {
               onReauth={reauthAllowed ? reauth : undefined}
               privacyUrl={privacyUrl}
               onRestored={() => void sessionDb.refresh()}
+              assistant={assistantSection}
             />
           ) : undefined}
           buildLabel={buildLabel}

@@ -41,7 +41,7 @@ export type TabId =
 export type FeatureStage = 'stable' | 'experimental' | 'preview-only';
 
 export type FeatureName =
-    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'sessionSync';
+    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'sessionSync' | 'assistantBridge';
 
 export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly TabId[] }> = {
     // The trunk. WARMUP is inside it, not beside it: the warmup table is generated from the VE
@@ -78,6 +78,18 @@ export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly
     // Never promoted — see the header. Owns no tab; its surfaces (SYNC, the store panel) are
     // gated where they render, on the same variant bit this registry reads.
     sessionSync: { stage: 'preview-only', tabs: [] },
+    /**
+     * ASSISTANT — the owner's assistant reaching this tab through the bridge (TSUNAGI///Matrix,
+     * matrix-tsunagi/bridge): read the state and the log, start a log, stop it on a spoken yes.
+     * Never connect, write or flash; there is no tool for them.
+     *
+     * Preview-only by decision, like sessionSync and for the same reason twice over: it needs a
+     * backend production does not have (`/api/bridge/ticket`), and it sends what the assistant asks
+     * for off the device — production's privacy policy says that build sends nothing. Owns no tab;
+     * its surfaces (the ASSISTANT section of the store panel, the header chip) are gated where they
+     * render.
+     */
+    assistantBridge: { stage: 'preview-only', tabs: [] },
 };
 
 /**

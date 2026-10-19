@@ -47,5 +47,13 @@
             // a database, it does not open one; access still needs the account's own credentials.
             "database_id": "af71b38c-8582-4432-be2f-054c568fa1dc"
         }
-    ]
+    ],
+
+    // Where ASSISTANT's socket goes: the TSUNAGI///Matrix bridge (matrix-tsunagi/bridge), handed to
+    // the tab by /api/bridge/ticket so the client carries no build-time URL. Remove it and the
+    // ticket endpoint answers `bridge_unavailable` — the switch for turning the feature off for
+    // everyone without a code change. BRIDGE_TICKET_SECRET is a Pages secret, never here.
+    "vars": {
+        "BRIDGE_TAB_URL": "wss://matrix-bridge.kazuhiro-mushi.workers.dev/tab"
+    }
 }

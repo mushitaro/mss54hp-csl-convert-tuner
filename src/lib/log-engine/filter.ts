@@ -5,8 +5,26 @@ import {
     isFullLoad, isOverLoadThreshold, isAtControllerStop, isNearControllerClamp, isFuelCut,
 } from './lambdaGates';
 import {
-    stepHighLoadClock, heldSeconds, type HighLoadClock,
+    stepHighLoadClock, heldSeconds, EMPTY_HIGH_LOAD_CLOCK, type HighLoadClock,
 } from './highLoadClock';
+
+/**
+ * Seconds after a mid-run reconnect whose samples are dropped as `linkGap`.
+ *
+ * A sample that ends a link gap (`LogDataPoint.linkGapS`) has no honest predecessor. The transient
+ * test compares it with the sample before it, which is from before the gap — seconds earlier, with
+ * whatever the engine did in between unseen — so "steady" there means nothing. The same is true of
+ * every rule that reaches back: the settle references walk back over time and would land before
+ * the gap, and the high-load clock would count the gap as time held. So the clock is reset at the
+ * gap, and the samples are dropped until the look-backs land on samples recorded after it.
+ *
+ * Two seconds is the shortest that does that for every config in use and then some: the transient
+ * reference is one sample back (~0.23 s at the VE rate), an archived session's index path reaches
+ * `transientWindow` = 4 samples back, and the rest is margin for what the gap hid — a lift-off and
+ * the lambda loop's restart, which rampState.ts recognises from the trim itself once it is back on
+ * the wire. Gaps are rare and seconds long; two seconds after each costs a handful of samples.
+ */
+export const LINK_GAP_HOLDOFF_S = 2;
 
 /**
  * What one pass over a log leaves behind, so the next pass can continue instead of starting again.
@@ -62,6 +80,13 @@ export interface FilterResume {
      *  flush landing mid-stab cannot forget the level the stab rose from. Null below the floor. */
     highLoadRefTime: number | null;
     highLoadRefRf: number | null;
+    /**
+     * When the last link gap ended, in the log's own time units, or null for none — the start of the
+     * LINK_GAP_HOLDOFF_S window. Carried for the reason the kats time is: a live flush landing inside
+     * that window must not forget it, or the next few samples a batch pass would drop survive.
+     * Optional, because a resume built before gaps existed has none and means none.
+     */
+    linkGapResumedAt?: number | null;
 }
 
 /**
@@ -246,6 +271,9 @@ export const processLogData = (
     // the current one, and losing it would re-arm the cat-protection window from scratch every
     // flush — quietly keeping samples that a batch pass would have dropped.
     let lastKatsHotTime = resume?.lastKatsHotTime ?? -Infinity;
+    // When the last link gap ended — see LINK_GAP_HOLDOFF_S. Carried across a resume for the same
+    // reason as the kats time.
+    let linkGapResumedAt: number | null = resume?.linkGapResumedAt ?? null;
 
     // Tank ventilation. Off by default — see LogFilterConfig for why this one is opt-in while the
     // cat-protection exclusion is not.
@@ -255,6 +283,14 @@ export const processLogData = (
 
     for (let i = resume?.consumed ?? 0; i < rawData.length; i++) {
         const current = rawData[i];
+
+        // A link gap ended here. Noted before ANY gate can `continue` past it — an operator's
+        // exclusion covering this one sample must not also cancel the holdoff after it — and the
+        // high-load clock forgets the excursion it was timing: the gap is not time held.
+        if (current.linkGapS !== undefined) {
+            linkGapResumedAt = current.time;
+            highLoad = EMPTY_HIGH_LOAD_CLOCK;
+        }
 
         // 0. Stretches the operator excluded.
         //
@@ -267,6 +303,15 @@ export const processLogData = (
         // being counted twice, and nothing has counted anything yet at the top of the loop.
         if (excluded.length > 0 && excluded.some(([a, b]) => current.time >= a && current.time < b)) {
             drop('excluded');
+            continue;
+        }
+
+        // 0b. The seconds after a mid-run reconnect — see LINK_GAP_HOLDOFF_S. Second only to the
+        // operator's own exclusions: whatever else is true of these samples, nothing they would be
+        // compared against was recorded, and the census should say the cable is why.
+        if (linkGapResumedAt !== null
+            && (current.time - linkGapResumedAt) * secondsPerTimeUnit < LINK_GAP_HOLDOFF_S) {
+            drop('linkGap');
             continue;
         }
 
@@ -511,6 +556,7 @@ export const processLogData = (
             highLoadEnteredAt: highLoad.enteredAt,
             highLoadRefTime: highLoad.refTime,
             highLoadRefRf: highLoad.refRf,
+            linkGapResumedAt,
         },
     };
 };

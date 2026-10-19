@@ -41,6 +41,8 @@ const RX_BUFFER_BYTES = 4096;
 
 export class WebSerialTransport extends BufferedByteTransport implements ByteTransport {
     private port: SerialPort | null = null;
+    /** The port CONNECT opened, kept across close() so a run can reopen it — see reopenGranted. */
+    private lastPort: SerialPort | null = null;
     private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
@@ -61,12 +63,57 @@ export class WebSerialTransport extends BufferedByteTransport implements ByteTra
             throw new DmeLinkError('Web Serial API is not available in this browser (Chrome/Edge desktop required).');
         }
         // Must be called from within a real user gesture (e.g. a button click handler).
-        this.port = await navigator.serial!.requestPort();
+        await this.openPort(await navigator.serial!.requestPort());
+    }
+
+    /**
+     * The cable chosen at CONNECT, reopened without the picker — see ByteTransport.reopenGranted.
+     *
+     * The SerialPort object first. After a USB re-enumeration the same adapter can come back as a
+     * new object, which the granted list then holds, so the ports there with the same USB vendor
+     * and product id are tried after it. Nothing else is: a port this page was never granted is not
+     * the cable the run started on.
+     */
+    async reopenGranted(): Promise<void> {
+        if (!WebSerialTransport.isSupported()) {
+            throw new DmeLinkError('Web Serial API is not available in this browser (Chrome/Edge desktop required).');
+        }
+        if (this.port) await this.close();
+        const last = this.lastPort;
+        if (!last) throw new DmeLinkError('No cable to reopen: this link was never connected.');
+        const candidates: SerialPort[] = [last];
+        try {
+            const want = last.getInfo();
+            for (const p of await navigator.serial!.getPorts()) {
+                if (p === last) continue;
+                const info = p.getInfo();
+                if (want.usbVendorId !== undefined && info.usbVendorId === want.usbVendorId
+                    && info.usbProductId === want.usbProductId) candidates.push(p);
+            }
+        } catch { /* the old object is still worth trying on its own */ }
+        let failure: unknown = null;
+        for (const port of candidates) {
+            try {
+                await this.openPort(port);
+                return;
+            } catch (e) {
+                failure = e;
+                // Whatever openPort got as far as — a port opened before a stream could be taken.
+                await this.close();
+            }
+        }
+        const why = failure instanceof Error ? failure.message : String(failure);
+        throw new DmeLinkError(`The cable could not be reopened: ${why}`);
+    }
+
+    private async openPort(port: SerialPort): Promise<void> {
         // 8E1 is mandatory — do not "simplify" this to 8N1 while chasing line errors. DS2/MSS54 is
         // even-parity; an 8N1 receiver samples the parity bit where the stop bit should be, so every
         // even-popcount byte raises a framing error. DS2's own address 0x12 and ACK 0xA0 both have
         // popcount 2, so effectively every frame would fault on its first byte. 8E1 is proven on the car.
-        await this.port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
+        await port.open({ baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'even', bufferSize: RX_BUFFER_BYTES });
+        this.port = port;
+        this.lastPort = port;
         await this.deassertControlLines();
         this.writer = this.port.writable!.getWriter();
         this.reader = this.port.readable!.getReader();

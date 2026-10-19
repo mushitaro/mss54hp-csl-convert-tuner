@@ -235,6 +235,10 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         if (ltft2 !== undefined) point.ltft2 = ltft2;
         const gap = pick(row, 'pressureDecodeGap');
         if (gap !== undefined) point.pressureDecodeDisagreesMbar = gap;
+        // Back onto the row a reconnect resumed at, so a re-imported log keeps telling the filter
+        // where it was blind. A blank cell is every other row and stays undefined.
+        const linkGap = pick(row, 'linkGapS');
+        if (linkGap !== undefined) point.linkGapS = linkGap;
         // The ignition side. Sparse in a fast VE log by construction — block 19 and the knock
         // counters are read one sample in eight — so a blank cell is "not read on this row" and
         // stays undefined rather than becoming 0, which would be an angle and a fresh knock.

@@ -17,6 +17,7 @@ import { TransferTimingReport } from '@/lib/dme-link/transferTiming';
 import { LinkEventLogSnapshot } from '@/lib/dme-link/linkEventLog';
 import type { LogExchange, LogProfile } from '@/lib/log-engine/logProfile';
 import { LOG_PROFILES } from '@/lib/log-engine/logProfile';
+import { runLivePoll, type LinkGapEvent, type LiveSampleMeta } from '@/lib/dme-link/liveSupervisor';
 
 /** What the *link* is doing — and nothing else.
  *
@@ -627,9 +628,14 @@ export function useDmeLink() {
      * simply never ran. That teardown is bound to a STOP button that had already stopped being
      * offered. onEnd stays a pure link fact ("the poll loop ended, and this is what ended it"); what
      * to DO about it belongs to the caller.
+     *
+     * A link failure no longer ends the run by itself. The loop reconnects in place first
+     * (liveSupervisor.ts) and the run goes on, still 'tuning', with the gap stated on the first
+     * sample after it (`meta.linkGapS`). onEnd fires with a failure only once the reconnect has
+     * given up or a different DME answered — the endings finishLog has always been for.
      */
     const startTuning = useCallback((
-        onSample: (sample: LiveMeasurement) => void,
+        onSample: (sample: LiveMeasurement, meta: LiveSampleMeta) => void,
         onEnd?: (failure: string | null) => void,
         /**
          * What a sample is made of — the run profile's exchange list.
@@ -640,10 +646,15 @@ export function useDmeLink() {
          * link keeps whatever it had, which is both blocks.
          */
         exchanges?: readonly LogExchange[],
+        /** The link dropping and coming back, as it happens — for the cue. The notice line is
+         *  this hook's own (`warning`), so a caller that only wants the run need not pass this. */
+        onGap?: (event: LinkGapEvent) => void,
     ) => {
         const link = linkRef.current;
         if (!link) { onEnd?.('Not connected to DME'); return; }
         if (exchanges) link.setLiveExchanges?.(exchanges);
+        // The car the run started on, so a reconnect can prove it reached the same one.
+        const startIdentity = snapshotRef.current.identity;
         // Every other operation clears the previous error first; this one didn't, so a failed
         // adaptation reset — the step designed to happen immediately before a log — left the status
         // dot red for the whole run and made the abort invisible.
@@ -658,29 +669,50 @@ export function useDmeLink() {
         // the link's answer, not the request, because it puts block 3 back if the caller left it out.
         link.beginLogTiming?.(link.getLiveExchanges?.() ?? exchanges);
 
+        // The gap, said on the notice line while it lasts and after it closes. 'warn' and not an
+        // error: the run is still recording, and red is for the thing that stops it — which, if the
+        // reconnect gives up, arrives through setError below like every other ending.
+        const sayGap = (event: LinkGapEvent) => {
+            const t = dialogText();
+            if (event.kind === 'gaveUp') return;
+            setWarningKind('warn');
+            if (event.kind === 'lost') setWarning(t.linkLost());
+            else if (event.kind === 'retrying') setWarning(t.linkRetrying(event.attempt, event.elapsedMs / 1000));
+            else setWarning(t.linkResumed(event.blindMs / 1000));
+        };
+
         (async () => {
             let failure: string | null = null;
             try {
-                while (pollingRef.current && linkRef.current) {
-                    try {
-                        const sample = await linkRef.current.pollLiveMeasurement();
-                        if (!pollingRef.current) break;
-                        onSample(sample);
-                    } catch (e) {
-                        // A stop already in flight owns the teardown: disconnect() closes the port under
-                        // the in-flight read, and reporting that as a link failure would resurrect
-                        // 'connected' after disconnect() had already set 'disconnected'.
-                        if (!pollingRef.current) break;
-                        failure = e instanceof Error ? e.message : String(e);
-                        setError(failure);
-                        pollingRef.current = false;
-                        settleIdle();
-                        break;
-                    }
+                failure = await runLivePoll({
+                    poll: () => link.pollLiveMeasurement(),
+                    reconnect: link.reconnect ? reason => link.reconnect!(reason) : undefined,
+                    disconnect: () => link.disconnect(),
+                    // A stop already in flight owns the teardown: disconnect() closes the port under
+                    // the in-flight read and nulls linkRef, and reporting that as a link failure
+                    // would resurrect 'connected' after disconnect() had already set 'disconnected'.
+                    shouldContinue: () => pollingRef.current && linkRef.current === link,
+                    onSample,
+                    onGap: event => {
+                        sayGap(event);
+                        onGap?.(event);
+                    },
+                    startIdentity,
+                });
+            } catch (e) {
+                // runLivePoll resolves every link failure; this is a throw from the caller's own
+                // onSample, which ends the run the way a link failure always did.
+                failure = e instanceof Error ? e.message : String(e);
+            }
+            try {
+                if (failure !== null) {
+                    setError(failure);
+                    pollingRef.current = false;
+                    settleIdle();
                 }
             } finally {
-                // finally, not the catch: the loop's normal exit is the while condition / the break,
-                // so this is the only true single exit point — and it makes a double-fire impossible.
+                // The one exit, whatever ended the run — STOP, a failure the reconnect could not
+                // recover, a different DME, or a throw — which makes a double-fire impossible.
                 //
                 // Closed on the same terms as a read or a write: a drive that died part-way is the
                 // most informative timing report there is, so the failure is passed in rather than

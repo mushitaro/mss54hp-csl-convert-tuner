@@ -133,6 +133,10 @@ export const APP_CONFIG = {
         MD_LS_DELTA: 'Tip-in Allowance',
         MD_DP_DELTA: 'Dashpot Allowance',
         PRESSURE_DECODE_GAP: 'Pressure Decode Gap',
+        // Seconds without samples before this row, on the row a mid-run reconnect resumed at — see
+        // LogDataPoint.linkGapS. Only exceptions are written: a run that never lost its link has no
+        // such column.
+        LINK_GAP: 'Link Gap',
         // Testo's own headers for the six angles ("Ignition angle cyl. n" on 12050B13), so a log
         // exported here reads as the same channel in either tool.
         IGNITION_ANGLE_1: 'Ignition angle cyl. 1',
@@ -255,6 +259,7 @@ export const APP_CONFIG = {
         mdLsDelta: ['tip-in allowance', 'md_ls_delta'] as string[],
         mdDpDelta: ['dashpot allowance', 'md_dp_delta'] as string[],
         pressureDecodeGap: ['pressure decode gap'] as string[],
+        linkGapS: ['link gap'] as string[],
         // Testo's list names these (`Ignition angle cyl. n`, symbol TZn, telegram 12050B13), so for
         // once the first spelling is read off Testo rather than this app's serializer — they are
         // the same string. The reference catalog's lowercase symbol is accepted as well.

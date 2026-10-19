@@ -60,6 +60,9 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     const hasTempSubstituted = points.some(p => p.ambientTempFromCan === false);
     const hasDecodeGap = points.some(p =>
         (p.pressureDecodeDisagreesMbar ?? 0) > PRESSURE_DECODE_TOLERANCE_MBAR);
+    // The link gaps, by the same rule: an exception column. Blank on every row but the one each gap
+    // ended on, and absent from a run that never lost its link.
+    const hasLinkGap = points.some(p => p.linkGapS !== undefined);
     // The ignition side, one flag per column like every channel above: a run that never read the
     // knock counters has no such columns, while one that did keeps its blank rows blank.
     const ignition = ([
@@ -118,6 +121,7 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasMdLsDelta) row[M.MD_LS_DELTA] = p.mdLsDelta ?? '';
         if (hasMdDpDelta) row[M.MD_DP_DELTA] = p.mdDpDelta ?? '';
         if (hasDecodeGap) row[M.PRESSURE_DECODE_GAP] = p.pressureDecodeDisagreesMbar ?? '';
+        if (hasLinkGap) row[M.LINK_GAP] = p.linkGapS ?? '';
         for (const [key, header] of ignition) row[header] = p[key] ?? '';
         return row;
     });

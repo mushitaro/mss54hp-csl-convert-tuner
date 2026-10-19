@@ -40,6 +40,7 @@ const LABEL: Record<DropReason, string> = {
     highLoadSettle: 'short pull',
     settle: 'unsettled',
     excluded: 'excluded',
+    linkGap: 'link gap',
     lambdaRamp: 'lambda ramp',
 };
 
@@ -62,6 +63,7 @@ const WHY: Record<'ja' | 'en', Record<DropReason, string>> = {
         highLoadSettle: 'The pull was too fresh. Above 55 % filling the DME steps its exhaust-temperature correction up off a sensor that lags, and the lambda trim needs about six seconds to walk after it — until then the reading is high by whatever it has not covered. Hold the pull longer: two drives disagreed by 5 % at high load until the short-pull samples came out.',
         settle: 'The operating point was still moving a settle ago, so the two things rf_korr is a ratio OF were measured at different air flows. This does not touch the VE map: the sample stays in the log and can still earn a cell. Hold a steady throttle for longer than Settle Time if the rf_korr table is what you are after.',
         excluded: 'You took this stretch out of the drive, because it disagreed with the rest of it. Nothing is wrong with these samples except that they belong to a different population; RESTORE on the map tab puts them back.',
+        linkGap: 'The link to the DME dropped during the run and the app reconnected. For the first two seconds after that, the only sample to compare against is one from before the gap, so nothing can say the engine was steady. Check the cable, the OBD connector and the USB lead — how you drove did not cause this.',
         lambdaRamp: 'The lambda trim was still ramping back from a fuel cut, a loop restart or an rf_korr step, so it read the seconds since then rather than the map. After a lift-off or a tip-in, hold the pedal steady for a few seconds — the cell counts from there.',
     },
     ja: {
@@ -75,6 +77,7 @@ const WHY: Record<'ja' | 'en', Record<DropReason, string>> = {
         highLoadSettle: '引きが新しすぎます。充填 55 % を超えると DME は排気温補正を一段上げますが、その元になるセンサーは遅れて読むため、λ トリムが追いつくのに約 6 秒かかります。それまでの値は、追いつけていない分だけ高く出ます。引きをもっと長く保持してください — 2 本の走行が高負荷で 5 % 食い違い、この短い引きを除いて一致しました。',
         settle: 'Settle Time だけ前の時点で、まだ回転数か開度が動いていました。rf_korr は 2 つの量の比なので、その 2 つが別々の空気量で測られたことになります。VE マップには影響しません — このサンプルはログに残り、セルの根拠にもなります。rf_korr の表が目的なら、Settle Time より長くアクセルを一定に保ってください。',
         excluded: '走行の一部を、残りの区間と食い違うという理由であなたが除外しました。サンプル自体に問題はなく、別の母集団に属しているというだけです。マップタブの RESTORE で戻せます。',
+        linkGap: '走行中に DME とのリンクが切れ、アプリが再接続しました。再接続から 2 秒のあいだは、比べられるサンプルが途切れる前のものしかなく、エンジンが落ち着いていたとは言えません。ケーブル・OBD コネクタ・USB の接続を確認してください — 走り方が原因ではありません。',
         lambdaRamp: '燃料カット・ループ再始動・rf_korr の段差のあとで λ トリムがまだ戻る途中にあり、マップではなく経過秒数を読んでいました。アクセルを戻した後や踏み込んだ後は、数秒ペダルを一定に保ってください — そこからがセルに数えられます。',
     },
 };

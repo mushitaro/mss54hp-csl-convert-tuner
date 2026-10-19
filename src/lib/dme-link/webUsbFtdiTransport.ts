@@ -283,6 +283,38 @@ export class WebUsbFtdiTransport extends BufferedByteTransport implements ByteTr
         // NotFoundError, and useDmeLink treats that name as a user cancel rather than a failure.
         // Wrapping it would turn "changed their mind" into a red error line.
         const device = granted[0] ?? await usb.requestDevice({ filters: [{ vendorId: FTDI_VENDOR_ID }] });
+        await this.openDevice(device);
+    }
+
+    /**
+     * The cable chosen at CONNECT, reopened without the chooser — see ByteTransport.reopenGranted.
+     *
+     * The granted list and nothing else. After the cable drops off the bus (a head unit's USB
+     * reset, a connector that let go) it comes back as a NEW USBDevice, so the object this transport
+     * held is not the thing to reopen — the grant is, and WebUSB keeps that per origin. With no
+     * FTDI device granted and present there is nothing to reopen, and requestDevice is not the
+     * answer: it needs a tap the driver cannot give.
+     */
+    async reopenGranted(): Promise<void> {
+        if (!WebUsbFtdiTransport.isSupported()) {
+            throw new DmeLinkError('WebUSB is not available in this browser (Chrome for Android required).');
+        }
+        if (this.device) await this.close();
+        const granted = (await navigator.usb!.getDevices()).filter(d => d.vendorId === FTDI_VENDOR_ID);
+        if (granted.length === 0) {
+            throw new DmeLinkError('The cable is not on the USB bus (no FTDI device granted to this page is connected).');
+        }
+        try {
+            await this.openDevice(granted[0]);
+        } catch (e) {
+            // A half-opened device would hold the interface against the next attempt.
+            await this.close();
+            throw e;
+        }
+    }
+
+    private async openDevice(device: USBDevice): Promise<void> {
+        const usb = navigator.usb!;
         this.device = device;
         this.deviceGone = false;
 

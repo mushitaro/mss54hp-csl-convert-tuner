@@ -219,6 +219,17 @@ export class MockDmeLink implements DmeLink {
         this.interruptNextReset = true;
     }
 
+    /**
+     * Arms one link drop for the in-run reconnect, the way `simulateInterruptedReset` arms a reset
+     * failure: the next poll fails, and the next `failReconnects` reconnects are refused before one
+     * takes. Driven from the console during testing; nothing in the UI sets it.
+     */
+    private linkDrop: { armed: boolean; failReconnects: number } | null = null;
+
+    simulateLinkDrop(failReconnects = 2): void {
+        this.linkDrop = { armed: true, failReconnects };
+    }
+
     abort(): void {
         this.aborted = true;
     }
@@ -255,6 +266,10 @@ export class MockDmeLink implements DmeLink {
         // The flash counter is NOT reseeded here, unlike the adaptations above. An ignition cycle
         // does not give a real DME its programming slots back, and a PRACTICE session that quietly
         // undid the reset on every reconnect would rehearse the wrong thing.
+        return this.identityRecord();
+    }
+
+    private async identityRecord(): Promise<DmeIdentity> {
         return {
             vin: 'MOCKVIN0000000001',
             aif: 'MOCK-0401-PD31',
@@ -262,6 +277,24 @@ export class MockDmeLink implements DmeLink {
             flashCounter: this.flashCounterSnapshot(),
             encodingChecksum: await this.queryEncodingChecksum(),
         };
+    }
+
+    /**
+     * The in-run reconnect, rehearsed — see DmeLink.reconnect.
+     *
+     * Not connect() again: a real one reopens the cable and logs in, it is not an ignition cycle, so
+     * nothing is re-seeded and `measurementStartTime` keeps the run's origin — the samples after the
+     * gap continue its timeline instead of starting a new one at t = 0.
+     */
+    async reconnect(): Promise<DmeIdentity> {
+        await delay(400);
+        if (this.linkDrop && this.linkDrop.failReconnects > 0) {
+            this.linkDrop.failReconnects--;
+            throw new DmeLinkError('PRACTICE: the cable did not answer (simulated)');
+        }
+        this.linkDrop = null;
+        this.connected = true;
+        return this.identityRecord();
     }
 
     async disconnect(): Promise<void> {
@@ -720,6 +753,13 @@ export class MockDmeLink implements DmeLink {
 
     async pollLiveMeasurement(): Promise<LiveMeasurement> {
         this.assertConnected();
+        if (this.linkDrop?.armed) {
+            // Dropped once, here: the poll fails the way a pulled cable fails it, and the link stays
+            // down until reconnect() has been refused `failReconnects` times.
+            this.linkDrop.armed = false;
+            this.connected = false;
+            throw new DmeLinkError('PRACTICE: link dropped (simulated)');
+        }
         // The cost of the exchange list this run was actually given, not a flat 20 ms. Rehearsing a
         // datalog at ten times the car's rate teaches the wrong thing about every part of the
         // procedure that depends on rate — how long a pull has to be held, how many samples a gate

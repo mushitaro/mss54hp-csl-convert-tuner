@@ -213,6 +213,14 @@ export function useLiveRun(input: {
         samplesRef.current.push(point);
         queueRef.current.push(point);
 
+        // The first sample after a link gap. The rate window would price the gap as one very slow
+        // exchange for the next 24 samples, and the pull clock would count the gap as pedal held —
+        // neither is what the readout says it is, so both start again from here.
+        if (point.linkGapS !== undefined) {
+            hzWindowRef.current = [];
+            pullRef.current = EMPTY_PULL_CLOCK;
+        }
+
         // Trailing window of sample times. There is no poll interval to read — the loop awaits
         // pollLiveMeasurement back to back, so the rate IS the DS2 round trip and the only way to
         // know it is to measure it.

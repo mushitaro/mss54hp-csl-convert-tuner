@@ -187,6 +187,20 @@ Confirmed on a real vehicle: a deliberate reload mid-log, then recovered.
 On a head unit, where the console cold-boots every time the key cycles, the run can come back without
 being asked for at all — see [Coming back after the ignition goes off](#coming-back-after-the-ignition-goes-off).
 
+**If the link drops mid-run, the run does not end.** The app reopens the same cable — without the
+port picker, since nobody can tap one at speed — logs in again, checks it is still the same DME, and
+carries on recording into the same run. Two falling tones mean the link went; two rising tones mean it
+is back. The notice line says the same in words. While it is reconnecting the hub still offers STOP and
+nothing else: a run that is reconnecting is still a run, so WRITE cannot come up.
+
+- The gap is in the log: the first sample after it carries **Link Gap** (seconds with no samples), and
+  that column goes out in the CSV. The 2 s after each gap are left out of the map as `link gap` in the
+  census, because their only comparison would be a sample from before it.
+- Attempts are spaced 0.5, 1, 2, then 3 s apart. After **60 s** without the link — most likely the
+  engine was switched off without STOP — the run ends the way it always has, with one long low tone.
+  A **different DME** answering ends it at once.
+- Not yet confirmed on a real vehicle. PRACTICE can rehearse it: `simulateLinkDrop()` on the mock link.
+
 ### FLASH — how many writes the DME has left
 
 The DME will only accept a limited number of programming cycles: **30 slots per processor**, tracked
@@ -354,6 +368,16 @@ why, and it sends nothing until you have confirmed that dialog. Its source, incl
 gate and the SYNC API, is published on this
 repository's [`preview`](https://github.com/mushitaro/mss54hp-csl-convert-tuner/tree/preview)
 branch before each deploy.
+
+**ASSISTANT** (WORKS only, off until you switch it on, per device, in the SYNC panel) lets an AI
+assistant you have connected — claude.ai or ChatGPT, voice on a phone included — ask the WORKS tab
+open on your head unit what is happening: the link, the run, a moment of the log ("torque just
+dropped — why?"), with knock retards placed in time from the DME's own counters. It can start a log,
+stop one only after you confirm out loud, and change the view. **It cannot connect to, write to or
+flash the car** — there is no tool for it; you do those on the screen. The assistant reaches the tab
+through the TSUNAGI///Matrix bridge
+([matrix-tsunagi/bridge](https://github.com/mushitaro/matrix-tsunagi/tree/main/bridge)), signed in
+with your m3 account; what it sends and where is in the same WORKS section of the privacy policy.
 
 ## ⚠️ Safety — please read before flashing
 

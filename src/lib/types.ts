@@ -31,6 +31,17 @@ export interface LogDataPoint {
      * computed over an intact array.
      */
     settleUnsteady?: boolean;
+    /**
+     * The link dropped before this sample and was reconnected mid-run: seconds since the sample
+     * before it, i.e. the stretch the log has nothing for. Only ever on the first sample after a
+     * gap (liveSupervisor.ts), and absent on every log recorded before runs could survive one.
+     *
+     * Kept on the sample rather than in a side list so it travels wherever the samples go — the
+     * recovery store, the session, the CSV (`Link Gap`) — and the filter can never see a sample
+     * without the fact that its predecessor is seconds away. See LINK_GAP_HOLDOFF_S for what the
+     * filter does with it.
+     */
+    linkGapS?: number;
     time: number;
     rpm: number;
     rawLoad: number; // relativer Oeffnungsquerschnitt

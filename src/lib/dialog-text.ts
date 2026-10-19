@@ -222,6 +222,35 @@ const JA = {
         : 'DMEに接続できません — Chrome/Edgeが必要です(Web Serial API)。PRACTICEならオフラインで試せます。',
 
     /**
+     * 走行中のログでリンクが切れ、同じケーブルで再接続しているあいだ（liveSupervisor.ts）。
+     *
+     * 三つとも「ログは止まっていない」を言う。この行を見る人が最初に知りたいのはそれで、
+     * 赤（エラー）ではなく黄（注意）なのもそのため。止まるときは別の文（logFinished）が出る。
+     * 電話の幅では二行に切れるので、短く保つ。
+     */
+    linkLost: (): string => 'リンクが切れました — 同じケーブルで再接続しています。ログは止めていません。',
+    linkRetrying: (attempt: number, elapsedS: number): string =>
+        `リンク断 ${Math.round(elapsedS)} 秒 — 再接続 ${attempt} 回目も応答なし、続けて試しています。`
+        + 'ケーブルとコネクタを確認してください。ログは止めていません。',
+    linkResumed: (gapS: number): string =>
+        `リンクが ${gapS.toFixed(1)} 秒途切れ、再接続しました。途切れた区間はログに記録し、直後は解析から外します。`,
+
+    /**
+     * ASSISTANT をオンにする前の確認。何が・どこへ・何のために送られ、何ができないかを一度だけ言う。
+     * 送り先は二つ（TSUNAGI の中継と、利用者が接続した AI サービス）で、後者はこちらの管理外 ——
+     * それを伏せると、プライバシーポリシーの約束（ワークス版の節）と画面が食い違う。
+     */
+    titleAssistantOn: 'ASSISTANT をオンにする',
+    assistantOn: (): string =>
+        'あなたが接続した AI アシスタントが、このタブに問い合わせられるようになります。\n\n'
+        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード）と、記録済みのデータログの一部（回転・負荷・点火角・ノックなど）。VIN は送りません。\n'
+        + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。\n'
+        + '届く先: あなたがアシスタントに接続したサービス（claude.ai など）。そこでの扱いは、そのサービスの規約によります。\n\n'
+        + 'できないこと: 車への接続・書き込み・フラッシュ。ログの停止は、あなたが声で確認したときだけです。\n\n'
+        + 'いつでもここでオフにできます。',
+    btnAssistantOn: 'オンにする',
+
+    /**
      * 読み取ったBINのチェックサムが合わなかったときだけ出る。成功時は何も出さない。
      *
      * 「ECUが壊れている」と読めないように書くこと。このCRC実装はstock BINと実車読み取りの2回、
@@ -467,6 +496,23 @@ const EN: NativeDialogText = {
     noTransport: (a: { android: boolean }) => a.android
         ? 'Cannot reach a DME — a USB OTG adapter and a WebUSB-capable browser (Chrome) are required. PRACTICE works offline.'
         : 'Cannot reach a DME — Chrome or Edge is required (Web Serial API). PRACTICE works offline.',
+
+    titleAssistantOn: 'Turn ASSISTANT on',
+    assistantOn: () =>
+        'The AI assistant you connected will be able to ask this tab questions.\n\n'
+        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode) and parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest). Never the VIN.\n'
+        + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing.\n'
+        + 'Where it ends up: the service you connected the assistant to (claude.ai and others), under that service\'s own terms.\n\n'
+        + 'What it cannot do: connect to, write to or flash the car. It stops a log only after you confirm out loud.\n\n'
+        + 'You can turn it off here at any time.',
+    btnAssistantOn: 'Turn on',
+
+    linkLost: () => 'Link lost — reconnecting on the same cable. The log has not stopped.',
+    linkRetrying: (attempt, elapsedS) =>
+        `Link down ${Math.round(elapsedS)} s — reconnect attempt ${attempt} got no answer, still trying. `
+        + 'Check the cable and connector. The log has not stopped.',
+    linkResumed: gapS =>
+        `The link was down ${gapS.toFixed(1)} s and is back. The gap is recorded in the log, and the samples just after it are left out of the map.`,
 
     readChecksumBad: (a: { slave: boolean; master: boolean }): string => {
         const which = !a.slave && !a.master ? 'SLAVE and MASTER' : !a.slave ? 'SLAVE' : 'MASTER';

@@ -454,6 +454,49 @@ export class WebSerialDmeLink implements DmeLink {
         await this.transport.close();
     }
 
+    /**
+     * The in-run reconnect — see DmeLink.reconnect and liveSupervisor.ts.
+     *
+     * Close, reopen the SAME cable without the picker, log in, identify: connect's own sequence,
+     * minus the one step a driver cannot do. What it keeps is what makes the samples on either side
+     * of the gap one run — `startTime`, the origin of every timestamp, and `liveExchanges`. What it
+     * clears is what would carry a reading from before the gap onto a sample after it: the lane
+     * index goes back to 0, so the first sample back reads every lane, and the block-19 carry is
+     * emptied rather than left to stand in for a read that has not happened yet.
+     *
+     * Gated like every other public operation. The poll that failed has released the gate by the
+     * time this runs, and nothing else may interleave frames with a login.
+     */
+    async reconnect(reason: string): Promise<DmeIdentity> {
+        return this.withGate(async () => {
+            const t0 = performance.now();
+            this.connected = false;
+            this.events.push(`LIVE reconnect: ${reason}`);
+            if (!this.transport.reopenGranted) {
+                throw new DmeLinkError('This transport cannot reopen its cable without the port picker.');
+            }
+            try {
+                await this.transport.close();
+                await this.transport.reopenGranted();
+                await this.login();
+            } catch (e) {
+                await this.transport.close();
+                this.events.push(`LIVE reconnect failed: ${e instanceof Error ? e.message : String(e)}`);
+                throw e;
+            }
+            this.connected = true;
+            this.liveSampleIndex = 0;
+            this.lambdaDriftRun = 0;
+            this.lastSlowLane = {};
+            // The reopen put the FTDI latency timer back to its idle value (WebUsbFtdiTransport.open
+            // does that on every open); the run is still a run. Not awaited, as in beginLogTiming.
+            void this.transport.setLatencyTimer?.('log');
+            const id = await this.identify();
+            this.events.pushTimed('LIVE reconnected', t0);
+            return id;
+        });
+    }
+
     private assertConnected() {
         if (!this.connected) throw new DmeLinkError('Not connected to DME');
     }

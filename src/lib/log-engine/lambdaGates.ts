@@ -113,6 +113,9 @@ export type DropReason =
     | 'highLoadSettle'
     | 'settle'
     | 'excluded'
+    /** Samples just after a mid-run reconnect, whose comparisons would reach across the gap — see
+     *  LINK_GAP_HOLDOFF_S in filter.ts. */
+    | 'linkGap'
     /**
      * Samples the lambda loop had not yet answered: its trim was still ramping back from the last
      * event — a loop restart at 1.000 after a fuel cut or loop-off, or an rf_korr step — gate open
@@ -129,7 +132,7 @@ export type DropCensus = Record<DropReason, number>;
 
 export const EMPTY_CENSUS: DropCensus = {
     coldEngine: 0, idle: 0, transient: 0, catProtect: 0, fullLoad: 0, highLoadSettle: 0,
-    settle: 0, controllerStop: 0, fuelCut: 0, excluded: 0, lambdaRamp: 0,
+    settle: 0, controllerStop: 0, fuelCut: 0, excluded: 0, linkGap: 0, lambdaRamp: 0,
 };
 
 /** The filter's census with the VE calculation's lambda-ramp count put in. A copy: the filter's

@@ -675,6 +675,19 @@ export interface WriteVerification {
 export interface DmeLink {
     connect(): Promise<DmeIdentity>;
     disconnect(): Promise<void>;
+    /**
+     * Re-establishes the diagnostic session on the cable this link already holds, in the middle of
+     * a datalog whose link dropped — see liveSupervisor.ts.
+     *
+     * Not a second `connect()`. No port picker (the transport reopens what it held), and the RUN
+     * survives it: the clock its samples are stamped against and the exchange list are kept, and
+     * the lane index restarts so the first sample back reads every lane. Resolves with the identity
+     * the DME gives after the login, which is how the caller proves it is still the same car.
+     *
+     * Optional: a link that cannot do this ends the run on a link failure, as every link did before.
+     * `reason` is the failure being recovered from, for the link's event log.
+     */
+    reconnect?(reason: string): Promise<DmeIdentity>;
     readPartialBin(onProgress?: TransferProgress): Promise<ArrayBuffer>;
     /**
      * Erases and rewrites the DataTune pair, then verifies per `options.verifyMode`.

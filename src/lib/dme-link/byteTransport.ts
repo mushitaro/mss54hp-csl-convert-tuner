@@ -17,6 +17,18 @@ import { WebUsbFtdiTransport } from './webUsbFtdiTransport';
 export interface ByteTransport {
     setTiming(timing: TransferTiming | null): void;
     open(): Promise<void>;
+    /**
+     * Opens the cable this transport last held, WITHOUT asking the user to pick it.
+     *
+     * For the in-run reconnect (liveSupervisor.ts). A datalog that loses its link mid-drive has no
+     * user gesture to spend on a port picker — the driver is driving — and the cable is the one
+     * they already chose. So this never falls back to a picker: one opened from a timer is refused
+     * by the browser, and a picker that did open would be a dialog over a moving car. It throws when
+     * that cable is not there to be reopened, and the run counts the attempt as failed.
+     *
+     * Optional: a bench or fake transport without it simply does not reconnect.
+     */
+    reopenGranted?(): Promise<void>;
     close(): Promise<void>;
     reopen(baudRate: number): Promise<void>;
     /**

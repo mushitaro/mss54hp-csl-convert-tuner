@@ -133,9 +133,17 @@ export const SessionStorePanel: React.FC<{
      * would be a second copy of that.
      */
     topAction?: React.ReactNode;
+    /**
+     * ASSISTANT — the switch that lets the owner's assistant reach this tab, and its state.
+     *
+     * Here because it is the same kind of thing as SYNC: a WORKS-only way this tab talks to a server
+     * on the owner's behalf, behind the same sign-in, under the same privacy section. A node, built
+     * once by the page, for the reason `topAction` is: this panel is mounted twice.
+     */
+    assistant?: React.ReactNode;
 }> = ({
     openUp, account, onReauth, privacyUrl, onRestored, label = 'Sync', triggerClassName,
-    triggerToneClassName, triggerIcon, topAction,
+    triggerToneClassName, triggerIcon, topAction, assistant,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [runs, setRuns] = useState<StoredSession[] | null>(null);
@@ -316,6 +324,7 @@ export const SessionStorePanel: React.FC<{
                         >
                             {t.privacy}
                         </a>
+                        {assistant && <div className="pt-3 border-t border-slate-800">{assistant}</div>}
                         {listError && <p className="text-[9px] text-red-400 break-words">{listError}</p>}
 
                         {/* The two lists below are the same shape on purpose: a heading, a LOAD
