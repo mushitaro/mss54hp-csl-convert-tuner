@@ -137,6 +137,11 @@ export const APP_CONFIG = {
         // LogDataPoint.linkGapS. Only exceptions are written: a run that never lost its link has no
         // such column.
         LINK_GAP: 'Link Gap',
+        // A label on the row it was put at: the OBSERVE plan, a finished step, a driver's "mark that".
+        MARK: 'Mark',
+        // OBSERVE: one column per watched address, `Watch FFD1A2`, holding the raw bytes as `0x0A1B`
+        // (with the prefix, so the CSV reader's number typing cannot turn `1234` into a number).
+        WATCH_PREFIX: 'Watch ',
         // Testo's own headers for the six angles ("Ignition angle cyl. n" on 12050B13), so a log
         // exported here reads as the same channel in either tool.
         IGNITION_ANGLE_1: 'Ignition angle cyl. 1',

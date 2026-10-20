@@ -1409,6 +1409,14 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         { name: 'KNOCK_AGE_RAM_READ', ...KNOCK_AGE_RAM_READ },
         { name: 'KNOCK_SUM_RAM_READ', ...KNOCK_SUM_RAM_READ },
         { name: 'MANIFOLD_AIR_RAM_READ', ...MANIFOLD_AIR_RAM_READ },
+        // Five reads the live poll makes that this list did not hold until 2026-10-20, so a wrong
+        // constant in any of them would have reached the car as a 0xB0 per sample instead of
+        // failing the build. Every *_RAM_READ belongs here; verify:observe counts them.
+        { name: 'LLS_AIR_RAM_READ', ...LLS_AIR_RAM_READ },
+        { name: 'LLS_INTEGRATOR_RAM_READ', ...LLS_INTEGRATOR_RAM_READ },
+        { name: 'LLS_DUTY_RAM_READ', ...LLS_DUTY_RAM_READ },
+        { name: 'SLEW_STATE_RAM_READ', ...SLEW_STATE_RAM_READ },
+        { name: 'SLEW_TORQUE_RAM_READ', ...SLEW_TORQUE_RAM_READ },
         ...RAM_PROBE_READS.map(r => ({ name: `RAM_PROBE_READS.${r.name}`, segment: r.segment, address: r.address, count: r.count })),
     ];
     for (const r of reads) {

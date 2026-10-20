@@ -24,6 +24,7 @@ import { MockIdleBench,
 import { readIdleTables, llsTvAt } from '@/lib/idle/idleTables';
 import { MockInertiaBench } from '@/lib/inertia/bench';
 import { type LogExchange, LOG_PROFILES, sampleMs , IDLE_SLOW_LANE_EVERY, IDLE_SURVEY_LANE_EVERY } from '@/lib/log-engine/logProfile';
+import { bytesToHex, practiceWatchBytes, watchKey } from '@/lib/log-engine/observe';
 
 const PARTIAL_BIN_LENGTH = 65536;
 // Imported, not redeclared: this used to be an independent `const CHUNK_SIZE = 122`, so the mock's
@@ -708,7 +709,15 @@ export class MockDmeLink implements DmeLink {
     private liveExchanges: LogExchange[] = LOG_PROFILES.VE.fallback ?? LOG_PROFILES.VE.exchanges;
 
     setLiveExchanges(exchanges: readonly LogExchange[]): void {
+        // The real link's check, so a plan that would be refused in the car is refused here first.
+        for (const x of exchanges) {
+            if (x.kind === 'ram' && !isRamReadInRange(x.segment, x.address, x.count)) {
+                throw new DmeLinkError(`RAM read "${x.name}" at 0x${x.address.toString(16)} +${x.count} is not inside `
+                    + `a declared window for segment 0x${x.segment.toString(16)}. See Mss54HpRamWindows.`);
+            }
+        }
         this.liveExchanges = [...exchanges];
+        this.watchSampleIndex = 0;
     }
 
     getLiveExchanges(): LogExchange[] {
@@ -771,7 +780,7 @@ export class MockDmeLink implements DmeLink {
         // The simulated drive, computed from this DME's own calibration — see mockDrive.ts. It is
         // the only mode in which the EGT correction can be rehearsed: the idle pattern below never
         // reaches the correction's 55-80 %RF gate, so rf_korr in it is 1.000 forever.
-        if (this.driveReady) return this.withIgnition(this.drive.sample(t));
+        if (this.driveReady) return this.withWatch(this.withIgnition(this.drive.sample(t)));
 
         // Fallback: the old idle pattern, for a binary with no usable EGT tables (the generated
         // placeholder, or an image whose bytes do not match the catalog). Telemetry-shaped, and
@@ -796,7 +805,7 @@ export class MockDmeLink implements DmeLink {
         const purging = Math.sin(t * 0.1) > 0;
         const tankVent = purging ? 7.4 + Math.sin(t * 0.6) * 0.5 : 0;
 
-        return this.withIgnition({
+        return this.withWatch(this.withIgnition({
             time: t,
             rpm: Math.max(0, rpm),
             rawLoad: Math.max(0, rawLoad),
@@ -856,7 +865,32 @@ export class MockDmeLink implements DmeLink {
             // A healthy valve: bit 0 is what lls_tv_init leaves, bit 7 clear. That is the case the
             // ti_load_factor branch question actually turns on, so a rehearsal has to get it right.
             llsSt: 0x01,
-        });
+        }));
+    }
+
+    /** Which sample of the run this is, for the watched reads' `every` — the real link's liveSampleIndex. */
+    private watchSampleIndex = 0;
+
+    /**
+     * OBSERVE in PRACTICE: made-up bytes for the watched addresses, so the run, the panel, the log
+     * and the CSV can be rehearsed without a car.
+     *
+     * There is no simulated RAM behind them, and pretending otherwise would teach that an address
+     * "means" something because the mock said so. So each address is given one of four plainly
+     * synthetic behaviours, picked by the address itself and therefore stable across runs:
+     * follows rpm (a word), follows load (a byte), a flag that sets with the throttle shut, and a
+     * free-running counter. Enough to practise telling those four shapes apart, which is the actual
+     * skill; nothing about any real address. Bytes past the meaningful ones are a constant.
+     */
+    private withWatch(sample: LiveMeasurement): LiveMeasurement {
+        const index = this.watchSampleIndex++;
+        let watch: Record<string, string> | null = null;
+        for (const x of this.liveExchanges) {
+            if (x.kind !== 'ram' || !x.watch || index % Math.max(1, x.every ?? 1) !== 0) continue;
+            const bytes = practiceWatchBytes(x.address, x.count, index, sample);
+            (watch ??= {})[watchKey(x.address)] = bytesToHex(bytes);
+        }
+        return watch ? { ...sample, watch } : sample;
     }
 
     /**

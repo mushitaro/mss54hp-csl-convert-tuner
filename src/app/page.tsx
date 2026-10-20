@@ -34,6 +34,8 @@ import { readRingTables, solveLlsTv, ringDrift, RING_GAIN_DEFAULTS } from '@/lib
 import { idleReachIfLlsTakes } from '@/lib/lls/composeLlsTv';
 import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
 import LlsPanel from '@/components/LlsPanel';
+import ObservePanel from '@/components/ObservePanel';
+import { EMPTY_PLAN, planMark, planProblems, watchExchanges, type ObservePlan } from '@/lib/log-engine/observe';
 import { WriteManifest, ManifestCorner, type ManifestGroup } from '@/components/WriteManifest';
 import {
   enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
@@ -322,6 +324,12 @@ export default function Home() {
    * measured, and the corner says so rather than disappearing. See `modeLock`.
    */
   const [logProcess, setLogProcess] = useState<ProcessId>('VE');
+  /** OBSERVE's plan: what the next observation run watches and asks for. Page state, not a store —
+   *  a plan is for the run about to happen, and the run itself carries it into the log as its first
+   *  mark, so a reload loses a draft and never a record. */
+  const [observePlan, setObservePlan] = useState<ObservePlan>(EMPTY_PLAN);
+  /** Labels waiting for the next sample — see markNow. */
+  const pendingMarksRef = useRef<string[]>([]);
   const connectedVin = dmeLink.identity?.vin ?? null;
   useEffect(() => {
     setVerifyMode(initialVerifyMode(connectedVin));
@@ -2172,6 +2180,9 @@ export default function Home() {
     // so the panel has something true to say before any drive. What the drive adds is which rows
     // it may write — until then the solve is shown against the map alone.
     { id: 'lls', label: 'LLS (EXP.)', enabled: !!binaryFileState.binaryBuffer },
+    // Always enabled: the plan is written before there is a log or a car, and the bytes it watched
+    // are read off whatever log is loaded.
+    { id: 'observe', label: 'OBSERVE (EXP.)', enabled: true },
     // Read-only, and the same prerequisite as IDLE. This is where the idle thresholds can be
     // checked against the bytes they were decoded from, cell by cell. It exists as its own tab so
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
@@ -2999,7 +3010,7 @@ export default function Home() {
     const t = dialogText();
     await ask({
       title: t.titleLogFinished, icon: <FileSpreadsheet className="w-3 h-3" />,
-      body: t.logFinished(failure), confirmLabel: t.btnOk,
+      body: logProcess === 'OBSERVE' ? t.observeFinished(failure) : t.logFinished(failure), confirmLabel: t.btnOk,
     });
   };
 
@@ -3010,6 +3021,12 @@ export default function Home() {
    *  cable). */
   const finishLogRef = useRef(finishLog);
   finishLogRef.current = finishLog;
+
+  /** Puts a label on the log at the next sample: an OBSERVE step done, a free MARK. Only while a log
+   *  records — a mark with no sample to land on would be a mark on nothing. */
+  const markNow = (label: string) => {
+    if (dmeLink.state === 'tuning') pendingMarksRef.current.push(label);
+  };
 
   const handleStartTune = async () => {
     const profile = LOG_PROFILES[logProcess];
@@ -3034,6 +3051,13 @@ export default function Home() {
     // measure, and the panel is where measuring happens.
     if (logProcess === 'INERTIA' || logProcess === 'IDLE') {
       goToTab(logProcess === 'INERTIA' ? 'inertia' : 'idle');
+      setNarrowPane('map');
+      return;
+    }
+    // OBSERVE with a plan that cannot run goes to the plan, which lists what is wrong with it —
+    // routing rather than refusing, for the reason above, and before any side effect below.
+    if (logProcess === 'OBSERVE' && planProblems(observePlan).length) {
+      goToTab('observe');
       setNarrowPane('map');
       return;
     }
@@ -3064,9 +3088,14 @@ export default function Home() {
     // first would hand it a list the disassembly never described.
     //
     // Both lists are annotated, so a production run that falls back is still a production run.
-    const exchanges = featurePreview
+    const verified = featurePreview
       ? (await dmeLink.verifyLogProfile(profile)).exchanges
       : productionExchanges((await dmeLink.verifyLogProfile(profile)).exchanges);
+    // OBSERVE's watched reads go on after the gate and the narrowing, like any read the profile does
+    // not describe: the plan is checked above, and the link checks every window again.
+    const exchanges = logProcess === 'OBSERVE' ? [...verified, ...watchExchanges(observePlan)] : verified;
+    // What the run is for, on its first sample, so the log explains itself without the plan beside it.
+    pendingMarksRef.current = logProcess === 'OBSERVE' ? [planMark(observePlan)] : [];
     liveExchangesRef.current = exchanges;
     if (currentSession) {
       void sessionDb.setProcess(currentSession.id, logProcess).catch(() => { /* label only */ });
@@ -3076,7 +3105,7 @@ export default function Home() {
     // LAMBDA FEEDBACK is where a run is actually read — it is the trim the log is being captured to
     // measure. It is disabled at this instant (no correctionMap, no newMap), which is exactly what
     // arming is for; the first sample's unthrottled flush releases it.
-    pendingTabRef.current = 'lambda';
+    pendingTabRef.current = logProcess === 'OBSERVE' ? 'observe' : 'lambda';
     dmeLink.startTuning(
       (sample, meta) => {
         const point: LogDataPoint = {
@@ -3168,6 +3197,13 @@ export default function Home() {
         // long nothing was recorded. On the sample itself so the filter, the store and the CSV all
         // see it (LogDataPoint.linkGapS).
         if (meta.linkGapS !== undefined) point.linkGapS = meta.linkGapS;
+        // OBSERVE's raw bytes, and any mark waiting for a sample to land on. Both on the point for
+        // linkGapS's reason: they travel with it into the store, the session and the CSV.
+        if (sample.watch) point.watch = sample.watch;
+        if (pendingMarksRef.current.length) {
+          point.mark = pendingMarksRef.current.join(' | ');
+          pendingMarksRef.current = [];
+        }
         lastSampleAtRef.current = performance.now();
         // Record it, price the rate, pace the flush and the recovery write. Nothing in there
         // renders anything — see useLiveRun for why that matters at four samples a second.
@@ -3839,6 +3875,10 @@ export default function Home() {
     if (dmeLink.state === 'tuning') return 'A log is already recording.';
     if (dmeLink.state !== 'connected') return 'The cable link is not connected. Connecting is done by a person on the screen (CONNECTION).';
     if (logProcess === 'INERTIA' || logProcess === 'IDLE') return `${logProcess} records from its own panel on the screen, not from START TUNE.`;
+    if (logProcess === 'OBSERVE') {
+      const problems = planProblems(observePlan);
+      if (problems.length) return `The OBSERVE plan cannot run yet: ${problems.join(' ')}`;
+    }
     // The hub's own answer, so the assistant can never start a log the screen would not offer:
     // an armed write outranks a new run there, and does here.
     if (idleAction !== 'tune') {
@@ -6113,6 +6153,19 @@ export default function Home() {
                     anchorMlKgH={llsAnchor}
                     onAnchorChange={setLlsAnchor}
                     idleReach={llsIdleReach}
+                  />
+                </div>
+              )}
+
+              {activeTab === 'observe' && (
+                <div className="h-full w-full overflow-y-auto p-3">
+                  <ObservePanel
+                    plan={observePlan}
+                    onPlanChange={setObservePlan}
+                    recording={dmeLink.state === 'tuning' && logProcess === 'OBSERVE'}
+                    points={logFileState.rawLogData ?? []}
+                    onMark={markNow}
+                    practice={dmeLink.mockMode}
                   />
                 </div>
               )}

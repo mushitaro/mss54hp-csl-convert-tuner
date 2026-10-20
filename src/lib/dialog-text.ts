@@ -150,6 +150,16 @@ const JA = {
         '※ エンジンが回っているとDMEが書き込みを拒否します。\n' +
         '※ エンジンを止めると通信が切れるため、接続はここで解除しました。\n\n' +
         '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
+    // OBSERVE: the same stop, without the WRITE route — an observation run derives nothing to write.
+    observeFinished: (failure: string | null) =>
+        (failure
+            ? '⚠ 通信が途切れたため、観察ランを中断しました。\n\n' +
+            `理由: ${failure}\n\n` +
+            '※ ここまでに記録したサンプルは保持しています。\n\n'
+            : '観察ランを終了しました。\n\n') +
+        '記録は OBSERVE タブの BYTES と、ログの Watch・Mark 列に残っています。\n' +
+        'このランは書き込むものを作りません。名前は、何と一緒に動いたかを見て、あとで付けます。\n\n' +
+        '※ 接続はここで解除しました。',
 
     // --- flashing the DME ---
     writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
@@ -439,6 +449,15 @@ const EN: NativeDialogText = {
         'Note: the DME refuses the write while the engine is running.\n' +
         'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
         'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
+    observeFinished: (failure: string | null) =>
+        (failure
+            ? '⚠ The observation run stopped because the link was lost.\n\n' +
+            `Reason: ${failure}\n\n` +
+            'Note: the samples recorded up to that point have been kept.\n\n'
+            : 'Observation run finished.\n\n') +
+        'What it saw is under BYTES on the OBSERVE tab, and in the log\'s Watch and Mark columns.\n' +
+        'This run makes nothing to write. The names come afterwards, from what moved with what.\n\n' +
+        'Note: the connection was released here.',
 
     writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +

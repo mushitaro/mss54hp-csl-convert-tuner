@@ -42,6 +42,18 @@ export interface LogDataPoint {
      * filter does with it.
      */
     linkGapS?: number;
+    /**
+     * OBSERVE: raw bytes of the watched addresses, as hex keyed by address (`{ FFD1A2: '0A1B' }`).
+     * Raw because the run exists to find out what they mean — see log-engine/observe.ts. Absent on
+     * samples where no watched read was due. CSV: one `Watch FFD1A2` column per address.
+     */
+    watch?: Record<string, string>;
+    /**
+     * A label put on the log at this sample: the plan at the start of an OBSERVE run, a step the
+     * owner finished, anything the driver asked to mark. On the sample rather than in a side list
+     * for linkGapS's reason — it travels wherever the samples go. CSV: `Mark`.
+     */
+    mark?: string;
     time: number;
     rpm: number;
     rawLoad: number; // relativer Oeffnungsquerschnitt

@@ -181,6 +181,13 @@ export type LogExchange =
         count: number;
         every?: number;
         provides?: readonly FieldKey[];
+        /**
+         * An OBSERVE read: an address nobody has named, recorded as the bytes it held. The live
+         * poll hands it to `LiveMeasurement.watch` before it dispatches on the address, so it can
+         * never be decoded as a channel it happens to overlap — a watched window that covers
+         * LA_F_REGLER is still bytes, not a lambda trim.
+         */
+        watch?: true;
     };
 
 /**
@@ -470,7 +477,7 @@ export function idleTorqueAgrees(
     return Math.abs(fromRam - fromBlock19) <= IDLE_TORQUE_TRUTH_GATE.toleranceNm;
 }
 
-export type ProcessId = 'VE' | 'EGT' | 'INERTIA' | 'IDLE' | 'LLS';
+export type ProcessId = 'VE' | 'EGT' | 'INERTIA' | 'IDLE' | 'LLS' | 'OBSERVE';
 
 /** A patch this run needs in the ECU before it means anything. Checked BEFORE the run, because
  *  finding out afterwards costs a drive. */
@@ -831,6 +838,17 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // None. The estimate reads torque and speed gradient, which the patches do not touch.
         requires: [],
         produces: 'Flywheel inertia estimate and a calibration proposal',
+        runnable: true,
+    },
+    OBSERVE: {
+        id: 'OBSERVE', label: 'OBSERVE',
+        // Block 3 only, as written: rpm, load, throttle, coolant, EGT and rf are the context every
+        // watched byte is read against. The watched reads themselves are not here — they are the
+        // operator's plan (observe.ts), appended at START after the plan is checked, because which
+        // addresses a run watches is the question it was started to answer.
+        exchanges: [{ ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] }],
+        requires: [],
+        produces: 'Raw bytes at the addresses the plan names, beside rpm, load and throttle',
         runnable: true,
     },
 };

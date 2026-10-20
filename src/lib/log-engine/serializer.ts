@@ -63,6 +63,11 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
     // The link gaps, by the same rule: an exception column. Blank on every row but the one each gap
     // ended on, and absent from a run that never lost its link.
     const hasLinkGap = points.some(p => p.linkGapS !== undefined);
+    // Marks and watched bytes: a column only when a row has one, like every optional channel here.
+    // Watched addresses are whatever the OBSERVE plan named, so the columns are the union across
+    // the run, in address order; a row that did not read an address leaves its cell blank.
+    const hasMark = points.some(p => p.mark !== undefined);
+    const watchKeys = [...new Set(points.flatMap(p => (p.watch ? Object.keys(p.watch) : [])))].sort();
     // The ignition side, one flag per column like every channel above: a run that never read the
     // knock counters has no such columns, while one that did keeps its blank rows blank.
     const ignition = ([
@@ -122,6 +127,11 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         if (hasMdDpDelta) row[M.MD_DP_DELTA] = p.mdDpDelta ?? '';
         if (hasDecodeGap) row[M.PRESSURE_DECODE_GAP] = p.pressureDecodeDisagreesMbar ?? '';
         if (hasLinkGap) row[M.LINK_GAP] = p.linkGapS ?? '';
+        if (hasMark) row[M.MARK] = p.mark ?? '';
+        for (const key of watchKeys) {
+            const hex = p.watch?.[key];
+            row[M.WATCH_PREFIX + key] = hex ? `0x${hex}` : '';
+        }
         for (const [key, header] of ignition) row[header] = p[key] ?? '';
         return row;
     });

@@ -48,6 +48,12 @@ export interface LiveMeasurement {
     /** Seconds since the run started. Note the Testo CSV path uses milliseconds for the same
      *  field name on LogDataPoint — log-engine/filter.ts detects which it is holding. */
     time: number;
+    /**
+     * OBSERVE: the bytes each watched read returned on this sample, as hex, keyed by the address's
+     * six hex digits (`FFD1A2` → `0A1B`). Present only on a sample where at least one was due and
+     * answered; a read that failed is absent, never zero. See log-engine/observe.ts.
+     */
+    watch?: Record<string, string>;
     rpm: number;
     rawLoad: number;
     /** `la_f_regler1/2` — the lambda controller's output factor, DS2 selection 19.

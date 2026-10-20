@@ -17,7 +17,7 @@ let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
 
 const ALL_TABS = ['startup', 'current', 'lambda', 'new', 'diff', 'log',
-    'rfkorr', 'warmup', 'inertia', 'shape', 'idle', 'lls', 'calibration'];
+    'rfkorr', 'warmup', 'inertia', 'shape', 'idle', 'lls', 'calibration', 'observe'];
 
 console.log('\n[every tab has exactly one owner]');
 {
@@ -81,8 +81,10 @@ console.log('\n[MODE, which a tab set cannot speak for either]');
     check('production offers VE and nothing else',
         JSON.stringify(production) === JSON.stringify(['VE']), production.join(', '));
     const preview = selectableModes(true);
-    check('preview offers all four',
-        JSON.stringify(preview) === JSON.stringify(['VE', 'IDLE', 'LLS', 'INERTIA']), preview.join(', '));
+    // OBSERVE (2026-10-20): experimental, so preview only — a research run that reads whatever the
+    // operator points it at, never a tune. Production's line above is the one that must not move.
+    check('preview offers all five',
+        JSON.stringify(preview) === JSON.stringify(['VE', 'IDLE', 'LLS', 'INERTIA', 'OBSERVE']), preview.join(', '));
 
     // Every mode names a real, runnable profile -- and every runnable profile is reachable. The
     // second half is the one that would otherwise rot: a profile could be marked runnable and

@@ -28,6 +28,7 @@ import {
     type LogExchange, LAMBDA_TRUTH_GATE, lambdaTrimAgrees, IDLE_SLOW_LANE_EVERY, IDLE_SURVEY_LANE_EVERY,
     IDLE_TORQUE_TRUTH_GATE, idleTorqueAgrees,
 } from '@/lib/log-engine/logProfile';
+import { bytesToHex, watchKey } from '@/lib/log-engine/observe';
 import { ServiceBlockPointers } from './serviceBlockReport';
 import { ByteTransport, createDmeTransport } from './byteTransport';
 import {
@@ -2102,6 +2103,15 @@ export class WebSerialDmeLink implements DmeLink {
     /** Block 3 is not optional: it carries rpm and load, without which there is no sample at all.
      *  A list that omits it is a caller error, so it is put back rather than obeyed. */
     setLiveExchanges(exchanges: readonly LogExchange[]): void {
+        // Every RAM read, checked against the windows before it can reach the car. The constants
+        // are checked at load (ramMap.ts), but an OBSERVE plan is typed in at runtime, and a read
+        // outside a window is a 0xB0 and a resync on every sample it is due — for the whole drive.
+        for (const x of exchanges) {
+            if (x.kind === 'ram' && !isRamReadInRange(x.segment, x.address, x.count)) {
+                throw new DmeLinkError(`RAM read "${x.name}" at 0x${x.address.toString(16)} +${x.count} is not inside `
+                    + `a declared window for segment 0x${x.segment.toString(16)}. See Mss54HpRamWindows.`);
+            }
+        }
         const hasStandard = exchanges.some(x =>
             x.kind === 'block' && x.selection === STANDARD_MEASUREMENT_BLOCK.selection && (x.every ?? 1) === 1);
         this.liveExchanges = hasStandard
@@ -2659,6 +2669,10 @@ export class WebSerialDmeLink implements DmeLink {
         let knockSums: Partial<KnockSumChannels> | null = null;
         let manifoldAir: Partial<ManifoldAirChannels> | null = null;
         let vanos: Partial<VanosChannels> | null = null;
+        // OBSERVE: the raw bytes of each watched read that was due, keyed by address. NOT carried —
+        // a byte read now is not the byte seven samples from now, and a count of keys is a count of
+        // reads.
+        let watched: Record<string, string> | null = null;
 
         for (const exchange of this.liveExchanges) {
             if (!due(exchange)) continue;
@@ -2666,6 +2680,13 @@ export class WebSerialDmeLink implements DmeLink {
             if (exchange.kind === 'ram') {
                 try {
                     const bytes = await this.pollRamChunk(exchange);
+                    // Before any dispatch on the address: a watched window that happens to cover a
+                    // channel this loop knows (LA_F_REGLER, say) is still the bytes the operator
+                    // asked to watch, and decoding it would write a trim nobody asked for.
+                    if (exchange.watch) {
+                        (watched ??= {})[watchKey(exchange.address)] = bytesToHex(bytes);
+                        continue;
+                    }
                     // Dispatched on the address, not on "it is a RAM read". There are two of them in
                     // a VE list now and they mean entirely different things; decoding the intake
                     // temperature as a lambda trim would produce a plausible number (one byte at
@@ -2729,6 +2750,14 @@ export class WebSerialDmeLink implements DmeLink {
                         // two clusters run at different rates, so most of the time they do not.
                         ambient = decodeAmbientTemp(bytes, exchange.address,
                             density?.ambientPressure ?? this.lastSlowLane.ambientPressure);
+                        continue;
+                    }
+                    // The lambda trim, and only from the read that IS the lambda trim. This used to
+                    // be the fall-through for any address the dispatch above did not know, which
+                    // was harmless only while every RAM read in every list was one of ours: an
+                    // unknown read whose window covered LA_F_REGLER would have overwritten stft1.
+                    // Anything else decodes to nothing.
+                    if (exchange.segment !== LAMBDA_TRIM_RAM_READ.segment || exchange.address !== LAMBDA_TRIM_RAM_READ.address) {
                         continue;
                     }
                     const b1 = decodeRamSignal(Mss54HpRamSignals.LA_F_REGLER1, bytes, exchange.address);
@@ -2833,6 +2862,7 @@ export class WebSerialDmeLink implements DmeLink {
             ...knockSums,
             ...manifoldAir,
             ...vanos,
+            ...(watched ? { watch: watched } : {}),
         };
     }
 
@@ -2877,6 +2907,12 @@ export class WebSerialDmeLink implements DmeLink {
      * Cancel Read and has nothing to do with a datalog.
      */
     private async pollRamChunk(read: { segment: number; address: number; count: number }): Promise<Uint8Array> {
+        // The public readRam checks this; the poll path did not, so a list that reached here without
+        // going through setLiveExchanges could have asked the DME for anything. Checked per read —
+        // it is a comparison, against a round trip of tens of milliseconds.
+        if (!isRamReadInRange(read.segment, read.address, read.count)) {
+            throw new DmeLinkError(`RAM read 0x${read.address.toString(16)} +${read.count} is outside every declared window`);
+        }
         let error: unknown;
         for (let attempt = 1; attempt <= POLL_RETRY_ATTEMPTS; attempt++) {
             try {

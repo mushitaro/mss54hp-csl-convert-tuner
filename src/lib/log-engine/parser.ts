@@ -122,7 +122,18 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
     const TRIM_ALIASES = [...APP_CONFIG.CSV_ALIASES.stft1, ...APP_CONFIG.CSV_ALIASES.stft2];
     const hasTrim = normalizedData.some(row =>
         pick(row, 'stft1') !== undefined || pick(row, 'stft2') !== undefined);
-    if (normalizedData.length > 0 && !hasTrim) {
+    // An OBSERVE run carries no trim by design — it records block 3 and the watched bytes, and a VE
+    // map was never what it was for. Its `Watch ` columns are what say so; any other log without a
+    // trim is still the VE input with the one channel it cannot do without missing.
+    const watchHeader = new RegExp(`^${APP_CONFIG.CSV_MAPPING.WATCH_PREFIX.toLowerCase()}([0-9a-f]{6})$`);
+    const watchColumns: [string, string][] = normalizedData.length
+        ? Object.keys(normalizedData[0]).flatMap(h => {
+            const m = watchHeader.exec(h);
+            return m ? [[h, m[1].toUpperCase()] as [string, string]] : [];
+        })
+        : [];
+    const markHeader = APP_CONFIG.CSV_MAPPING.MARK.toLowerCase();
+    if (normalizedData.length > 0 && !hasTrim && watchColumns.length === 0) {
         throw new Error(
             'This log has no lambda controller factor column (Testo calls it Lambdaintegrator), '
             + 'which is the only input the VE correction has. Without it every cell would come out '
@@ -239,6 +250,18 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         // where it was blind. A blank cell is every other row and stays undefined.
         const linkGap = pick(row, 'linkGapS');
         if (linkGap !== undefined) point.linkGapS = linkGap;
+        // A mark is text; a blank cell is no mark. A mark that happens to be all digits arrives typed.
+        const mark = row[markHeader];
+        if (typeof mark === 'string' && mark.trim()) point.mark = mark;
+        else if (typeof mark === 'number' && Number.isFinite(mark)) point.mark = String(mark);
+        // Watched bytes come back as the hex they were written as, without the prefix; anything that
+        // is not whole bytes of hex is not a reading and stays absent.
+        for (const [header, key] of watchColumns) {
+            const v = row[header];
+            if (typeof v !== 'string') continue;
+            const hex = v.trim().replace(/^0x/i, '').toUpperCase();
+            if (/^(?:[0-9A-F]{2})+$/.test(hex)) (point.watch ??= {})[key] = hex;
+        }
         // The ignition side. Sparse in a fast VE log by construction — block 19 and the knock
         // counters are read one sample in eight — so a blank cell is "not read on this row" and
         // stays undefined rather than becoming 0, which would be an angle and a fresh knock.

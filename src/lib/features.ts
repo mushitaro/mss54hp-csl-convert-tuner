@@ -36,12 +36,12 @@
  *  the page owns layout; this file only answers "may this render in this variant". */
 export type TabId =
     | 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log'
-    | 'rfkorr' | 'warmup' | 'inertia' | 'shape' | 'idle' | 'lls' | 'calibration';
+    | 'rfkorr' | 'warmup' | 'inertia' | 'shape' | 'idle' | 'lls' | 'calibration' | 'observe';
 
 export type FeatureStage = 'stable' | 'experimental' | 'preview-only';
 
 export type FeatureName =
-    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'sessionSync' | 'assistantBridge';
+    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'observe' | 'sessionSync' | 'assistantBridge';
 
 export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly TabId[] }> = {
     // The trunk. WARMUP is inside it, not beside it: the warmup table is generated from the VE
@@ -75,6 +75,16 @@ export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly
     lls: { stage: 'experimental', tabs: ['lls'] },
     inertia: { stage: 'experimental', tabs: ['inertia'] },
     calibration: { stage: 'experimental', tabs: ['calibration'] },
+    /**
+     * OBSERVE — a run that records up to four RAM addresses the operator names, as raw bytes,
+     * beside block 3. For the moment a tune runs into a symbol nobody has named yet: stop tuning,
+     * watch the address while the owner does what the plan asks, name it from what moved, go back.
+     *
+     * Experimental, and it is a research instrument rather than a tune: what it reads is whatever
+     * the operator points it at, so it stays out of production until there is a reason for a
+     * production owner to point it anywhere.
+     */
+    observe: { stage: 'experimental', tabs: ['observe'] },
     // Never promoted — see the header. Owns no tab; its surfaces (SYNC, the store panel) are
     // gated where they render, on the same variant bit this registry reads.
     sessionSync: { stage: 'preview-only', tabs: [] },
@@ -126,6 +136,7 @@ export const MODE_FEATURES = {
     IDLE: 'idle',
     LLS: 'lls',
     INERTIA: 'inertia',
+    OBSERVE: 'observe',
 } as const satisfies Record<string, FeatureName>;
 
 /** The MODE ids, as this registry knows them. */
@@ -180,6 +191,9 @@ export const MODE_TABS = {
     // No log tab: an inertia run has no per-sample view yet. The estimate and its regression are
     // the panel's, and a tab that opened on nothing would be a destination that does nothing.
     INERTIA: ['startup', 'inertia', 'calibration'],
+    // The plan and the watched bytes first; LOG is the run behind them; CALIBRATION is where the
+    // unnamed symbol was met, and where the name it earns is checked against the code.
+    OBSERVE: ['startup', 'observe', 'log', 'calibration'],
 } as const satisfies Record<string, readonly TabId[]>;
 
 /**
@@ -209,6 +223,8 @@ export const MODE_WRITES = {
     IDLE: ['idle'],
     LLS: ['lls'],
     INERTIA: ['inertia'],
+    // Nothing. An observation run names a symbol; it never derives a value to write.
+    OBSERVE: [],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
