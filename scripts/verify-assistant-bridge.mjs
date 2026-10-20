@@ -149,9 +149,10 @@ console.log('\n[the rules a tool call meets]');
         stopLog: () => { stopped++; },
         views: () => ['current', 'lambda', 'log'],
         show: v => { shown = v; },
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the five tools', JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the seven tools', TOOL_NAMES.length === 7 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -179,6 +180,93 @@ console.log('\n[the rules a tool call meets]');
     check('a view is matched without case or spaces', shown === 'log');
     const m = await h.tuner_moment({ seconds_ago: 5, window_s: 10 });
     check('moment reads the facade\'s samples', m.source === 'live run' && m.at === 25, JSON.stringify({ s: m.source, at: m.at }));
+}
+
+console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
+{
+    let running = false, plan = { title: '', reads: [], steps: [] }, modeRefusal = null, entered = 0;
+    const marked = [];
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => running,
+        stopLog: () => {}, views: () => [], show: () => {},
+        observePlan: () => plan,
+        setObservePlan: p => { plan = p; },
+        enterObserve: () => { entered++; return modeRefusal; },
+        mark: label => { marked.push(label); },
+    };
+    const h = bridgeHandlers(f);
+    const good = {
+        title: 'what holds torque back on a 3rd-gear tip-in',
+        reads: [{ address: 'DAT_00ffd1a2', bytes: 2, every: 2, label: 'DAT_00ffd1a2' }, { address: '0xFF8123', bytes: 1, every: 4 }],
+        steps: ['idle 30 s', '  ', 'blip to 3000 twice'],
+    };
+
+    let err = null;
+    try { await h.tuner_observe({ ...good, reads: [{ address: 'FF0000', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
+    check('a plan with a read outside the windows is refused, with the reason, and not set', /not set.*outside/.test(err ?? '') && plan.title === '', err);
+    err = null;
+    try { await h.tuner_observe({ ...good, reads: [{ address: 'FUN_0003c2e8', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
+    check('an address that is not an address is named as not filled in', /not filled in/.test(err ?? ''), err);
+
+    const set = await h.tuner_observe(good);
+    check('a good plan is set, addresses read as written in the disassembly', set.set === true && plan.reads[0].address === 0xFFD1A2 && plan.reads[1].address === 0xFF8123
+        && JSON.stringify(set.reads.map(r => r.address)) === '["FFD1A2","FF8123"]', JSON.stringify(set));
+    check('...blank steps dropped', JSON.stringify(set.steps) === '["idle 30 s","blip to 3000 twice"]', JSON.stringify(set.steps));
+    check('...the session asked into OBSERVE, and the answer says to ask the owner before tuner_start_log', entered === 1 && set.mode === 'OBSERVE' && /tuner_start_log/.test(set.next));
+    check('...with the rate it will run at', typeof set.expectedHz === 'number' && set.expectedHz > 0 && set.expectedHz < 8, String(set.expectedHz));
+    modeRefusal = 'this session already holds a log, so its mode is fixed.';
+    const fixed = await h.tuner_observe(good);
+    check('a session whose mode is fixed: the plan is set and the answer says what the screen needs', fixed.mode === 'not OBSERVE' && /NEW SESSION|holds a log/.test(fixed.next), fixed.next);
+
+    running = true;
+    err = null;
+    try { await h.tuner_observe(good); } catch (e) { err = e.message; }
+    check('no plan change while a log records', /cannot change under it/.test(err ?? ''), err);
+    const m1 = await h.tuner_mark({ label: '  driver: that hesitation  ' });
+    check('a free mark lands as said, trimmed', m1.marked === true && marked.at(-1) === 'driver: that hesitation');
+    const m2 = await h.tuner_mark({ step: 2 });
+    check('a step mark is the panel\'s own label for it, so its checklist ticks', m2.label === 'step 2: blip to 3000 twice' && marked.at(-1) === m2.label, m2.label);
+    err = null;
+    try { await h.tuner_mark({ step: 3 }); } catch (e) { err = e.message; }
+    check('a step the plan does not have is refused', /No step 3: the plan has steps 1 to 2/.test(err ?? ''), err);
+    err = null;
+    try { await h.tuner_mark({}); } catch (e) { err = e.message; }
+    check('a mark with nothing to say is refused', /Say what to mark/.test(err ?? ''), err);
+    running = false;
+    const m3 = await h.tuner_mark({ label: 'x' });
+    check('no mark without a recording log', m3.marked === false && marked.length === 2);
+    const cleared = await h.tuner_observe({ clear: true });
+    check('clear empties the plan', cleared.cleared === true && plan.reads.length === 0 && plan.title === '');
+}
+
+console.log('\n[a moment of an observation run]');
+{
+    // 60 s at 4 Hz; FFD1A2 a counter-like word on every other sample, FF8123 a flag that flips once at 33.0 s.
+    const s = pull(0, 60, t => ({
+        ...(Math.round(t * 4) % 2 === 0 ? { watch: { FFD1A2: (Math.round(t * 4) & 0xFFFF).toString(16).toUpperCase().padStart(4, '0'), FF8123: t >= 33 ? '21' : '01' } } : {}),
+        ...(t === 10 ? { mark: 'OBSERVE: tip-in [FFD1A2+2/2, FF8123+1/2]' } : {}),
+        ...(t === 33.5 ? { mark: 'step 2: blip to 3000 twice' } : {}),
+    }));
+    const m = cutMoment({ samples: s, nowLogTime: 60, secondsAgo: 50, atLogTime: 33, windowS: 10, source: 'loaded log' });
+    check('at_log_time wins over seconds_ago, and secondsAgo reports where that was', m.at === 33 && m.secondsAgo === 27, JSON.stringify({ at: m.at, ago: m.secondsAgo }));
+    const wi = m.columns.indexOf('w:FF8123');
+    const mi = m.columns.indexOf('mark');
+    check('watched addresses come back as w: columns of raw hex, with a mark column', wi > 0 && m.columns.includes('w:FFD1A2') && mi > wi, m.columns.join(','));
+    const flip = m.rows.find(r => r[wi] === '21');
+    check('...the raw hex as recorded, a string', typeof flip?.[wi] === 'string' && m.rows.some(r => r[wi] === '01'));
+    check('a mark is an event and a row value', m.events.some(e => e.kind === 'mark' && e.detail === 'step 2: blip to 3000 twice' && e.t === 0.5)
+        && m.rows.some(r => r[mi] === 'step 2: blip to 3000 twice'), JSON.stringify(m.events.filter(e => e.kind === 'mark')));
+    check('...and the reading is called a reading', m.notes.some(n => /reading, not a value/.test(n)));
+
+    const long = cutMoment({ samples: s, nowLogTime: 60, atLogTime: 30, windowS: 120, source: 'loaded log' });
+    const lwi = long.columns.indexOf('w:FF8123');
+    const firstOn = long.rows.find(r => r[lwi] === '21');
+    check(`a thinned window (${long.samples} samples → ${long.rows.length} rows) keeps the row where a rarely-changing watched value changed`,
+        long.rows.length <= 130 && long.rows.length < long.samples && firstOn?.[0] === 3, `first 21 at ${firstOn?.[0]}`);
+    check('...while a value that changes on every read (FFD1A2) does not pin the whole window', long.rows.length <= 125, String(long.rows.length));
+    check('...and every mark row', long.rows.filter(r => r[long.columns.indexOf('mark')]).length === 2);
+    const plainM = cutMoment({ samples: pull(0, 20), nowLogTime: 20, secondsAgo: 5, windowS: 10, source: 'live run' });
+    check('a log without watched bytes or marks has neither kind of column', !plainM.columns.some(c => c.startsWith('w:') || c === 'mark'), plainM.columns.join(','));
 }
 
 console.log('\n[why samples were left out: how many, the name, what to do — in the reader\'s language]');
@@ -237,7 +325,7 @@ console.log('\n[the client: ticket, socket, hello, answers]');
     const ws = FakeWS.last;
     check('the ticket is asked for with POST on this origin', calls[0]?.init?.method === 'POST' && calls[0]?.url === '/api/bridge/ticket');
     check('the socket offers the protocol and the ticket — not in the URL', ws?.url === 'wss://bridge/tab' && ws.protocols[0] === BRIDGE_PROTOCOL && ws.protocols[1] === 't.v1.abc.def', JSON.stringify(ws?.protocols));
-    check('hello goes first, with the build and the tools', JSON.parse(ws.sent[0]).type === 'hello' && JSON.parse(ws.sent[0]).tools.length === 5);
+    check('hello goes first, with the build and the tools', JSON.parse(ws.sent[0]).type === 'hello' && JSON.parse(ws.sent[0]).tools.length === TOOL_NAMES.length);
     check('state reads live', states.at(-1) === 'live', states.join(','));
     ws.deliver({ type: 'call', id: 'c1', tool: 'tuner_status', args: {} });
     ws.deliver({ type: 'call', id: 'c2', tool: 'tuner_moment', args: {} });

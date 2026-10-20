@@ -16,7 +16,7 @@ import type { BridgeStatus } from '@/lib/bridge/bridgeClient';
 const TEXT = {
     ja: {
         title: 'ASSISTANT',
-        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止と表示の切り替えを行えるようになります。車への接続・書き込み・フラッシュはできません。',
+        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止、表示の切り替え、観察（OBSERVE）の計画の設定とログへの印付けを行えるようになります。車への接続・書き込み・フラッシュはできません。',
         on: 'オン', off: 'オフ',
         state: {
             off: 'オフ', connecting: '接続中…', live: '接続済み — アシスタントからこのタブに届きます',
@@ -27,7 +27,7 @@ const TEXT = {
     },
     en: {
         title: 'ASSISTANT',
-        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, and change the view. It cannot connect to, write to or flash the car.',
+        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, change the view, set an observation (OBSERVE) plan and put marks on the log. It cannot connect to, write to or flash the car.',
         on: 'ON', off: 'OFF',
         state: {
             off: 'Off', connecting: 'Connecting…', live: 'Connected — your assistant can reach this tab',

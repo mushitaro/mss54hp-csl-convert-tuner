@@ -19,6 +19,12 @@
  *   fuelCut     both trims exactly 1.000 with the throttle shut: the injectors were off
  *   throttle    the pedal moved more than a few points between two samples
  *   linkGap     nothing was recorded for that long before this sample
+ *   mark        a label put on the log: an OBSERVE plan, a step done, a driver's "mark that"
+ *
+ * An OBSERVE run's watched addresses come back as columns of their own (`w:FFD1A2`), holding the
+ * raw hex the run recorded — a reading of them is the assistant's to make and to say is a reading.
+ * When a long window is thinned, every row where a watched value changed is kept: a flag that flips
+ * once is the whole finding, and an even stride would step over it.
  *
  * Pure: samples in, a plain object out. verify:assistant-bridge pins it.
  */
@@ -36,11 +42,13 @@ export const THROTTLE_MOVED_PTS = 6;
 export const ACCEL_LOSS_RPM_S = 400;
 /** Rows handed to the assistant at most; slow-lane and gap rows are always kept. */
 export const MAX_ROWS = 120;
+/** A watched address that changed at most this often in a window has every change row kept. */
+export const WATCH_PIN_MAX_CHANGES = 40;
 
 export interface MomentEvent {
     /** Seconds relative to the moment (negative = before it). */
     t: number;
-    kind: 'accelLoss' | 'knock' | 'angleLow' | 'gear' | 'fuelCut' | 'throttle' | 'linkGap';
+    kind: 'accelLoss' | 'knock' | 'angleLow' | 'gear' | 'fuelCut' | 'throttle' | 'linkGap' | 'mark';
     detail: string;
 }
 
@@ -55,7 +63,8 @@ export interface Moment {
     /** How many samples the window held, and how many rows came back. */
     samples: number;
     columns: string[];
-    rows: (number | null)[][];
+    /** Numbers, except a watched column's raw hex and a mark's text. */
+    rows: (number | string | null)[][];
     events: MomentEvent[];
     /** Said when the window could not be what was asked for. */
     notes: string[];
@@ -104,11 +113,16 @@ export function cutMoment(input: {
     nowLogTime: number;
     secondsAgo?: number;
     windowS?: number;
+    /** The moment on the log's own clock, seconds — when the assistant already knows it (a mark's
+     *  time from tuner_status). Wins over secondsAgo. */
+    atLogTime?: number;
     source: Moment['source'];
 }): Moment {
-    const secondsAgo = clamp(input.secondsAgo ?? 8, 0, 900);
     const windowS = clamp(input.windowS ?? 20, 4, 120);
-    const at = input.nowLogTime - secondsAgo;
+    const at = input.atLogTime !== undefined && Number.isFinite(input.atLogTime)
+        ? input.atLogTime
+        : input.nowLogTime - clamp(input.secondsAgo ?? 8, 0, 900);
+    const secondsAgo = round(input.nowLogTime - at, 2);
     const from = at - windowS / 2;
     const to = at + windowS / 2;
     const notes: string[] = [];
@@ -206,24 +220,47 @@ export function cutMoment(input: {
             });
         }
     }
+    for (const p of inWin) {
+        if (p.mark) events.push({ t: rel(p.time), kind: 'mark', detail: p.mark });
+    }
     events.sort((x, y) => x.t - y.t);
 
-    // Rows: every slow-lane and gap row, the rest thinned evenly to fit.
-    const keep = (p: LogDataPoint) => p.linkGapS !== undefined || p.knockAge1 !== undefined || p.ignitionAngle1 !== undefined || p.krDtzSum !== undefined;
+    // Watched addresses in this window, and the samples where one of them changed — for an address
+    // that changes rarely. A counter or a value that moves on every read changes on every row, so
+    // pinning its changes would pin the whole window and thin nothing; those are left to the stride.
+    const watchKeys = [...new Set(inWin.flatMap(p => (p.watch ? Object.keys(p.watch) : [])))].sort();
+    const changed = new Set<LogDataPoint>();
+    for (const key of watchKeys) {
+        let last: string | undefined;
+        const at: LogDataPoint[] = [];
+        for (const p of inWin) {
+            const hex = p.watch?.[key];
+            if (hex === undefined) continue;
+            if (last !== undefined && hex !== last) at.push(p);
+            last = hex;
+        }
+        if (at.length <= WATCH_PIN_MAX_CHANGES) at.forEach(p => changed.add(p));
+    }
+
+    // Rows: every slow-lane, gap, mark and watched-change row, the rest thinned evenly to fit.
+    const keep = (p: LogDataPoint) => p.linkGapS !== undefined || p.knockAge1 !== undefined || p.ignitionAngle1 !== undefined
+        || p.krDtzSum !== undefined || p.mark !== undefined || changed.has(p);
     let rowsSrc = inWin;
     if (inWin.length > MAX_ROWS) {
         const pinned = inWin.filter(keep).length;
         const stride = Math.max(1, Math.ceil((inWin.length - pinned) / Math.max(1, MAX_ROWS - pinned)));
         let k = 0;
         rowsSrc = inWin.filter(p => keep(p) || (k++ % stride === 0));
-        notes.push(`${inWin.length} samples thinned to ${rowsSrc.length} rows; every row carrying ignition, knock or a link gap is kept.`);
+        notes.push(`${inWin.length} samples thinned to ${rowsSrc.length} rows; every row carrying ignition, knock, a link gap, a mark or a change in a rarely-changing watched value is kept.`);
     }
     const used = COLUMNS.filter(c => rowsSrc.some(p => c.get(p) !== undefined));
-    const columns = ['t', ...used.map(c => c.name)];
+    const hasMark = rowsSrc.some(p => p.mark !== undefined);
+    const columns = ['t', ...used.map(c => c.name), ...watchKeys.map(k => `w:${k}`), ...(hasMark ? ['mark'] : [])];
     const rows = rowsSrc.map(p => [rel(p.time), ...used.map(c => {
         const v = c.get(p);
         return typeof v === 'number' && Number.isFinite(v) ? round(v, c.digits) : null;
-    })]);
+    }), ...watchKeys.map(k => p.watch?.[k] ?? null), ...(hasMark ? [p.mark ?? null] : [])]);
+    if (watchKeys.length) notes.push('w: columns are the raw bytes of watched addresses, in hex. Any number made of them is a reading, not a value.');
 
     return {
         source: input.source, secondsAgo, windowS, at: round(at, 2),

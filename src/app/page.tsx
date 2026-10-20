@@ -35,7 +35,7 @@ import { idleReachIfLlsTakes } from '@/lib/lls/composeLlsTv';
 import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
 import LlsPanel from '@/components/LlsPanel';
 import ObservePanel from '@/components/ObservePanel';
-import { EMPTY_PLAN, planMark, planProblems, watchExchanges, type ObservePlan } from '@/lib/log-engine/observe';
+import { EMPTY_PLAN, activeSteps, marksOf, planMark, planProblems, stepMark, summariseWatch, watchExchanges, watchKey, type ObservePlan } from '@/lib/log-engine/observe';
 import { WriteManifest, ManifestCorner, type ManifestGroup } from '@/components/WriteManifest';
 import {
   enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
@@ -3889,6 +3889,41 @@ export default function Home() {
     if (missing.length) return `START TUNE would ask first, because ${missing.join(', ')} is not in the car. Write it, or start from the screen.`;
     return null;
   };
+  /** The samples the assistant reads: the live run while one records, else the loaded log in seconds. */
+  const facadeSamples = (): { points: readonly LogDataPoint[]; live: boolean; nowLogTime: number } | null => {
+    const pts = liveRun.samplesRef.current;
+    if (dmeLink.state === 'tuning' && pts.length) {
+      const age = lastSampleAtRef.current ? (performance.now() - lastSampleAtRef.current) / 1000 : 0;
+      return { points: pts, live: true, nowLogTime: pts[pts.length - 1].time + age };
+    }
+    const raw = processedLog?.rawData;
+    if (!raw?.length) return null;
+    // A Testo CSV counts milliseconds; the moment is cut in seconds.
+    const scale = timeScaleSeconds(raw);
+    const points = scale === 1 ? raw : raw.map(p => ({ ...p, time: p.time * scale }));
+    return { points, live: false, nowLogTime: points[points.length - 1].time };
+  };
+  /** OBSERVE as the assistant should hear it: the plan, what is wrong with it, which steps the log
+   *  has marked done, every mark with its log time (for tuner_moment's at_log_time), and what each
+   *  watched address did — all read off the page and the log, nothing kept beside them. */
+  const observeStatus = () => {
+    if (logProcess !== 'OBSERVE' && !observePlan.title && observePlan.reads.length === 0) return null;
+    const pts = facadeSamples()?.points ?? [];
+    const marks = pts.flatMap(p => marksOf(p.mark).map(label => ({ t: Math.round(p.time * 10) / 10, label })));
+    const steps = activeSteps(observePlan);
+    const keys = [...new Set(pts.flatMap(p => (p.watch ? Object.keys(p.watch) : [])))].sort();
+    return {
+      plan: {
+        title: observePlan.title,
+        reads: observePlan.reads.map(r => ({ address: Number.isInteger(r.address) ? watchKey(r.address) : null, bytes: r.count, every: r.every, label: r.label })),
+        steps,
+      },
+      problems: planProblems(observePlan),
+      stepsDone: steps.flatMap((_, i) => (marks.some(m => m.label === stepMark(observePlan, i)) ? [i + 1] : [])),
+      marks,
+      watched: keys.map(k => summariseWatch(pts, k)),
+    };
+  };
   const bridgeFacade: TabFacade = {
     status: () => {
       const pts = liveRun.samplesRef.current;
@@ -3916,29 +3951,36 @@ export default function Home() {
           hz: liveRun.hzValueRef.current === null ? null : Math.round(liveRun.hzValueRef.current * 10) / 10,
           linkGaps: pts.filter(p => p.linkGapS !== undefined).length,
         } : null,
-        log: processedLog ? { valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut } : null,
+        // The VE filter's census, which says nothing about an observation run: it has no trim to
+        // filter, and its counts would read as findings about the bytes it watched.
+        log: processedLog && logProcess !== 'OBSERVE' ? { valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut } : null,
         canStartLog: startRefusal() ?? 'yes',
+        observe: observeStatus(),
       };
     },
-    samples: () => {
-      const pts = liveRun.samplesRef.current;
-      if (dmeLink.state === 'tuning' && pts.length) {
-        const age = lastSampleAtRef.current ? (performance.now() - lastSampleAtRef.current) / 1000 : 0;
-        return { points: pts, live: true, nowLogTime: pts[pts.length - 1].time + age };
-      }
-      const raw = processedLog?.rawData;
-      if (!raw?.length) return null;
-      // A Testo CSV counts milliseconds; the moment is cut in seconds.
-      const scale = timeScaleSeconds(raw);
-      const points = scale === 1 ? raw : raw.map(p => ({ ...p, time: p.time * scale }));
-      return { points, live: false, nowLogTime: points[points.length - 1].time };
-    },
+    samples: facadeSamples,
     startRefusal,
     startLog: () => { void handleStartTune(); },
     running: () => dmeLink.state === 'tuning',
     stopLog: () => { void handleStopTune(); },
     views: () => TABS.filter(t => t.enabled).map(t => t.id),
     show: (view) => { goToTab(view as TabId); setNarrowPane('map'); },
+    observePlan: () => observePlan,
+    // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
+    // asked for before anything runs.
+    setObservePlan: (plan) => {
+      setObservePlan(plan);
+      if (plan.reads.length) { goToTab('observe'); setNarrowPane('map'); }
+    },
+    enterObserve: () => {
+      if (logProcess === 'OBSERVE') return null;
+      if (!selectableModes.includes('OBSERVE')) return 'This build does not offer OBSERVE.';
+      if (modeLock === null) { handleModeChange('OBSERVE'); return null; }
+      if (modeLock === 'running') return 'A log is recording.';
+      if (modeLock === 'has-log') return 'this session already holds a log, so its mode is fixed. On the screen: NEW SESSION, then MODE → OBSERVE (the plan stays set).';
+      return 'no open session takes a mode change. On the screen: NEW SESSION, then MODE → OBSERVE (the plan stays set).';
+    },
+    mark: markNow,
   };
   const assistantAllowed = isPreviewBuild && featureEnabled('assistantBridge', isPreviewBuild) && previewNoticeAcknowledged();
   const assistant = useAssistantBridge({
