@@ -49,11 +49,12 @@
         }
     ],
 
-    // Where ASSISTANT's socket goes: the TSUNAGI///Matrix bridge (matrix-tsunagi/bridge), handed to
-    // the tab by /api/bridge/ticket so the client carries no build-time URL. Remove it and the
-    // ticket endpoint answers `bridge_unavailable` — the switch for turning the feature off for
-    // everyone without a code change. BRIDGE_TICKET_SECRET is a Pages secret, never here.
+    // Where ASSISTANT's socket goes: TSUNAGI///Matrix's MAPPING WORKS relay (matrix-tsunagi/bridge),
+    // on matrix-mcp.tsunagi.app since 2026-10-20 (it was on a workers.dev address under a personal
+    // account). Handed to the tab by /api/bridge/ticket so the client carries no build-time URL.
+    // Remove it and the ticket endpoint answers `bridge_unavailable` — the switch for turning the
+    // feature off for everyone without a code change. BRIDGE_TICKET_SECRET is a Pages secret, never here.
     "vars": {
-        "BRIDGE_TAB_URL": "wss://matrix-bridge.kazuhiro-mushi.workers.dev/tab"
+        "BRIDGE_TAB_URL": "wss://matrix-mcp.tsunagi.app/tab"
     }
 }
