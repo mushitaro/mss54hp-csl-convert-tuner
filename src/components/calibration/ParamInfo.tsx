@@ -21,7 +21,8 @@ import { useDialogLang } from '@/hooks/useDialogLang';
  * (undirected). That is the same dashed-means-inferred rule the diagram uses.
  */
 
-const LOCK_TEXT: Record<EditLockReason, { ja: string; en: string }> = {
+/** Exported so the assistant bridge gives the reason in the same words the screen does. */
+export const LOCK_TEXT: Record<EditLockReason, { ja: string; en: string }> = {
     'no-address': { ja: 'XDF にアドレスの記載がないため表示・編集できません。', en: 'The XDF records no address for this; it cannot be decoded or edited.' },
     'width-32': { ja: '32bit 項目のため v1 では読み取り専用です。', en: '32-bit item — read-only in this version.' },
     'math-unsupported': { ja: 'スケーリング式を解釈できないため raw 表示のみです。', en: 'The scaling equation could not be compiled; raw display only.' },

@@ -19,6 +19,11 @@
  *   sessions      list the sessions saved on this device, and open one (2026-10-21) — the same
  *                 open the session list's row does, refused while anything is in flight on the link
  *                 or the workspace holds work that is not saved, because opening replaces it
+ *   calibration   read a calibration parameter of the open session's BIN, and stage a change to one
+ *                 (2026-10-21) — the CALIBRATION tab's own edit, made in front of whoever is at the
+ *                 screen and only after the owner heard the old and new value read back. Staging is
+ *                 not writing: the BIN changes when a person saves, and the car when a person
+ *                 WRITEs, on the screen.
  *
  *   NOT connect, write, flash or arm a write. A person does those on the screen. There is no tool,
  *   and the facade has no method that could reach them.
@@ -32,8 +37,44 @@ import {
 
 export const TOOL_NAMES = [
     'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_observe', 'tuner_mark',
-    'tuner_sessions', 'tuner_open_session',
+    'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit',
 ] as const;
+
+/** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
+export interface CalibrationItem {
+    name: string;
+    kind: 'constant' | 'curve' | 'map';
+    bank: string;
+    address: number;
+    units: string;
+    description: string;
+    /** Why it cannot be edited, in words; null when it can. */
+    locked: string | null;
+    count: number;
+    dims: { rows: number; cols: number } | null;
+    /** Physical values as loaded (BASE), and with this session's edits. Null cells did not scale. */
+    base: readonly (number | null)[];
+    current: readonly (number | null)[];
+    /** The integers in the bytes, loaded and now. A switch byte (cfg_m.getriebetyp = 0x40) is
+     *  talked about in hex, and its scaled value alone hides that. */
+    baseRaw: readonly number[];
+    raw: readonly number[];
+}
+
+export interface CalibrationChange {
+    name: string;
+    cell: number;
+    from: number | null;
+    to: number;
+    raw: number;
+    /** False when the value asked for was rounded to the nearest one the bytes can hold. */
+    exact: boolean;
+    /** What else writes these bytes on every build (a PATCH toggle), when one does: the edit is
+     *  kept on the tab but not written while that is on. */
+    conflict: string | null;
+    /** True when the parameter's edits are switched OFF on the tab (kept, not written). */
+    held: boolean;
+}
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /** A saved session as the assistant hears it. No file names: a BIN's name can carry a VIN, and the
@@ -76,6 +117,12 @@ export interface TabFacade {
     openRefusal?(): string | null;
     /** Opens a saved session as its row's OPEN does. Resolves true when its BASE is now the workspace. */
     openSession?(id: string): Promise<boolean>;
+    /** Why the calibration cannot be read or edited right now (no BIN, archived, link busy), or null. */
+    calibrationRefusal?(forEdit: boolean): string | null;
+    /** Parameters whose name (or, failing that, description) matches, best first. */
+    calibrationFind?(query: string, limit: number): Promise<readonly CalibrationItem[]>;
+    /** Stages one cell's change on the CALIBRATION tab, as typing it there would, and shows it. */
+    calibrationEdit?(name: string, cell: number, value: number): Promise<CalibrationChange>;
     /** The OBSERVE plan as the page holds it. */
     observePlan(): ObservePlan;
     /** Replaces it. Only called with a plan that has no problems, or with the empty plan. */
@@ -90,6 +137,35 @@ export type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+const fmt = (v: number | null | undefined) => (v === null || v === undefined ? 'unreadable' : String(Math.round(v * 1e6) / 1e6));
+const hex = (v: number) => `0x${v.toString(16).toUpperCase()}`;
+const rawHex = (v: number | undefined) => (v === undefined ? null : v >= 0 ? hex(v) : String(v));
+
+/** A parameter as the assistant hears it: every value of a constant or a small run, and only the
+ *  range and the edited cells of a large one — a 20×24 map read out cell by cell is not an answer. */
+function calBrief(i: CalibrationItem) {
+    const changed = i.current.flatMap((v, k) => (v !== i.base[k] ? [k] : []));
+    const finite = (xs: readonly (number | null)[]) => xs.filter((v): v is number => v !== null);
+    const small = i.count <= 32;
+    const cur = finite(i.current);
+    return {
+        name: i.name,
+        kind: i.kind,
+        where: `${i.bank} ${hex(i.address)}`,
+        units: i.units || null,
+        description: i.description || null,
+        editable: i.locked ? `no: ${i.locked}` : 'yes',
+        cells: i.count,
+        dims: i.dims,
+        ...(i.count === 1
+            ? { value: i.current[0], raw: rawHex(i.raw[0]), loaded: i.base[0], loadedRaw: rawHex(i.baseRaw[0]) }
+            : small
+                ? { values: i.current, loaded: changed.length ? i.base : 'same as values' }
+                : { min: cur.length ? Math.min(...cur) : null, max: cur.length ? Math.max(...cur) : null }),
+        edited: changed.length ? changed.slice(0, 40).map(k => ({ cell: k, loaded: i.base[k], now: i.current[k] })) : [],
+    };
+}
 
 /** A session in a line: what the owner calls it and what it holds. The date is the tab's local day,
  *  the way the session list writes it. */
@@ -190,6 +266,53 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 total: all.length,
                 shown: Math.min(hits.length, limit),
                 sessions: hits.slice(0, limit).map(brief),
+            };
+        },
+
+        tuner_calibration: async (args) => {
+            if (!f.calibrationFind) throw new Error('This build cannot read its calibration to the assistant.');
+            const refusal = f.calibrationRefusal?.(false) ?? null;
+            if (refusal) throw new Error(refusal);
+            const query = text(args.name, 80) || text(args.query, 80);
+            if (!query) throw new Error('Say which parameter: its name (K_PWG_SOLL_ANF_2_FAK, cfg_m.getriebetyp) or words to look for.');
+            const limit = Math.min(Math.max(Math.trunc(num(args.limit) ?? 8), 1), 20);
+            const items = await f.calibrationFind(query, limit);
+            if (!items.length) return { found: 0, note: `Nothing named or described as "${query}". Try part of the name.` };
+            return { found: items.length, parameters: items.map(calBrief) };
+        },
+
+        tuner_calibration_edit: async (args) => {
+            if (!f.calibrationFind || !f.calibrationEdit) throw new Error('This build cannot change its calibration for the assistant.');
+            // A recording log means the car is likely moving, and this brings the CALIBRATION tab to
+            // the front: parked, with the log stopped, like every other look at the screen.
+            if (f.running()) throw new Error('A log is recording. Calibration is changed parked, with the log stopped (read the stop back to the driver first).');
+            const refusal = f.calibrationRefusal?.(true) ?? null;
+            if (refusal) throw new Error(refusal);
+            const name = text(args.name, 80);
+            const value = num(args.value);
+            if (!name) throw new Error('Say which parameter, by its exact name.');
+            if (value === undefined) throw new Error('Say the new value, as a number in the parameter\'s units.');
+            const [item] = (await f.calibrationFind(name, 1)).filter(i => i.name.toLowerCase() === name.toLowerCase());
+            if (!item) throw new Error(`No parameter named "${name}". tuner_calibration finds it.`);
+            if (item.locked) throw new Error(`${item.name} cannot be edited: ${item.locked}`);
+            const cell = item.count === 1 ? 0 : num(args.cell);
+            if (cell === undefined || !Number.isInteger(cell) || cell < 0 || cell >= item.count) {
+                throw new Error(`${item.name} is a ${item.kind} of ${item.count} cells: say which one with cell (0 to ${item.count - 1}${item.dims ? `, row-major, ${item.dims.cols} per row` : ''}).`);
+            }
+            const from = item.current[cell];
+            // The same rule as stopping the log: the owner hears the change before it is made.
+            if (args.confirmed !== true) {
+                throw new Error(`Not changed. Read it back to the owner first — "${item.name}${item.count > 1 ? ` cell ${cell}` : ''}: ${fmt(from)} → ${value}${item.units ? ` ${item.units}` : ''}" — and call again with confirmed: true only after a clear yes.`);
+            }
+            const change = await f.calibrationEdit(item.name, cell, value);
+            return {
+                staged: true,
+                ...change,
+                units: item.units,
+                note: (change.exact ? '' : `The bytes cannot hold ${value} exactly; the nearest is ${change.to}. `)
+                    + 'It is on the CALIBRATION tab now, marked as edited. Nothing is written: the BIN changes when a person presses SAVE, and the car when a person WRITEs, on the screen. Undo on that tab takes it back.'
+                    + (change.conflict ? ` It will not be written as it stands: ${change.conflict} writes the same bytes on every build. Say so; the owner settles it on the screen.` : '')
+                    + (change.held ? ' Its edits are switched OFF on the tab, so it is kept but not written until a person turns it back on.' : ''),
             };
         },
 

@@ -152,7 +152,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the nine tools', TOOL_NAMES.length === 9 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the eleven tools', TOOL_NAMES.length === 11 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -237,6 +237,95 @@ console.log('\n[sessions: which is open, the list, opening one]');
     err = null;
     try { await h.tuner_show({ view: 'warp' }); } catch (e) { err = e.message; }
     check('a view the build does not have is still "no view"', /No view "warp"/.test(err ?? ''), err);
+}
+
+console.log('\n[calibration: reading a parameter, staging a change a person saves]');
+{
+    const constant = (name, bank, address, v, locked = null) => ({
+        name, kind: 'constant', bank, address, units: '-', description: 'gearbox type', locked, count: 1, dims: null,
+        base: [v], current: [v], baseRaw: [v], raw: [v],
+    });
+    const items = [
+        constant('cfg_m.getriebetyp', 'master', 0x8008, 64),
+        constant('cfg_s.getriebetyp', 'slave', 0x8, 64),
+        { name: 'K_SMALL_MAP', kind: 'map', bank: 'master', address: 0x9000, units: '%', description: 'a map', locked: null, count: 6,
+            dims: { rows: 2, cols: 3 }, base: [1, 2, 3, 4, 5, 6], current: [1, 2, 9, 4, 5, 6], baseRaw: [1, 2, 3, 4, 5, 6], raw: [1, 2, 9, 4, 5, 6] },
+        constant('K_SEALED', 'master', 0x7ffe, 0, 'Overlaps a checksum slot; not writable.'),
+    ];
+    let readRefusal = null, editRefusal = null, answer = {}, running = false;
+    const edits = [];
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => running, stopLog: () => {},
+        views: () => ['calibration'], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        calibrationRefusal: forEdit => (forEdit ? editRefusal : readRefusal),
+        calibrationFind: async (q, limit) => {
+            const ql = q.toLowerCase();
+            const exact = items.filter(i => i.name.toLowerCase() === ql);
+            return (exact.length ? exact : items.filter(i => i.name.toLowerCase().includes(ql))).slice(0, limit);
+        },
+        calibrationEdit: async (name, cell, value) => {
+            edits.push([name, cell, value]);
+            return { name, cell, from: 64, to: value, raw: value, exact: true, conflict: null, held: false, ...answer };
+        },
+    };
+    const h = bridgeHandlers(f);
+    const found = await h.tuner_calibration({ query: 'getriebetyp' });
+    check('a name part finds both gearbox bytes', found.parameters?.length === 2 && found.parameters.map(p => p.name).join() === 'cfg_m.getriebetyp,cfg_s.getriebetyp', JSON.stringify(found.parameters?.map(p => p.name)));
+    const m = found.parameters[0];
+    check('...a constant says its value, its byte in hex, and where it is', m.value === 64 && m.raw === '0x40' && m.where === 'master 0x8008' && m.editable === 'yes', JSON.stringify(m));
+    const map = (await h.tuner_calibration({ name: 'K_SMALL_MAP' })).parameters[0];
+    check('a small map is read out whole, with what this session changed', map.values.join() === '1,2,9,4,5,6' && map.edited.length === 1 && map.edited[0].cell === 2 && map.edited[0].loaded === 3, JSON.stringify(map));
+    const sealed = (await h.tuner_calibration({ name: 'K_SEALED' })).parameters[0];
+    check('a locked parameter says why, in the screen\'s words', /^no: Overlaps a checksum slot/.test(sealed.editable), sealed.editable);
+    const none = await h.tuner_calibration({ query: 'warp' });
+    check('nothing found: said, not an empty list', none.found === 0 && /Nothing named/.test(none.note), JSON.stringify(none));
+    readRefusal = 'No session with a BIN is open. tuner_sessions and tuner_open_session open one.';
+    let err = null;
+    try { await h.tuner_calibration({ query: 'getriebetyp' }); } catch (e) { err = e.message; }
+    check('no BIN open: the read is refused with the reason', err === readRefusal, err);
+    readRefusal = null;
+
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3 }); } catch (e) { err = e.message; }
+    check('a change without confirmed: refused, with the line to read back', /cfg_m\.getriebetyp: 64 → 3/.test(err ?? '') && /confirmed: true/.test(err ?? '') && edits.length === 0, err);
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3, confirmed: 'yes' }); } catch (e) { err = e.message; }
+    check('"yes" as a string is not a confirmation', err !== null && edits.length === 0);
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'getriebe', value: 3, confirmed: true }); } catch (e) { err = e.message; }
+    check('a change needs the exact name, not a part of it', /No parameter named "getriebe"/.test(err ?? '') && edits.length === 0, err);
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'K_SEALED', value: 1, confirmed: true }); } catch (e) { err = e.message; }
+    check('a locked parameter is not changed', /cannot be edited: Overlaps a checksum slot/.test(err ?? '') && edits.length === 0, err);
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'K_SMALL_MAP', value: 7, confirmed: true }); } catch (e) { err = e.message; }
+    check('a map without a cell: asks which, with the layout', /0 to 5, row-major, 3 per row/.test(err ?? '') && edits.length === 0, err);
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'K_SMALL_MAP', cell: 6, value: 7, confirmed: true }); } catch (e) { err = e.message; }
+    check('...and a cell past its end is refused', err !== null && edits.length === 0, err);
+    editRefusal = 'The open session is archived (read-only). Change values in a draft: NEXT on its row, on the screen, branches one.';
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3, confirmed: true }); } catch (e) { err = e.message; }
+    check('an archived session: refused with the screen\'s reason', err === editRefusal && edits.length === 0, err);
+    editRefusal = null;
+    running = true;
+    err = null;
+    try { await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3, confirmed: true }); } catch (e) { err = e.message; }
+    check('a log recording: refused (parked, log stopped), nothing staged', /A log is recording/.test(err ?? '') && edits.length === 0, err);
+    const whileLogging = await h.tuner_calibration({ name: 'cfg_m.getriebetyp' });
+    check('...though reading it is fine', whileLogging.parameters?.[0]?.value === 64);
+    running = false;
+
+    const ok = await h.tuner_calibration_edit({ name: 'CFG_M.GETRIEBETYP', value: 3, confirmed: true });
+    check('confirmed: staged once, under the parameter\'s own name', ok.staged === true && edits.length === 1 && edits[0].join() === 'cfg_m.getriebetyp,0,3', JSON.stringify(edits));
+    check('...and it says nothing is written until a person SAVEs and WRITEs', /Nothing is written/.test(ok.note) && /SAVE/.test(ok.note) && /WRITE/.test(ok.note), ok.note);
+    answer = { to: 2.5, exact: false };
+    const near = await h.tuner_calibration_edit({ name: 'K_SMALL_MAP', cell: 4, value: 2.4, confirmed: true });
+    check('a value the bytes cannot hold: says the nearest it took', /nearest is 2\.5/.test(near.note) && edits.at(-1).join() === 'K_SMALL_MAP,4,2.4', near.note);
+    answer = { conflict: 'PATCH: SMG', held: false };
+    const clash = await h.tuner_calibration_edit({ name: 'cfg_s.getriebetyp', value: 3, confirmed: true });
+    check('bytes a PATCH toggle also writes: says it will not be written', /will not be written as it stands: PATCH: SMG/.test(clash.note), clash.note);
 }
 
 console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');

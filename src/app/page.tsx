@@ -51,7 +51,9 @@ import { useCalibrationWorkspace, useCalibrationCompare } from '@/components/cal
 import { useCalibrationEdits } from '@/hooks/useCalibrationEdits';
 import { useCalibrationData, useCalibrationDiff } from '@/hooks/useCalibrationData';
 import { useCalVariantBuffers } from '@/hooks/useCalVariantBuffers';
-import { armedWriterSpans, changedCellCount, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
+import { armedWriterSpans, changedCellCount, editConflicts, withCellEdit, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
+import { decodeParam } from '@/lib/calibration/decode';
+import { LOCK_TEXT } from '@/components/calibration/ParamInfo';
 import { readIdleTablesResult, type IdleTables } from '@/lib/idle/idleTables';
 import { useShapeWorkspace } from '@/components/shape/shapeWorkspace';
 import { ShapeGrid } from '@/components/shape/ShapeGrid';
@@ -3990,6 +3992,57 @@ export default function Home() {
     openSession: async (id) => {
       const s = sessionDb.sessions.find(x => x.id === id);
       return s ? handleOpenSession(s) : false;
+    },
+    calibrationRefusal: (forEdit) => {
+      if (!featureEnabled('calibration', featurePreview)) return 'This build has no CALIBRATION.';
+      if (!currentSession || !binaryBuffer) return 'No session with a BIN is open. tuner_sessions and tuner_open_session open one.';
+      if (!forEdit) return null;
+      if (isArchived) return 'The open session is archived (read-only). Change values in a draft: NEXT on its row, on the screen, branches one.';
+      if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      return null;
+    },
+    // Read off the same three things the CALIBRATION tab reads: the catalog, the BASE bytes, and this
+    // session's edit set — so what the assistant is told is what the tab shows.
+    calibrationFind: async (query, limit) => {
+      if (!binaryBuffer) return [];
+      const cat = await loadCalCatalog();
+      const q = query.trim().toLowerCase();
+      const exact = cat.params.filter(d => d.name.toLowerCase() === q);
+      const byName = exact.length ? exact : cat.params.filter(d => d.name.toLowerCase().includes(q));
+      const hits = byName.length ? byName
+        : cat.params.filter(d => d.desc.en.toLowerCase().includes(q) || d.desc.ja.toLowerCase().includes(q));
+      const lang = detectDialogLang();
+      return hits.slice(0, limit).flatMap(def => {
+        const base = decodeParam(binaryBuffer, def).value;
+        if (!def.run || !base) return [];
+        const edit = calEdits.edits.get(def.id);
+        const current = edit ? edit.raw.map(r => { const p = def.run!.scaling.toPhysical(r); return Number.isFinite(p) ? p : null; }) : base.phys;
+        return [{
+          name: def.name, kind: def.kind, bank: def.bank, address: def.run.address, units: def.run.units,
+          description: (lang === 'ja' ? def.desc.ja : def.desc.en) || def.desc.en || def.desc.ja,
+          locked: def.lock.locked ? LOCK_TEXT[def.lock.reason].en : null,
+          count: def.run.count, dims: def.rows !== undefined && def.cols !== undefined ? { rows: def.rows, cols: def.cols } : null,
+          base: base.phys, current, baseRaw: base.raw, raw: edit ? edit.raw : base.raw,
+        }];
+      });
+    },
+    // The tab's own edit (calEdits.editCell, what typing the value does), with the parameter put on
+    // the screen so whoever is there sees what changed. withCellEdit is the same pure step the hook
+    // runs, used here only to report the value the bytes will actually hold.
+    calibrationEdit: async (name, cell, value) => {
+      const cat = await loadCalCatalog();
+      const def = cat.params.find(d => d.name.toLowerCase() === name.toLowerCase());
+      const base = def && binaryBuffer ? decodeParam(binaryBuffer, def).value : null;
+      if (!def || !def.run || !base) throw new Error(`${name} cannot be read from this BIN.`);
+      const before = calEdits.edits.get(def.id)?.raw[cell] ?? base.raw[cell];
+      const { set, quantised } = withCellEdit(calEdits.edits, def, base, cell, value);
+      calEdits.editCell(def, base, cell, value);
+      goToTab('calibration'); setNarrowPane('map'); calWs.select(def.id);
+      const from = def.run.scaling.toPhysical(before);
+      return {
+        name: def.name, cell, from: Number.isFinite(from) ? from : null, to: quantised.value, raw: quantised.raw, exact: quantised.exact,
+        conflict: editConflicts(set, calConflictSpans).get(def.id) ?? null, held: calEdits.heldBack.has(def.id),
+      };
     },
     observePlan: () => observePlan,
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
