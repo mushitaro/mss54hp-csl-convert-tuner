@@ -152,7 +152,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the seven tools', TOOL_NAMES.length === 7 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the nine tools', TOOL_NAMES.length === 9 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -180,6 +180,63 @@ console.log('\n[the rules a tool call meets]');
     check('a view is matched without case or spaces', shown === 'log');
     const m = await h.tuner_moment({ seconds_ago: 5, window_s: 10 });
     check('moment reads the facade\'s samples', m.source === 'live run' && m.at === 25, JSON.stringify({ s: m.source, at: m.at }));
+}
+
+console.log('\n[sessions: which is open, the list, opening one]');
+{
+    const at = new Date(2026, 9, 20, 21, 5).getTime();
+    const rows = [
+        { id: 'a', seq: 977, label: 'Session #977', status: 'archived', createdAt: at - 86_400_000, hasBase: true, hasLog: true, logPoints: 2230, mode: 'VE', open: false },
+        { id: 'b', seq: 978, label: 'track day', status: 'draft', createdAt: at, hasBase: true, hasLog: true, logPoints: 5120, mode: 'VE', open: false },
+        { id: 'c', seq: 979, label: 'Session #979', status: 'draft', createdAt: at + 60_000, hasBase: false, hasLog: false, logPoints: 0, mode: 'VE', open: true },
+        { id: 'd', seq: 12, label: 'twin', status: 'draft', createdAt: at, hasBase: true, hasLog: false, logPoints: 0, mode: 'VE', open: false },
+        { id: 'e', seq: 13, label: 'twin', status: 'draft', createdAt: at, hasBase: true, hasLog: false, logPoints: 0, mode: 'VE', open: false },
+    ];
+    let opened = [], refusal = null, shown = null;
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => false, stopLog: () => {},
+        views: () => ['startup'], closedViews: () => ['current', 'calibration'], show: v => { shown = v; },
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        sessions: () => rows,
+        openRefusal: () => refusal,
+        openSession: async id => { opened.push(id); return rows.find(r => r.id === id).hasBase; },
+    };
+    const h = bridgeHandlers(f);
+    const list = await h.tuner_sessions({});
+    check('the list names the open session', list.open?.session === '#979', JSON.stringify(list.open));
+    check('...newest number first', list.sessions[0].session === '#979' && list.sessions[1].session === '#978', list.sessions.map(s => s.session).join(','));
+    check('...with name, state, local date, BIN and log', list.sessions[1].name === 'track day' && /draft/.test(list.sessions[1].state)
+        && list.sessions[1].created === '2026-10-20 21:05' && list.sessions[1].bin === true && list.sessions[1].log === 5120, JSON.stringify(list.sessions[1]));
+    check('...and no file name anywhere (a BIN\'s name can carry a VIN)', !/fileName|\.bin/i.test(JSON.stringify(list)));
+    const found = await h.tuner_sessions({ query: '978' });
+    check('a query finds a session by its number', found.sessions.length === 1 && found.sessions[0].session === '#978', JSON.stringify(found.sessions));
+    const named = await h.tuner_sessions({ query: 'TRACK' });
+    check('...or by its name, without case', named.sessions.length === 1 && named.sessions[0].session === '#978');
+
+    refusal = 'A log is recording. Opening another session would end it; stop it first (read it back to the driver).';
+    let err = null;
+    try { await h.tuner_open_session({ session: 978 }); } catch (e) { err = e.message; }
+    check('open refused with the screen\'s reason, nothing opened', err === refusal && opened.length === 0, err);
+    refusal = null;
+    const ok = await h.tuner_open_session({ session: '#978' });
+    check('open "#978": opens that session once', ok.opened === true && opened.join() === 'b' && ok.session.session === '#978', JSON.stringify(ok));
+    check('...and says the BIN tabs are open now', /BASE loaded/.test(ok.note), ok.note);
+    const byName = await h.tuner_open_session({ session: 'track day' });
+    check('a session can be named instead of numbered', byName.opened === true && opened.at(-1) === 'b');
+    const already = await h.tuner_open_session({ session: 979 });
+    check('the open one: says so, opens nothing', already.opened === false && opened.length === 2, JSON.stringify(already));
+    err = null;
+    try { await h.tuner_open_session({ session: 'twin' }); } catch (e) { err = e.message; }
+    check('two sessions with that name: asks for the number', /#12, #13/.test(err ?? '') && opened.length === 2, err);
+    err = null;
+    try { await h.tuner_open_session({ session: 4242 }); } catch (e) { err = e.message; }
+    check('a number that does not exist: said, with where to look', /No session #4242/.test(err ?? '') && /tuner_sessions/.test(err ?? ''), err);
+    err = null;
+    try { await h.tuner_show({ view: 'calibration' }); } catch (e) { err = e.message; }
+    check('a view that waits for a session says so, not "no such view"', /opens once a session with a BIN is open/.test(err ?? '') && shown === null, err);
+    err = null;
+    try { await h.tuner_show({ view: 'warp' }); } catch (e) { err = e.message; }
+    check('a view the build does not have is still "no view"', /No view "warp"/.test(err ?? ''), err);
 }
 
 console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');

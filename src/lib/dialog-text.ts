@@ -253,10 +253,10 @@ const JA = {
     titleAssistantOn: 'ASSISTANT をオンにする',
     assistantOn: (): string =>
         'あなたが接続した AI アシスタントが、このタブに問い合わせられるようになります。\n\n'
-        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード）と、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）。VIN は送りません。\n'
+        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）。VIN とファイル名は送りません。\n'
         + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。\n'
         + '届く先: あなたがアシスタントに接続したサービス（claude.ai など）。そこでの扱いは、そのサービスの規約によります。\n\n'
-        + 'できること: ログの開始と停止、画面の切り替え、観察（OBSERVE）の計画の設定とログへの印付け。\n'
+        + 'できること: ログの開始と停止、画面の切り替え、保存したセッションを開くこと（記録中・保存していない作業があるときは開きません）、観察（OBSERVE）の計画の設定とログへの印付け。\n'
         + 'できないこと: 車への接続・書き込み・フラッシュ。ログの停止は、あなたが声で確認したときだけです。\n\n'
         + 'いつでもここでオフにできます。',
     btnAssistantOn: 'オンにする',
@@ -520,10 +520,10 @@ const EN: NativeDialogText = {
     titleAssistantOn: 'Turn ASSISTANT on',
     assistantOn: () =>
         'The AI assistant you connected will be able to ask this tab questions.\n\n'
-        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode) and parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks). Never the VIN.\n'
+        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode, the open session), the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), and parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks). Never the VIN or a file name.\n'
         + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing.\n'
         + 'Where it ends up: the service you connected the assistant to (claude.ai and others), under that service\'s own terms.\n\n'
-        + 'What it can do: start and stop a log, bring a view to the front, set an observation (OBSERVE) plan and put marks on the log.\n'
+        + 'What it can do: start and stop a log, bring a view to the front, open a saved session (not while a log records or unsaved work is open), set an observation (OBSERVE) plan and put marks on the log.\n'
         + 'What it cannot do: connect to, write to or flash the car. It stops a log only after you confirm out loud.\n\n'
         + 'You can turn it off here at any time.',
     btnAssistantOn: 'Turn on',

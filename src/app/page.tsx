@@ -3941,6 +3941,12 @@ export default function Home() {
         link: dmeLink.state,
         notice: dmeLink.error ?? (dmeLink.warning && dmeLink.warningKind !== 'info' ? dmeLink.warning : null),
         program: dmeLink.identity?.softwareVersion ?? null,
+        // Which saved session the screen holds — "which session are you looking at?" — by the number
+        // and name the session list shows. Null on a fresh workspace with no session open.
+        session: currentSession ? {
+          number: `#${currentSession.seq}`, name: currentSession.label, state: currentSession.status,
+          bin: !!currentSession.baseOrigin, log: currentSession.hasLog ? currentSession.logPointCount : null,
+        } : null,
         mode: logProcess,
         view: activeTab,
         nextOnScreen,
@@ -3964,7 +3970,27 @@ export default function Home() {
     running: () => dmeLink.state === 'tuning',
     stopLog: () => { void handleStopTune(); },
     views: () => TABS.filter(t => t.enabled).map(t => t.id),
+    closedViews: () => TABS.filter(t => !t.enabled).map(t => t.id),
     show: (view) => { goToTab(view as TabId); setNarrowPane('map'); },
+    sessions: () => sessionDb.sessions.map(s => ({
+      id: s.id, seq: s.seq, label: s.label, status: s.status, createdAt: s.createdAt,
+      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
+      open: s.id === currentSession?.id,
+    })),
+    // Opening replaces the workspace, so the assistant may do it only where nothing can be lost or
+    // cut: the link idle or off, and nothing in the workspace that exists only until SAVE. The row's
+    // own OPEN does not ask — a person at the screen sees what they are leaving — and an assistant
+    // talking to a driver does not.
+    openRefusal: () => {
+      if (dmeLink.state === 'tuning') return 'A log is recording. Opening another session would end it; stop it first (read it back to the driver).';
+      if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') return 'The open session has work that is not saved. Opening another would drop it: SAVE it on the screen first, or ask the owner.';
+      return null;
+    },
+    openSession: async (id) => {
+      const s = sessionDb.sessions.find(x => x.id === id);
+      return s ? handleOpenSession(s) : false;
+    },
     observePlan: () => observePlan,
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
     // asked for before anything runs.
