@@ -4,7 +4,7 @@ import type { DecodedRun } from '@/lib/calibration/decode';
 import {
     type BulkOp, type CalEdit, type CalEditSet, type RunSpan,
     EMPTY_EDITS, editConflicts,
-    withBulkOp, withCellEdit, withReferenceCopy, withoutParam,
+    withBulkOp, withCellEdit, withFill, withReferenceCopy, withoutParam,
 } from '@/lib/calibration/edits';
 
 /**
@@ -132,6 +132,11 @@ export function useCalibrationEdits(baseBuffer: ArrayBuffer | null, conflictSpan
         }));
     }, [step]);
 
+    // Not coalesced either: a whole row set at once is one step, and one undo.
+    const fillParam = useCallback((def: CalParamDef, base: DecodedRun, physical: number) => {
+        step(null, s => ({ ...s, edits: withFill(s.edits, def, base, physical).set }));
+    }, [step]);
+
     const bulkOp = useCallback((
         def: CalParamDef, base: DecodedRun, op: BulkOp, indices?: readonly number[],
     ) => {
@@ -229,10 +234,10 @@ export function useCalibrationEdits(baseBuffer: ArrayBuffer | null, conflictSpan
 
     return useMemo(() => ({
         edits, heldBack, conflicts, armedEdits,
-        editCell, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
+        editCell, fillParam, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
         undo, redo, canUndo, canRedo,
     }), [edits, heldBack, conflicts, armedEdits,
-        editCell, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
+        editCell, fillParam, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
         undo, redo, canUndo, canRedo]);
 }
 

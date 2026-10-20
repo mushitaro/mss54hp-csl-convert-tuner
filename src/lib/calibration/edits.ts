@@ -92,6 +92,23 @@ export function withCellEdit(
     return { set: withEntry(set, makeEdit(def, base, raw)), quantised: q };
 }
 
+/**
+ * Every cell of the run set to (the nearest writable value to) one `physical` — what typing the
+ * same value into each cell does, as one edit. For rows that are switched off whole (a fault
+ * code's row zeroed), where fourteen single-cell edits would be fourteen undo presses.
+ */
+export function withFill(
+    set: CalEditSet,
+    def: CalParamDef,
+    base: DecodedRun,
+    physical: number,
+): { set: CalEditSet; quantised: { raw: number; value: number; exact: boolean } } {
+    const run = def.run;
+    if (!run) return { set, quantised: { raw: NaN, value: NaN, exact: false } };
+    const q = quantise(run, physical);
+    return { set: withEntry(set, makeEdit(def, base, new Array<number>(run.count).fill(q.raw))), quantised: q };
+}
+
 /** One cell put back to what the loaded buffer holds. */
 export function withCellRevert(
     set: CalEditSet,

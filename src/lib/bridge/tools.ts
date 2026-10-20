@@ -24,11 +24,17 @@
  *                 screen and only after the owner heard the old and new value read back. Staging is
  *                 not writing: the BIN changes when a person saves, and the car when a person
  *                 WRITEs, on the screen.
+ *   evidence      with each parameter, how the DME code tests it, the XDF's own choices, and the
+ *                 known recipes that touch it; and the recipes themselves, compared with the open
+ *                 BIN (tuner_recipes) — so "what value makes it manual?" is answered from sources,
+ *                 with how sure, instead of from the parameter's name.
  *
  *   NOT connect, write, flash or arm a write. A person does those on the screen. There is no tool,
  *   and the facade has no method that could reach them.
  */
 import type { LogDataPoint } from '@/lib/types';
+import type { CodeUses, ParamChoice } from '@/lib/calibration/evidence';
+import { findRecipes, recipeParams, type Recipe, type RecipeStep, type Words } from '@/lib/calibration/recipes';
 import { cutMoment } from './moment';
 import {
     EMPTY_PLAN, OBSERVE_MAX_READS, OBSERVE_MAX_STEPS, activeSteps, observeHz, parseAddress, planProblems,
@@ -37,7 +43,7 @@ import {
 
 export const TOOL_NAMES = [
     'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_observe', 'tuner_mark',
-    'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit',
+    'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
 ] as const;
 
 /** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
@@ -59,6 +65,10 @@ export interface CalibrationItem {
      *  talked about in hex, and its scaled value alone hides that. */
     baseRaw: readonly number[];
     raw: readonly number[];
+    /** The XDF's own list of what each value selects, when it has one. */
+    choices: readonly ParamChoice[] | null;
+    /** Which DME functions read it, and the conditions they test it in. */
+    code: CodeUses | null;
 }
 
 export interface CalibrationChange {
@@ -74,6 +84,8 @@ export interface CalibrationChange {
     conflict: string | null;
     /** True when the parameter's edits are switched OFF on the tab (kept, not written). */
     held: boolean;
+    /** How many cells this change set: 1, or the whole run for a fill. */
+    cells: number;
 }
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -121,8 +133,11 @@ export interface TabFacade {
     calibrationRefusal?(forEdit: boolean): string | null;
     /** Parameters whose name (or, failing that, description) matches, best first. */
     calibrationFind?(query: string, limit: number): Promise<readonly CalibrationItem[]>;
-    /** Stages one cell's change on the CALIBRATION tab, as typing it there would, and shows it. */
-    calibrationEdit?(name: string, cell: number, value: number): Promise<CalibrationChange>;
+    /** Stages a change on the CALIBRATION tab, as typing it there would, and shows it: one cell, or
+     *  every cell of the run set to one value ('all'). */
+    calibrationEdit?(name: string, cell: number | 'all', value: number): Promise<CalibrationChange>;
+    /** The language the tab's dialogs speak, for answers written in both. */
+    lang?(): 'ja' | 'en';
     /** The OBSERVE plan as the page holds it. */
     observePlan(): ObservePlan;
     /** Replaces it. Only called with a plan that has no problems, or with the empty plan. */
@@ -164,6 +179,33 @@ function calBrief(i: CalibrationItem) {
                 ? { values: i.current, loaded: changed.length ? i.base : 'same as values' }
                 : { min: cur.length ? Math.min(...cur) : null, max: cur.length ? Math.max(...cur) : null }),
         edited: changed.length ? changed.slice(0, 40).map(k => ({ cell: k, loaded: i.base[k], now: i.current[k] })) : [],
+        ...(i.choices ? { choices: i.choices.map(c => `${c.value === 'else' ? 'else' : hex(c.value)} = ${c.label}`) } : {}),
+        ...(i.code ? { code: { readBy: i.code.readBy.count, tested: i.code.conditions.map(c => `${c.when}  (${c.in.join(', ')})`) } } : {}),
+        ...(recipesFor(i.name).length ? { recipes: recipesFor(i.name) } : {}),
+    };
+}
+
+const recipesFor = (name: string) => findRecipes('').filter(r => recipeParams(r).includes(name)).map(r => r.id);
+
+const say = (w: Words, lang: 'ja' | 'en') => w[lang];
+
+/** One recipe step against the open BIN: what it changes, what the BIN holds now, whether it is done. */
+function stepNow(s: RecipeStep, item: CalibrationItem | undefined, lang: 'ja' | 'en') {
+    const target = s.set ?? s.fill!;
+    const now = item?.current ?? [];
+    const done = !!item && now.length > 0 && now.every(v => v !== null && Math.abs(v - target) < 1e-9);
+    const asLoaded = !!item && item.baseRaw.length === s.from.length && item.baseRaw.every((r, k) => r === s.from[k]);
+    const before = s.from.length === 1 ? rawHex(s.from[0]) : s.from.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    return {
+        param: s.param,
+        change: s.fill !== undefined ? `every cell (${before}) → ${fmt(s.fill)}` : `${before} → ${fmt(s.set)}${item?.units ? ` ${item.units}` : ''}`,
+        edit: s.fill !== undefined ? { name: s.param, fill: s.fill } : { name: s.param, value: s.set },
+        now: !item ? 'not in this BIN' : item.count === 1 ? `${fmt(now[0])} (${rawHex(item.raw[0])})` : item.raw.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+        done,
+        // False means the open BIN did not hold, when loaded, what the recipe's sources saw before the
+        // change: a different software, an earlier change, or a different car. Say so before going on.
+        loadedAsExpected: asLoaded,
+        why: say(s.why, lang),
     };
 }
 
@@ -289,22 +331,28 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             const refusal = f.calibrationRefusal?.(true) ?? null;
             if (refusal) throw new Error(refusal);
             const name = text(args.name, 80);
-            const value = num(args.value);
+            const fill = num(args.fill);
+            const value = fill ?? num(args.value);
             if (!name) throw new Error('Say which parameter, by its exact name.');
-            if (value === undefined) throw new Error('Say the new value, as a number in the parameter\'s units.');
+            if (value === undefined) throw new Error('Say the new value (value, or fill for every cell), as a number in the parameter\'s units.');
             const [item] = (await f.calibrationFind(name, 1)).filter(i => i.name.toLowerCase() === name.toLowerCase());
             if (!item) throw new Error(`No parameter named "${name}". tuner_calibration finds it.`);
             if (item.locked) throw new Error(`${item.name} cannot be edited: ${item.locked}`);
-            const cell = item.count === 1 ? 0 : num(args.cell);
+            const whole = fill !== undefined && item.count > 1;
+            const cell = item.count === 1 ? 0 : whole ? 0 : num(args.cell);
             if (cell === undefined || !Number.isInteger(cell) || cell < 0 || cell >= item.count) {
-                throw new Error(`${item.name} is a ${item.kind} of ${item.count} cells: say which one with cell (0 to ${item.count - 1}${item.dims ? `, row-major, ${item.dims.cols} per row` : ''}).`);
+                throw new Error(`${item.name} is a ${item.kind} of ${item.count} cells: say which one with cell (0 to ${item.count - 1}${item.dims ? `, row-major, ${item.dims.cols} per row` : ''}), or fill to set every cell.`);
             }
             const from = item.current[cell];
-            // The same rule as stopping the log: the owner hears the change before it is made.
+            // The same rule as stopping the log: the owner hears the change before it is made — one
+            // read-back per parameter, a whole row included.
             if (args.confirmed !== true) {
-                throw new Error(`Not changed. Read it back to the owner first — "${item.name}${item.count > 1 ? ` cell ${cell}` : ''}: ${fmt(from)} → ${value}${item.units ? ` ${item.units}` : ''}" — and call again with confirmed: true only after a clear yes.`);
+                const line = whole
+                    ? `${item.name}: every one of its ${item.count} cells → ${value}${item.units ? ` ${item.units}` : ''}`
+                    : `${item.name}${item.count > 1 ? ` cell ${cell}` : ''}: ${fmt(from)}${item.count === 1 ? ` (${rawHex(item.raw[0])})` : ''} → ${value}${item.units ? ` ${item.units}` : ''}`;
+                throw new Error(`Not changed. Read it back to the owner first — "${line}" — and call again with confirmed: true only after a clear yes.`);
             }
-            const change = await f.calibrationEdit(item.name, cell, value);
+            const change = await f.calibrationEdit(item.name, whole ? 'all' : cell, value);
             return {
                 staged: true,
                 ...change,
@@ -313,6 +361,47 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     + 'It is on the CALIBRATION tab now, marked as edited. Nothing is written: the BIN changes when a person presses SAVE, and the car when a person WRITEs, on the screen. Undo on that tab takes it back.'
                     + (change.conflict ? ` It will not be written as it stands: ${change.conflict} writes the same bytes on every build. Say so; the owner settles it on the screen.` : '')
                     + (change.held ? ' Its edits are switched OFF on the tab, so it is kept but not written until a person turns it back on.' : ''),
+            };
+        },
+
+        tuner_recipes: async (args) => {
+            const query = text(args.query, 80);
+            const found = findRecipes(query);
+            const lang = f.lang?.() ?? 'en';
+            if (!found.length) {
+                return {
+                    found: 0,
+                    note: `No known recipe for "${query}". Work it out from tuner_calibration (code, choices, description) and say how sure that is — never a value from a name alone.`,
+                };
+            }
+            // The open BIN's values for every step, when one is open; the recipe alone otherwise.
+            const refusal = f.calibrationRefusal?.(false) ?? null;
+            const items = new Map<string, CalibrationItem>();
+            if (!refusal && f.calibrationFind) {
+                for (const name of new Set(found.flatMap(recipeParams))) {
+                    const [it] = (await f.calibrationFind(name, 1)).filter(i => i.name === name);
+                    if (it) items.set(name, it);
+                }
+            }
+            return {
+                found: found.length,
+                openBin: refusal ? `Not compared: ${refusal}` : 'Compared with the open session\'s BIN.',
+                recipes: found.map((r: Recipe) => ({
+                    id: r.id,
+                    title: say(r.title, lang),
+                    summary: say(r.summary, lang),
+                    checkedOn: r.software,
+                    grade: r.grade,
+                    gradeWhy: say(r.gradeWhy, lang),
+                    steps: r.steps.map(s => stepNow(s, items.get(s.param), lang)),
+                    ...(r.choose ? {
+                        ask: say(r.choose.question, lang),
+                        options: r.choose.options.map(o => ({ when: say(o.when, lang), steps: o.steps.map(s => stepNow(s, items.get(s.param), lang)) })),
+                    } : {}),
+                    sources: r.sources.map(s => say(s, lang)),
+                    unverified: say(r.unverified, lang),
+                })),
+                note: 'Each step is staged with tuner_calibration_edit (its `edit` arguments), one read-back and yes per step. Ask the owner the `ask` question; never pick an option for them. Say the grade and what is unverified with the recipe.',
             };
         },
 

@@ -51,8 +51,9 @@ import { useCalibrationWorkspace, useCalibrationCompare } from '@/components/cal
 import { useCalibrationEdits } from '@/hooks/useCalibrationEdits';
 import { useCalibrationData, useCalibrationDiff } from '@/hooks/useCalibrationData';
 import { useCalVariantBuffers } from '@/hooks/useCalVariantBuffers';
-import { armedWriterSpans, changedCellCount, editConflicts, withCellEdit, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
+import { armedWriterSpans, changedCellCount, editConflicts, withCellEdit, withFill, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
 import { decodeParam } from '@/lib/calibration/decode';
+import { codeUses, paramChoices, paramNote } from '@/lib/calibration/evidence';
 import { LOCK_TEXT } from '@/components/calibration/ParamInfo';
 import { readIdleTablesResult, type IdleTables } from '@/lib/idle/idleTables';
 import { useShapeWorkspace } from '@/components/shape/shapeWorkspace';
@@ -4019,31 +4020,39 @@ export default function Home() {
         const current = edit ? edit.raw.map(r => { const p = def.run!.scaling.toPhysical(r); return Number.isFinite(p) ? p : null; }) : base.phys;
         return [{
           name: def.name, kind: def.kind, bank: def.bank, address: def.run.address, units: def.run.units,
-          description: (lang === 'ja' ? def.desc.ja : def.desc.en) || def.desc.en || def.desc.ja,
+          description: (lang === 'ja' && def.desc.ja) || paramNote(def.desc.en),
           locked: def.lock.locked ? LOCK_TEXT[def.lock.reason].en : null,
           count: def.run.count, dims: def.rows !== undefined && def.cols !== undefined ? { rows: def.rows, cols: def.cols } : null,
           base: base.phys, current, baseRaw: base.raw, raw: edit ? edit.raw : base.raw,
+          choices: paramChoices(def.desc.en), code: codeUses(cat.graph, def),
         }];
       });
     },
-    // The tab's own edit (calEdits.editCell, what typing the value does), with the parameter put on
-    // the screen so whoever is there sees what changed. withCellEdit is the same pure step the hook
-    // runs, used here only to report the value the bytes will actually hold.
+    // The tab's own edit (calEdits.editCell, what typing the value does; fillParam, the same value
+    // typed into every cell as one step), with the parameter put on the screen so whoever is there
+    // sees what changed. withCellEdit / withFill are the same pure steps the hook runs, used here only
+    // to report the value the bytes will actually hold.
     calibrationEdit: async (name, cell, value) => {
       const cat = await loadCalCatalog();
       const def = cat.params.find(d => d.name.toLowerCase() === name.toLowerCase());
       const base = def && binaryBuffer ? decodeParam(binaryBuffer, def).value : null;
       if (!def || !def.run || !base) throw new Error(`${name} cannot be read from this BIN.`);
-      const before = calEdits.edits.get(def.id)?.raw[cell] ?? base.raw[cell];
-      const { set, quantised } = withCellEdit(calEdits.edits, def, base, cell, value);
-      calEdits.editCell(def, base, cell, value);
+      const at = cell === 'all' ? 0 : cell;
+      const before = calEdits.edits.get(def.id)?.raw[at] ?? base.raw[at];
+      const { set, quantised } = cell === 'all'
+        ? withFill(calEdits.edits, def, base, value)
+        : withCellEdit(calEdits.edits, def, base, cell, value);
+      if (cell === 'all') calEdits.fillParam(def, base, value);
+      else calEdits.editCell(def, base, cell, value);
       goToTab('calibration'); setNarrowPane('map'); calWs.select(def.id);
       const from = def.run.scaling.toPhysical(before);
       return {
-        name: def.name, cell, from: Number.isFinite(from) ? from : null, to: quantised.value, raw: quantised.raw, exact: quantised.exact,
+        name: def.name, cell: at, from: Number.isFinite(from) ? from : null, to: quantised.value, raw: quantised.raw, exact: quantised.exact,
         conflict: editConflicts(set, calConflictSpans).get(def.id) ?? null, held: calEdits.heldBack.has(def.id),
+        cells: cell === 'all' ? def.run.count : 1,
       };
     },
+    lang: () => detectDialogLang(),
     observePlan: () => observePlan,
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
     // asked for before anything runs.
