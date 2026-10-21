@@ -24,6 +24,12 @@
  *                 screen and only after the owner heard the old and new value read back. Staging is
  *                 not writing: the BIN changes when a person saves, and the car when a person
  *                 WRITEs, on the screen.
+ *   save & sync   SAVE the open session, send what changed to the cloud store, list the cloud's
+ *                 sessions and bring one back into this device (2026-10-21, the owner's request) —
+ *                 the screen's own SAVE, SYNC and the store panel's restore, each only after the
+ *                 owner heard it read back. The bytes go between the tab and the store directly;
+ *                 the bridge carries counts and names. SAVE changes this device's record, never the
+ *                 car: WRITE stays a person's, on the screen.
  *   evidence      with each parameter, how the DME code tests it, the XDF's own choices, and the
  *                 known recipes that touch it; and the recipes themselves, compared with the open
  *                 BIN (tuner_recipes) — so "what value makes it manual?" is answered from sources,
@@ -44,6 +50,7 @@ import {
 export const TOOL_NAMES = [
     'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_observe', 'tuner_mark',
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
+    'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
 ] as const;
 
 /** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
@@ -88,6 +95,27 @@ export interface CalibrationChange {
     held: boolean;
     /** How many cells this change set: 1, or the whole run for a fill. */
     cells: number;
+}
+/** What SAVE would keep, said before it is pressed. */
+export interface SaveSummary {
+    session: string;
+    name: string;
+    /** Each thing that is only in memory now: "7 calibration edits (cfg_m.getriebetyp, …)". */
+    items: string[];
+}
+
+/** A session in the cloud store, as the assistant hears it. No VIN and no file names: the store's
+ *  listing carries a VIN, and the privacy policy says the assistant never gets one. */
+export interface CloudSessionSummary {
+    ref: string;
+    name: string;
+    createdAt: number;
+    syncedAt: number;
+    status: string | null;
+    hasTune: boolean;
+    logPoints: number;
+    /** This device's number for it, when this device has it too. */
+    local: number | null;
 }
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -140,6 +168,24 @@ export interface TabFacade {
     calibrationEdit?(name: string, cell: number | 'all', value: number): Promise<CalibrationChange>;
     /** The language the tab's dialogs speak, for answers written in both. */
     lang?(): 'ja' | 'en';
+    /** Why SAVE cannot be pressed now (recording, archived, nothing open, busy link), or null. */
+    saveRefusal?(): string | null;
+    /** What SAVE would keep; empty items when everything is already on the device. */
+    saveSummary?(): SaveSummary | null;
+    /** Presses SAVE without its dialogs. */
+    save?(): Promise<'saved' | 'nothing' | 'no-base'>;
+    /** Why the cloud cannot be reached now (no store in this build, offline, busy), or null. */
+    syncRefusal?(): string | null;
+    /** The sessions SYNC would send: changed since they were last sent. */
+    syncPending?(): readonly SessionSummary[];
+    /** Presses SYNC. */
+    syncUpload?(): Promise<{ sent: number; failed: number; firstError: string | null } | { skipped: 'signed-out' | 'nothing' }>;
+    /** The cloud store's sessions, newest first. */
+    cloudSessions?(): Promise<readonly CloudSessionSummary[]>;
+    /** Why bringing that one back would lose or break something now, or null. */
+    cloudRestoreRefusal?(ref: string): string | null;
+    /** The store panel's restore: the cloud copy replaces this device's copy of the same session. */
+    cloudRestore?(ref: string): Promise<void>;
     /** What a value becomes in a parameter's bytes, without changing anything — so a read-back
      *  says the value the bytes will hold, in the same two forms as the value they hold now. */
     calibrationQuantise?(name: string, value: number): Promise<{ raw: number; value: number; exact: boolean; bits: number } | null>;
@@ -248,6 +294,13 @@ function stepNow(s: RecipeStep, item: CalibrationItem | undefined, q: Quantised,
         ...(q && !q.exact ? { note: `The bytes cannot hold ${fmt(target)} exactly; the nearest is ${fmt(q.value)}.` } : {}),
         why: say(s.why, lang),
     };
+}
+
+/** A moment as the session list writes it: the tab's local day and minute. */
+function localTime(ms: number): string {
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** A session in a line: what the owner calls it and what it holds. The date is the tab's local day,
@@ -452,6 +505,91 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     unverified: say(r.unverified, lang),
                 })),
                 note: 'Each step is staged with tuner_calibration_edit (its `edit` arguments), one read-back and yes per step. Ask the owner the `ask` question; never pick an option for them. Say the grade and what is unverified with the recipe.',
+            };
+        },
+
+        tuner_save: async (args) => {
+            if (!f.save || !f.saveSummary) throw new Error('This build cannot save for the assistant.');
+            const refusal = f.saveRefusal?.() ?? null;
+            if (refusal) throw new Error(refusal);
+            const what = f.saveSummary();
+            if (!what) throw new Error('No session is open. tuner_sessions and tuner_open_session open one.');
+            if (!what.items.length) return { saved: false, session: what.session, reason: 'Nothing to save: everything in this session is already on this device.' };
+            // The same rule as stopping the log: the owner hears what will be kept, then says yes.
+            if (args.confirmed !== true) {
+                throw new Error(`Not saved. Read it back to the owner first — "Save ${what.session}${what.name && what.name !== `Session ${what.session}` ? ` (${what.name})` : ''}: ${what.items.join('; ')}?" — and call again with confirmed: true only after a clear yes.`);
+            }
+            const outcome = await f.save();
+            if (outcome === 'no-base') throw new Error(`${what.session} has no BASE, so there is nothing to save a tune against. A BASE is read off the car or picked on the session's row, on the screen.`);
+            if (outcome === 'nothing') return { saved: false, session: what.session, reason: 'The screen had nothing to write after all; nothing changed.' };
+            return {
+                saved: true, session: what.session, kept: what.items,
+                note: 'Saved on this device. The car is unchanged — WRITE is done by a person on the screen. tuner_sync_upload sends it to the cloud.',
+            };
+        },
+
+        tuner_sync_upload: async (args) => {
+            if (!f.syncUpload || !f.syncPending) throw new Error('This build has no cloud to send to.');
+            if (f.running()) throw new Error('A log is recording. Send to the cloud parked, with the log stopped (read the stop back to the driver first).');
+            const refusal = f.syncRefusal?.() ?? null;
+            if (refusal) throw new Error(refusal);
+            const pending = f.syncPending();
+            if (!pending.length) return { sent: 0, note: 'Nothing to send: every session on this device matches its cloud copy.' };
+            const list = pending.slice(0, 6).map(s => `#${s.seq}${s.label !== `Session #${s.seq}` ? ` ${s.label}` : ''}`).join(', ');
+            if (args.confirmed !== true) {
+                throw new Error(`Not sent. Read it back to the owner first — "Send ${pending.length} session${pending.length > 1 ? 's' : ''} to the cloud: ${list}${pending.length > 6 ? ', …' : ''}?" — and call again with confirmed: true only after a clear yes.`);
+            }
+            const r = await f.syncUpload();
+            if ('skipped' in r) {
+                return r.skipped === 'signed-out'
+                    ? { sent: 0, note: 'Not sent: the sign-in for the cloud has expired on this device. On the screen, SYNC offers to sign in on m3 again.' }
+                    : { sent: 0, note: 'Nothing to send: every session on this device matches its cloud copy.' };
+            }
+            return {
+                sent: r.sent, failed: r.failed,
+                ...(r.firstError ? { error: r.firstError } : {}),
+                note: r.failed ? 'Some did not land; they stay marked to send, and SYNC (or this tool) tries them again.' : 'Sent. The copies on this device are unchanged.',
+            };
+        },
+
+        tuner_cloud_sessions: async (args) => {
+            if (!f.cloudSessions) throw new Error('This build has no cloud.');
+            const refusal = f.syncRefusal?.() ?? null;
+            if (refusal) throw new Error(refusal);
+            const all = [...await f.cloudSessions()].sort((a, b) => b.syncedAt - a.syncedAt);
+            const query = text(args.query, 60).toLowerCase().replace(/^#/, '');
+            const hits = query ? all.filter(s => s.name.toLowerCase().includes(query) || (s.local !== null && String(s.local) === query)) : all;
+            const limit = Math.min(Math.max(Math.trunc(num(args.limit) ?? 15), 1), 50);
+            return {
+                total: all.length, shown: Math.min(hits.length, limit),
+                sessions: hits.slice(0, limit).map(s => ({
+                    ref: s.ref, name: s.name,
+                    created: localTime(s.createdAt), synced: localTime(s.syncedAt),
+                    state: s.status ?? 'unknown', tune: s.hasTune, log: s.logPoints,
+                    onThisDevice: s.local !== null ? `#${s.local}` : false,
+                })),
+            };
+        },
+
+        tuner_cloud_restore: async (args) => {
+            if (!f.cloudRestore || !f.cloudSessions) throw new Error('This build has no cloud.');
+            if (f.running()) throw new Error('A log is recording. Bring a session back parked, with the log stopped.');
+            const refusal = f.syncRefusal?.() ?? null;
+            if (refusal) throw new Error(refusal);
+            const ref = text(args.ref, 80);
+            if (!ref) throw new Error('Say which cloud session: its ref from tuner_cloud_sessions.');
+            const target = (await f.cloudSessions()).find(s => s.ref === ref);
+            if (!target) throw new Error(`No cloud session with ref "${ref}". tuner_cloud_sessions lists them.`);
+            const blocked = f.cloudRestoreRefusal?.(ref) ?? null;
+            if (blocked) throw new Error(blocked);
+            if (args.confirmed !== true) {
+                const replaces = target.local !== null ? ` It replaces #${target.local} on this device with the cloud copy.` : ' This device does not have it yet.';
+                throw new Error(`Not brought back. Read it back to the owner first — "Bring ${target.name} (sent ${localTime(target.syncedAt)}) from the cloud into this device?${replaces}" — and call again with confirmed: true only after a clear yes.`);
+            }
+            await f.cloudRestore(ref);
+            return {
+                restored: true, name: target.name,
+                note: 'On this device now. tuner_sessions finds it and tuner_open_session opens it.',
             };
         },
 

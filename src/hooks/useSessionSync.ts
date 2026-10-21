@@ -115,7 +115,7 @@ export function useSessionSync(input: {
         const { state } = await recheckGate();
         if (state !== 'active' || !outstanding.length) {
             setBusy(false);
-            return;
+            return { skipped: state !== 'active' ? 'signed-out' : 'nothing' } as const;
         }
         const failures: string[] = [];
         for (const session of outstanding) {
@@ -129,6 +129,9 @@ export function useSessionSync(input: {
         setError(failures.length
             ? `${failures[0]}${failures.length > 1 ? ` (and ${failures.length - 1} more)` : ''}`
             : null);
+        // Said back to whoever pressed it — the controls read the state above; the assistant bridge
+        // reads this, because by the time it could read the state the press has moved on.
+        return { sent: outstanding.length - failures.length, failed: failures.length, firstError: failures[0] ?? null };
     }, [pending, recheckGate, syncOne, refresh]);
 
     /**

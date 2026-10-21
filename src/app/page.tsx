@@ -133,7 +133,7 @@ import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
 import { useAssistantBridge } from '@/hooks/useAssistantBridge';
 import type { TabFacade } from '@/lib/bridge/tools';
 import { AssistantSection } from '@/components/AssistantSection';
-import { buildId } from '@/lib/session-sync/client';
+import { buildId, listStoredSessions, restoreSession } from '@/lib/session-sync/client';
 import { previewNoticeAcknowledged } from '@/lib/session-sync/preview-notice';
 import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
@@ -2777,7 +2777,12 @@ export default function Home() {
    *  A flash is the other way to get a TUNED, and it deliberately does NOT require one — writing an
    *  untuned PATCH-ON BIN for the log run is a real step, and those bytes genuinely went to the ECU,
    *  so they have to be kept for flashHistory's hash to point at anything. */
-  const handleSaveSession = async () => {
+  /**
+   * SAVE. `fromAssistant` is the assistant bridge's press (tuner_save, after the owner said yes to
+   * it read back): the same writes, and no dialog — nobody may be at the screen to answer one — so a
+   * missing BASE is returned instead of alerted, and the session stays loaded instead of asking.
+   */
+  const saveSession = async (fromAssistant: boolean): Promise<'saved' | 'nothing' | 'no-base'> => {
     // No map, but a drive: keep the drive. This is the ONLY way an EGT run's log gets off the heap —
     // its samples carry no lambda trim, so not one VE cell can clear the evidence gate and there is
     // no tune for saveSessionTune to record. Routed to saveResearch for the reason that function
@@ -2800,10 +2805,10 @@ export default function Home() {
        */
       if (calEdits.armedEdits.length > 0 && binaryBuffer) {
         const target = await ensureDraft();
-        if (!target) return;
-        if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
+        if (!target) return 'nothing';
+        if (!target.baseOrigin) { if (!fromAssistant) alert(dialogText().setBaseFirst); return 'no-base'; }
         const patched = binaryFileState.buildPatchedBuffer(null, undefined, writeExtras);
-        if (!patched) return;
+        if (!patched) return 'nothing';
         await sessionDb.saveSessionTune({
           sessionId: target.id,
           binaryFileName: binaryFileState.buildFileName(null, writeExtras),
@@ -2819,7 +2824,7 @@ export default function Home() {
           await sessionDb.setProcess(target.id, logProcess).catch(() => { /* label only */ });
         }
         setSavedInputs({ ...saveInputs, sessionId: target.id });
-        return;
+        return 'saved';
       }
       // RAW, not filtered. The guard here used to read `processedLog.data.length` while the line
       // below saved `rawLogData` — it refused to save the very array it was about to write. A log
@@ -2827,9 +2832,9 @@ export default function Home() {
       // gate, so the filtered set is empty and the recording is complete; the app said "nothing to
       // save" over a whole drive. The question this asks is "did we record anything", and only the
       // raw array can answer it.
-      if (!logFileState.rawLogData?.length) return;
+      if (!logFileState.rawLogData?.length) return 'nothing';
       const target = await ensureDraft();
-      if (!target) return;
+      if (!target) return 'nothing';
       await sessionDb.saveResearch({
         sessionId: target.id,
         process: logProcess,
@@ -2841,13 +2846,13 @@ export default function Home() {
       setSavedInputs({ ...saveInputs, sessionId: target.id });
       void discardLiveRun().catch(() => { /* a stale record only costs one declined offer */ });
       liveRun.runIdRef.current = null;
-      return;
+      return 'saved';
     }
     const target = await ensureDraft();
-    if (!target || !binaryBuffer) return;
-    if (!target.baseOrigin) { alert(dialogText().setBaseFirst); return; }
+    if (!target || !binaryBuffer) return 'nothing';
+    if (!target.baseOrigin) { if (!fromAssistant) alert(dialogText().setBaseFirst); return 'no-base'; }
     const patchedBuffer = binaryFileState.buildPatchedBuffer(newMap, undefined, writeExtras);
-    if (!patchedBuffer) return;
+    if (!patchedBuffer) return 'nothing';
 
     await sessionDb.saveSessionTune({
       sessionId: target.id,
@@ -2876,15 +2881,18 @@ export default function Home() {
     //
     // The question is still asked, because the other answer is also real: a run that is finished
     // with wants to go back to the list, and this is the one moment that is known.
+    if (fromAssistant) return 'saved';
     const keepLoaded = confirm(dialogText().saved);
-    if (keepLoaded) return;
+    if (keepLoaded) return 'saved';
 
     // resetDerived also clears pendingTabRef, which is what stops a run's end-of-log move from firing
     // later on top of the session list.
     resetDerived();
     setActiveSessionId(null);
     goToTab('startup');
+    return 'saved';
   };
+  const handleSaveSession = () => { void saveSession(false); };
 
   // --- DME connection flow (CONNECTION -> READ -> START TUNE -> STOP -> WRITE / NEXT) ---
 
@@ -3988,7 +3996,7 @@ export default function Home() {
     openRefusal: () => {
       if (dmeLink.state === 'tuning') return 'A log is recording. Opening another session would end it; stop it first (read it back to the driver).';
       if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
-      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') return 'The open session has work that is not saved. Opening another would drop it: SAVE it on the screen first, or ask the owner.';
+      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') return 'The open session has work that is not saved. Opening another would drop it: tuner_save keeps it (read it back to the owner first), or the owner saves on the screen.';
       return null;
     },
     openSession: async (id) => {
@@ -4054,6 +4062,61 @@ export default function Home() {
       };
     },
     lang: () => detectDialogLang(),
+    // SAVE, SYNC and the store panel's restore, for the assistant (2026-10-21, the owner's request).
+    // Each refuses where the screen's control would be dark or would ask something nobody may be at
+    // the screen to answer; the bridge reads each back to the owner before it calls these.
+    saveRefusal: () => {
+      if (dmeLink.state === 'tuning') return 'A log is recording. SAVE comes after it stops (read the stop back to the driver first).';
+      if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      if (!currentSession) return 'No session is open. tuner_sessions and tuner_open_session open one.';
+      if (isArchived) return 'The open session is archived (read-only): it is already what was flashed. NEXT on its row, on the screen, branches a draft to change.';
+      return null;
+    },
+    // What SAVE would write, by the same test saveStatus makes — so the read-back and the button agree
+    // on whether there is anything to keep.
+    saveSummary: () => {
+      if (!currentSession) return null;
+      const items: string[] = [];
+      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') {
+        const edits = calEdits.armedEdits;
+        if (newMap) items.push('the tuned map');
+        if (edits.length) items.push(`${edits.length} calibration edit${edits.length > 1 ? 's' : ''} (${edits.slice(0, 6).map(e => e.name).join(', ')}${edits.length > 6 ? ', …' : ''})`);
+        const n = logFileState.rawLogData?.length ?? 0;
+        if (n) items.push(`the log (${n} samples)`);
+        if (!items.length) items.push('the changes on the screen');
+      }
+      return { session: `#${currentSession.seq}`, name: currentSession.label, items };
+    },
+    save: () => saveSession(true),
+    syncRefusal: () => {
+      if (!isPreviewBuild) return 'This build has no cloud.';
+      if (!online) return 'This device is offline. The cloud is reached when it has a connection again.';
+      if (sync.status?.phase === 'busy') return 'A send to the cloud is already running. Wait for it to finish.';
+      return null;
+    },
+    syncPending: () => sync.pending.map(s => ({
+      id: s.id, seq: s.seq, label: s.label, status: s.status, createdAt: s.createdAt,
+      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
+      open: s.id === currentSession?.id,
+    })),
+    syncUpload: () => sync.syncAll(),
+    // The store's listing, without its VIN column: the policy says the assistant never gets one.
+    cloudSessions: async () => {
+      const here = new Map(sessionDb.sessions.map(s => [s.id, s.seq]));
+      return (await listStoredSessions()).map(s => ({
+        ref: s.id, name: s.label, createdAt: s.created_at, syncedAt: s.synced_at, status: s.status,
+        hasTune: !!s.has_tune, logPoints: s.point_count, local: here.get(s.id) ?? null,
+      }));
+    },
+    cloudRestoreRefusal: (ref) => {
+      if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      if (ref === currentSession?.id) return 'That session is the one open on the screen, and bringing the cloud copy back would change it under the workspace. Open another session first (tuner_open_session), then bring it back.';
+      return null;
+    },
+    cloudRestore: async (ref) => {
+      await restoreSession(ref);
+      await sessionDb.refresh();
+    },
     // The same quantise the edit runs (withCellEdit / withFill), asked before anything is staged.
     calibrationQuantise: async (name, value) => {
       const cat = await loadCalCatalog();

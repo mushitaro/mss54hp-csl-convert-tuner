@@ -253,11 +253,11 @@ const JA = {
     titleAssistantOn: 'ASSISTANT をオンにする',
     assistantOn: (): string =>
         'あなたが接続した AI アシスタントが、このタブに問い合わせられるようになります。\n\n'
-        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）。VIN とファイル名は送りません。\n'
+        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）、クラウドに送ったセッションの一覧（名前・日時・チューンとログの有無）。VIN とファイル名は送りません。\n'
         + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。\n'
         + '届く先: あなたがアシスタントに接続したサービス（claude.ai など）。そこでの扱いは、そのサービスの規約によります。\n\n'
-        + 'できること: ログの開始と停止、画面の切り替え、保存したセッションを開くこと（記録中・保存していない作業があるときは開きません）、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（記録中は変えません。CALIBRATION に変更として置くだけで、BIN は SAVE で変わります）。\n'
-        + 'できないこと: BIN の保存、車への接続・書き込み・フラッシュ。ログの停止とキャリブレーションの変更は、あなたが声で確認したときだけです。\n\n'
+        + 'できること: ログの開始と停止、画面の切り替え、保存したセッションを開くこと（記録中・保存していない作業があるときは開きません）、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（CALIBRATION に変更として置きます）、SAVE、クラウドへの送信（SYNC）とクラウドからの取り込み（記録中はしません。送信と取り込みのデータは、このタブとクラウドの間で直接やり取りします）。\n'
+        + 'できないこと: 車への接続・書き込み・フラッシュ。ログの停止、値の変更、SAVE、送信、取り込みは、あなたが声で確認したときだけです。\n\n'
         + 'いつでもここでオフにできます。',
     btnAssistantOn: 'オンにする',
 
@@ -520,11 +520,11 @@ const EN: NativeDialogText = {
     titleAssistantOn: 'Turn ASSISTANT on',
     assistantOn: () =>
         'The AI assistant you connected will be able to ask this tab questions.\n\n'
-        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode, the open session), the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), and the calibration items of the open session it asks about (name, description, address, units, values). Never the VIN or a file name.\n'
+        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode, the open session), the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), the calibration items of the open session it asks about (name, description, address, units, values), and the list of sessions sent to your cloud (name, dates, whether each has a tune and a log). Never the VIN or a file name.\n'
         + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing.\n'
         + 'Where it ends up: the service you connected the assistant to (claude.ai and others), under that service\'s own terms.\n\n'
-        + 'What it can do: start and stop a log, bring a view to the front, open a saved session (not while a log records or unsaved work is open), set an observation (OBSERVE) plan and put marks on the log, and change calibration values (never while a log records; a change is only placed on CALIBRATION, and the BIN changes when you press SAVE).\n'
-        + 'What it cannot do: save the BIN, or connect to, write to or flash the car. It stops a log or changes calibration only after you confirm out loud.\n\n'
+        + 'What it can do: start and stop a log, bring a view to the front, open a saved session (not while a log records or unsaved work is open), set an observation (OBSERVE) plan and put marks on the log, change calibration values (placed on CALIBRATION as changes), SAVE, and send to your cloud (SYNC) and bring a session back from it (never while a log records; what is sent or brought back goes directly between this tab and the cloud).\n'
+        + 'What it cannot do: connect to, write to or flash the car. It stops a log, changes values, saves, sends or brings back only after you confirm out loud.\n\n'
         + 'You can turn it off here at any time.',
     btnAssistantOn: 'Turn on',
 

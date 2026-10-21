@@ -15,6 +15,8 @@
  *                throw as ok:false; signed out retries slowly; no bridge configured stops; another
  *                tab taking over (4000) stops instead of fighting for the socket
  *   the ticket   the function's format: v1.<payload>.<HMAC-SHA256>, sixty seconds, this owner
+ *   save & sync  SAVE, sending to the cloud and bringing a session back, each only with
+ *                `confirmed: true` after a read-back; no VIN in the cloud's listing
  *   calibration  reading a parameter (its value, its byte, the XDF's choices, how the code tests
  *                it); staging a change only with `confirmed: true`, a whole row as one fill; the
  *                recipes compared with the open BIN, step by step, with how sure each is
@@ -155,7 +157,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the twelve tools', TOOL_NAMES.length === 12 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the sixteen tools', TOOL_NAMES.length === 16 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -415,6 +417,99 @@ console.log('\n[recipes: a known change, compared with the open BIN, staged step
     refusal = null;
     const none = await h.tuner_recipes({ query: 'turbo' });
     check('no recipe: says so, and to work from the evidence, not a name', none.found === 0 && /never a value from a name alone/.test(none.note), JSON.stringify(none));
+}
+
+console.log('\n[save and sync: SAVE, sending to the cloud, bringing a session back — each read back first]');
+{
+    const at = new Date(2026, 9, 21, 9, 30).getTime();
+    const row = (id, seq, label, open = false) => ({ id, seq, label, status: 'draft', createdAt: at, hasBase: true, hasLog: true, logPoints: 5830, mode: 'VE', open });
+    let running = false, saveRefusal = null, summary = { session: '#978', name: 'Session #978', items: ['7 calibration edits (cfg_m.getriebetyp, cfg_s.getriebetyp, …)'] };
+    let pending = [row('a', 978, 'Session #978', true), row('b', 979, 'track day')];
+    let syncAnswer = { sent: 2, failed: 0, firstError: null }, syncRefusal = null, restoreBlock = null;
+    const saves = [], uploads = [], restores = [];
+    const cloud = [
+        { ref: 'b', name: 'track day', createdAt: at, syncedAt: at + 60_000, status: 'draft', hasTune: true, logPoints: 5120, local: 979 },
+        { ref: 'z', name: 'from the desk', createdAt: at - 86_400_000, syncedAt: at - 3_600_000, status: 'archived', hasTune: true, logPoints: 0, local: null },
+    ];
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => running, stopLog: () => {},
+        views: () => [], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        saveRefusal: () => saveRefusal,
+        saveSummary: () => summary,
+        save: async () => { saves.push(1); return 'saved'; },
+        syncRefusal: () => syncRefusal,
+        syncPending: () => pending,
+        syncUpload: async () => { uploads.push(1); return syncAnswer; },
+        cloudSessions: async () => cloud,
+        cloudRestoreRefusal: ref => restoreBlock?.(ref) ?? null,
+        cloudRestore: async ref => { restores.push(ref); },
+    };
+    const h = bridgeHandlers(f);
+
+    let err = null;
+    try { await h.tuner_save({}); } catch (e) { err = e.message; }
+    check('save without confirmed: refused, with what would be kept to read back', /Save #978: 7 calibration edits/.test(err ?? '') && /confirmed: true/.test(err ?? '') && saves.length === 0, err);
+    err = null;
+    try { await h.tuner_save({ confirmed: 'yes' }); } catch (e) { err = e.message; }
+    check('"yes" as a string is not a confirmation', err !== null && saves.length === 0);
+    const saved = await h.tuner_save({ confirmed: true });
+    check('confirmed: SAVE pressed once, and it says the car is unchanged', saved.saved === true && saves.length === 1 && /car is unchanged/.test(saved.note) && /WRITE/.test(saved.note), JSON.stringify(saved));
+    summary = { session: '#978', name: 'Session #978', items: [] };
+    const nothing = await h.tuner_save({ confirmed: true });
+    check('nothing in memory: says so, presses nothing', nothing.saved === false && saves.length === 1, JSON.stringify(nothing));
+    saveRefusal = 'The open session is archived (read-only): it is already what was flashed.';
+    err = null;
+    try { await h.tuner_save({ confirmed: true }); } catch (e) { err = e.message; }
+    check('an archived session: refused with the screen\'s reason', err === saveRefusal && saves.length === 1, err);
+    saveRefusal = null;
+
+    err = null;
+    try { await h.tuner_sync_upload({}); } catch (e) { err = e.message; }
+    check('send without confirmed: refused, naming what would go', /Send 2 sessions to the cloud: #978, #979 track day/.test(err ?? '') && uploads.length === 0, err);
+    const sent = await h.tuner_sync_upload({ confirmed: true });
+    check('confirmed: SYNC pressed once, the count said back', sent.sent === 2 && sent.failed === 0 && uploads.length === 1, JSON.stringify(sent));
+    syncAnswer = { skipped: 'signed-out' };
+    const out = await h.tuner_sync_upload({ confirmed: true });
+    check('signed out on the device: says to sign in again from SYNC', out.sent === 0 && /sign in on m3 again/.test(out.note), JSON.stringify(out));
+    syncAnswer = { sent: 1, failed: 1, firstError: 'HTTP 503' };
+    const half = await h.tuner_sync_upload({ confirmed: true });
+    check('a send that half landed: both counts and the error', half.sent === 1 && half.failed === 1 && half.error === 'HTTP 503', JSON.stringify(half));
+    running = true;
+    err = null;
+    try { await h.tuner_sync_upload({ confirmed: true }); } catch (e) { err = e.message; }
+    check('a log recording: no send', /A log is recording/.test(err ?? '') && uploads.length === 3, err);
+    running = false;
+    pending = [];
+    const clean = await h.tuner_sync_upload({ confirmed: true });
+    check('nothing changed since the last send: says so', clean.sent === 0 && /Nothing to send/.test(clean.note) && uploads.length === 3);
+    syncRefusal = 'This device is offline. The cloud is reached when it has a connection again.';
+    err = null;
+    try { await h.tuner_cloud_sessions({}); } catch (e) { err = e.message; }
+    check('offline: the cloud is not listed, and why', err === syncRefusal, err);
+    syncRefusal = null;
+
+    const list = await h.tuner_cloud_sessions({});
+    check('the cloud\'s sessions, newest send first, with whether this device has each', list.total === 2 && list.sessions[0].ref === 'b' && list.sessions[0].onThisDevice === '#979' && list.sessions[1].onThisDevice === false, JSON.stringify(list));
+    check('...and no VIN or file name in the listing', !/vin|\.bin/i.test(JSON.stringify(list)));
+    const q = await h.tuner_cloud_sessions({ query: 'desk' });
+    check('a query finds one by its name', q.sessions.length === 1 && q.sessions[0].ref === 'z');
+    err = null;
+    try { await h.tuner_cloud_restore({ ref: 'z' }); } catch (e) { err = e.message; }
+    check('bring back without confirmed: refused, said as new to this device', /Bring from the desk/.test(err ?? '') && /does not have it yet/.test(err ?? '') && restores.length === 0, err);
+    err = null;
+    try { await h.tuner_cloud_restore({ ref: 'b' }); } catch (e) { err = e.message; }
+    check('...or as replacing the copy here', /replaces #979 on this device/.test(err ?? ''), err);
+    restoreBlock = ref => (ref === 'b' ? 'That session is the one open on the screen.' : null);
+    err = null;
+    try { await h.tuner_cloud_restore({ ref: 'b', confirmed: true }); } catch (e) { err = e.message; }
+    check('the open session: refused with the reason', err === 'That session is the one open on the screen.' && restores.length === 0, err);
+    restoreBlock = null;
+    const back = await h.tuner_cloud_restore({ ref: 'z', confirmed: true });
+    check('confirmed: brought back once, and how to open it', back.restored === true && restores.join() === 'z' && /tuner_open_session/.test(back.note), JSON.stringify(back));
+    err = null;
+    try { await h.tuner_cloud_restore({ ref: 'nope', confirmed: true }); } catch (e) { err = e.message; }
+    check('an unknown ref: said, with where to look', /No cloud session with ref "nope"/.test(err ?? '') && restores.length === 1, err);
 }
 
 console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
