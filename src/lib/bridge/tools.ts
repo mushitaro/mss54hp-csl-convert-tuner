@@ -57,6 +57,8 @@ export interface CalibrationItem {
     /** Why it cannot be edited, in words; null when it can. */
     locked: string | null;
     count: number;
+    /** Width of one cell in the bytes, so a raw value is written at its width (0x01, 0x0032). */
+    bits: number;
     dims: { rows: number; cols: number } | null;
     /** Physical values as loaded (BASE), and with this session's edits. Null cells did not scale. */
     base: readonly (number | null)[];
@@ -138,6 +140,9 @@ export interface TabFacade {
     calibrationEdit?(name: string, cell: number | 'all', value: number): Promise<CalibrationChange>;
     /** The language the tab's dialogs speak, for answers written in both. */
     lang?(): 'ja' | 'en';
+    /** What a value becomes in a parameter's bytes, without changing anything — so a read-back
+     *  says the value the bytes will hold, in the same two forms as the value they hold now. */
+    calibrationQuantise?(name: string, value: number): Promise<{ raw: number; value: number; exact: boolean; bits: number } | null>;
     /** The OBSERVE plan as the page holds it. */
     observePlan(): ObservePlan;
     /** Replaces it. Only called with a plan that has no problems, or with the empty plan. */
@@ -155,7 +160,14 @@ const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.tri
 
 const fmt = (v: number | null | undefined) => (v === null || v === undefined ? 'unreadable' : String(Math.round(v * 1e6) / 1e6));
 const hex = (v: number) => `0x${v.toString(16).toUpperCase()}`;
-const rawHex = (v: number | undefined) => (v === undefined ? null : v >= 0 ? hex(v) : String(v));
+/** A raw cell at its width: 0x01 for a byte, 0x0032 for a word. Negative raws stay decimal. */
+const rawHex = (v: number | undefined, bits = 8) =>
+    (v === undefined ? null : v >= 0 ? `0x${v.toString(16).toUpperCase().padStart(Math.max(2, Math.ceil(bits / 4)), '0')}` : String(v));
+/** A run's raws as the bytes read: "06 01 0A … FF", each cell at its width. */
+const cellsHex = (vs: readonly number[], bits = 8) => vs.map(v => rawHex(v, bits)!.replace(/^0x/, '')).join(' ');
+/** A value as the owner hears it and as the bytes hold it: "64 (0x40)", "5 s (0x0032)". */
+const both = (phys: number | null | undefined, raw: number | undefined, bits: number, units: string) =>
+    `${fmt(phys)}${units ? ` ${units}` : ''}${raw === undefined ? '' : ` (${rawHex(raw, bits)})`}`;
 
 /** A parameter as the assistant hears it: every value of a constant or a small run, and only the
  *  range and the edited cells of a large one — a 20×24 map read out cell by cell is not an answer. */
@@ -174,37 +186,66 @@ function calBrief(i: CalibrationItem) {
         cells: i.count,
         dims: i.dims,
         ...(i.count === 1
-            ? { value: i.current[0], raw: rawHex(i.raw[0]), loaded: i.base[0], loadedRaw: rawHex(i.baseRaw[0]) }
+            ? { value: i.current[0], raw: rawHex(i.raw[0], i.bits), loaded: i.base[0], loadedRaw: rawHex(i.baseRaw[0], i.bits) }
             : small
                 ? { values: i.current, loaded: changed.length ? i.base : 'same as values' }
                 : { min: cur.length ? Math.min(...cur) : null, max: cur.length ? Math.max(...cur) : null }),
         edited: changed.length ? changed.slice(0, 40).map(k => ({ cell: k, loaded: i.base[k], now: i.current[k] })) : [],
-        ...(i.choices ? { choices: i.choices.map(c => `${c.value === 'else' ? 'else' : hex(c.value)} = ${c.label}`) } : {}),
-        ...(i.code ? { code: { readBy: i.code.readBy.count, tested: i.code.conditions.map(c => `${c.when}  (${c.in.join(', ')})`) } } : {}),
+        ...(i.choices ? { choices: i.choices.map(c => `${c.value === 'else' ? 'else' : rawHex(c.value, i.bits)} = ${c.label}`) } : {}),
+        ...(i.code ? { code: codeBrief(i.code) } : {}),
         ...(recipesFor(i.name).length ? { recipes: recipesFor(i.name) } : {}),
     };
+}
+
+/** How the DME code uses it. None found is said as none found: a table reached through a pointer or
+ *  an index (the fault-code rows are) has no direct reference, and is not unused for it. */
+function codeBrief(c: CodeUses) {
+    if (c.readBy.count === 0 && c.conditions.length === 0) {
+        return { readBy: 0, note: 'No direct reference found in the decompiled code. That does not make it unused: a table can be reached through a pointer or an index.' };
+    }
+    return { readBy: c.readBy.count, tested: c.conditions.map(x => `${x.when}  (${x.in.join(', ')})`) };
 }
 
 const recipesFor = (name: string) => findRecipes('').filter(r => recipeParams(r).includes(name)).map(r => r.id);
 
 const say = (w: Words, lang: 'ja' | 'en') => w[lang];
 
-/** One recipe step against the open BIN: what it changes, what the BIN holds now, whether it is done. */
-function stepNow(s: RecipeStep, item: CalibrationItem | undefined, lang: 'ja' | 'en') {
+type Quantised = { raw: number; value: number; exact: boolean; bits: number } | null;
+
+/**
+ * One recipe step against the open BIN: what it changes, what the BIN holds now, whether it is done.
+ * Before and after are written the same way — the value and the raw at its width, "64 (0x40) → 3
+ * (0x03)" — because "0x40 → 3" read out loud is two numbers in two notations.
+ */
+function stepNow(s: RecipeStep, item: CalibrationItem | undefined, q: Quantised, lang: 'ja' | 'en') {
     const target = s.set ?? s.fill!;
+    const bits = item?.bits ?? q?.bits ?? 8;
+    const units = item?.units ?? '';
     const now = item?.current ?? [];
     const done = !!item && now.length > 0 && now.every(v => v !== null && Math.abs(v - target) < 1e-9);
     const asLoaded = !!item && item.baseRaw.length === s.from.length && item.baseRaw.every((r, k) => r === s.from[k]);
-    const before = s.from.length === 1 ? rawHex(s.from[0]) : s.from.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    // The recipe's "before" in physical terms is known only where this BIN holds exactly those raws.
+    const fromPhys = item && item.count === 1 && item.baseRaw[0] === s.from[0] ? item.base[0] : undefined;
+    const before = s.from.length === 1
+        ? (fromPhys === undefined ? rawHex(s.from[0], bits)! : both(fromPhys, s.from[0], bits, units))
+        : cellsHex(s.from, bits);
+    const after = both(q?.value ?? target, q?.raw, bits, units);
+    // Where the BIN differs from what the recipe's sources saw, cell by cell, so the owner hears what
+    // is different rather than only that something is.
+    const differsAt = item && !asLoaded && item.baseRaw.length === s.from.length
+        ? item.baseRaw.flatMap((r, k) => (r === s.from[k] ? [] : [{ cell: k, expected: rawHex(s.from[k], bits), loaded: rawHex(r, bits) }])).slice(0, 8)
+        : undefined;
     return {
         param: s.param,
-        change: s.fill !== undefined ? `every cell (${before}) → ${fmt(s.fill)}` : `${before} → ${fmt(s.set)}${item?.units ? ` ${item.units}` : ''}`,
+        change: s.fill !== undefined ? `every cell (${before}) → ${after}` : `${before} → ${after}`,
         edit: s.fill !== undefined ? { name: s.param, fill: s.fill } : { name: s.param, value: s.set },
-        now: !item ? 'not in this BIN' : item.count === 1 ? `${fmt(now[0])} (${rawHex(item.raw[0])})` : item.raw.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+        now: !item ? 'not in this BIN' : item.count === 1 ? both(now[0], item.raw[0], bits, units) : cellsHex(item.raw, bits),
         done,
         // False means the open BIN did not hold, when loaded, what the recipe's sources saw before the
         // change: a different software, an earlier change, or a different car. Say so before going on.
         loadedAsExpected: asLoaded,
+        ...(differsAt?.length ? { differsAt } : {}),
+        ...(q && !q.exact ? { note: `The bytes cannot hold ${fmt(target)} exactly; the nearest is ${fmt(q.value)}.` } : {}),
         why: say(s.why, lang),
     };
 }
@@ -347,9 +388,12 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             // The same rule as stopping the log: the owner hears the change before it is made — one
             // read-back per parameter, a whole row included.
             if (args.confirmed !== true) {
+                // The value the bytes will hold, in the same two forms as the one they hold now.
+                const q = await f.calibrationQuantise?.(item.name, value) ?? null;
+                const after = both(q?.value ?? value, q?.raw, item.bits, item.units);
                 const line = whole
-                    ? `${item.name}: every one of its ${item.count} cells → ${value}${item.units ? ` ${item.units}` : ''}`
-                    : `${item.name}${item.count > 1 ? ` cell ${cell}` : ''}: ${fmt(from)}${item.count === 1 ? ` (${rawHex(item.raw[0])})` : ''} → ${value}${item.units ? ` ${item.units}` : ''}`;
+                    ? `${item.name}: every one of its ${item.count} cells (${cellsHex(item.raw, item.bits)}) → ${after}`
+                    : `${item.name}${item.count > 1 ? ` cell ${cell}` : ''}: ${both(from, item.raw[cell], item.bits, item.units)} → ${after}`;
                 throw new Error(`Not changed. Read it back to the owner first — "${line}" — and call again with confirmed: true only after a clear yes.`);
             }
             const change = await f.calibrationEdit(item.name, whole ? 'all' : cell, value);
@@ -383,6 +427,12 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     if (it) items.set(name, it);
                 }
             }
+            const quantised = new Map<string, Quantised>();
+            for (const s of found.flatMap(r => [...r.steps, ...(r.choose?.options.flatMap(o => o.steps) ?? [])])) {
+                const key = `${s.param}=${s.set ?? s.fill}`;
+                if (!quantised.has(key)) quantised.set(key, (await f.calibrationQuantise?.(s.param, (s.set ?? s.fill)!)) ?? null);
+            }
+            const at = (s: RecipeStep) => stepNow(s, items.get(s.param), quantised.get(`${s.param}=${s.set ?? s.fill}`) ?? null, lang);
             return {
                 found: found.length,
                 openBin: refusal ? `Not compared: ${refusal}` : 'Compared with the open session\'s BIN.',
@@ -393,10 +443,10 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     checkedOn: r.software,
                     grade: r.grade,
                     gradeWhy: say(r.gradeWhy, lang),
-                    steps: r.steps.map(s => stepNow(s, items.get(s.param), lang)),
+                    steps: r.steps.map(at),
                     ...(r.choose ? {
                         ask: say(r.choose.question, lang),
-                        options: r.choose.options.map(o => ({ when: say(o.when, lang), steps: o.steps.map(s => stepNow(s, items.get(s.param), lang)) })),
+                        options: r.choose.options.map(o => ({ when: say(o.when, lang), steps: o.steps.map(at) })),
                     } : {}),
                     sources: r.sources.map(s => say(s, lang)),
                     unverified: say(r.unverified, lang),

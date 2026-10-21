@@ -54,6 +54,7 @@ import { useCalVariantBuffers } from '@/hooks/useCalVariantBuffers';
 import { armedWriterSpans, changedCellCount, editConflicts, withCellEdit, withFill, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
 import { decodeParam } from '@/lib/calibration/decode';
 import { codeUses, paramChoices, paramNote } from '@/lib/calibration/evidence';
+import { quantise } from '@/lib/ecu-items/quantise';
 import { LOCK_TEXT } from '@/components/calibration/ParamInfo';
 import { readIdleTablesResult, type IdleTables } from '@/lib/idle/idleTables';
 import { useShapeWorkspace } from '@/components/shape/shapeWorkspace';
@@ -4022,7 +4023,7 @@ export default function Home() {
           name: def.name, kind: def.kind, bank: def.bank, address: def.run.address, units: def.run.units,
           description: (lang === 'ja' && def.desc.ja) || paramNote(def.desc.en),
           locked: def.lock.locked ? LOCK_TEXT[def.lock.reason].en : null,
-          count: def.run.count, dims: def.rows !== undefined && def.cols !== undefined ? { rows: def.rows, cols: def.cols } : null,
+          count: def.run.count, bits: def.run.bits, dims: def.rows !== undefined && def.cols !== undefined ? { rows: def.rows, cols: def.cols } : null,
           base: base.phys, current, baseRaw: base.raw, raw: edit ? edit.raw : base.raw,
           choices: paramChoices(def.desc.en), code: codeUses(cat.graph, def),
         }];
@@ -4053,6 +4054,14 @@ export default function Home() {
       };
     },
     lang: () => detectDialogLang(),
+    // The same quantise the edit runs (withCellEdit / withFill), asked before anything is staged.
+    calibrationQuantise: async (name, value) => {
+      const cat = await loadCalCatalog();
+      const def = cat.params.find(d => d.name.toLowerCase() === name.toLowerCase());
+      if (!def?.run) return null;
+      const q = quantise(def.run, value);
+      return { raw: q.raw, value: q.value, exact: q.exact, bits: def.run.bits };
+    },
     observePlan: () => observePlan,
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
     // asked for before anything runs.

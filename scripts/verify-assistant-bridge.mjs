@@ -245,14 +245,14 @@ console.log('\n[sessions: which is open, the list, opening one]');
 console.log('\n[calibration: reading a parameter, staging a change a person saves]');
 {
     const constant = (name, bank, address, v, locked = null) => ({
-        name, kind: 'constant', bank, address, units: '-', description: 'gearbox type', locked, count: 1, dims: null,
+        name, kind: 'constant', bank, address, units: '', description: 'gearbox type', locked, count: 1, bits: 8, dims: null,
         base: [v], current: [v], baseRaw: [v], raw: [v],
     });
     const items = [
         constant('cfg_m.getriebetyp', 'master', 0x8008, 64),
         constant('cfg_s.getriebetyp', 'slave', 0x8, 64),
         { name: 'K_SMALL_MAP', kind: 'map', bank: 'master', address: 0x9000, units: '%', description: 'a map', locked: null, count: 6,
-            dims: { rows: 2, cols: 3 }, base: [1, 2, 3, 4, 5, 6], current: [1, 2, 9, 4, 5, 6], baseRaw: [1, 2, 3, 4, 5, 6], raw: [1, 2, 9, 4, 5, 6] },
+            bits: 8, dims: { rows: 2, cols: 3 }, base: [1, 2, 3, 4, 5, 6], current: [1, 2, 9, 4, 5, 6], baseRaw: [1, 2, 3, 4, 5, 6], raw: [1, 2, 9, 4, 5, 6] },
         constant('K_SEALED', 'master', 0x7ffe, 0, 'Overlaps a checksum slot; not writable.'),
     ];
     let readRefusal = null, editRefusal = null, answer = {}, running = false;
@@ -334,21 +334,22 @@ console.log('\n[calibration: reading a parameter, staging a change a person save
 console.log('\n[recipes: a known change, compared with the open BIN, staged step by step]');
 {
     const one = (name, raw, extra = {}) => ({
-        name, kind: 'constant', bank: 'master', address: 0x8000, units: '', description: '', locked: null, count: 1, dims: null,
+        name, kind: 'constant', bank: 'master', address: 0x8000, units: '', description: '', locked: null, count: 1, bits: 8, dims: null,
         base: [raw], current: [raw], baseRaw: [raw], raw: [raw], choices: null, code: null, ...extra,
     });
     const row = (name, bytes) => ({
-        name, kind: 'map', bank: 'slave', address: 0x6000, units: '', description: name, locked: null, count: bytes.length,
-        dims: { rows: 1, cols: bytes.length }, base: [...bytes], current: [...bytes], baseRaw: [...bytes], raw: [...bytes], choices: null, code: null,
+        name, kind: 'map', bank: 'slave', address: 0x6000, units: '', description: name, locked: null, count: bytes.length, bits: 8,
+        dims: { rows: 1, cols: bytes.length }, base: [...bytes], current: [...bytes], baseRaw: [...bytes], raw: [...bytes], choices: null,
+        code: { readBy: { count: 0, names: [] }, conditions: [] },
     });
     const items = [
         one('cfg_m.getriebetyp', 0x40, { code: { readBy: { count: 19, names: [] }, conditions: [{ when: 'cfg_m_getriebetyp == 0x40', in: ['s_kraftschluss_calc'] }] } }),
         one('cfg_s.getriebetyp', 0x40),
-        row('DTC_06_SMG_CAN_TIMEOUT', [0x06, 0x01, 0x0A, 0x01, 0x01, 0x01, 0x0A, 0x00, 0x01, 0x02, 0x03, 0x28, 0x23, 0xFF]),
+        row('DTC_06_SMG_CAN_TIMEOUT', [0x06, 0x01, 0x0A, 0x01, 0x01, 0x01, 0x0A, 0x00, 0x01, 0x02, 0x03, 0x28, 0x00, 0xFF]),
         row('DTC_7B_SMG_CAN_FAIL', [0x7B, 0x01, 0x0A, 0x01, 0x01, 0x01, 0x0A, 0x00, 0x01, 0x02, 0x03, 0x28, 0x23, 0xFF]),
         row('DTC_B1_SMG_MIL', [0xB1, 0x0A, 0x0A, 0x03, 0x02, 0x03, 0x02, 0x00, 0x01, 0x02, 0x03, 0x28, 0x01, 0xFF]),
         one('K_SKRAFTS_CONTROL', 1, { choices: [{ value: 0, label: 'aus V-Fz' }, { value: 1, label: 'aus S_Gang' }, { value: 2, label: 'aus S_Kuppl' }] }),
-        { ...one('K_S_GANG_LL_ED', 0x32), base: [5], current: [5] },
+        { ...one('K_S_GANG_LL_ED', 0x32), base: [5], current: [5], bits: 16, units: 's' },
     ];
     let refusal = null;
     const edits = [];
@@ -357,6 +358,10 @@ console.log('\n[recipes: a known change, compared with the open BIN, staged step
         views: () => ['calibration'], show: () => {},
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
         lang: () => 'ja',
+        // As the page's: the value through the item's own scaling (x/10 for the GPS time).
+        calibrationQuantise: async (name, v) => (name === 'K_S_GANG_LL_ED'
+            ? { raw: Math.round(v * 10), value: Math.round(v * 10) / 10, exact: true, bits: 16 }
+            : { raw: v, value: v, exact: true, bits: 8 }),
         calibrationRefusal: () => refusal,
         calibrationFind: async (q, limit) => items.filter(i => i.name.toLowerCase() === q.toLowerCase()).slice(0, limit),
         calibrationEdit: async (name, cell, value) => {
@@ -372,19 +377,23 @@ console.log('\n[recipes: a known change, compared with the open BIN, staged step
     check('words find the recipe, in the tab\'s language', got.found === 1 && r.id === 'smg-to-manual' && /マニュアル/.test(r.title), JSON.stringify(got).slice(0, 300));
     check('...with how sure, why, the sources and what is unverified', r.grade === 'single' && !!r.gradeWhy && r.sources.length >= 2 && !!r.unverified);
     const m = r.steps.find(s => s.param === 'cfg_m.getriebetyp');
-    check('a step says the change, what the BIN holds, and that it is not done', m.change === '0x40 → 3' && m.now === '64 (0x40)' && m.done === false && m.loadedAsExpected === true, JSON.stringify(m));
+    check('a step says before and after the same way, what the BIN holds, and that it is not done', m.change === '64 (0x40) → 3 (0x03)' && m.now === '64 (0x40)' && m.done === false && m.loadedAsExpected === true && !m.differsAt, JSON.stringify(m));
     check('...and the exact arguments to stage it', JSON.stringify(m.edit) === JSON.stringify({ name: 'cfg_m.getriebetyp', value: 3 }));
     const d = r.steps.find(s => s.param === 'DTC_06_SMG_CAN_TIMEOUT');
-    check('a fault-code row is a fill of every cell', JSON.stringify(d.edit) === JSON.stringify({ name: 'DTC_06_SMG_CAN_TIMEOUT', fill: 0 }) && /^every cell \(06 01 0A/.test(d.change), JSON.stringify(d));
+    check('a fault-code row is a fill of every cell, after written as the bytes', JSON.stringify(d.edit) === JSON.stringify({ name: 'DTC_06_SMG_CAN_TIMEOUT', fill: 0 }) && d.change === 'every cell (06 01 0A 01 01 01 0A 00 01 02 03 28 23 FF) → 0 (0x00)', JSON.stringify(d));
+    check('a BIN that differs from the recipe\'s before says where, cell by cell', d.loadedAsExpected === false
+        && JSON.stringify(d.differsAt) === JSON.stringify([{ cell: 12, expected: '0x23', loaded: '0x00' }]), JSON.stringify(d.differsAt));
+    const gps = r.options[1].steps.find(s => s.param === 'K_S_GANG_LL_ED');
+    check('a 16-bit value: units, and its raw at its width, before and after', gps.change === '5 s (0x0032) → 6553.5 s (0xFFFF)' && gps.now === '5 s (0x0032)', JSON.stringify(gps));
     check('the wiring is asked, with both options and their steps', !!r.ask && r.options.length === 2 && r.options[1].steps.map(s => s.param).join() === 'K_SKRAFTS_CONTROL,K_S_GANG_LL_ED');
     check('...the stock-wired option is already done on an SMG BIN', r.options[0].steps[0].done === true);
 
     let err = null;
     try { await h.tuner_calibration_edit({ name: 'DTC_06_SMG_CAN_TIMEOUT', fill: 0 }); } catch (e) { err = e.message; }
-    check('a fill without confirmed: one read-back line for the whole row', /every one of its 14 cells → 0/.test(err ?? '') && edits.length === 0, err);
+    check('a fill without confirmed: one read-back line for the whole row, its bytes now and after', /every one of its 14 cells \(06 01 0A 01 01 01 0A 00 01 02 03 28 00 FF\) → 0 \(0x00\)/.test(err ?? '') && edits.length === 0, err);
     err = null;
     try { await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3 }); } catch (e) { err = e.message; }
-    check('a constant\'s read-back says the byte in hex too', /cfg_m\.getriebetyp: 64 \(0x40\) → 3/.test(err ?? ''), err);
+    check('a constant\'s read-back says both values in both forms', /cfg_m\.getriebetyp: 64 \(0x40\) → 3 \(0x03\)/.test(err ?? ''), err);
     const filled = await h.tuner_calibration_edit({ name: 'DTC_06_SMG_CAN_TIMEOUT', fill: 0, confirmed: true });
     check('confirmed: the whole row staged as one change', filled.staged === true && filled.cells === 14 && edits.at(-1).join() === 'DTC_06_SMG_CAN_TIMEOUT,all,0', JSON.stringify(edits));
     await h.tuner_calibration_edit({ name: 'cfg_m.getriebetyp', value: 3, confirmed: true });
@@ -394,9 +403,11 @@ console.log('\n[recipes: a known change, compared with the open BIN, staged step
         && again.steps.find(s => s.param === 'cfg_s.getriebetyp').done === false);
 
     const k = (await h.tuner_calibration({ name: 'K_SKRAFTS_CONTROL' })).parameters[0];
-    check('a parameter carries the XDF\'s choices and the recipes that touch it', k.choices?.join(' | ') === '0x0 = aus V-Fz | 0x1 = aus S_Gang | 0x2 = aus S_Kuppl' && k.recipes?.join() === 'smg-to-manual', JSON.stringify(k));
+    check('a parameter carries the XDF\'s choices (at the byte\'s width) and the recipes that touch it', k.choices?.join(' | ') === '0x00 = aus V-Fz | 0x01 = aus S_Gang | 0x02 = aus S_Kuppl' && k.raw === '0x01' && k.recipes?.join() === 'smg-to-manual', JSON.stringify(k));
     const g = (await h.tuner_calibration({ name: 'cfg_m.getriebetyp' })).parameters[0];
     check('...and how the DME code tests it', g.code?.readBy === 19 && g.code.tested[0] === 'cfg_m_getriebetyp == 0x40  (s_kraftschluss_calc)', JSON.stringify(g.code));
+    const t06 = (await h.tuner_calibration({ name: 'DTC_06_SMG_CAN_TIMEOUT' })).parameters[0];
+    check('no direct reference is said as not found, not as unused', t06.code?.readBy === 0 && /No direct reference found/.test(t06.code.note) && /does not make it unused/.test(t06.code.note) && !t06.code.tested, JSON.stringify(t06.code));
 
     refusal = 'No session with a BIN is open. tuner_sessions and tuner_open_session open one.';
     const bare = await h.tuner_recipes({ query: 'manual' });
