@@ -54,6 +54,8 @@ export const NOT_FOR_MAIN = [
     'scripts/verify-release-scope.mjs',
     'scripts/ship.mjs',
     'scripts/wrangler.mjs',
+    // The store's own check: it loads functions/api/sessions, which main does not carry.
+    'scripts/verify-store-stale.mjs',
     // They say where the VINs are, which is a signpost worth not putting up in public.
     'docs/release-environments.md',
     'docs/preview-deployment.md',
@@ -73,7 +75,7 @@ export const NOT_FOR_MAIN = [
  */
 export const NOT_FOR_MAIN_SCRIPTS = [
     'preview', 'deploy:preview', 'deploy:staging', 'build:preview', 'publish:preview', 'release', 'ship',
-    'gate:verify', 'verify:release-scope', 'wrangler',
+    'gate:verify', 'verify:release-scope', 'verify:store-stale', 'wrangler',
     'db:migrate:local', 'db:migrate:remote', 'db:sessions', 'db:diagnostics',
 ];
 

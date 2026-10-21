@@ -27,11 +27,15 @@
  * Synthetic data only.
  */
 import crypto from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
 import { BridgeClient, BRIDGE_PROTOCOL, HELD_CLOSE_CODE } from '../src/lib/bridge/bridgeClient.ts';
-import { mintTicket } from '../functions/api/bridge/ticket.ts';
+// The ticket is minted by the preview's backend, and functions/ is not on main (release-scope.mjs
+// NOT_FOR_MAIN: main is static). Loaded only where the backend is, so this suite runs on main too —
+// everything in it but the ticket is the tab's own code.
+const TICKET = new URL('../functions/api/bridge/ticket.ts', import.meta.url);
+const { mintTicket } = existsSync(TICKET) ? await import(TICKET.href) : { mintTicket: null };
 import { DROP_LABEL, DROP_WHY, explainDrops } from '../src/lib/log-engine/dropReasons.ts';
 import { EMPTY_CENSUS } from '../src/lib/log-engine/lambdaGates.ts';
 
@@ -848,7 +852,9 @@ console.log('\n[the client: ticket, socket, hello, answers]');
 }
 
 console.log('\n[the ticket the function mints]');
-{
+if (!mintTicket) {
+    console.log('  SKIP  functions/ is not in this tree (main has no backend); the ticket is checked where it is');
+} else {
     const secret = 'x'.repeat(40);
     const t = await mintTicket(secret, 'owner-1234-abcd', 1_000_000);
     const [v, payload, sig] = t.split('.');
