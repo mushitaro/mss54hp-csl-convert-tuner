@@ -24,7 +24,7 @@
  *      gate, recomputed from K_RF_LUFTDICHTE and K_RF_HUBVOLUMEN out of both shipped images.
  *   4. That a VE run records them — cams and air one sample in eight, the sums one in sixteen, all on
  *      block-19 samples; that production drops all three reads and pays nothing; and what the three
- *      cost the preview sample (11.2 % against a ~10 % budget — see KNOCK_SUM_LANE_EVERY).
+ *      cost the WORKS sample (11.2 % against a ~10 % budget — see KNOCK_SUM_LANE_EVERY).
  *   5. The CSV round trip, blanks kept blank; and PRACTICE refusing all three reads.
  *
  *     node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/verify-air-knock.mjs
@@ -329,7 +329,7 @@ console.log('\n[a VE run records them, on block-19 samples]');
     }
 }
 
-console.log('\n[production drops all three and pays nothing; what preview pays]');
+console.log('\n[production drops all three and pays nothing; what WORKS pays]');
 {
     const ve = LOG_PROFILES.VE.exchanges;
     const OURS = [KNOCK_SUM_RAM_READ.address, MANIFOLD_AIR_RAM_READ.address, IDLE_VANOS_RAM_READ.address];

@@ -15,7 +15,7 @@
  * `functions/` is the one that matters. It is the server side of SYNC, and SYNC is `preview-only`
  * BY DECISION: production's privacy policy says sessions never leave the device, and
  * `verify:features` asserts the stage because that sentence depends on it. The button is already
- * gated — it renders in preview alone — but the RECEIVER would have been published as production's
+ * gated — it renders in WORKS alone — but the RECEIVER would have been published as production's
  * own source, and worse, deployed: `deploy-staging.mjs` compiles Pages Functions from its working
  * directory, so a `functions/` in main would put a live API on the release candidate. Measured on
  * 2026-08-27, before that was fixed: staging answered 503 on /api/sessions, which is that endpoint
@@ -27,7 +27,7 @@
  *
  * The rest — wrangler.jsonc, migrations/, the owner gate and the deploy scripts — are simply not
  * production's. They describe a Cloudflare account, a database and an access gate that main has no
- * relationship with. (The PREVIEW branch does carry them: it publishes what the preview serves.
+ * relationship with. (The `preview` branch does carry them: it publishes what WORKS serves.
  * See release-scope.mjs.)
  *
  * The verify suite and docs/ecu-logic DO go to main. They are the reason to read this repository.
@@ -48,7 +48,7 @@ import { SOURCE, NOT_FOR_MAIN, NOT_FOR_MAIN_SCRIPTS } from './release-scope.mjs'
 const MAIN = resolve(process.cwd(), '..', 'E46M3CSL_TuningTool-main');
 
 /**
- * The lists live in release-scope.mjs, beside the preview's own (NOT_FOR_PUBLIC), so that
+ * The lists live in release-scope.mjs, beside the `preview` branch's own (NOT_FOR_PUBLIC), so that
  * `verify:release-scope` can read them without running a release — importing THIS file does.
  * Re-exported here because this is where a reader of the release looks for them.
  */

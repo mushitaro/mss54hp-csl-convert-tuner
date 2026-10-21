@@ -1,7 +1,7 @@
 /**
  * verify:release-scope — the exclusion lists in release-scope.mjs hold what they must.
  *
- * Two published copies of this tree (main, the release; preview, the preview's source) each leave
+ * Two published copies of this tree (main, the release; `preview`, WORKS's source) each leave
  * things behind by a list. A list is only as good as the day it was last read, and the failures are
  * silent — a new deploy tool that reaches main, a package script left naming a file main does not
  * have, a VIN-bearing doc on the public preview branch. This reads the lists against the tree:
@@ -67,7 +67,7 @@ check(`${kept.length} kept file(s) import nothing dropped`, !reaching.length, re
 check('git-dirty.mjs (imported by build-id.mjs) stays on main', !excluded('scripts/git-dirty.mjs', NOT_FOR_MAIN));
 check('the gate client (compiled into every build) stays on main', !excluded('src/lib/session-sync/owner-sync.ts', NOT_FOR_MAIN));
 
-console.log('\n[the preview branch publishes what it serves, and nothing that points at a VIN]');
+console.log('\n[the preview branch publishes what WORKS serves, and nothing that points at a VIN]');
 for (const p of ['functions/_middleware.ts', 'migrations/0006_owner.sql', 'wrangler.jsonc', 'scripts/check-public-tree.mjs']) {
     check(`${p} is published on preview`, existsSync(p) && !excluded(p, NOT_FOR_PUBLIC));
 }

@@ -4,19 +4,19 @@
  * ## The problem it removes
  *
  * Checking a change happened on staging, because staging is what production will show. But staging
- * is `main`, so it only moves when a release is cut — and preview moves whenever anything is built.
- * Every fix after a look therefore needed two deploys and, worse, a DECISION about which: preview
+ * is `main`, so it only moves when a release is cut — and WORKS moves whenever anything is built.
+ * Every fix after a look therefore needed two deploys and, worse, a DECISION about which: WORKS
  * only, staging only, or both. That decision kept being got wrong, in both directions (operator,
  * 2026-08-31).
  *
  * A decision nobody makes cannot be got wrong. This runs the whole sequence:
  *
- *   on feat/develop, clean, preview source published → preview → release onto main → every verify
+ *   on feat/develop, clean, WORKS source published → WORKS → release onto main → every verify
  *   suite → tsc → commit → staging → read both URLs back and check what they actually served
  *
  * Production's look is still checked on staging; this makes getting there cost no decision. For a
- * while the build badge on the preview doubled as a WORKS ⇄ AS PRODUCTION switch meant to answer
- * that without staging. It was removed on 2026-09-30, because the preview is the development branch
+ * while the build badge on WORKS doubled as a WORKS ⇄ AS PRODUCTION switch meant to answer
+ * that without staging. It was removed on 2026-09-30, because WORKS is the development branch
  * and no switch inside it runs the release's code (tsunagi-m-release §10).
  *
  * ## What it will not do for you
@@ -25,21 +25,21 @@
  * line that says what a release IS should be written by whoever decided to cut it — the same reason
  * release-to-main.mjs stops before committing. Pass `--body` for the long form.
  *
- * It will not run over a dirty worktree any more. Preview is built from the FILES and the release
+ * It will not run over a dirty worktree any more. WORKS was built from the FILES and the release
  * from the COMMITTED tree, so uncommitted work used to reach one environment and not the other, and
- * that was reported rather than refused. The preview is handed to owners now and must be a commit
+ * that was reported rather than refused. WORKS is handed to owners now and must be a commit
  * whose source is public, so uncommitted changes to tracked files stop the run before anything is
  * built (`.claude/` and CLAUDE.md, which never reach a build, do not count — git-dirty.mjs).
  *
- * It will not push, and it will not publish the preview's source for you: if GitHub's `preview`
+ * It will not push, and it will not publish WORKS's source for you: if GitHub's `preview`
  * branch does not yet hold this commit it stops and prints `npm run publish:preview` and
- * `git push origin preview`. And it reads the preview back only with an owner session
- * (GATE_SESSION_FILE); without one the preview is reported NOT VERIFIED and the exit code is 2.
+ * `git push origin preview`. And it reads WORKS back only with an owner session
+ * (GATE_SESSION_FILE); without one WORKS is reported NOT VERIFIED and the exit code is 2.
  *
  * Usage:
  *   npm run ship -- -m "2.2.0 — what this release is"
  *   npm run ship -- -m "…" --body notes.md
- *   npm run ship -- -m "…" --no-preview        # staging only, when preview is already current
+ *   npm run ship -- -m "…" --no-preview        # staging only, when WORKS is already current
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -58,7 +58,7 @@ const STAGING_URL = 'https://mss54hp-csl-convert-tuner-staging.pages.dev';
  * the time. It worked, and it silently broke the deploy: with `output: 'export'`, moving distDir
  * MOVES THE EXPORT with it. The site landed in `.next-dev-ship/`, `out/` was never rewritten, and
  * the branding and stamping steps then dressed the PREVIOUS export in the current build id and
- * uploaded it. Measured: preview served `width:6px` under a build id of 474.46b2bf9 while the
+ * uploaded it. Measured: WORKS served `width:6px` under a build id of 474.46b2bf9 while the
  * commit in that id had made it 3px (operator noticed; 2026-08-31).
  *
  * So the build goes where the rest of the pipeline looks. If a dev server holds the lock, the build
@@ -106,11 +106,11 @@ const capture = (cmd, cmdArgs, cwd = process.cwd()) =>
 const step = (n, of, what) => console.log(`\n${'='.repeat(78)}\n[${n}/${of}] ${what}\n${'='.repeat(78)}`);
 
 /**
- * The preview is behind the owner gate, so reading it back needs an owner session: a short-lived one
+ * WORKS is behind the owner gate, so reading it back needs an owner session: a short-lived one
  * issued for this check (tsunagi-m3's `access-session.mjs`), handed over as a file — never on the
  * command line, never printed — named by GATE_SESSION_FILE and holding `{"token": "..."}`.
  *
- * Without it the preview cannot be read back, and that is said as exactly that: "not verified" is a
+ * Without it WORKS cannot be read back, and that is said as exactly that: "not verified" is a
  * different outcome from "wrong" (tsunagi-m-release §8), so it ends in exit 2 rather than 1, and
  * only after staging — which needs no session — has been checked in full.
  */
@@ -156,8 +156,8 @@ if (!existsSync(MAIN)) {
     process.exit(1);
 }
 
-// The release is a copy of SOURCE's tree (release-to-main.mjs) and the preview is SOURCE's commit
-// (deploy-preview.mjs). Run from anywhere else, the preview would refuse and the release would copy
+// The release is a copy of SOURCE's tree (release-to-main.mjs) and WORKS is SOURCE's commit
+// (deploy-preview.mjs). Run from anywhere else, deploy:preview would refuse and the release would copy
 // a branch nobody meant — so it is refused here, before anything else happens.
 const onBranch = capture('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
 if (onBranch !== SOURCE) {
@@ -174,8 +174,8 @@ console.log(`develop HEAD  ${head}`);
 // The same definition deploy:preview refuses on and build-id.mjs stamps from (git-dirty.mjs).
 const dirty = dirtyPaths();
 if (dirty.length) {
-    // It used to report and carry on: preview built from the files, the release from the commit.
-    // The preview is handed to owners now and must be a published commit, so a dirty tree stops
+    // It used to report and carry on: WORKS built from the files, the release from the commit.
+    // WORKS is handed to owners now and must be a published commit, so a dirty tree stops
     // everything here rather than half-way through.
     console.error(`\n${dirty.length} tracked file(s) have uncommitted changes. Commit them first:`);
     for (const line of dirty) console.error(`  ${line}`);
@@ -183,7 +183,7 @@ if (dirty.length) {
 }
 console.log('worktree clean — both environments get the same tree.');
 
-// deploy:preview serves only a commit whose source is already on GitHub's preview branch. Checked
+// deploy:preview serves only a commit whose source is already on GitHub's `preview` branch. Checked
 // here too, so that an unpublished tree stops the run before a single step, with the commands.
 if (!flag('--no-preview')) {
     const short = capture('git', ['rev-parse', '--short', 'HEAD']);
@@ -196,7 +196,7 @@ if (!flag('--no-preview')) {
             && capture('git', ['rev-parse', `${named}^{commit}`]) === capture('git', ['rev-parse', 'HEAD']);
     } catch { /* no branch, no network: not established */ }
     if (!published) {
-        console.error(`\nThe preview's source (${SOURCE} @ ${short}) is not on GitHub's ${PREVIEW_BRANCH} branch yet.`);
+        console.error(`\nThe WORKS source (${SOURCE} @ ${short}) is not on GitHub's ${PREVIEW_BRANCH} branch yet.`);
         console.error('Publish it and push it, then ship again:');
         console.error('  npm run publish:preview');
         console.error(`  git push origin ${PREVIEW_BRANCH}`);
@@ -204,15 +204,15 @@ if (!flag('--no-preview')) {
     }
 }
 
-// ---- 2. preview ------------------------------------------------------------------------------
-// What it serves NOW, so that "did the deploy land" is a comparison rather than a hope. Preview's
+// ---- 2. WORKS --------------------------------------------------------------------------------
+// What it serves NOW, so that "did the deploy land" is a comparison rather than a hope. WORKS's
 // own build id cannot simply be predicted from HEAD: another session committing during the build
 // moves it, which has happened.
 let previewWas = null;
 if (flag('--no-preview')) {
-    step(2, TOTAL, 'Preview — SKIPPED (--no-preview)');
+    step(2, TOTAL, 'WORKS — SKIPPED (--no-preview)');
 } else {
-    step(2, TOTAL, 'Preview');
+    step(2, TOTAL, 'WORKS');
     previewWas = await readDeployed(PREVIEW_URL, previewCookie).then(r => r.buildId).catch(() => null);
     console.log(`serving now: ${previewWas ?? `(could not read${previewCookie ? '' : ' — no GATE_SESSION_FILE'})`}`);
     // The moment the build starts, so that "did the export actually get rewritten" is answerable
@@ -236,7 +236,7 @@ run('node', ['scripts/release-to-main.mjs']);
 const staged = capture('git', ['-C', MAIN, 'diff', '--cached', '--name-only']).split('\n').filter(Boolean);
 if (!staged.length) {
     console.log('\nNothing staged on main — it already holds this tree. No release to cut.');
-    console.log('Preview is up to date; staging already matches. Stopping here.');
+    console.log('WORKS is up to date; staging already matches. Stopping here.');
     process.exit(0);
 }
 
@@ -285,7 +285,7 @@ console.log(`\n${'='.repeat(78)}\nWhat the two URLs are actually serving\n${'='.
 // what that URL answers with".
 const mainSha = capture('git', ['-C', MAIN, 'rev-parse', '--short', 'HEAD']);
 const developSha = capture('git', ['rev-parse', '--short', 'HEAD']);
-// The preview carries develop's commit, stamped by build-id.mjs from a clean tree — so the same
+// WORKS carries develop's commit, stamped by build-id.mjs from a clean tree — so the same
 // strong statement as staging's is available, instead of "it is not what it was before".
 const landed = (label, r) => label === 'staging'
     ? r.buildId.includes(mainSha)
@@ -293,11 +293,12 @@ const landed = (label, r) => label === 'staging'
 
 let bad = 0;
 let unverified = 0;
-// Staging first: it needs no session, so its verdict never waits on the preview's.
-for (const [label, url, apiShouldBe] of [['staging', STAGING_URL, '404'], ['preview', PREVIEW_URL, 'alive']]) {
-    if (label === 'preview' && flag('--no-preview')) continue;
-    if (label === 'preview' && !previewCookie) {
-        console.log(`${'preview'.padEnd(8)} NOT VERIFIED — behind the owner gate, and GATE_SESSION_FILE names no session.`);
+// Staging first: it needs no session, so its verdict never waits on WORKS's. The labels are what
+// the rows print; WORKS's variant is still checked as 'preview' below.
+for (const [label, url, apiShouldBe] of [['staging', STAGING_URL, '404'], ['WORKS', PREVIEW_URL, 'alive']]) {
+    if (label === 'WORKS' && flag('--no-preview')) continue;
+    if (label === 'WORKS' && !previewCookie) {
+        console.log(`${label.padEnd(8)} NOT VERIFIED — behind the owner gate, and GATE_SESSION_FILE names no session.`);
         console.log('         Issue one (tsunagi-m3: node scripts/access-session.mjs --client tuner-preview), put');
         console.log('         {"token":"..."} in a file outside the repo, and read it back with GATE_SESSION_FILE set.');
         unverified++;
@@ -311,7 +312,7 @@ for (const [label, url, apiShouldBe] of [['staging', STAGING_URL, '404'], ['prev
     // does not read as a hang.
     const ATTEMPTS = 24;
     for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-        try { r = await readDeployed(url, label === 'preview' ? previewCookie : null); } catch (err) {
+        try { r = await readDeployed(url, label === 'WORKS' ? previewCookie : null); } catch (err) {
             console.error(`${label.padEnd(8)} could not be read back: ${err.message}`);
             break;
         }
@@ -338,7 +339,7 @@ for (const [label, url, apiShouldBe] of [['staging', STAGING_URL, '404'], ['prev
         bad++;
     }
     if (label === 'staging' && r.variant !== 'staging') { console.error(`  ^ variant should be 'staging'`); bad++; }
-    if (label === 'preview' && r.variant !== 'preview') { console.error(`  ^ variant should be 'preview'`); bad++; }
+    if (label === 'WORKS' && r.variant !== 'preview') { console.error(`  ^ variant should be 'preview'`); bad++; }
     // With a session, the store answers 200 — the gate let the owner through and the D1 binding
     // is live. 401 would mean the session was refused; 5xx that the binding did not arrive.
     if (apiShouldBe === 'alive' && r.api !== 200) { console.error(`  ^ /api/sessions answered ${r.api} with an owner session; expected 200`); bad++; }
@@ -348,7 +349,7 @@ if (bad) {
     process.exit(1);
 }
 if (unverified) {
-    console.error('\nStaging reads back correctly. The preview was NOT verified — see above. Exit 2: not checked, not failed.');
+    console.error('\nStaging reads back correctly. WORKS was NOT verified — see above. Exit 2: not checked, not failed.');
     process.exit(2);
 }
 console.log('\nBoth environments carry this change. `git -C "' + MAIN + '" push origin main` IS the release.');

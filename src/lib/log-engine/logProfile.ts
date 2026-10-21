@@ -195,7 +195,7 @@ export type LogExchange =
  *
  * Decided 2026-08-25, shipped with the first production cut. Production records `core` + `tuning`:
  * the two lambda pairs, coolant, EGT, rf, RF KORR, purge duty and road speed. The twelve `debug`
- * channels are for the preview build, because the question each of them answers is "why is the tool
+ * channels are for the WORKS build, because the question each of them answers is "why is the tool
  * or the DME saying that" rather than "what is this tune doing", and nothing in the derivation reads
  * one.
  *

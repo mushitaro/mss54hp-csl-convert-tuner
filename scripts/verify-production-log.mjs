@@ -135,11 +135,11 @@ console.log('\n[the exchanges a production run drops]');
                 'NOISE_ST/GANG/KR_DTZ_SUM/KA_DTZ_SUM', 'RF_KORR/P_SAUG/RF_P_SAUG',
                 'EVAN1_IST/EVAN_SOLL/AVAN1_IST/AVAN_SOLL', 'USV/USN/LA_ST_EIN/BA_F_TI'].sort()),
         gone.join(', '));
-    console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
+    console.log(`        WORKS    ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);
     // The rate is not the argument — 2.31 % would not justify removing a channel anyone reads.
     // Pinned only so that a future exchange added to the debug lane cannot make it one.
-    check('production is not SLOWER than preview', expectedHz(prod) >= expectedHz(full));
+    check('production is not SLOWER than WORKS', expectedHz(prod) >= expectedHz(full));
 }
 
 console.log('\n[the panel offers no switch for a channel this build does not record]');
@@ -147,7 +147,7 @@ console.log('\n[the panel offers no switch for a channel this build does not rec
     const prodGroups = fieldGroupsFor(false).map(g => g.relevance);
     check('production draws TUNING only', JSON.stringify(prodGroups) === JSON.stringify(['tuning']), prodGroups.join(', '));
     const previewGroups = fieldGroupsFor(true).map(g => g.relevance);
-    check('preview draws both', JSON.stringify(previewGroups) === JSON.stringify(['tuning', 'debug']), previewGroups.join(', '));
+    check('WORKS draws both', JSON.stringify(previewGroups) === JSON.stringify(['tuning', 'debug']), previewGroups.join(', '));
 }
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILURE(S)`);

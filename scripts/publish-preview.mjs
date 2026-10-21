@@ -1,10 +1,10 @@
 /**
- * Publishes the SOURCE of the preview: feat/develop's committed tree, onto the local `preview`
+ * Publishes the SOURCE of WORKS: feat/develop's committed tree, onto the local `preview`
  * branch, as one commit — and stops before pushing.
  *
- * ## Why the preview's source is published at all
+ * ## Why WORKS's source is published at all
  *
- * The preview is handed to owners now, not only run by its author, and tsunagi-m3's MESH page says
+ * WORKS is handed to owners now, not only run by its author, and tsunagi-m3's MESH page says
  * the tools are open source. A build served to people whose source is nowhere public would make
  * that sentence false for exactly the build they hold. So every deploy:preview has to serve a tree
  * that is on GitHub first — deploy-preview.mjs refuses otherwise — and this is how it gets there.
@@ -13,12 +13,12 @@
  *
  * Its history has carried real VINs and DME images (archive/, commit f2ad2dd), and a push carries
  * every object reachable from what is pushed. The same answer as the release (release-to-main.mjs):
- * a SINGLE-PARENT commit whose only parent is the previous preview commit, holding the source tree
+ * a SINGLE-PARENT commit whose only parent is the previous `preview` commit, holding the source tree
  * minus NOT_FOR_PUBLIC. Development history never becomes reachable from it.
  *
  * What it leaves behind is short (release-scope.mjs): archive/, the agent notes, and the two docs
  * that say where the VINs are. functions/, migrations/ and wrangler.jsonc ARE published — the owner
- * gate and the SYNC API are part of what the preview serves.
+ * gate and the SYNC API are part of what WORKS serves.
  *
  * ## The proof, separate from the removal
  *
@@ -31,7 +31,7 @@
  * Push. `git push origin preview` is the publication, and it is a person's act — the pre-push hook
  * allows exactly main and preview. The message names the source commit (`preview: <short sha>`),
  * which is how deploy-preview.mjs knows the tree it is about to serve has been published, and how
- * anyone can match a preview's build id to its public source.
+ * anyone can match a WORKS build id to its public source.
  *
  * Usage: npm run publish:preview
  */
@@ -56,7 +56,7 @@ const ref = (name) => {
 };
 
 const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-if (branch !== SOURCE) refuse(`On '${branch}', not ${SOURCE}. The preview is published from ${SOURCE} only.`);
+if (branch !== SOURCE) refuse(`On '${branch}', not ${SOURCE}. WORKS is published from ${SOURCE} only.`);
 const dirty = dirtyPaths();
 if (dirty.length) {
     // The commit is made from the committed tree whatever the files say, but a deploy right after
@@ -100,11 +100,11 @@ try {
     git(['worktree', 'add', '--detach', '-q', checkout, commit]);
     try {
         const present = NOT_FOR_PUBLIC.filter((p) => !p.includes('*') && existsSync(join(checkout, p)));
-        if (present.length) fail(['Present in the checked-out preview tree:', ...present.map((p) => `  ${p}`)]);
+        if (present.length) fail(['Present in the checked-out WORKS source tree:', ...present.map((p) => `  ${p}`)]);
         try {
             execFileSync('node', ['scripts/check-public-tree.mjs'], { cwd: checkout, stdio: 'inherit' });
         } catch {
-            fail(`check-public-tree failed on the preview tree. ${PREVIEW_BRANCH} was not moved.`);
+            fail(`check-public-tree failed on the WORKS source tree. ${PREVIEW_BRANCH} was not moved.`);
         }
     } finally {
         git(['worktree', 'remove', '--force', checkout]);

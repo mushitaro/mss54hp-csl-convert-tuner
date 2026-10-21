@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
  * Nothing here used to handle `beforeinstallprompt`, so getting the tool onto a phone's home screen
  * depended entirely on Chrome offering it — and Chrome's own prompt is heuristic and its menu entry
  * is three taps deep behind an overflow icon. On the production origin that was masked by the
- * Trusted Web Activity, which installs from a link; on any other origin, including a preview
+ * Trusted Web Activity, which installs from a link; on any other origin, including the WORKS
  * deployment, there was simply no way in that a user would find.
  *
  * That matters more here than for most apps. Installed, the tool has no browser chrome to lose room

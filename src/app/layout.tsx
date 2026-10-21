@@ -20,7 +20,7 @@ const jetbrainsMono = JetBrains_Mono({
 /**
  * Where this tool lives — production's URL, named in every build.
  *
- * staging and preview carry the same canonical link and the same JSON-LD, pointing here: they are
+ * staging and WORKS carry the same canonical link and the same JSON-LD, pointing here: they are
  * the same pages under other origins, and a crawler that reaches one of them should learn that the
  * real one is here. What they refuse is the crawl itself — brand-preview.mjs replaces their
  * robots.txt with a Disallow and drops the sitemap (public/robots.txt and public/sitemap.xml are
@@ -118,7 +118,7 @@ export const metadata: Metadata = {
    * tsunagi-m3's `scripts/m-icons.mjs --word mapping`: chosen, not drawn. MAPPING is the operator's
    * choice for TUNER (2026-09-22); `mss54hp-base` is the m3 site's own mark, not this app's. This is
    * PRODUCTION's set; `scripts/brand-preview.mjs` points every one of these references at the
-   * `-dev-` twin for staging and preview, which is why the dev files sit beside them in public/icons.
+   * `-dev-` twin for staging and WORKS, which is why the dev files sit beside them in public/icons.
    */
   manifest: '/manifest.webmanifest',
   icons: {

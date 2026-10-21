@@ -5,8 +5,8 @@
  *
  *   main      the release (GitHub Pages). A static app, so it carries no backend, no gate, no
  *             infrastructure and no deploy tooling — see NOT_FOR_MAIN.
- *   preview   the source of what the preview project serves (tsunagi-m3's MESH page promises the
- *             tools' source is open, and the preview is one of the tools). It DOES carry functions/,
+ *   preview   the source of what WORKS serves (tsunagi-m3's MESH page promises the
+ *             tools' source is open, and WORKS is one of the tools). It DOES carry functions/,
  *             migrations/ and wrangler.jsonc, because those are part of what is served. What it
  *             leaves behind is only what must never be public — see NOT_FOR_PUBLIC.
  *
@@ -19,10 +19,10 @@
  * module because release-to-main.mjs RUNS the release when it is imported.
  */
 
-/** The development branch. Releases and previews are copied from its committed tree. */
+/** The development branch. Releases and the WORKS source are copied from its committed tree. */
 export const SOURCE = 'feat/develop';
 
-/** The branch the preview's source is published on, and the Pages project it is served from. */
+/** The branch WORKS's source is published on, and the Pages project WORKS is served from. */
 export const PREVIEW_BRANCH = 'preview';
 export const PREVIEW_PROJECT = 'mss54hp-csl-convert-tuner-preview';
 
@@ -60,7 +60,7 @@ export const NOT_FOR_MAIN = [
     'docs/release-environments.md',
     'docs/preview-deployment.md',
     // Ghidra's decompiled C of the 0401 program — text derived from BMW firmware, which no public
-    // branch carries. Off main for the same reason it is off the preview (NOT_FOR_PUBLIC below);
+    // branch carries. Off main for the same reason it is off the `preview` branch (NOT_FOR_PUBLIC below);
     // production falls back to quoted names without it, and verify:cal-decomp / verify:cal-docs
     // SKIP on a tree that lacks it.
     'public/data/calibration-decomp.json',
@@ -80,8 +80,8 @@ export const NOT_FOR_MAIN_SCRIPTS = [
 ];
 
 /**
- * Paths that stay off the public `preview` branch. Much shorter than NOT_FOR_MAIN, because the
- * preview's backend is part of what is served and so is part of what is published.
+ * Paths that stay off the public `preview` branch. Much shorter than NOT_FOR_MAIN, because
+ * WORKS's backend is part of what is served and so is part of what is published.
  *
  *   archive/            D1 dumps: real VINs and DME images. Gitignored now, and in history.
  *   .claude/, CLAUDE.md  agent configuration and working notes, not the tool.
@@ -91,14 +91,14 @@ export const NOT_FOR_MAIN_SCRIPTS = [
  *                       plan, 2026-09-23). It is in NOT_FOR_MAIN too. It is not on origin/main, but
  *                       the LOCAL main (1d542df, 7 unpushed commits ahead of origin/main on
  *                       2026-09-23) does carry it: that main must be re-cut from origin/main with
- *                       this exclusion before the next push (docs/release-environments.md §6). The
- *                       preview SERVES it to signed-in owners, and the app falls back to quoted
+ *                       this exclusion before the next push (docs/release-environments.md §6).
+ *                       WORKS SERVES it to signed-in owners, and the app falls back to quoted
  *                       names without it, which is what a clone of either public branch sees.
  *                       Whether it may be published at all (karter16 publishes the Ghidra output)
  *                       is the operator's decision, not this list's; until then it stays off.
  *   session-920-base    the 64 KB calibration partial of one recorded session on the developer's
  *                       own car (scripts/fixtures). Already on origin/main, which is the operator's
- *                       call; kept off the preview branch because being public once is no reason
+ *                       call; kept off the `preview` branch because being public once is no reason
  *                       to publish it on a second branch. verify:model-gate, verify:shape-repair
  *                       and verify:restore-tables SKIP without it.
  *

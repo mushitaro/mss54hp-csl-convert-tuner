@@ -1,14 +1,14 @@
 /**
- * The preview says what it sends, and why, before it sends any of it — and production's first-run
+ * WORKS says what it sends, and why, before it sends any of it — and production's first-run
  * dialog is exactly what it was.
  *
- * Until 2026-09-24 the notice was a page on m3 that a first visit to any owner preview passed
+ * Until 2026-09-24 the notice was a page on m3 that a first visit to any owner build (WORKS) passed
  * through. The operator moved it into the app's own first-run dialog, and the privacy policy's
- * preview section now says that sending starts only after the owner has seen it there. Four things
+ * WORKS section (`#preview`) now says that sending starts only after the owner has seen it there. Four things
  * make that sentence true, and each breaks silently:
  *
- *   1. the dialog shows it — on the preview, in the reader's language, with the policy's #preview
- *      section one click away;
+ *   1. the dialog shows it — on WORKS, in the reader's language, with the policy's WORKS section
+ *      (`#preview`) one click away;
  *   2. the dialog is up until it has been confirmed, whatever the disclaimer's older "don't show
  *      again" says, and when storage cannot say (a private window), it is up;
  *   3. nothing is sent before the press — no session, no error record, no flush of the outbox. The
@@ -197,7 +197,7 @@ for (const lang of LANGS) {
     check(`${lang}: its policy link is still #tuner`, now.includes(`href="${privacyPolicyUrl(lang, false)}"`));
 }
 
-console.log('\n[the preview: the dialog carries the notice]');
+console.log('\n[WORKS: the dialog carries the notice]');
 for (const lang of LANGS) {
     const html = render(lang, true);
     const copy = PREVIEW_NOTICE[lang];
@@ -207,12 +207,12 @@ for (const lang of LANGS) {
     const link = [...html.matchAll(/<a\b([^>]*)>([^<]*)<\/a>/g)];
     const policy = link.find(([, , text]) => text === esc(copy.policy));
     check(`${lang}: the policy link reads as the notice's last line`, !!policy, `links: ${link.map((m) => m[2]).join(' | ')}`);
-    check(`${lang}: ...and goes to the policy's preview section`, !!policy && policy[1].includes(`href="${privacyPolicyUrl(lang, true)}"`),
+    check(`${lang}: ...and goes to the policy's WORKS section (#preview)`, !!policy && policy[1].includes(`href="${privacyPolicyUrl(lang, true)}"`),
         policy?.[1]);
     check(`${lang}: ...in a new tab, without an opener`, !!policy && policy[1].includes('target="_blank"') && policy[1].includes('rel="noopener noreferrer"'),
         'a same-tab navigation drops the serial link and an unsaved run with it');
     check(`${lang}: one policy link, not two`, link.length === 1, `${link.length} links`);
-    check(`${lang}: no #tuner anywhere`, !html.includes('#tuner'), 'the preview is not the build section 9 describes');
+    check(`${lang}: no #tuner anywhere`, !html.includes('#tuner'), 'WORKS is not the build section 9 describes');
 
     // After the note that says what the press accepts: "the above" must stay the five disclaimer items.
     const agreeNote = { ja: '上記に同意したものとみなします', en: 'is taken as your acceptance of the above' }[lang];
@@ -235,11 +235,11 @@ for (const lang of LANGS) {
 console.log('\n[when the dialog is up]');
 {
     const open = (preview, d, n) => notice.firstRunDialogOpen({ preview, disclaimerAcknowledged: d, noticeAcknowledged: n });
-    check('preview: an old "don\'t show again" does NOT hide a notice never confirmed', open(true, true, false) === true,
+    check('WORKS: an old "don\'t show again" does NOT hide a notice never confirmed', open(true, true, false) === true,
         'the one case this whole change exists for');
-    check('preview: open while neither is recorded', open(true, false, false));
-    check('preview: open while the disclaimer is not "don\'t show again", as it always was', open(true, false, true));
-    check('preview: closed once both are', !open(true, true, true));
+    check('WORKS: open while neither is recorded', open(true, false, false));
+    check('WORKS: open while the disclaimer is not "don\'t show again", as it always was', open(true, false, true));
+    check('WORKS: closed once both are', !open(true, true, true));
     for (const n of [false, true]) {
         check(`production: the notice's state changes nothing (notice ${n ? 'confirmed' : 'not confirmed'})`,
             open(false, false, n) === true && open(false, true, n) === false);
@@ -291,7 +291,7 @@ console.log('\n[the acknowledgement: its key, and what storage can do to it]');
 
 // --- 5. nothing is sent before the press -------------------------------------------------------------
 
-console.log('\n[the preview sends nothing before the notice is confirmed]');
+console.log('\n[WORKS sends nothing before the notice is confirmed]');
 const record = (id) => ({
     id, kind: 'read', createdAt: 1_758_600_000_000, completed: false, error: 'verify: nothing was connected',
     vin: null, softwareVersion: null, transport: null, mock: true, sessionId: null, report: null, events: null,
@@ -382,7 +382,7 @@ for (const build of ['', 'staging']) {
     variant = build;
     storage = new MemoryStorage();
     storage.setItem('preview-notice:v1', new Date().toISOString());   // even with a stray key
-    await settle();                                                    // the preview's last flush first
+    await settle();                                                    // WORKS's last flush first
     const mark = requests.length;
     const label = build || 'production';
     const before = await pending.count();

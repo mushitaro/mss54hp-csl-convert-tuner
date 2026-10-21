@@ -29,7 +29,7 @@ const TEMPLATE = join('scripts', 'sw.template.js');
  *   *.map          source maps are for a debugger on a desk, not for a car
  *   CNAME          an instruction to GitHub Pages, not a resource
  *   /data/*        the calibration corpus — 8.5 MB of the 14.6 that ONLY the CALIBRATION tab reads,
- *                  and only a preview build renders that tab. Every install on every device paid
+ *                  and only a WORKS build renders that tab. Every install on every device paid
  *                  for it, again on every deploy (the cache name is a content hash), and a head
  *                  unit paid it over a phone's tether with the whole list downloading at once. It
  *                  is cached on first use instead — see DATA_CACHE in sw.template.js, which keeps
@@ -76,7 +76,7 @@ const paths = walk(OUT).sort();
  *
  * The size has to come from here. The worker could read `content-length` off each response instead,
  * but that is the COMPRESSED length where the host compresses and the decoded length where it does
- * not — the preview and production hosts differ on exactly that — so a total summed from it would
+ * not — the WORKS and production hosts differ on exactly that — so a total summed from it would
  * be a different number from the bytes that actually arrive, and the bar would end at 140 % on one
  * host and 100 % on the other. The on-disk size is what the browser hands the worker after
  * decoding, on every host, which makes it the only total the parts can be counted against.

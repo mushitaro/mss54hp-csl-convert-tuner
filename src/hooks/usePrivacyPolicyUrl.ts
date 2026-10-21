@@ -3,7 +3,7 @@ import { useIsPreviewBuild } from '@/lib/build-variant';
 import { privacyPolicyUrl } from '@/config/links';
 
 /**
- * プライバシーポリシーの URL を、ブラウザの言語設定とビルド(本番かプレビュー版か)に合わせて返す。
+ * プライバシーポリシーの URL を、ブラウザの言語設定とビルド(本番かワークス版か)に合わせて返す。
  *
  * ## 何を避ける必要があるか
  *
@@ -26,7 +26,7 @@ import { privacyPolicyUrl } from '@/config/links';
  * 自動判定があるため英語ブラウザはそのまま /en へ送られる。取り違えたまま終わることはない。
  */
 export function usePrivacyPolicyUrl(): string {
-    // 両方のフックを先に呼ぶ(条件付きで呼ばない)。プレビュー版は `#preview` の節へ — links.ts 参照。
+    // 両方のフックを先に呼ぶ(条件付きで呼ばない)。ワークス版は `#preview` の節へ — links.ts 参照。
     const lang = useDialogLang();
     const preview = useIsPreviewBuild();
     return privacyPolicyUrl(lang, preview);

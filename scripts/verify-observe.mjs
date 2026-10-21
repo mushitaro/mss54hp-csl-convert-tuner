@@ -16,7 +16,7 @@
  *   the CSV       `Watch FFD1A2` and `Mark` go out and come back — `1234` stays bytes, a mark keeps
  *                 its commas — and an OBSERVE log without a trim imports, while any other still
  *                 does not;
- *   the registry  OBSERVE is a preview-only mode with its own tab second and no WRITE rows.
+ *   the registry  OBSERVE is a WORKS-only mode with its own tab second and no WRITE rows.
  *
  * What a wrong answer costs: a plausible lambda trim invented from an operator's watched bytes and
  * carried into a VE map, or a 0xB0 on every sample of a drive. Synthetic data only.
@@ -185,7 +185,7 @@ console.log('\n[the CSV]');
 // ---------------------------------------------------------------------------------------------
 console.log('\n[the registry]');
 {
-    check('OBSERVE is offered in preview only', selectableModes(true).includes('OBSERVE') && !selectableModes(false).includes('OBSERVE'), JSON.stringify([selectableModes(true), selectableModes(false)]));
+    check('OBSERVE is offered in WORKS only', selectableModes(true).includes('OBSERVE') && !selectableModes(false).includes('OBSERVE'), JSON.stringify([selectableModes(true), selectableModes(false)]));
     check('...because its feature is experimental and owns the observe tab', FEATURES.observe.stage === 'experimental' && JSON.stringify(FEATURES.observe.tabs) === '["observe"]');
     check('its tabs: startup, its own panel second, the log, calibration', JSON.stringify(MODE_TABS.OBSERVE) === '["startup","observe","log","calibration"]');
     check('it offers no WRITE row — an observation names, it never derives', Array.isArray(MODE_WRITES.OBSERVE) && MODE_WRITES.OBSERVE.length === 0);

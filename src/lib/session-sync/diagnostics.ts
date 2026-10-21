@@ -102,7 +102,7 @@ export type DiagnosticUpload =
     | { ok: false; reason: string };
 
 /**
- * Records that could not be sent yet: offline in a garage, or signed out of the preview. Kept in
+ * Records that could not be sent yet: offline in a garage, or signed out of WORKS. Kept in
  * IndexedDB (newest twenty) and sent, oldest first, after the next send that works — see owner-sync.
  * A separate database from the sessions', so clearing one can never take the other with it.
  */
@@ -152,7 +152,7 @@ const settled = (status: number) =>
  * Called after any send that worked — a diagnostic or a session — because that is the moment the
  * route is known to be open.
  *
- * Nothing at all before the preview's notice is confirmed — not even the gate check `flush` opens
+ * Nothing at all before WORKS's notice is confirmed — not even the gate check `flush` opens
  * with. What waits keeps waiting, and goes on the first flush after the press (useGateStatus asks
  * again at that moment for exactly this).
  */
@@ -173,7 +173,7 @@ export async function flushDiagnostics(): Promise<number> {
  * send-or-lose uploader would lose. On production and staging nothing is sent and nothing is kept —
  * they have no store, and the production privacy policy says the data stays on the device.
  *
- * Before the preview's notice is confirmed the record is kept the same way, and not sent: the
+ * Before WORKS's notice is confirmed the record is kept the same way, and not sent: the
  * notice says what goes before any of it does (preview-notice.ts). The dialog is modal, so a record
  * that arrives here first would be one filed by no hand — which is why this does not rely on it.
  */

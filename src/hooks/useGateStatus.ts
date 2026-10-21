@@ -11,7 +11,7 @@ export interface GateInfo {
      *  as one: `unknown` is the gate's answer that it could not confirm anybody, and the SYNC control
      *  says so — the first half-second of every load must not. */
     state: GateState | 'checking';
-    /** The account the preview is signed in as, e.g. `#A1B2` — what the SYNC panel names as the
+    /** The account WORKS is signed in as, e.g. `#A1B2` — what the SYNC panel names as the
      *  destination. Null until the gate has said. */
     label: string | null;
 }
@@ -29,13 +29,13 @@ const CHECKING: GateInfo = { state: 'checking', label: null };
  * sign-in round trip that cannot complete from a garage — but SYNC says the store is unreachable
  * rather than offering a send that cannot land.
  *
- * `enabled` is the preview marker. Production and staging have no gate and make no request here.
+ * `enabled` is the WORKS marker. Production and staging have no gate and make no request here.
  *
  * A signed-in answer is also the moment the route is known to be open, so diagnostics kept while
  * signed out or offline are sent then — after a re-sign-in the page reloads, and this is the first
  * thing that runs.
  *
- * Except before the preview's notice is confirmed: that flush sends nothing until then
+ * Except before WORKS's notice is confirmed: that flush sends nothing until then
  * (flushDiagnostics). So confirming it is one more moment to ask — whatever waited goes right away,
  * rather than the next time the tab comes back.
  */

@@ -1,21 +1,21 @@
 import { isPreviewBuild } from './owner-sync';
 
 /**
- * Whether this browser has been shown what the preview sends — and the rule that nothing is sent
+ * Whether this browser has been shown what WORKS sends — and the rule that nothing is sent
  * until it has.
  *
  * ## Where the notice lives
  *
- * In the first-run dialog (DisclaimerDialog), on the preview build only; the words are in
- * preview-notice-copy.ts. It used to be a page on m3 that every owner-gated preview routed a first
+ * In the first-run dialog (DisclaimerDialog), on the WORKS build only; the words are in
+ * preview-notice-copy.ts. It used to be a page on m3 that every owner-gated build routed a first
  * visit through. The operator dropped that page on 2026-09-24: the confirmation belongs in the app's
- * own first-run dialog, which this app already had. The privacy policy's preview section says the
+ * own first-run dialog, which this app already had. The privacy policy's WORKS section (`#preview`) says the
  * same — sending starts only after the owner has seen the notice — and this module is what makes
  * that sentence true in code rather than only in layout.
  *
  * ## The rule
  *
- * On the preview, nothing goes to the store until `PREVIEW_NOTICE_KEY` has been written: not a saved
+ * On WORKS, nothing goes to the store until `PREVIEW_NOTICE_KEY` has been written: not a saved
  * session (`client.ts` refuses every store request), not a diagnostic record (`diagnostics.ts` keeps
  * it in the outbox instead, where a record that cannot go yet already waits), and not the outbox
  * itself. The dialog is modal, so nothing a hand does can get there first; the guards are for what
@@ -25,7 +25,7 @@ import { isPreviewBuild } from './owner-sync';
  *
  * Owners ticked the disclaimer's "don't show again" before this notice existed. Reading that as having
  * seen a notice they were never shown would be exactly the failure this prevents. So the notice has
- * its own versioned key: on the preview the dialog shows while the key is missing, whatever the old
+ * its own versioned key: on WORKS the dialog shows while the key is missing, whatever the old
  * flag says, and pressing its button writes it. If what the notice says changes in substance, bump
  * the version and every owner is shown it again.
  *
@@ -60,7 +60,7 @@ export function previewNoticeAcknowledged(): boolean {
  * The press that confirms it. Records when, and tells the subscribers — the gate status is one, so
  * that whatever waited in the outbox goes as soon as it may.
  *
- * Does nothing off the preview. Production and staging show no notice and have nothing to confirm,
+ * Does nothing off WORKS. Production and staging show no notice and have nothing to confirm,
  * and production's privacy policy names every localStorage key that build writes.
  */
 export function acknowledgePreviewNotice(): void {
@@ -83,7 +83,7 @@ export function subscribePreviewNotice(listener: () => void): () => void {
  * Whether the first-run dialog has to be up.
  *
  * Production and staging: exactly as before the notice existed — only the disclaimer's own "don't
- * show again" decides. The preview: that, or the notice not yet confirmed, whatever that checkbox
+ * show again" decides. WORKS: that, or the notice not yet confirmed, whatever that checkbox
  * said. Written out as a function because this one line is the whole of "the old flag must not
  * suppress the notice", and it is what `verify:preview-notice` holds to.
  */

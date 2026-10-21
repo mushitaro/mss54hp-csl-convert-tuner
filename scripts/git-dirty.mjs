@@ -1,11 +1,11 @@
 /**
  * What "a dirty tree" means, in one place.
  *
- * build-id.mjs marks a build `+` when it was made from uncommitted changes, and the preview deploy
+ * build-id.mjs marks a build `+` when it was made from uncommitted changes, and the WORKS deploy
  * refuses such a tree outright. They must agree, or the deploy passes a tree the stamp calls dirty
  * (or refuses one it calls clean), and the build id stops being evidence of anything.
  *
- * Tracked files only (`--untracked-files=no`): the preview has to be something that can be pointed
+ * Tracked files only (`--untracked-files=no`): WORKS has to be something that can be pointed
  * at in git, so what matters is whether a committed file was changed. An untracked file that the
  * build really depends on fails `next build` on a fresh clone — which is where the published
  * `preview` branch gets built from — so it cannot hide there for long.

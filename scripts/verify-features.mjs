@@ -46,11 +46,11 @@ console.log('\n[featureEnabled truth table]');
     const byStage = (stage) => Object.entries(FEATURES).find(([, d]) => d.stage === stage)?.[0];
     const stable = byStage('stable'), exp = byStage('experimental'), pOnly = byStage('preview-only');
     check('a stable feature shows in production', featureEnabled(stable, false));
-    check('a stable feature shows in preview', featureEnabled(stable, true));
+    check('a stable feature shows in WORKS', featureEnabled(stable, true));
     check('an experimental feature is CLOSED in production', !featureEnabled(exp, false));
-    check('an experimental feature shows in preview', featureEnabled(exp, true));
+    check('an experimental feature shows in WORKS', featureEnabled(exp, true));
     check('a preview-only feature is closed in production', !featureEnabled(pOnly, false));
-    check('a preview-only feature shows in preview', featureEnabled(pOnly, true));
+    check('a preview-only feature shows in WORKS', featureEnabled(pOnly, true));
 }
 
 console.log('\n[the production tab set, as a literal]');
@@ -66,7 +66,7 @@ console.log('\n[the production tab set, as a literal]');
     check('production shows the VE workflow and nothing else',
         JSON.stringify(production) === JSON.stringify(expected), production.join(', '));
     const preview = enabledTabs(true);
-    check('preview shows every tab', ALL_TABS.every(t => preview.has(t)),
+    check('WORKS shows every tab', ALL_TABS.every(t => preview.has(t)),
         ALL_TABS.filter(t => !preview.has(t)).join(', '));
 }
 
@@ -81,9 +81,9 @@ console.log('\n[MODE, which a tab set cannot speak for either]');
     check('production offers VE and nothing else',
         JSON.stringify(production) === JSON.stringify(['VE']), production.join(', '));
     const preview = selectableModes(true);
-    // OBSERVE (2026-10-20): experimental, so preview only — a research run that reads whatever the
+    // OBSERVE (2026-10-20): experimental, so WORKS only — a research run that reads whatever the
     // operator points it at, never a tune. Production's line above is the one that must not move.
-    check('preview offers all five',
+    check('WORKS offers all five',
         JSON.stringify(preview) === JSON.stringify(['VE', 'IDLE', 'LLS', 'INERTIA', 'OBSERVE']), preview.join(', '));
 
     // Every mode names a real, runnable profile -- and every runnable profile is reachable. The
@@ -106,7 +106,7 @@ console.log('\n[MODE, which a tab set cannot speak for either]');
         const tabs = enabledTabs(isPreview);
         const bad = selectableModes(isPreview)
             .filter(m => !FEATURES[MODE_FEATURES[m]].tabs.every(t => tabs.has(t)));
-        check('every offered mode has its tabs open (' + (isPreview ? 'preview' : 'production') + ')',
+        check('every offered mode has its tabs open (' + (isPreview ? 'WORKS' : 'production') + ')',
             bad.length === 0, bad.join(', '));
     }
 }

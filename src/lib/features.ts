@@ -2,19 +2,19 @@
  * Which features a build variant shows — the registry that closes experiments in production.
  *
  * One codebase serves two deployments: production (GitHub Pages, from main, plain `npm run build`)
- * and preview (Cloudflare Pages, `npm run build:preview`). They are the SAME compiled output — the
- * preview is distinguished only by a `<meta name="app-variant">` the branding script injects, read
+ * and WORKS (Cloudflare Pages, `npm run build:preview`). They are the SAME compiled output —
+ * WORKS is distinguished only by a `<meta name="app-variant">` the branding script injects, read
  * at runtime by `useIsPreviewBuild()` (build-variant.ts). This registry rides on that: a feature
- * staged `experimental` exists in every bundle and renders only where the variant says preview.
+ * staged `experimental` exists in every bundle and renders only where the variant says `preview`.
  * No compile-time branching, so main and the experiment can never diverge in code — integrating a
  * tested module is a merge plus one word here, not a port.
  *
  * ## Stages
  *
  *   - `stable`        — shown in every variant. What main ships.
- *   - `experimental`  — shown in preview only. The tab keeps its position and its (EXP.) label;
+ *   - `experimental`  — shown in WORKS only. The tab keeps its position and its (EXP.) label;
  *                       production simply does not render it, or its WRITE-manifest rows.
- *   - `preview-only`  — shown in preview only, like experimental, but NOT awaiting promotion:
+ *   - `preview-only`  — shown in WORKS only, like experimental, but NOT awaiting promotion:
  *                       a deliberate decision that production never gets it.
  *
  * ## Promoting a feature (the planned order: rfKorr → idle → inertia)
@@ -93,7 +93,7 @@ export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly
      * matrix-tsunagi/bridge): read the state and the log, start a log, stop it on a spoken yes.
      * Never connect, write or flash; there is no tool for them.
      *
-     * Preview-only by decision, like sessionSync and for the same reason twice over: it needs a
+     * `preview-only` by decision, like sessionSync and for the same reason twice over: it needs a
      * backend production does not have (`/api/bridge/ticket`), and it sends what the assistant asks
      * for off the device — production's privacy policy says that build sends nothing. Owns no tab;
      * its surfaces (the ASSISTANT section of the store panel, the header chip) are gated where they
@@ -103,7 +103,7 @@ export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly
 };
 
 /**
- * The dev server counts as preview. The meta is injected post-build, so `next dev` never carries
+ * The dev server counts as WORKS. The meta is injected post-build, so `next dev` never carries
  * it — and a dev session with the experiments hidden would be a dev session on the wrong app.
  * NODE_ENV is inlined by Next at compile time: 'production' in BOTH deployed variants (they come
  * out of the same `next build`), 'development' only under `next dev`. The same discrimination

@@ -1,11 +1,11 @@
 import type { DialogLang } from '@/lib/dialog-text';
 
 /**
- * What this preview sends, and why — the words the first-run dialog shows before the first send.
+ * What this WORKS build sends, and why — the words the first-run dialog shows before the first send.
  *
  * Moved here, verbatim, from tsunagi-m3's `/preview-notice` page (its `lib/preview-notice-copy.ts`:
  * the shared `NOTICE_COPY` and this app's `NOTICE_APPS['tuner-preview']`). Until 2026-09-24 every
- * owner-gated preview sent a first visit through that page on m3; the operator decided the
+ * owner-gated build sent a first visit through that page on m3; the operator decided the
  * confirmation belongs in the app's own first-run dialog instead, and m3 dropped the page. This file
  * is now the only copy of this app's notice.
  *
@@ -21,7 +21,7 @@ import type { DialogLang } from '@/lib/dialog-text';
  * compares.
  *
  * It is a claim about what `client.ts` and `diagnostics.ts` send. Change what those send and this
- * changes with them, together with the per-app list in the privacy policy's preview section
+ * changes with them, together with the per-app list in the privacy policy's WORKS section (`#preview`)
  * (m3.tsunagi.app/privacy-policy#preview, both languages) — the policy is the other copy. And if
  * what it says changes in substance, bump the version in `PREVIEW_NOTICE_KEY` (preview-notice.ts),
  * so that every owner who confirmed the old words is shown the new ones. A new name for the build
@@ -46,7 +46,7 @@ export interface PreviewNoticeCopy {
     where: string;
     deleteTitle: string;
     deleteBody: string;
-    /** The text of the link to the policy's preview section. */
+    /** The text of the link to the policy's WORKS section (`#preview`). */
     policy: string;
 }
 

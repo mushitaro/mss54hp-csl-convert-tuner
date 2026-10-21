@@ -209,7 +209,7 @@ const Band: React.FC<{ title: string; className?: string; children: React.ReactN
  * How wide the destination board is, from how many destinations there are.
  *
  * Four across is what a 683x400 head unit holds at the 44px floor with room to spare (two rows for
- * the 8 tabs production ships). A preview build carrying ten needs five to stay two rows deep. Fewer
+ * the 8 tabs production ships). A WORKS build carrying ten needs five to stay two rows deep. Fewer
  * than five get a column each rather than a half-empty grid — INERTIA mode is three tabs.
  */
 const boardColumns = (count: number) => (count <= 4 ? Math.max(count, 1) : count <= 8 ? 4 : 5);

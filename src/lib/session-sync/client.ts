@@ -39,14 +39,14 @@ import { previewNoticeAcknowledged } from './preview-notice';
 /**
  * Whether this build talks to a store at all — a fact about the build, not a setting.
  *
- * True on the preview and nowhere else. Production is local-complete (its privacy policy says so,
+ * True on WORKS and nowhere else. Production is local-complete (its privacy policy says so,
  * and `sessionSync` is `preview-only` in the registry for that reason); staging is main unmodified
  * and has no `/api`; the dev server has no backend. So every network function below returns early
- * on anything but the preview, and those builds make no sync request of any kind.
+ * on anything but WORKS, and those builds make no sync request of any kind.
  *
- * There is no token and nothing to configure. The preview sits behind the owner gate, which put a
+ * There is no token and nothing to configure. WORKS sits behind the owner gate, which put a
  * session cookie on this origin when the owner arrived from m3; every request here is same-origin
- * and carries it (owner-sync.ts). The shared token that used to be baked into the preview HTML, and
+ * and carries it (owner-sync.ts). The shared token that used to be baked into the WORKS HTML, and
  * the `localStorage` override a bench rig wrote by hand, are gone — the first was readable by
  * anyone who could load the page, and the second pointed a device at a store by hand-typed secret.
  */
@@ -76,7 +76,7 @@ export class SyncError extends Error {
 /**
  * Why nothing may go to the store from this page yet, or null when it may.
  *
- * Two answers. A build with no store; and, on the preview, a notice not yet confirmed — the first-run
+ * Two answers. A build with no store; and, on WORKS, a notice not yet confirmed — the first-run
  * dialog says what is sent and why, and until it has been pressed nothing is (preview-notice.ts).
  * Asked before every request below, so no path in this file reaches the network first.
  */

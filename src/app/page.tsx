@@ -360,7 +360,7 @@ export default function Home() {
    *  nothing compares it). The badge is on whenever it is not empty. Not `buildLabel`: that name is
    *  the build id (`<count>.<sha>`) the credits and the menu show, from useDiagnosticsPublisher. */
   const variantLabel = useBuildLabel();
-  /** What the FEATURE gate reads: the deployed variant, with the dev server counting as preview.
+  /** What the FEATURE gate reads: the deployed variant, with the dev server counting as WORKS.
    *  Nothing at runtime overrides it — see usePreviewSurfaces. */
   const featurePreview = usePreviewSurfaces();
   /**
@@ -374,14 +374,14 @@ export default function Home() {
    * What the badge says: this build's NAME (WORKS, STAGING), DEV under `next dev`, nothing on
    * production. It names the URL that is open and switches nothing.
    *
-   * The dev server gets one because it BEHAVES as preview — the experiments have to be visible where
+   * The dev server gets one because it BEHAVES as WORKS — the experiments have to be visible where
    * they are written — and without a badge it would look like the release.
    */
   const badgeLabel = variantLabel || (DEV_VARIANT_IS_PREVIEW ? 'DEV' : '');
-  /** Amber on the builds that are not the release (preview, dev); violet on staging, which is. */
+  /** Amber on the builds that are not the release (WORKS, dev); violet on staging, which is. */
   const badgeNotRelease = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
-  /** Where this browser stands with the owner gate — preview only; production and staging have no
+  /** Where this browser stands with the owner gate — WORKS only; production and staging have no
    *  gate and ask nothing. Names the SYNC destination, and drives the SIGN IN chip. */
   const gate = useGateStatus(isPreviewBuild);
   // Sending sessions to the store, and what the three controls that do it say. See useSessionSync.
@@ -1363,7 +1363,7 @@ export default function Home() {
     // failed is polling the fallback, and comparing its rate against the fast profile's expectation
     // would report a correct run as a slow one.
     // Narrowed when nothing is running, because the expectation has to describe the run this BUILD
-    // would start. A production build quoting the preview list's 4.46 Hz would report its own
+    // would start. A production build quoting the WORKS list's 4.46 Hz would report its own
     // correct 4.56 Hz run as faster than possible. Not applied to the live list: that one is what
     // the link actually settled on, already narrowed at START TUNE.
     const exchanges = (dmeLink.state === 'tuning' ? liveExchangesRef.current : null)
@@ -4777,7 +4777,7 @@ export default function Home() {
         rows: g.rows
           // ...unless it is ARMED. The gate hides what a build cannot offer, not what is already
           // going into the bytes: the retired RF GATE row belonged to 'rfKorr', so production hid it
-          // while a BASE read off a car patched from preview still armed it — WRITE stayed PATCH-ON
+          // while a BASE read off a car patched from WORKS still armed it — WRITE stayed PATCH-ON
           // with PATCH off, and the one switch that would clear it was not on screen.
           .filter(r => (r.kind === 'toggle' && r.checked) || featureEnabled(
             r.id.startsWith('cal:') ? 'calibration' : rowFeature[r.id], featurePreview))
@@ -4930,7 +4930,7 @@ export default function Home() {
    * drive not yet saved is asked about first; everything already saved is on this device and
    * survives the trip.
    *
-   * Nothing depends on this being pressed. A signed-out preview keeps working locally; only SYNC
+   * Nothing depends on this being pressed. A signed-out WORKS build keeps working locally; only SYNC
    * and the store's lists wait for it.
    */
   const reauthAllowed = isPreviewBuild && gate.state === 'expired' && online
@@ -5550,15 +5550,15 @@ export default function Home() {
             TUNER
           </h1>
           {/* Which build this is, once you are already inside it. The manifest name only shows on
-              the way in — on the home screen and in the task switcher — and with production and a
-              preview installed side by side, "which one am I looking at" is a question you ask
+              the way in — on the home screen and in the task switcher — and with production and
+              WORKS installed side by side, "which one am I looking at" is a question you ask
               after opening one, not before.
 
               Read from a meta tag injected by scripts/brand-preview.mjs rather than compiled in,
               so the name has exactly one definition and production's build is untouched. It is
               `app-label` (the name, from scripts/brand-label.mjs), not `app-variant` (what the
               build is): the owner build reads WORKS while it stays the variant `preview`. */}
-          {/* ANY non-production build says so, not just the preview one.
+          {/* ANY non-production build says so, not just WORKS.
               STAGING is the build that needed this most and had it least: it is main, unmodified,
               so it carries none of the code that would mark it — and it looks identical to
               production once it is open, on a phone where the URL is not on screen. The badge is
@@ -5568,7 +5568,7 @@ export default function Home() {
               "this is not the release", violet is "this IS the release, one step early". */}
           {badgeLabel && (
             /* A READOUT on every build, never a control (tsunagi-m-chrome §2): it names the URL that
-               is open. Until 2026-09-30 it was also a WORKS ⇄ AS PRODUCTION switch on the preview,
+               is open. Until 2026-09-30 it was also a WORKS ⇄ AS PRODUCTION switch on WORKS,
                and that is why it is not one now — closing the experiments did not make the
                development branch the release, yet the mode wore staging's violet and said it was.
                Production's look is read on the staging URL (tsunagi-m-release §10). */
@@ -5591,7 +5591,7 @@ export default function Home() {
               AI
             </span>
           )}
-          {/* SIGN IN — the preview's owner-gate session has ended. Beside the badge because it is a
+          {/* SIGN IN — the WORKS owner-gate session has ended. Beside the badge because it is a
               fact about this BUILD's reach (its store), not about the car, and on a phone this is
               the one part of the header that is always on screen. Rendered only when pressing it
               is safe — see `reauth` — so a cable in the socket hides it rather than greying it:
@@ -6527,7 +6527,7 @@ export default function Home() {
                        `hidden min-[900px]:block` and not a second render path, so the two layouts
                        cannot drift apart.
 
-                       Preview only — see `storePanel` on the menu sheet for why — and unstyled, so
+                       WORKS only — see `storePanel` on the menu sheet for why — and unstyled, so
                        it takes the component's default shape: the same 10px uppercase label and 3px
                        icon NEW SESSION uses, one control's width to its left. */
                     beforeNew={syncSurfaces ? (
@@ -7041,7 +7041,7 @@ export default function Home() {
              deployment and there is nothing to choose. The panel is titled SESSION SYNC, explains
              the two-step flow, and carries the send itself as `topAction`.
 
-             Preview only, for the same reason `sync` is: production has no `/api` for this to talk
+             WORKS only, for the same reason `sync` is: production has no `/api` for this to talk
              to, so it could only ever report failures. Assembled here rather than imported inside
              the sheet so that one gate stays in one place, and so the trigger's tone comes from the
              same describeSync the header's twin reads. */

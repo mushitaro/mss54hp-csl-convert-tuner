@@ -300,7 +300,7 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(request.url);
     if (url.origin !== self.location.origin) return;
 
-    // The upload API, where one exists (the Cloudflare Pages preview — production is static and has
+    // The upload API, where one exists (WORKS, on Cloudflare Pages — production is static and has
     // no /api at all). Left entirely to the network, for two reasons that both bite:
     //
     //   A GET to /api/runs has `mode: 'cors'`, so it would fall past the navigate branch into the

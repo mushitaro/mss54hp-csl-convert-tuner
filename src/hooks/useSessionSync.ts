@@ -160,7 +160,7 @@ export function useSessionSync(input: {
      * greyed "Sync — not set up" row there would describe a feature that build does not contain,
      * and the honest rendering of a feature that does not exist is nothing at all.
      *
-     * Keyed on the preview marker, which is also what `canSync` reads: the marker is the one thing
+     * Keyed on the WORKS marker, which is also what `canSync` reads: the marker is the one thing
      * that means "this deployment has functions", and there is no token any more to disagree with
      * it.
      */

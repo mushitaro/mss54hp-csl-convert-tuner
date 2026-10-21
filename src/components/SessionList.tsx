@@ -141,7 +141,7 @@ interface Props {
     loadedLogPoints?: number;
     /** Absent on an archived session, which states its log but cannot drop it — mirroring the bar. */
     onClearLog?: (e: React.MouseEvent) => void;
-    /** Sends this session's log to the preview deployment's store — NOT the control above. Absent
+    /** Sends this session's log to the WORKS deployment's store — NOT the control above. Absent
      *  when no upload token has been configured, which is the normal state on a desktop and on
      *  production. */
     onUploadLog?: (session: TuningSession) => void;
@@ -1070,7 +1070,7 @@ export const SessionList: React.FC<Props> = ({
                                                         for one build, because this was written as "move
                                                         every icon off the row" rather than "which of
                                                         these belongs on a phone at all". The store is a
-                                                        development fixture — it exists only in a preview
+                                                        development fixture — it exists only in a WORKS
                                                         build carrying a sync token — and production and
                                                         development are kept apart by not opening extra
                                                         windows onto it (operator, 2026-08-25). It stays

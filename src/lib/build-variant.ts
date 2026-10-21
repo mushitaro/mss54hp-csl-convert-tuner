@@ -4,7 +4,7 @@ import { useSyncExternalStore } from 'react';
 import { featureEnabled, DEV_VARIANT_IS_PREVIEW, type FeatureName } from '@/lib/features';
 
 /**
- * Whether this is a preview build rather than production.
+ * Whether this is the WORKS build (variant `preview`) rather than production.
  *
  * Read from a `<meta name="app-variant">` that `scripts/brand-preview.mjs` injects into the export.
  * Deliberately NOT a compiled constant or an env var: both deployments come out of the same
@@ -57,7 +57,7 @@ export function useIsPreviewBuild(): boolean {
 /**
  * Where the scope switch kept its state. The switch is gone (2026-09-30): the build badge toggled
  * WORKS ⇄ AS PRODUCTION, `?scope=production` turned it on as well, and this key held it across
- * reloads. It answered a question the preview cannot answer — the preview is the development
+ * reloads. It answered a question WORKS cannot answer — WORKS is the development
  * branch, so closing its experiments still does not run the release's code — and it answered in
  * staging's violet, so the badge called a build the release candidate that was not. Environments
  * are told apart by URL alone now, and production's look is checked on the staging URL
@@ -78,7 +78,7 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * Whether PREVIEW SURFACES render — the one answer every feature gate should read.
+ * Whether WORKS's SURFACES render — the one answer every feature gate should read.
  *
  * Folds in both parts so no call site has to remember the second: the deployed variant, and the
  * dev server (the experiments must be visible where they are developed). The
@@ -117,7 +117,7 @@ export function useFeatureEnabled(name: FeatureName): boolean {
  *
  * It fought Next's compiled metadata for the `<title>` element: the branding script rewrote the
  * exported HTML, Next put the production name back during hydration, and a MutationObserver put
- * the preview name back after that. Correct, and measured — but the whole contest only existed
+ * the owner build's name back after that. Correct, and measured — but the whole contest only existed
  * because the two builds had different titles.
  *
  * They do not any more (operator, 2026-08-27). The full name is the app's identity and does not

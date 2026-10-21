@@ -1,5 +1,5 @@
 /**
- * Cloudflare Pages — the PREVIEW: feat/develop, behind the owner gate (functions/_middleware.ts),
+ * Cloudflare Pages — WORKS: feat/develop, behind the owner gate (functions/_middleware.ts),
  * for MILE buyers and past owners. Published on the public `preview` branch with its source.
  *
  * Production stays on GitHub Pages at mss54hp-csl-convert-tuner.tsunagi.app, deployed from `main`

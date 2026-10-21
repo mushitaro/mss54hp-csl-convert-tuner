@@ -27,12 +27,12 @@ const DISCLAIMER_VERSION = '1';
  * real answer, which arrives on the first client render rather than after a commit. Same pattern,
  * and the same argument, as `useIsPreviewBuild` and `useDialogLang`.
  *
- * ## On the preview, the notice as well
+ * ## On WORKS, the notice as well
  *
- * The preview build puts what it sends, and why, into this same dialog, and sends nothing until that
+ * The WORKS build puts what it sends, and why, into this same dialog, and sends nothing until that
  * has been confirmed (lib/session-sync/preview-notice.ts). The confirmation is a key of its own, so
  * this "don't show again" — ticked by owners before the notice existed — cannot stand in for it: on
- * the preview the dialog is up while either is missing, and the one press writes the notice's.
+ * WORKS the dialog is up while either is missing, and the one press writes the notice's.
  * Production and staging never read or write that key, and open exactly as they always did.
  *
  * ストレージが使えない場合(プライベートモード等)は必ず提示する。
@@ -80,7 +80,7 @@ export function useDisclaimer() {
                 // 保存に失敗しても同意操作自体は成立させる(次回また出るだけ)。
             }
         }
-        // プレビュー版では、この押下がお知らせを確認したことの記録でもある(チェックの有無に関係なく)。
+        // ワークス版では、この押下がお知らせを確認したことの記録でもある(チェックの有無に関係なく)。
         // 本番と staging には何もしない。
         if (preview) acknowledgePreviewNotice();
         acknowledged = true;

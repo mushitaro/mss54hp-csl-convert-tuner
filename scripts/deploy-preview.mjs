@@ -1,5 +1,5 @@
 /**
- * Puts feat/develop on the PREVIEW URL — behind the owner gate, from a published tree, or not at all.
+ * Puts feat/develop on the WORKS URL — behind the owner gate, from a published tree, or not at all.
  *
  * `mss54hp-csl-convert-tuner-preview.pages.dev` is handed to MILE buyers and past owners now. It
  * used to be `npm run build:preview && wrangler pages deploy …` in package.json, which would publish
@@ -7,7 +7,7 @@
  * dirty tree, open to anyone, with the store's token in its HTML. Every refusal below closes one of
  * those, and each is checked BEFORE anything is uploaded:
  *
- *   1. wrangler.jsonc's `name` is the preview project. Bindings (the D1 store) apply only when the
+ *   1. wrangler.jsonc's `name` is the WORKS project. Bindings (the D1 store) apply only when the
  *      config names the project deployed to — a mismatch deploys "successfully" with no database
  *      (tsunagi-m-release §5.2) — so the project name is READ from the config, never restated.
  *   2. HEAD is feat/develop, and no tracked file is modified (git-dirty.mjs — the same definition
@@ -65,10 +65,10 @@ if (config.name !== PREVIEW_PROJECT) {
 
 // 2. What is being served, as a commit.
 const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-if (branch !== SOURCE) refuse(`On '${branch}', not ${SOURCE}. The preview is ${SOURCE} and nothing else.`);
+if (branch !== SOURCE) refuse(`On '${branch}', not ${SOURCE}. WORKS is ${SOURCE} and nothing else.`);
 const dirty = dirtyPaths();
 if (dirty.length) {
-    refuse(`${dirty.length} tracked file(s) have uncommitted changes. The preview is served from a commit:`,
+    refuse(`${dirty.length} tracked file(s) have uncommitted changes. WORKS is served from a commit:`,
         ...dirty.map((l) => `  ${l}`));
 }
 const head = git(['rev-parse', 'HEAD']);
@@ -76,7 +76,7 @@ const short = git(['rev-parse', '--short', 'HEAD']);
 console.log(`Publishing ${SOURCE} @ ${git(['log', '-1', '--format=%h %s'])}\n  -> https://${config.name}.pages.dev`);
 
 // 3 and 4. The gate is here and canonical; the tree is fit to be public.
-if (!existsSync('functions/_middleware.ts')) refuse('functions/_middleware.ts is missing — the preview would be served to anyone.');
+if (!existsSync('functions/_middleware.ts')) refuse('functions/_middleware.ts is missing — WORKS would be served to anyone.');
 try { run('npm', ['run', '-s', 'gate:verify']); } catch { refuse('gate:verify failed.'); }
 try { run('node', ['scripts/check-public-tree.mjs']); } catch { refuse('check-public-tree failed.'); }
 
@@ -88,7 +88,7 @@ const named = localTip ? /^preview: ([0-9a-f]{4,40})$/.exec(git(['log', '-1', '-
 let namesHead = false;
 try { namesHead = !!named && git(['rev-parse', `${named}^{commit}`]) === head; } catch { /* unknown sha */ }
 if (!namesHead) {
-    refuse(`The ${PREVIEW_BRANCH} branch does not publish ${SOURCE} @ ${short} yet. The preview serves only`,
+    refuse(`The ${PREVIEW_BRANCH} branch does not publish ${SOURCE} @ ${short} yet. WORKS serves only`,
         'source that is public. Publish it, push it, then deploy:', ...publishCommands);
 }
 let remoteTip = '';

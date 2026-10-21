@@ -31,7 +31,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
 import { BridgeClient, BRIDGE_PROTOCOL, HELD_CLOSE_CODE } from '../src/lib/bridge/bridgeClient.ts';
-// The ticket is minted by the preview's backend, and functions/ is not on main (release-scope.mjs
+// The ticket is minted by WORKS's backend, and functions/ is not on main (release-scope.mjs
 // NOT_FOR_MAIN: main is static). Loaded only where the backend is, so this suite runs on main too —
 // everything in it but the ticket is the tab's own code.
 const TICKET = new URL('../functions/api/bridge/ticket.ts', import.meta.url);

@@ -52,7 +52,7 @@ const TEXT = {
  * 表示可否と「今後表示しない」の永続化は useDisclaimer フックが持ち、ここは UI と同意操作だけを担う。
  * 表示言語(JA/EN)は useDialogLang で全ダイアログ共有。
  *
- * プレビュー版では、このダイアログが「このプレビュー版が何を、なぜ送るか」も示す(PreviewNotice)。
+ * ワークス版では、このダイアログが「このワークス版が何を、なぜ送るか」も示す(PreviewNotice)。
  * 以前は m3 の /preview-notice ページが初回に示していたもので、2026-09-24 にアプリ側へ移した。
  * 本番と staging の表示は変えない — verify:preview-notice が両言語のマークアップを固定している。
  */
@@ -72,7 +72,7 @@ export const DisclaimerDialogView: React.FC<Props & { lang: DialogLang; preview:
     const [dontShowAgain, setDontShowAgain] = useState(false);
     const t = TEXT[lang];
     const notice = preview ? PREVIEW_NOTICE[lang] : null;
-    // 言語とビルドの両方で決まる。プレビュー版は `#preview` の節 — config/links.ts 参照。
+    // 言語とビルドの両方で決まる。ワークス版は `#preview` の節 — config/links.ts 参照。
     const privacyUrl = privacyPolicyUrl(lang, preview);
 
     return (
@@ -112,7 +112,7 @@ export const DisclaimerDialogView: React.FC<Props & { lang: DialogLang; preview:
                         ダイアログの同意対象はあくまで上の免責 5 項目であり、ポリシーへの同意まで
                         黙って増やさないため。読みたい人のための導線であって、同意の一部ではない。
                         別タブで開くのは、書き込み中や収録中にここへ来た場合に現在のタブを
-                        遷移させないため。プレビュー版では、お知らせの結びの一行を兼ねる
+                        遷移させないため。ワークス版では、お知らせの結びの一行を兼ねる
                         (行き先は `#preview`、文言はお知らせのもの)。 */}
                     <p>
                         <a
@@ -150,7 +150,7 @@ export const DisclaimerDialogView: React.FC<Props & { lang: DialogLang; preview:
 };
 
 /**
- * What the preview sends, and why — m3's notice, in this dialog (preview only).
+ * What WORKS sends, and why — m3's notice, in this dialog (WORKS only).
  *
  * After the agree note, not before it: that note says pressing the button accepts "the above", and
  * the above has to stay the five disclaimer items. This is something the owner is told and the same

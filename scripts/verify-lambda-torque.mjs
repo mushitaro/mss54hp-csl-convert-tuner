@@ -24,7 +24,7 @@
  *   4. The torque telegram (0xFFD8B0, 26 B): the identity MD_IND_WUNSCH = MD_FW_FILTER +
  *      MD_SAWE_FILTER from the one function that writes them, MD_DP_FAKTOR never 0; all or none.
  *   5. That a VE run reads both on block 19's lane, that the 12-byte slew read they replace is gone,
- *      that production drops both and pays nothing, and what preview pays (<= 8 % of the sample).
+ *      that production drops both and pays nothing, and what WORKS pays (<= 8 % of the sample).
  *   6. The CSV round trip (plain numbers, blanks blank, the DME's symbols accepted), PRACTICE
  *      refusing both reads, and the live poll dispatching both and copying block 3's two fields.
  *
@@ -388,7 +388,7 @@ console.log('\n[a VE run records them, on block 19\'s lane]');
         LOG_FIELD_REGISTRY.frRegler.relevance === 'tuning');
 }
 
-console.log('\n[production drops both and pays nothing; what preview pays]');
+console.log('\n[production drops both and pays nothing; what WORKS pays]');
 {
     const ve = LOG_PROFILES.VE.exchanges;
     const ours = (x) => x.kind === 'ram' && (x.address === LAMBDA_SENSOR_RAM_READ.address || x.address === TORQUE_REQUEST_RAM_READ.address);
@@ -405,7 +405,7 @@ console.log('\n[production drops both and pays nothing; what preview pays]');
     console.log(`        VE sample ${sampleMs(before).toFixed(1)} ms -> ${sampleMs(ve).toFixed(1)} ms (+${added.toFixed(1)} ms, `
         + `${(100 * added / sampleMs(before)).toFixed(1)} %); ${expectedHz(before).toFixed(3)} -> ${expectedHz(ve).toFixed(3)} Hz; `
         + `production ${expectedHz(prod).toFixed(3)} Hz`);
-    // The budget was ~8 % of the preview sample, and this is 7.6 %. Pinned at 8 % so the next read on
+    // The budget was ~8 % of the WORKS sample, and this is 7.6 %. Pinned at 8 % so the next read on
     // this lane has to be priced, not slipped in.
     check('together they cost at most 8 % of the VE sample', added / sampleMs(before) <= 0.08,
         `${(100 * added / sampleMs(before)).toFixed(1)} %`);

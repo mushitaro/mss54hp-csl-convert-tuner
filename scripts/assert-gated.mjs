@@ -1,13 +1,13 @@
 /**
- * Refuses unless what is about to be uploaded to the preview project is behind the owner gate.
+ * Refuses unless what is about to be uploaded to the WORKS project is behind the owner gate.
  *
  *   node scripts/assert-gated.mjs <out-dir>
  *
- * Run by deploy-preview.mjs after the build and BEFORE wrangler. Each check is a way the preview
+ * Run by deploy-preview.mjs after the build and BEFORE wrangler. Each check is a way WORKS
  * would go out open, or carrying the thing the gate replaced, without any step saying so:
  *
  *   - functions/_middleware.ts missing: wrangler uploads the static export with no gate at all —
- *     the state every preview was in until 2026-09-23;
+ *     the state WORKS was in until 2026-09-23;
  *   - the gate's copy drifted from tsunagi-m3/tools/owner-gate (gate:verify);
  *   - a `sync-token` meta in any document: the shared upload token, readable by anyone who could
  *     load the page, which is what this whole arrangement retired;
@@ -30,7 +30,7 @@ const fail = (m) => { failures++; console.log(`  FAIL  ${m}`); };
 const ok = (m) => console.log(`  ok    ${m}`);
 
 const MIDDLEWARE = join('functions', '_middleware.ts');
-if (!existsSync(MIDDLEWARE)) fail(`${MIDDLEWARE} is missing — the preview would be served to anyone`);
+if (!existsSync(MIDDLEWARE)) fail(`${MIDDLEWARE} is missing — WORKS would be served to anyone`);
 else ok(`${MIDDLEWARE} present`);
 
 try {

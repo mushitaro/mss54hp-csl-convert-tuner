@@ -1,7 +1,7 @@
 -- Every row belongs to one account, and nobody else can see it.
 --
 -- Until now the store had one tenant: a developer, a shared token, and lists that returned
--- everything. The preview is now handed to MILE buyers and past owners through the owner gate
+-- everything. WORKS is now handed to MILE buyers and past owners through the owner gate
 -- (functions/_middleware.ts), and a row holds a VIN, a DME image and that car's drive — so a row is
 -- somebody's, and the handlers put `owner = ?` on every query. The owner is the account m3 resolved
 -- for the request, never anything the client sent.

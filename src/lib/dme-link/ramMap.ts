@@ -1451,7 +1451,7 @@ export const TORQUE_REQUEST_RAM_READ = {
  * of overhead (13 bytes of framing plus the 35 ms turnaround) once — 6.2 ms a sample at one in
  * eight. Stretching the per-sample read to 0xFF80BE..0xFF80DF is 26 bytes = 29.8 ms on EVERY sample
  * (11.5 % of the VE sample), and production would pay it too, because the trim read is tuning and
- * is never dropped; this read is 10.8 ms a sample on preview and nothing on production. Widening
+ * is never dropped; this read is 10.8 ms a sample on WORKS and nothing on production. Widening
  * only wins below about six bytes (n x 1.15 ms against 6.2 + n x 0.14 ms).
  *
  * `AQ_REL` two bytes further on is not read: block 3 carries `aq_rel` (offset 20) on every sample.

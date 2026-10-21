@@ -17,7 +17,7 @@
  * number is a later build and the phone can be compared against the desk by eye. The short sha is
  * what turns the number back into a diff. A `+` suffix marks a build made with uncommitted changes
  * to tracked files — exactly the thing you want to know before trusting a number that looks like a
- * commit, and the thing the preview deploy now refuses.
+ * commit, and the thing the WORKS deploy now refuses.
  *
  * ## The comparison holds within a branch, and NOT across them
  *
@@ -26,7 +26,7 @@
  * branch counts commits, and the two numbers are different number lines entirely:
  *
  *   staging  112.8f65620   main, and NEWER
- *   preview  383.9068dac   feat/develop, and older
+ *   WORKS    383.9068dac   feat/develop, and older
  *
  * Read the sha, or read the badge in the header, and never the number alone when the two builds
  * came from different branches. Comparing 383 against 112 by eye gives the wrong answer, which is
@@ -51,7 +51,7 @@ function buildId() {
     try {
         const count = git(['rev-list', '--count', 'HEAD']);
         const sha = git(['rev-parse', '--short', 'HEAD']);
-        // The same definition the preview deploy refuses on — see git-dirty.mjs, including why
+        // The same definition the WORKS deploy refuses on — see git-dirty.mjs, including why
         // untracked files and the agent notes no longer count.
         const dirty = dirtyPaths().length > 0 ? '+' : '';
         return `${count}.${sha}${dirty}`;
@@ -79,7 +79,7 @@ for (const path of walk(OUT)) {
     // STRIP FIRST, then insert. `out/` is not guaranteed to be a fresh export — Next can leave an
     // unchanged document in place, and another session building in this checkout can leave one
     // behind entirely — so an insert-only stamp appends a SECOND tag to a document that already had
-    // one. Measured on the preview deployment: two `build-id` metas, the stale one first, which is
+    // one. Measured on the WORKS deployment: two `build-id` metas, the stale one first, which is
     // the one every reader takes. `ship`'s own readback reported the previous build because of it.
     writeFileSync(path, html
         .replace(/<meta name="build-(?:id|at)" content="[^"]*">/g, '')

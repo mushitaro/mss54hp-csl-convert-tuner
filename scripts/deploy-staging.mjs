@@ -20,7 +20,7 @@
  *   503  https://mss54hp-csl-convert-tuner-staging.pages.dev/api/sessions
  *   401  https://mss54hp-csl-convert-tuner-preview.pages.dev/api/sessions
  *
- * Preview's 401 is the endpoint working — it wants its upload token. Staging's 503 is the same
+ * WORKS's 401 is the endpoint working — it wants its upload token. Staging's 503 is the same
  * endpoint deployed onto a project with no D1 bound, failing at the first query. A static site with
  * no functions would have answered 404.
  *
@@ -60,7 +60,7 @@
  * `next build && gen-sw`, which was true of the main this script was written against and stopped
  * being true the moment `build-id.mjs` shipped. The decomposition then quietly dropped a step.
  *
- * Measured before the fix: preview carried `383.9068dac` and staging carried no build id at all.
+ * Measured before the fix: WORKS carried `383.9068dac` and staging carried no build id at all.
  * On the RELEASE CANDIDATE that is the worst place to lose it — the whole purpose of the URL is to
  * look at a specific commit on a phone, and without the stamp the phone cannot say which one it
  * has. Steps are read out of main's own `build` script rather than restated here for exactly this

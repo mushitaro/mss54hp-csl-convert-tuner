@@ -80,7 +80,7 @@ const LOAD_BUTTON = 'shrink-0 min-h-8 px-2 text-[10px] font-bold tracking-wider 
  * may not exist yet.
  *
  * **No destination fields, and no token.** The destination is the owner's own account on this
- * deployment: the preview sits behind the owner gate, which knows who is signed in, and the store
+ * deployment: WORKS sits behind the owner gate, which knows who is signed in, and the store
  * keeps each account's rows apart. So the panel NAMES the destination — "saved to account #A1B2",
  * from the gate — rather than asking for one. It used to carry a base URL and a token override,
  * and later a token baked into the export; both are gone.
@@ -103,7 +103,7 @@ export const SessionStorePanel: React.FC<{
     /** Signs in again, when that is safe right now (no cable, nothing running); absent otherwise.
      *  The page owns the rule — see `reauth` there. */
     onReauth?: () => void;
-    /** The privacy policy's preview section. The page resolves it (language, variant). */
+    /** The privacy policy's WORKS section (`#preview`). The page resolves it (language, variant). */
     privacyUrl: string;
     /** Refreshes the local session list after a pull. */
     onRestored?: () => void;

@@ -1,5 +1,5 @@
 /**
- * Renames an exported build so a staging or preview install cannot be mistaken for production.
+ * Renames an exported build so a staging or WORKS install cannot be mistaken for production.
  *
  * The deployments are already separate installs — Chrome keys an installed app on its origin, and
  * nothing under `mss54hp-csl-convert-tuner-preview.pages.dev` is `mss54hp-csl-convert-tuner.tsunagi.app`.

@@ -234,9 +234,9 @@ WRITE
   ☑ ALPHA-N               8 cells
   ☑ SHAPE                 3 cells
   ☑ WARMUP                derived
-  ☐ RF KORR               証拠なし（V > 20 km/h の走行が必要）   ← preview のみ
-    IDLE            seal                                        ← preview のみ
-    INERTIA         —     proposal only                         ← preview のみ
+  ☐ RF KORR               証拠なし（V > 20 km/h の走行が必要）   ← WORKS のみ
+    IDLE            seal                                        ← WORKS のみ
+    INERTIA         —     proposal only                         ← WORKS のみ
 ```
 
 トグルを入れると、ハブの WRITE という語の下に項目名が並ぶ。開かなくても
