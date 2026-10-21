@@ -86,6 +86,12 @@ const JA = {
     discardLog: '今記録したデータログを破棄して、最初からやり直しますか？',
     deleteSession: (label: string) => `「${label}」を削除しますか？この操作は取り消せません。`,
     noStoredBinary: 'このセッションにはBINが保存されていません。',
+    // 別の端末から、より新しい版がクラウドに送られている。上書きすると、その端末の分が消える。
+    syncOverwriteNewer: (label: string, at?: number) => `「${label}」は、別の端末から${at ? `（${new Date(at).toLocaleString('ja-JP')}）` : ''}新しい版がクラウドに送られています。
+
+この端末の版で上書きすると、その版はクラウドから消えます。先に取り込むなら、キャンセルしてクラウドの一覧から取り込んでください。
+
+上書きして送りますか？`,
     noStoredTune: 'このセッションにはまだTUNEDが保存されていません。',
     noStoredLog: 'このセッションにはデータログが保存されていません。',
 
@@ -253,11 +259,11 @@ const JA = {
     titleAssistantOn: 'ASSISTANT をオンにする',
     assistantOn: (): string =>
         'あなたが接続した AI アシスタントが、このタブに問い合わせられるようになります。\n\n'
-        + '送るもの: アシスタントが求めたときだけ、このタブの状態（接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）、クラウドに送ったセッションの一覧（名前・日時・チューンとログの有無）。VIN とファイル名は送りません。\n'
+        + '送るもの: アシスタントが求めたときだけ、このタブの状態（この端末に付けた名前・接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）、クラウドに送ったセッションの一覧（名前・日時・チューンとログの有無）。VIN とファイル名は送りません。\n'
         + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。\n'
         + '届く先: あなたがアシスタントに接続したサービス（claude.ai など）。そこでの扱いは、そのサービスの規約によります。\n\n'
-        + 'できること: ログの開始と停止、画面の切り替え、保存したセッションを開くこと（記録中・保存していない作業があるときは開きません）、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（CALIBRATION に変更として置きます）、SAVE、クラウドへの送信（SYNC）とクラウドからの取り込み（記録中はしません。送信と取り込みのデータは、このタブとクラウドの間で直接やり取りします）。\n'
-        + 'できないこと: 車への接続・書き込み・フラッシュ。ログの停止、値の変更、SAVE、送信、取り込みは、あなたが声で確認したときだけです。\n\n'
+        + 'できること: ログの開始と停止、画面の切り替え、セッションを開く・新しく作る・コピーする（NEXT）こと、保存していない変更を捨てること、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（CALIBRATION に変更として置きます）、SAVE、クラウドへの送信（SYNC）とクラウドからの取り込み（記録中はしません。送信と取り込みのデータは、このタブとクラウドの間で直接やり取りします）。\n'
+        + 'できないこと: 車への接続・書き込み・フラッシュ。これらの操作は、あなたが頼んだか、声で確認したときだけです。何かを失う操作（保存していない作業を捨てる、別の端末の新しい版を上書きする、取り込みで置き換える、ログの停止）は、必ず読み上げて確認します。\n\n'
         + 'いつでもここでオフにできます。',
     btnAssistantOn: 'オンにする',
 
@@ -388,6 +394,11 @@ const EN: NativeDialogText = {
     discardLog: 'Discard the log just recorded and start over?',
     deleteSession: (label: string) => `Delete "${label}"? This cannot be undone.`,
     noStoredBinary: 'This session has no stored binary.',
+    syncOverwriteNewer: (label: string, at?: number) => `A newer copy of "${label}" was sent to the cloud from another device${at ? ` (${new Date(at).toLocaleString('en-GB')})` : ''}.
+
+Sending this device's copy replaces it, and that copy is gone from the cloud. To bring it back first, cancel and restore it from the cloud list.
+
+Send over it?`,
     noStoredTune: 'This session has no saved tune yet.',
     noStoredLog: 'This session has no stored log.',
 
@@ -520,11 +531,11 @@ const EN: NativeDialogText = {
     titleAssistantOn: 'Turn ASSISTANT on',
     assistantOn: () =>
         'The AI assistant you connected will be able to ask this tab questions.\n\n'
-        + 'What is sent: only when the assistant asks, this tab\'s state (link, whether a log is running, mode, the open session), the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), the calibration items of the open session it asks about (name, description, address, units, values), and the list of sessions sent to your cloud (name, dates, whether each has a tune and a log). Never the VIN or a file name.\n'
+        + 'What is sent: only when the assistant asks, this tab\'s state (the name you gave this device, link, whether a log is running, mode, the open session),the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), the calibration items of the open session it asks about (name, description, address, units, values), and the list of sessions sent to your cloud (name, dates, whether each has a tune and a log). Never the VIN or a file name.\n'
         + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing.\n'
         + 'Where it ends up: the service you connected the assistant to (claude.ai and others), under that service\'s own terms.\n\n'
-        + 'What it can do: start and stop a log, bring a view to the front, open a saved session (not while a log records or unsaved work is open), set an observation (OBSERVE) plan and put marks on the log, change calibration values (placed on CALIBRATION as changes), SAVE, and send to your cloud (SYNC) and bring a session back from it (never while a log records; what is sent or brought back goes directly between this tab and the cloud).\n'
-        + 'What it cannot do: connect to, write to or flash the car. It stops a log, changes values, saves, sends or brings back only after you confirm out loud.\n\n'
+        + 'What it can do: start and stop a log, bring a view to the front, open, start and copy (NEXT) sessions, drop unsaved changes, set an observation (OBSERVE) plan and put marks on the log, change calibration values (placed on CALIBRATION as changes), SAVE, and send to your cloud (SYNC) and bring a session back from it (never while a log records; what is sent or brought back goes directly between this tab and the cloud).\n'
+        + 'What it cannot do: connect to, write to or flash the car. It does these only when you ask or confirm out loud; anything that loses something (dropping unsaved work, sending over another device\'s newer copy, replacing a copy here, stopping the log) it always reads back first.\n\n'
         + 'You can turn it off here at any time.',
     btnAssistantOn: 'Turn on',
 

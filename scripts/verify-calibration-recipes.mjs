@@ -16,7 +16,8 @@
 import { readFileSync } from 'node:fs';
 import { buildCatalog } from '../src/lib/calibration/catalog.ts';
 import { decodeParam } from '../src/lib/calibration/decode.ts';
-import { codeUses, paramChoices, paramNote } from '../src/lib/calibration/evidence.ts';
+import { codeUses, paramChoices, paramNote, ramFind } from '../src/lib/calibration/evidence.ts';
+import { windowOf } from '../src/lib/log-engine/observe.ts';
 import { findRecipes, recipeParams, RECIPES } from '../src/lib/calibration/recipes.ts';
 import { quantise } from '../src/lib/ecu-items/quantise.ts';
 
@@ -85,6 +86,24 @@ console.log('\n[evidence: the code, the choices, the description]');
     check('...a real description is kept', paramNote(cat.byName.get('DTC_06_SMG_CAN_TIMEOUT').desc.en) === '06 DME: Timeout SMG-CAN');
     const none = codeUses(cat.graph, cat.byName.get('DTC_06_SMG_CAN_TIMEOUT'));
     check('a table no code reads says so (0 readers), not an error', none.readBy.count === 0 && none.conditions.length === 0);
+}
+
+console.log('\n[RAM: by name or address, and whether an observation run can read it]');
+{
+    const at = (bank, address) => bank === 'master' && windowOf(address, 1) !== null;
+    const evan = ramFind(cat.graph, 'EVAN1_IST', 5, at);
+    check('a name finds it, exact match first, in master RAM an OBSERVE run can read', evan[0]?.name === 'EVAN1_IST' && evan[0].address === 0xFF81DC && evan[0].observable === true, JSON.stringify(evan[0]));
+    const byAddr = ramFind(cat.graph, 'DAT_00ff81dc', 5, at);
+    check('...the same by its address as the disassembly writes it (master and slave both keep it there)', byAddr.length === 2
+        && byAddr.every(h => h.name === 'EVAN1_IST') && byAddr.find(h => h.bank === 'master')?.observable === true && byAddr.find(h => h.bank === 'slave')?.observable === false,
+        JSON.stringify(byAddr.map(h => [h.bank, h.name, h.observable])));
+    check('...or as 0xFF81DC', ramFind(cat.graph, '0xFF81DC', 5, at)[0]?.name === 'EVAN1_IST');
+    const part = ramFind(cat.graph, 'evan', 30, at);
+    check('part of a name finds the family', part.length >= 3 && part.every(h => /evan/i.test(h.name)), part.map(h => h.name).join(','));
+    check('a short word is a word, not an address ("ad" is not 0xAD)', ramFind(cat.graph, 'ad', 5, at).every(h => /ad/i.test(h.name)));
+    const slave = ramFind(cat.graph, 'ff', 200, at).find(h => h.bank === 'slave');
+    check('slave RAM is said as not readable', !slave || slave.observable === false);
+    check('nothing by that name: an empty answer', ramFind(cat.graph, 'no_such_symbol_xyz', 5, at).length === 0);
 }
 
 console.log(fails === 0 ? '\nALL PASS' : '\n' + fails + ' FAILURE(S)');

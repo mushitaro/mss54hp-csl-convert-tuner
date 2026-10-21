@@ -5,15 +5,17 @@ import {
 } from './types';
 import {
     AMBIENT_CHARGE_ADDRESS, AMBIENT_TEMP_ADDRESS, IDLE_VALVE_STATE_ADDRESS,
-    SLEW_STATE_ADDRESS, SLEW_TORQUE_ADDRESS,
+    SLEW_STATE_ADDRESS, TORQUE_REQUEST_ADDRESS,
     LLS_AIR_ADDRESS, LLS_INTEGRATOR_ADDRESS, LLS_DUTY_ADDRESS,
-    decodeAmbientCharge, decodeAmbientTemp, decodeIdleValveState, decodeSlewState, decodeSlewTorque,
+    decodeAmbientCharge, decodeAmbientTemp, decodeIdleValveState, decodeSlewState,
+    decodeTorqueRequest, type TorqueRequestChannels,
     decodeLlsAir, decodeLlsIntegrator, decodeLlsDuty, type LlsRingChannels,
     mergeSlowLane, type SlowLaneChannels, type SlewChannels,
     KNOCK_AGE_ADDRESS, decodeKnockAge, ignitionFromBlock19, type IgnitionChannels,
     KNOCK_SUM_ADDRESS, decodeKnockSums, type KnockSumChannels,
     MANIFOLD_AIR_ADDRESS, decodeManifoldAir, type ManifoldAirChannels,
     VANOS_ADDRESS, decodeVanos, type VanosChannels,
+    LAMBDA_SENSOR_ADDRESS, decodeLambdaSensors, type LambdaSensorChannels,
 } from './slowLane';
 import type { SpotWindow } from './spotCheck';
 import {
@@ -2655,7 +2657,13 @@ export class WebSerialDmeLink implements DmeLink {
         // on the same lane and a single variable would let whichever decoded last erase the other.
         // NOT carried between samples — see SlewChannels for why an event must not be held.
         let slewState: Partial<SlewChannels> | null = null;
-        let slewTorque: Partial<SlewChannels> | null = null;
+        // The four slew words grew into the request either side of them (TORQUE_REQUEST_RAM_READ);
+        // the same rule — written on the sample that read them, never carried.
+        let torqueRequest: Partial<TorqueRequestChannels> | null = null;
+        // The lambda sensors and the loop state, and FR_REGLER out of block 19: one exchange each
+        // on the block-19 lane, NOT carried — see LambdaSensorChannels and LlsRingChannels.
+        let lambdaSensors: Partial<LambdaSensorChannels> | null = null;
+        let fillingRegulator: Partial<LlsRingChannels> | null = null;
         // Three exchanges, merged rather than assigned, for the reason the two slow-lane clusters
         // are: they run on the same lane and a single variable would let whichever decoded last
         // erase the other two. NOT carried between samples — see LlsRingChannels.
@@ -2708,8 +2716,15 @@ export class WebSerialDmeLink implements DmeLink {
                         slewState = decodeSlewState(bytes, exchange.address);
                         continue;
                     }
-                    if (exchange.address === SLEW_TORQUE_ADDRESS) {
-                        slewTorque = decodeSlewTorque(bytes, exchange.address);
+                    if (exchange.address === TORQUE_REQUEST_ADDRESS) {
+                        torqueRequest = decodeTorqueRequest(bytes, exchange.address);
+                        continue;
+                    }
+                    // Dispatched by name although the trim's own guard below already turns any other
+                    // address away: this telegram CONTAINS LA_F_REGLER1/2, and a later edit that
+                    // loosened that guard to "covers the trim" would read a second trim out of it.
+                    if (exchange.address === LAMBDA_SENSOR_ADDRESS) {
+                        lambdaSensors = decodeLambdaSensors(bytes, exchange.address);
                         continue;
                     }
                     if (exchange.address === LLS_AIR_ADDRESS) {
@@ -2800,6 +2815,9 @@ export class WebSerialDmeLink implements DmeLink {
                 // Out of the same 90 bytes, and NOT into the carry above: an angle read now is not
                 // the angle seven samples from now. See IgnitionChannels.
                 ignitionAngles = ignitionFromBlock19(op);
+                // FR_REGLER too (offset 79), by the same rule: the filling regulator is an
+                // integrator in motion, and a value held for seven samples is one it no longer has.
+                fillingRegulator = op.frRegler === null ? {} : { frRegler: op.frRegler };
                 // The RAM claim, re-checked against the block that is the authority for it — for
                 // free, on every slow-lane sample, for the whole drive. Reported, never acted on:
                 // switching the source mid-run would leave one log holding two measurements.
@@ -2851,11 +2869,19 @@ export class WebSerialDmeLink implements DmeLink {
             rf: std.rf ?? undefined,
             exhaustTemp: std.exhaustTemp ?? undefined,
             wdk1: std.wdk1 ?? undefined,
+            // Same response again, on every sample: the pedal and the throttle target beside the
+            // plate, so "the DME opened the throttle past what the pedal asked" is one row.
+            pwg1: std.pwg1 ?? undefined,
+            edkSoll: std.edkSoll ?? undefined,
             ...this.lastSlowLane,
             // AFTER the carry and never inside it: present on the sample that read them, absent on
             // every other, so a count of them is a count of reads. See SlewChannels.
             ...slewState,
-            ...slewTorque,
+            ...torqueRequest,
+            ...lambdaSensors,
+            // Block 19's FR_REGLER before the ring: a profile that read both would want the
+            // per-sample RAM word, and the ring's spread lets it win.
+            ...fillingRegulator,
             ...llsRing,
             ...ignitionAngles,
             ...knockAge,

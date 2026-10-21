@@ -30,7 +30,7 @@ import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
-import { BridgeClient, BRIDGE_PROTOCOL } from '../src/lib/bridge/bridgeClient.ts';
+import { BridgeClient, BRIDGE_PROTOCOL, HELD_CLOSE_CODE } from '../src/lib/bridge/bridgeClient.ts';
 import { mintTicket } from '../functions/api/bridge/ticket.ts';
 import { DROP_LABEL, DROP_WHY, explainDrops } from '../src/lib/log-engine/dropReasons.ts';
 import { EMPTY_CENSUS } from '../src/lib/log-engine/lambdaGates.ts';
@@ -157,7 +157,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the sixteen tools', TOOL_NAMES.length === 16 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the nineteen tools', TOOL_NAMES.length === 19 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -512,6 +512,123 @@ console.log('\n[save and sync: SAVE, sending to the cloud, bringing a session ba
     check('an unknown ref: said, with where to look', /No cloud session with ref "nope"/.test(err ?? '') && restores.length === 1, err);
 }
 
+console.log('\n[sessions by voice: a clean copy, dropping test edits, opening without saving; RAM; one yes]');
+{
+    const at = new Date(2026, 9, 21, 9, 30).getTime();
+    const rows = [
+        { id: 'a', seq: 978, label: 'Session #978', status: 'draft', createdAt: at, hasBase: true, hasLog: true, logPoints: 5830, mode: 'VE', open: false },
+        { id: 'b', seq: 979, label: 'Session #979', status: 'draft', createdAt: at + 1, hasBase: true, hasLog: true, logPoints: 2316, mode: 'VE', open: true },
+        { id: 'c', seq: 980, label: 'empty', status: 'draft', createdAt: at + 2, hasBase: false, hasLog: false, logPoints: 0, mode: 'VE', open: false },
+    ];
+    let unsaved = ['3 calibration edits (cfg_m.getriebetyp, K_SKRAFTS_CONTROL, DTC_06_SMG_CAN_TIMEOUT)'];
+    const made = [], opened = [], dropped = [], saves = [];
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => false, stopLog: () => {},
+        views: () => ['startup', 'dash'], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        sessions: () => rows,
+        openRefusal: discard => (!discard && unsaved.length ? 'The open session has work that is not saved.' : null),
+        openSession: async id => { opened.push(id); return true; },
+        saveRefusal: () => null,
+        saveSummary: () => ({ session: '#979', name: 'Session #979', items: unsaved }),
+        save: async () => { saves.push(1); return 'saved'; },
+        newSession: async parentId => { made.push(parentId); return { seq: 981, label: 'Session #981', inherited: !!parentId }; },
+        calibrationRefusal: () => null,
+        calibrationFind: async () => [],
+        discardEdits: () => { dropped.push(1); const n = unsaved.length; unsaved = []; return n; },
+        ramFind: async q => (q === 'evan' ? [
+            { name: 'EVAN1_IST', bank: 'master', address: 0xFF81DC, observable: true, writes: [{ in: 'vanos_calc', value: 'nw_pos - 0x10' }], readers: 6 },
+            { name: 'S_EVAN', bank: 'slave', address: 0xFFE100, observable: false, writes: [], readers: 2 },
+        ] : []),
+    };
+    const h = bridgeHandlers(f);
+
+    // One yes: the owner's own "保存して" is the confirmation.
+    let err = null;
+    try { await h.tuner_save({}); } catch (e) { err = e.message; }
+    check('save without confirmed: says the owner\'s own words are the yes', /asked for exactly this in their own words, that is the yes/.test(err ?? '') && saves.length === 0, err);
+    const saved = await h.tuner_save({ confirmed: true });
+    check('...and one call with confirmed: true saves', saved.saved === true && saves.length === 1);
+
+    err = null;
+    try { await h.tuner_new_session({ from: 978, confirmed: true }); } catch (e) { err = e.message; }
+    check('a new session over unsaved work: refused with the screen\'s reason', /not saved/.test(err ?? '') && made.length === 0, err);
+    err = null;
+    try { await h.tuner_new_session({ from: '#978', discard: true }); } catch (e) { err = e.message; }
+    check('...with discard but no yes: a read-back naming what is lost (never "asked" for a loss)', /loses something/.test(err ?? '') && /3 calibration edits/.test(err ?? '') && made.length === 0, err);
+    const copy = await h.tuner_new_session({ from: 978, discard: true, confirmed: true });
+    check('discard read back and confirmed: NEXT from #978, a clean copy', copy.started === true && made.join() === 'a' && copy.from === '#978' && copy.session === '#981', JSON.stringify(copy));
+    err = null;
+    try { await h.tuner_new_session({ from: 980, confirmed: true }); } catch (e) { err = e.message; }
+    check('a session without a BIN cannot be copied: said', /#980 has no BIN/.test(err ?? ''), err);
+    unsaved = [];
+    const fresh = await h.tuner_new_session({ confirmed: true });
+    check('nothing unsaved: an empty new session on one yes', fresh.started === true && made.at(-1) === null && /empty/.test(fresh.note), JSON.stringify(fresh));
+
+    unsaved = ['2 calibration edits (cfg_m.getriebetyp, cfg_s.getriebetyp)'];
+    err = null;
+    try { await h.tuner_discard_edits({}); } catch (e) { err = e.message; }
+    check('dropping edits without confirmed: the line to read, or the owner\'s words as the yes', /Drop 2 calibration edits/.test(err ?? '') && dropped.length === 0, err);
+    const gone = await h.tuner_discard_edits({ confirmed: true });
+    check('...dropped as one step, with Undo said', gone.discarded === 1 && dropped.length === 1 && /Undo on that tab brings them back/.test(gone.note), JSON.stringify(gone));
+    const none = await h.tuner_discard_edits({ confirmed: true });
+    check('nothing staged: says so', none.discarded === 0 && dropped.length === 1);
+
+    unsaved = ['the log (2316 samples)'];
+    err = null;
+    try { await h.tuner_open_session({ session: 978, discard: true }); } catch (e) { err = e.message; }
+    check('open without saving: read back what is lost first', /Open #978 without saving/.test(err ?? '') && /the log \(2316 samples\)/.test(err ?? '') && opened.length === 0, err);
+    const op = await h.tuner_open_session({ session: 978, discard: true, confirmed: true });
+    check('...then opens', op.opened === true && opened.join() === 'a');
+
+    const ram = await h.tuner_ram({ query: 'evan' });
+    check('RAM by name: the address to watch, or why it cannot be', ram.found === 2 && ram.ram[0].observe === 'DAT_00ff81dc' && /slave RAM cannot be read/.test(ram.ram[1].observe), JSON.stringify(ram));
+    check('...with where the code sets it', ram.ram[0].setBy?.[0] === 'vanos_calc: nw_pos - 0x10');
+    const noRam = await h.tuner_ram({ query: 'nothing' });
+    check('nothing found: said', noRam.found === 0);
+}
+
+console.log('\n[sending over a newer cloud copy: only when the owner chose it, read back]');
+{
+    const pending = [{ id: 'a', seq: 978, label: 'Session #978', status: 'draft', createdAt: 0, hasBase: true, hasLog: true, logPoints: 1, mode: 'VE', open: true }];
+    let answer = { sent: 0, failed: 0, firstError: null, stale: [{ id: 'a', seq: 978, label: 'Session #978', storeSyncedAt: new Date(2026, 9, 21, 8, 0).getTime() }] };
+    const calls = [];
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => false, stopLog: () => {},
+        views: () => [], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        syncRefusal: () => null, syncPending: () => pending,
+        syncUpload: async overwrite => { calls.push(overwrite ?? []); return answer; },
+    };
+    const h = bridgeHandlers(f);
+    const first = await h.tuner_sync_upload({ confirmed: true });
+    check('another device sent a newer copy: not sent, said as such', first.sent === 0 && first.notSent?.[0]?.session === '#978' && /2026-10-21 08:00/.test(first.notSent[0].newerCopySent) && /Ask the owner which to keep/.test(first.note), JSON.stringify(first));
+    let err = null;
+    try { await h.tuner_sync_upload({ overwrite: ['#978'] }); } catch (e) { err = e.message; }
+    check('overwrite without a yes: always read back, the other copy named as lost', /loses something/.test(err ?? '') && /#978 replaces the newer cloud copy/.test(err ?? '') && calls.length === 1, err);
+    answer = { sent: 1, failed: 0, firstError: null, stale: [] };
+    const over = await h.tuner_sync_upload({ overwrite: ['#978'], confirmed: true });
+    check('...confirmed: sent over it, by id', over.sent === 1 && calls.at(-1).join() === 'a', JSON.stringify(calls));
+    err = null;
+    try { await h.tuner_sync_upload({ overwrite: ['#977'], confirmed: true }); } catch (e) { err = e.message; }
+    check('overwrite of a session not waiting to be sent: refused', /not waiting to be sent: #977/.test(err ?? ''), err);
+}
+
+console.log('\n[the moment: the air side and the cams]');
+{
+    const pts = Array.from({ length: 40 }, (_, i) => ({
+        time: i * 0.25, rpm: 3000 + i * 10, rawLoad: 0.5, wdk1: 30, stft1: 1, stft2: 1, coolantTemp: 90,
+        ...(i % 8 === 0 ? { pSaug: 950, pSaugM: 940, rfPSaug: 60.5, rfDiagF: -1.2, evan1Ist: 110, evanSoll: 118, avan1Ist: -100, avanSoll: -96 } : {}),
+    }));
+    const m = cutMoment({ samples: pts, nowLogTime: 10, secondsAgo: 5, windowS: 10 });
+    for (const c of ['coolant', 'pSaug', 'pSaugM', 'rfPSaug', 'rfDiagF', 'evan', 'evanSoll', 'evanDev', 'avan', 'avanSoll', 'avanDev']) {
+        if (!m.columns.includes(c)) check(`column ${c} is cut into the moment`, false, m.columns.join(','));
+    }
+    check('manifold pressure, manifold air and the cams are in the moment', ['pSaug', 'rfPSaug', 'evan', 'evanSoll', 'avanDev'].every(c => m.columns.includes(c)), m.columns.join(','));
+    const row = m.rows.find(r => r[m.columns.indexOf('evan')] !== null);
+    check('...and the cam gap is ist minus soll', row?.[m.columns.indexOf('evanDev')] === -8 && row?.[m.columns.indexOf('avanDev')] === -4, JSON.stringify(row));
+}
+
 console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
 {
     let running = false, plan = { title: '', reads: [], steps: [] }, modeRefusal = null, entered = 0;
@@ -668,7 +785,38 @@ console.log('\n[the client: ticket, socket, hello, answers]');
     check('a tool the tab does not have is not answered as success', r('c3')?.ok === false && /does not answer "tuner_write"/.test(r('c3').error));
     ws.onclose({ code: 4000 });
     await sleep(20);
-    check('taken over by another tab: stops, does not reconnect', states.at(-1) === 'stopped' && FakeWS.last === ws);
+    check('taken over by another device: held, and no fight for the socket (asks again in a minute)', states.at(-1) === 'held' && FakeWS.last === ws);
+    client.stop();
+}
+{
+    // Refused while another device's live tab has it (4002, holder in the reason); "switch here".
+    class FakeWS {
+        static all = [];
+        constructor(url, protocols) { this.url = url; this.protocols = protocols; this.sent = []; FakeWS.all.push(this); setTimeout(() => this.onopen?.(), 2); }
+        send(t) { this.sent.push(t); }
+        close(code = 1000) { setTimeout(() => this.onclose?.({ code, reason: '' }), 1); }
+    }
+    const seen = [];
+    const client = new BridgeClient({
+        ticketUrl: '/api/bridge/ticket', handlers: () => ({}),
+        hello: () => ({ build: 'b1', variant: 'preview', tools: [], device: 'PC' }),
+        onStatus: s => seen.push(s),
+        fetch: async () => new Response(JSON.stringify({ ticket: 'v1.abc.def', url: 'wss://bridge/tab' }), { status: 200 }),
+        WebSocket: FakeWS,
+    });
+    client.start();
+    await sleep(20);
+    const first = FakeWS.all[0];
+    check('hello carries this device\'s name', JSON.parse(first.sent[0]).device === 'PC', first.sent[0]);
+    first.onclose({ code: HELD_CLOSE_CODE, reason: 'held:ナビ' });
+    await sleep(10);
+    check('held by another device: says which one, and waits', seen.at(-1).state === 'held' && seen.at(-1).holder === 'ナビ' && FakeWS.all.length === 1, JSON.stringify(seen.at(-1)));
+    client.takeover();
+    await sleep(20);
+    check('switch here: a new socket asking to take over', FakeWS.all.length === 2 && FakeWS.all[1].url === 'wss://bridge/tab?takeover=1', FakeWS.all.at(-1)?.url);
+    check('...and only once: the next one asks normally', (() => { FakeWS.all[1].onclose({ code: 1006 }); return true; })());
+    await sleep(1200);
+    check('...a reconnect after that does not take over again', FakeWS.all.length === 3 && FakeWS.all[2].url === 'wss://bridge/tab', FakeWS.all.map(w => w.url).join(' | '));
     client.stop();
 }
 {

@@ -127,3 +127,55 @@ export function codeUses(graph: Indexed, def: CalParamDef): CodeUses {
         .map(([when, places]) => ({ when, in: [...places].slice(0, MAX_PLACES) }));
     return { readBy: { count: readers.size, names: [...readers.values()].slice(0, 6) }, conditions };
 }
+
+// --- RAM -----------------------------------------------------------------------------------------
+
+export interface RamHit {
+    name: string;
+    bank: 'master' | 'slave';
+    address: number;
+    /** Whether an OBSERVE run can read it: master RAM inside the windows the DME serves over DS2. */
+    observable: boolean;
+    /** Where the DME code assigns it, and what — the first few, the C literals as hex. */
+    writes: { in: string; value: string }[];
+    /** How many functions read it. */
+    readers: number;
+}
+
+const MAX_RAM_WRITES = 4;
+
+/**
+ * RAM symbols by name or address, for planning an OBSERVE run: the assistant could not find an
+ * address it was asked to watch, and the catalog holds 2,563 of them by name.
+ *
+ * An address is taken as one only when it is written as one (DAT_00ffd1a2, 0xFFD1A2, or four or more
+ * hex digits); "ad" is a word to look for, not 0xAD. Exact names first, then names containing it.
+ */
+export function ramFind(
+    graph: Indexed, query: string, limit: number,
+    observableAt: (bank: 'master' | 'slave', address: number) => boolean,
+): RamHit[] {
+    const q = query.trim();
+    const asAddress = /^(DAT_|0x)/i.test(q) || /^[0-9a-f]{4,8}$/i.test(q) ? parseInt(q.replace(/^(DAT_|0x)/i, ''), 16) : NaN;
+    const ram = graph.raw.nodes.filter(n => n.t === 'ram' && typeof n.addr === 'number');
+    const lower = q.toLowerCase();
+    const hits = Number.isFinite(asAddress)
+        ? ram.filter(n => n.addr === asAddress)
+        : [...ram.filter(n => n.name.toLowerCase() === lower), ...ram.filter(n => n.name.toLowerCase() !== lower && n.name.toLowerCase().includes(lower))];
+    return hits.slice(0, limit).map(n => {
+        const address = n.addr!;
+        const bank = (n.bank ?? 'master') as 'master' | 'slave';
+        const alias = `DAT_00${address.toString(16).padStart(6, '0')}`;
+        const writes: RamHit['writes'] = [];
+        for (const fn of graph.raw.nodes) {
+            if (fn.t !== 'func' || fn.bank !== bank || writes.length >= MAX_RAM_WRITES) continue;
+            for (const st of fn.stmts ?? []) {
+                if (st.out !== n.name && st.out.toLowerCase() !== alias) continue;
+                writes.push({ in: fn.name, value: hexLiterals(st.expr) });
+                if (writes.length >= MAX_RAM_WRITES) break;
+            }
+        }
+        const readers = (graph.in.get(n.id) ?? []).filter(e => e.k === 'read' && graph.byId.get(e.s)?.t === 'func').length;
+        return { name: n.name, bank, address, observable: observableAt(bank, address), writes, readers };
+    });
+}

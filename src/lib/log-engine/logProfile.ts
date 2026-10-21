@@ -48,9 +48,9 @@ import {
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     IDLE_GOVERNOR_RAM_READ, IDLE_THROTTLE_RAM_READ, IDLE_WDK_RAM_READ, IDLE_LAMBDA_LEARN_RAM_READ,
     IDLE_RESERVE_RAM_READ, IDLE_STEERING_RAM_READ, IDLE_VALVE_STATE_RAM_READ,
-    SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
+    SLEW_STATE_RAM_READ, TORQUE_REQUEST_RAM_READ,
     IDLE_VANOS_RAM_READ,
-    KNOCK_AGE_RAM_READ, KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ,
+    KNOCK_AGE_RAM_READ, KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ, LAMBDA_SENSOR_RAM_READ,
 } from '@/lib/dme-link/ramMap';
 import { type FieldKey, LOG_FIELD_REGISTRY } from '@/lib/field-registry/registry';
 import { IGNITION_ANGLE_KEYS } from '@/lib/dme-link/liveValueBlocks';
@@ -624,7 +624,11 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // Substituted`, `ambientTempFromCan` and `pressureDecodeDisagreesMbar` ride along on
             // these same reads as qualifiers on a channel rather than columns of their own, so they
             // have no registry entry to name and cannot keep an exchange alive by themselves.
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            //
+            // `pwg1` and `edkSoll` (the pedal and the throttle target) ride in free since
+            // 2026-10-21, debug like `wdk1` beside them — on every sample, which is better than the
+            // one in eight a RAM read of PWG or WDK_SOLL could have been afforded.
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'pwg1', 'edkSoll'] },
             // Eight bytes: the short-term pair the correction is read from, and the long-term
             // stores its mean is learned into. All four are tuning — this read never narrows.
             { kind: 'ram', name: 'LA_F_REGLER1/2', ...LAMBDA_TRIM_RAM_READ,
@@ -635,8 +639,13 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // And the six ignition angles, debug, riding in the same way: a production VE log
             // records them because `tetv` keeps this exchange. One sample in eight, because that is
             // the rate this block already comes at; they are not carried to the seven between.
+            //
+            // And `fr_regler` (offset 79), since 2026-10-21 — the filling regulator that opens the
+            // throttle past KF_EGAS_WDK when the air falls short of the torque request. Free, not
+            // carried, and `tuning` already (the LLS derivation reads it), so production keeps it.
             { ...block(19, LAMBDA_SLOW_LANE_EVERY),
-                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze', ...IGNITION_ANGLES] },
+                provides: ['tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze', ...IGNITION_ANGLES,
+                    'frRegler'] },
             // How long ago knock control last retarded each cylinder — twelve bytes, and the one
             // channel that says whether a felt loss was knock. On block 19's lane ON PURPOSE: the
             // same sample index carries both, so a counter of 12 stands beside the angle that
@@ -690,6 +699,33 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             { kind: 'ram', name: 'RF_KORR/P_SAUG/RF_P_SAUG', ...MANIFOLD_AIR_RAM_READ,
                 every: LAMBDA_SLOW_LANE_EVERY,
                 provides: ['rfPSaug', 'rfDiagF', 'rfKorrDme', 'pSaug', 'pSaugM'] },
+            // Rich or lean where the trim cannot say: both banks' pre- and post-cat sensor
+            // voltages, LA_ST_EIN (bit 0 = the loop is closed — open, `la_f_regler` is pinned at
+            // 1.000) and BA_F_TI, the transient enrichment, in thirty-two bytes. See
+            // LAMBDA_SENSOR_RAM_READ for why this is its own exchange and not a widening of the
+            // per-sample trim read.
+            //
+            // Block 19's lane, after the reads #978 put in order behind it and not between the trim
+            // and block 19, for the manifold read's reason.
+            //
+            // Debug throughout, so a production run drops it. ~10.8 ms a sample.
+            { kind: 'ram', name: 'USV/USN/LA_ST_EIN/BA_F_TI', ...LAMBDA_SENSOR_RAM_READ,
+                every: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['usv1', 'usv2', 'usn1', 'usn2', 'laStEin1', 'laStEin2', 'baFTi'] },
+            // The torque request from the pedal to the throttle: MD_FW, the slew limiter's state,
+            // MD_IND_WUNSCH after it and MD_IND_WUNSCH_RED_KORR, the torque the throttle is opened
+            // for — twenty-six bytes. See TORQUE_REQUEST_RAM_READ.
+            //
+            // It REPLACES the twelve-byte MD_FW/MD_FW_FILTER read that sat on the slowest lane: the
+            // same address, fourteen bytes longer, and on block 19's lane rather than one in
+            // sixty-four, because "is the request ahead of the air" is asked of a tip-in, not of a
+            // drive. Every MD_DYN_ST read (1/64) still lands on one of these.
+            //
+            // Debug throughout, so a production run drops it. ~10.0 ms a sample, ~9.0 more than the
+            // read it replaced.
+            { kind: 'ram', name: 'MD_FW/MD_IND_WUNSCH/MD_IND_WUNSCH_RED_KORR', ...TORQUE_REQUEST_RAM_READ,
+                every: LAMBDA_SLOW_LANE_EVERY,
+                provides: ['mdFw', 'mdFwFilter', 'mdLsDelta', 'mdDpDelta', 'mdIndWunsch', 'mdIndWunschRedKorr'] },
             // Ambient pressure, its two diagnostic bytes, the DME's altitude, intake air
             // temperature and the DME's own modelled charge temperature — sixteen bytes, one
             // telegram, on the same slow lane. This is what separates a real VE error from a
@@ -715,20 +751,19 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
             // One channel, debug — the other exchange a production run drops.
             { kind: 'ram', name: 'LLS_ST', ...IDLE_VALVE_STATE_RAM_READ, every: LATCHED_BIT_LANE_EVERY,
                 provides: ['llsSt'] },
-            // The slew limiter, in two exchanges because `MD_DYN_ST` is in segment 0x01 and the
-            // torque words are in 0x04 — a telegram cannot span both.
+            // The slew limiter's state byte. `MD_DYN_ST` is in segment 0x01 and the torque words are
+            // in 0x04 — a telegram cannot span both — so it is its own exchange; the words it is
+            // read beside now come with the torque request above.
             //
-            // Neither is a VE input, and both are DEBUG: a production run drops them the same way
-            // it drops the density cluster and LLS_ST. What they answer is a question the maps
-            // cannot — `KF_MD_LS_KOMF` says what the allowance WAS, and only bit 6 says whether the
-            // demand ever exceeded it. On the survey lane because a tip-in is not a state you hold:
-            // it lasts a few hundred milliseconds, and what is wanted is whether it happened at all
-            // during a drive, not its shape. One in sixty-four samples costs 0.7 % of the rate and
+            // Not a VE input, and DEBUG: a production run drops it the same way it drops the
+            // density cluster and LLS_ST. What it answers is a question the maps cannot —
+            // `KF_MD_LS_KOMF` says what the allowance WAS, and only bit 6 says whether the demand
+            // ever exceeded it. On the survey lane because a tip-in is not a state you hold: it
+            // lasts a few hundred milliseconds, and what is wanted is whether it happened at all
+            // during a drive, not its shape. One in sixty-four samples costs 0.3 % of the rate and
             // is enough to answer that; catching the clip itself is what the WOT pull is for.
             { kind: 'ram', name: 'MD_DYN_ST', ...SLEW_STATE_RAM_READ, every: LATCHED_BIT_LANE_EVERY,
                 provides: ['mdDynSt'] },
-            { kind: 'ram', name: 'MD_FW/MD_FW_FILTER', ...SLEW_TORQUE_RAM_READ, every: LATCHED_BIT_LANE_EVERY,
-                provides: ['mdFw', 'mdFwFilter', 'mdLsDelta', 'mdDpDelta'] },
             // The additive half of long-term lambda learning — the store a stationary idle parks
             // its error in, which `laa_f` above cannot reach (its zone needs ML > 40 kg/h). Four
             // bytes in the OTHER RAM window, so it is its own exchange; the learner's time
@@ -746,9 +781,9 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // in production it must record the same channel set. Narrowing this changes nothing — both
         // blocks carry tuning channels — which is the point of stating it rather than assuming it.
         fallback: [
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'pwg1', 'edkSoll'] },
             { ...block(19), provides: ['stft1', 'stft2', 'tankVent', 'tankVentCheckState', 'tankVentDiag', 'lambdaFreeze',
-                ...IGNITION_ANGLES] },
+                ...IGNITION_ANGLES, 'frRegler'] },
         ],
         // The lambda trim is the whole input, and PATCH is what stops the DME hiding the error the
         // trim is supposed to reveal: k_rf_cfg turns MAP compensation off and K_LAA_TMOT_MIN stops
@@ -800,7 +835,9 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // They are four new RAM reads and a decision of their own, deliberately not smuggled in
         // with the mode surface.
         exchanges: [
-            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] },
+            // The pedal and the throttle target arrive with every block 3 the live poll decodes, so
+            // they are named here as on the VE list.
+            { ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'pwg1', 'edkSoll'] },
             { kind: 'ram', name: 'T_UMG/V', ...AMBIENT_TEMP_RAM_READ, every: AMBIENT_SLOW_LANE_EVERY,
                 provides: ['ambientTemp', 'vehicleSpeed'] },
             // THE RING, on the fast lane. Every sample, because these are the signals that
@@ -846,7 +883,7 @@ export const LOG_PROFILES: Record<ProcessId, LogProfile> = {
         // watched byte is read against. The watched reads themselves are not here — they are the
         // operator's plan (observe.ts), appended at START after the plan is checked, because which
         // addresses a run watches is the question it was started to answer.
-        exchanges: [{ ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1'] }],
+        exchanges: [{ ...block(3), provides: ['rpm', 'rawLoad', 'coolantTemp', 'exhaustTemp', 'rf', 'wdk1', 'pwg1', 'edkSoll'] }],
         requires: [],
         produces: 'Raw bytes at the addresses the plan names, beside rpm, load and throttle',
         runnable: true,

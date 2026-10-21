@@ -35,7 +35,7 @@ import { idleReachIfLlsTakes } from '@/lib/lls/composeLlsTv';
 import { summariseSession, type LlsSample } from '@/lib/lls/fromLog';
 import LlsPanel from '@/components/LlsPanel';
 import ObservePanel from '@/components/ObservePanel';
-import { EMPTY_PLAN, activeSteps, marksOf, planMark, planProblems, stepMark, summariseWatch, watchExchanges, watchKey, type ObservePlan } from '@/lib/log-engine/observe';
+import { EMPTY_PLAN, activeSteps, marksOf, planMark, planProblems, stepMark, summariseWatch, watchExchanges, watchKey, windowOf, type ObservePlan } from '@/lib/log-engine/observe';
 import { WriteManifest, ManifestCorner, type ManifestGroup } from '@/components/WriteManifest';
 import {
   enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
@@ -53,7 +53,7 @@ import { useCalibrationData, useCalibrationDiff } from '@/hooks/useCalibrationDa
 import { useCalVariantBuffers } from '@/hooks/useCalVariantBuffers';
 import { armedWriterSpans, changedCellCount, editConflicts, withCellEdit, withFill, type BulkOp, type CalEdit, type RunSpan } from '@/lib/calibration/edits';
 import { decodeParam } from '@/lib/calibration/decode';
-import { codeUses, paramChoices, paramNote } from '@/lib/calibration/evidence';
+import { codeUses, paramChoices, paramNote, ramFind } from '@/lib/calibration/evidence';
 import { quantise } from '@/lib/ecu-items/quantise';
 import { LOCK_TEXT } from '@/components/calibration/ParamInfo';
 import { readIdleTablesResult, type IdleTables } from '@/lib/idle/idleTables';
@@ -130,7 +130,7 @@ import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { detectDialogLang, dialogText } from '@/lib/dialog-text';
 import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
-import { useAssistantBridge } from '@/hooks/useAssistantBridge';
+import { readDeviceName, useAssistantBridge } from '@/hooks/useAssistantBridge';
 import type { TabFacade } from '@/lib/bridge/tools';
 import { AssistantSection } from '@/components/AssistantSection';
 import { buildId, listStoredSessions, restoreSession } from '@/lib/session-sync/client';
@@ -2703,7 +2703,7 @@ export default function Home() {
    * next stage of a campaign, and the stage after an EGT run is a VE run — `deriveRoute` reads the
    * parent's process to say so.
    */
-  const handleNext = async (parent: TuningSession, from?: { carImage: ArrayBuffer }) => {
+  const handleNext = async (parent: TuningSession, from?: { carImage: ArrayBuffer }): Promise<TuningSession | null> => {
     const parentOpen = parent.id === activeSessionId && !!binaryBuffer;
     let carImage: ArrayBuffer;
     let toggles: { applyPatch: boolean; applyWotDisable: boolean; applyTankVentDisable: boolean; applyRfKorrHold: boolean };
@@ -2714,7 +2714,7 @@ export default function Home() {
       toggles = { applyPatch, applyWotDisable, applyTankVentDisable, applyRfKorrHold };
     } else {
       const bins = await sessionDb.loadBinaries(parent.id);
-      if (!bins) { alert(dialogText().noStoredBinary); return; }
+      if (!bins) { alert(dialogText().noStoredBinary); return null; }
       carImage = from?.carImage ?? (await resolveCarImage({
         flashHistory: parent.flashHistory, base: bins.baseBinaryBuffer,
         tuned: bins.tunedBinaryBuffer, stored: bins.carBinaryBuffer,
@@ -2726,7 +2726,7 @@ export default function Home() {
     const start = nextStart(parent, { carImage, toggles, filterConfig: config, interpolationTable: table });
 
     const created = await handleNewSession();
-    if (!created) return;
+    if (!created) return null;
     resetDerived();
 
     const fileName = `${fileSafe(parent.label)}_CAR.bin`;
@@ -2739,7 +2739,7 @@ export default function Home() {
       applyTankVentDisable: start.settings.applyTankVentDisable,
       applyRfKorrHold: start.settings.applyRfKorrHold,
     });
-    if (!map) return;
+    if (!map) return null;
     logFileState.adopt(start.settings.filterConfig, start.settings.interpolationTable);
 
     await sessionDb.setBase({
@@ -2763,6 +2763,7 @@ export default function Home() {
     // the hub and the driver is already standing on DASH, so there is nothing to move them to.
     goToTab('current');
     setNarrowPane('dash');
+    return created;
   };
 
   /** Saves the draft's tune. The only way to persist a session without a cable.
@@ -3204,6 +3205,19 @@ export default function Home() {
           avan1St: sample.avan1St,
           vanEdSt: sample.vanEdSt,
           vanAdapSt: sample.vanAdapSt,
+          // The bucking channels (2026-10-21): the pedal and throttle target (block 3, every sample),
+          // the torque request and the lambda sensors (RAM, one in eight). FR_REGLER is above.
+          pwg1: sample.pwg1,
+          edkSoll: sample.edkSoll,
+          mdIndWunsch: sample.mdIndWunsch,
+          mdIndWunschRedKorr: sample.mdIndWunschRedKorr,
+          usv1: sample.usv1,
+          usv2: sample.usv2,
+          usn1: sample.usn1,
+          usn2: sample.usn2,
+          laStEin1: sample.laStEin1,
+          laStEin2: sample.laStEin2,
+          baFTi: sample.baFTi,
         };
         // Not a channel: the link dropped before this sample and the run reconnected, and this is how
         // long nothing was recorded. On the sample itself so the filter, the store and the CSV all
@@ -3948,6 +3962,9 @@ export default function Home() {
           : 'CONNECTION';
       return {
         app: 'MSS54HP CSL CONVERT /// TUNER — WORKS',
+        // The name the owner gave this device under ASSISTANT ("ナビ"), so the assistant can say which
+        // device is answering — with two open, only one is.
+        device: readDeviceName(),
         build: buildId() ?? null,
         practice: dmeLink.mockMode,
         link: dmeLink.state,
@@ -3981,9 +3998,14 @@ export default function Home() {
     startLog: () => { void handleStartTune(); },
     running: () => dmeLink.state === 'tuning',
     stopLog: () => { void handleStopTune(); },
-    views: () => TABS.filter(t => t.enabled).map(t => t.id),
+    // The tabs, and the two panes a narrow screen switches between beside the map: DASH (the hub —
+    // connection, the run, the live readouts) and GRAPH. On a wide screen both are always showing.
+    views: () => [...TABS.filter(t => t.enabled).map(t => t.id), 'dash', 'graph'],
     closedViews: () => TABS.filter(t => !t.enabled).map(t => t.id),
-    show: (view) => { goToTab(view as TabId); setNarrowPane('map'); },
+    show: (view) => {
+      if (view === 'dash' || view === 'graph') { setNarrowPane(view); return; }
+      goToTab(view as TabId); setNarrowPane('map');
+    },
     sessions: () => sessionDb.sessions.map(s => ({
       id: s.id, seq: s.seq, label: s.label, status: s.status, createdAt: s.createdAt,
       hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
@@ -3993,16 +4015,37 @@ export default function Home() {
     // cut: the link idle or off, and nothing in the workspace that exists only until SAVE. The row's
     // own OPEN does not ask — a person at the screen sees what they are leaving — and an assistant
     // talking to a driver does not.
-    openRefusal: () => {
+    openRefusal: (discard) => {
       if (dmeLink.state === 'tuning') return 'A log is recording. Opening another session would end it; stop it first (read it back to the driver).';
       if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
-      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') return 'The open session has work that is not saved. Opening another would drop it: tuner_save keeps it (read it back to the owner first), or the owner saves on the screen.';
+      if (!discard && (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly')) return 'The open session has work that is not saved. Opening another would drop it: tuner_save keeps it, or say discard: true to drop it (read back what is lost first).';
       return null;
     },
     openSession: async (id) => {
       const s = sessionDb.sessions.find(x => x.id === id);
       return s ? handleOpenSession(s) : false;
     },
+    // NEW SESSION, or NEXT on a row: the session list's own two ways to start one. The stored-BIN check
+    // runs here first because handleNext alerts without one, and nobody may be at the screen.
+    newSession: async (parentId) => {
+      if (parentId) {
+        const parent = sessionDb.sessions.find(s => s.id === parentId);
+        if (!parent) return { refused: 'That session is not on this device.' };
+        const open = parent.id === activeSessionId && !!binaryBuffer;
+        if (!open && !(await sessionDb.loadBinaries(parent.id))) return { refused: 'That session has no stored BIN to start from.' };
+        const made = await handleNext(parent);
+        return made ? { seq: made.seq, label: made.label, inherited: true } : { refused: 'The new session could not be started from it.' };
+      }
+      const made = await handleNewSession();
+      return made ? { seq: made.seq, label: made.label, inherited: false } : { refused: 'A new session could not be started.' };
+    },
+    discardEdits: () => {
+      const n = calEdits.edits.size;
+      calEdits.discardAll();
+      return n;
+    },
+    ramFind: async (query, limit) => ramFind((await loadCalCatalog()).graph, query, limit,
+      (bank, address) => bank === 'master' && windowOf(address, 1) !== null),
     calibrationRefusal: (forEdit) => {
       if (!featureEnabled('calibration', featurePreview)) return 'This build has no CALIBRATION.';
       if (!currentSession || !binaryBuffer) return 'No session with a BIN is open. tuner_sessions and tuner_open_session open one.';
@@ -4099,7 +4142,7 @@ export default function Home() {
       hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
       open: s.id === currentSession?.id,
     })),
-    syncUpload: () => sync.syncAll(),
+    syncUpload: (overwrite) => sync.syncAll(overwrite),
     // The store's listing, without its VIN column: the policy says the assistant never gets one.
     cloudSessions: async () => {
       const here = new Map(sessionDb.sessions.map(s => [s.id, s.seq]));
@@ -4159,7 +4202,8 @@ export default function Home() {
     if (go) assistant.setOn(true);
   };
   const assistantSection = assistantAllowed
-    ? <AssistantSection on={assistant.on} status={assistant.status} onToggle={(next) => void toggleAssistant(next)} />
+    ? <AssistantSection on={assistant.on} status={assistant.status} onToggle={(next) => void toggleAssistant(next)}
+        onTakeover={assistant.takeover} device={assistant.device} onDevice={assistant.setDevice} />
     : undefined;
 
   /**

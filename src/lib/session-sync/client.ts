@@ -63,10 +63,13 @@ export const canSync = (): boolean => isPreviewBuild();
 export class SyncError extends Error {
     // Declared and assigned rather than a `readonly kind` parameter property: `verify:session-wire`
     // loads this module through Node's type stripping, which cannot erase that syntax.
-    readonly kind: 'expired' | 'unreachable' | 'tooLarge' | 'conflict' | 'offline' | 'failed' | 'notice';
-    constructor(kind: SyncError['kind'], message: string) {
+    readonly kind: 'expired' | 'unreachable' | 'tooLarge' | 'conflict' | 'stale' | 'offline' | 'failed' | 'notice';
+    /** `stale`: when the store's newer copy was sent. */
+    readonly storeSyncedAt?: number;
+    constructor(kind: SyncError['kind'], message: string, storeSyncedAt?: number) {
         super(message);
         this.kind = kind;
+        this.storeSyncedAt = storeSyncedAt;
     }
 }
 
@@ -112,6 +115,11 @@ export async function call<T>(path: string, init: { method?: string; body?: unkn
     }
     if (r.tooLarge) {
         throw new SyncError('tooLarge', detail && detail !== 'too_large' ? detail : 'Too large to send — the store takes rows up to 1.9 MB.');
+    }
+    if (r.status === 409 && detail === 'newer_in_store') {
+        const at = (r.data as { syncedAt?: unknown } | null)?.syncedAt;
+        const when = typeof at === 'number' ? new Date(at).toLocaleString() : 'since';
+        throw new SyncError('stale', `A newer copy was sent from another device (${when}). Not sent: bring that copy back, or send this one over it.`, typeof at === 'number' ? at : undefined);
     }
     if (r.status === 409) throw new SyncError('conflict', 'That id belongs to another account’s record and cannot be replaced.');
     if (r.status === 0) throw new SyncError('offline', 'No connection to the store.');
@@ -306,6 +314,8 @@ export async function buildIdentity(): Promise<string | undefined> {
 export interface SyncResult {
     id: string;
     storedBytes: number;
+    /** The store's time for this copy — see TuningSession.storeSyncedAt. Absent from an older API. */
+    syncedAt?: number;
 }
 
 /**
@@ -315,7 +325,7 @@ export interface SyncResult {
  * session's id in the same database, and a caller that passed a mismatched pair would produce a
  * stored session that is internally inconsistent with nothing to detect it.
  */
-export async function syncSession(session: TuningSession): Promise<SyncResult> {
+export async function syncSession(session: TuningSession, opts: { force?: boolean } = {}): Promise<SyncResult> {
     // Refused before anything is read to be sent, not only at the request: before the notice, no
     // part of a session is even gathered for the store. It stays outstanding in the local database,
     // which is where an unsent session has always waited.
@@ -360,6 +370,10 @@ export async function syncSession(session: TuningSession): Promise<SyncResult> {
             // still an idle run, and the list has to say so.
             hasIdle: (log?.idle?.length ?? 0) > 0,
             appBuild: await buildIdentity(),
+            // What this device last saw of the store's copy; the store refuses when it holds a newer
+            // one. `force` is the owner saying to replace it anyway.
+            ifStoreSyncedAt: session.storeSyncedAt,
+            force: opts.force === true ? true : undefined,
             sessionGz: toBase64(sessionGz),
             logGz: logGz ? toBase64(logGz) : null,
             binariesGz: binariesGz ? toBase64(binariesGz) : null,
@@ -400,10 +414,12 @@ export async function listStoredSessions(): Promise<StoredSession[]> {
  */
 export async function restoreSession(id: string): Promise<TuningSession> {
     const body = await call<{
-        sessionGz: string; logGz: string | null; binariesGz: string | null;
+        sessionGz: string; logGz: string | null; binariesGz: string | null; syncedAt?: number;
     }>(`/api/sessions/${encodeURIComponent(id)}`);
 
-    const session = await gunzipJson<TuningSession>(fromBase64(body.sessionGz));
+    const stored = await gunzipJson<TuningSession>(fromBase64(body.sessionGz));
+    // The copy this device now holds is the store's, so the store's time is what it has seen.
+    const session: TuningSession = typeof body.syncedAt === 'number' ? { ...stored, storeSyncedAt: body.syncedAt } : stored;
     // Either wire shape — see WireLog. Sessions stored before the record travelled whole are bare
     // arrays, and they have to keep coming back.
     const log = body.logGz

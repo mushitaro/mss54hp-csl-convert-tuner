@@ -99,6 +99,14 @@ export interface LiveMeasurement {
      *  "was the lambda controller even running here", by comparing against the WOT threshold. */
     wdk1?: number;
     /**
+     * `PWG1` — accelerator pedal sensor 1, % (0.1 % steps, signed), and `EDK_SOLL` — the throttle
+     * target the position controller is driving WDK1 onto, % (normally egas_compute_throttle_target's
+     * WDK_SOLL). Same block as rpm/rawLoad, so free and on EVERY sample: the pedal, the target and
+     * `wdk1` from one telegram. See STANDARD_MEASUREMENT_BLOCK.
+     */
+    pwg1?: number;
+    edkSoll?: number;
+    /**
      * TETV — tank-vent valve pulse time, ms. Same block as stft1/stft2, so it is free.
      *
      * Zero means the valve is shut and this sample's trim is the engine's own mixture error. Any
@@ -190,6 +198,10 @@ export interface LiveMeasurement {
      * previously recovered from AQ_REL through KL_AQ_ABS_LLS inverted. `mlSoll` is the total air
      * request and `mlSollLls` the part routed to the valve; the gap between them is where
      * egas_compute_throttle_target split it, which no other channel shows.
+     *
+     * A VE run carries `frRegler` too, out of block 19 (offset 79) one sample in eight: above 1.0
+     * the filling regulator is opening the throttle past KF_EGAS_WDK because the air fell short
+     * of the torque request. Not carried there either — it is an integrator in motion.
      */
     frRegler?: number;
     llsTv?: number;
@@ -203,6 +215,36 @@ export interface LiveMeasurement {
     /** `MD_LS_DELTA` / `MD_DP_DELTA` — the allowance the tip-in and dashpot paths had. */
     mdLsDelta?: number;
     mdDpDelta?: number;
+    /**
+     * `MD_IND_WUNSCH` — the request after the limiter plus the minimum torque, Nm; and
+     * `MD_IND_WUNSCH_RED_KORR` — after the idle governor, the limiters and the reserve, the torque
+     * the throttle is opened FOR (MD_RF_ROH and WDK_SOLL are sized from it). Out of the same
+     * 26-byte telegram as the four above (TORQUE_REQUEST_RAM_READ), one sample in eight on the
+     * block-19 lane, all six or none; written on the sample that read them, never carried.
+     */
+    mdIndWunsch?: number;
+    mdIndWunschRedKorr?: number;
+    /**
+     * The lambda sensors and the controller's own state, one 32-byte telegram (LAMBDA_SENSOR_RAM_READ,
+     * 0xFF80BE..0xFF80DD), one sample in eight on the block-19 lane:
+     *
+     *   `usv1`/`usv2`  pre-cat sensor, banks 1/2, volts. Rich above 0.51, lean below 0.40 (the
+     *                  controller's own K_LAS_R_FETT / K_LAS_R_MAGER) — and that holds in the OPEN
+     *                  loop too, where `stft` is pinned at 1.000 and says nothing.
+     *   `usn1`/`usn2`  post-cat sensors, volts.
+     *   `laStEin1/2`   LA_ST_EIN, a bitfield: bit 0 = closed loop on that bank.
+     *   `baFTi`        BA_F_TI, the transient enrichment on injection time, 1.000 = none.
+     *
+     * All or none, and never carried: a voltage that swings every half second is not the voltage
+     * seven samples later.
+     */
+    usv1?: number;
+    usv2?: number;
+    usn1?: number;
+    usn2?: number;
+    laStEin1?: number;
+    laStEin2?: number;
+    baFTi?: number;
     /**
      * How far the two ambient-pressure decodes disagree, mbar.
      *

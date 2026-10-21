@@ -84,6 +84,23 @@ const COLUMNS: { name: string; get: (p: LogDataPoint) => number | undefined; dig
     ...[1, 2, 3, 4, 5, 6].map(n => ({ name: `knockAge${n}`, get: (p: LogDataPoint) => p[`knockAge${n}` as keyof LogDataPoint] as number | undefined, digits: 0 })),
     { name: 'krSum', get: p => p.krDtzSum, digits: 1 },
     { name: 'kaSum', get: p => p.kaDtzSum, digits: 1 },
+    { name: 'coolant', get: p => p.coolantTemp, digits: 0 },
+    { name: 'intakeTemp', get: p => p.intakeTemp, digits: 0 },
+    // The air side, one sample in eight (types.ts): the two manifold pressures (mbar), the manifold
+    // sensor's air and how far the Alpha-N target sits from it (%). They were logged and never cut
+    // into a moment, so an assistant asked about intake pressure was told the log had none.
+    { name: 'pSaug', get: p => p.pSaug, digits: 0 },
+    { name: 'pSaugM', get: p => p.pSaugM, digits: 0 },
+    { name: 'rfPSaug', get: p => p.rfPSaug, digits: 1 },
+    { name: 'rfDiagF', get: p => p.rfDiagF, digits: 1 },
+    // The cams against their map targets (degrees crank), and the gap between them, which is what an
+    // owner asking "is VANOS lagging?" means.
+    { name: 'evan', get: p => p.evan1Ist, digits: 1 },
+    { name: 'evanSoll', get: p => p.evanSoll, digits: 1 },
+    { name: 'evanDev', get: p => (p.evan1Ist !== undefined && p.evanSoll !== undefined ? p.evan1Ist - p.evanSoll : undefined), digits: 1 },
+    { name: 'avan', get: p => p.avan1Ist, digits: 1 },
+    { name: 'avanSoll', get: p => p.avanSoll, digits: 1 },
+    { name: 'avanDev', get: p => (p.avan1Ist !== undefined && p.avanSoll !== undefined ? p.avan1Ist - p.avanSoll : undefined), digits: 1 },
     { name: 'linkGapS', get: p => p.linkGapS, digits: 1 },
 ];
 

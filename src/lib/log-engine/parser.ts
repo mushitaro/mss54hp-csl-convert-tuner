@@ -21,6 +21,15 @@ const AIR_KNOCK_CSV_KEYS = [
     'evan1Ist', 'evanSoll', 'avan1Ist', 'avanSoll', 'evan1St', 'avan1St', 'vanEdSt', 'vanAdapSt',
 ] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
 
+/** The bucking channels (2026-10-21) — the pedal and throttle target, the torque request, the lambda
+ *  sensors with the loop state, the tip-in enrichment and FR_REGLER. Read the same optional way:
+ *  all but the first two are sparse on a fast VE log, and `laStEin1/2` are bitfields written as
+ *  plain numbers, so `pick` reads them. */
+const LAMBDA_TORQUE_CSV_KEYS = [
+    'pwg1', 'edkSoll', 'mdIndWunsch', 'mdIndWunschRedKorr',
+    'usv1', 'usv2', 'usn1', 'usn2', 'laStEin1', 'laStEin2', 'baFTi', 'frRegler',
+] as const satisfies readonly (AliasKey & keyof LogDataPoint)[];
+
 /**
  * First aliased header that carries a number on this row.
  *
@@ -272,6 +281,12 @@ export const parseLogFile = (csvText: string): LogDataPoint[] => {
         // Slow lanes as well, so a blank is "not read on this row": an absent knock sum is
         // not 0 deg of retard and an absent gear is not neutral.
         for (const key of AIR_KNOCK_CSV_KEYS) {
+            const v = pick(row, key);
+            if (v !== undefined) point[key] = v;
+        }
+        // And the bucking channels: an absent voltage is not 0 V (lean), and an absent loop state
+        // is not 0 (open).
+        for (const key of LAMBDA_TORQUE_CSV_KEYS) {
             const v = pick(row, key);
             if (v !== undefined) point[key] = v;
         }

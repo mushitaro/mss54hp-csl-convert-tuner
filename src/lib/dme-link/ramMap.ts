@@ -135,6 +135,43 @@ export const Mss54HpRamSignals = {
     MD_LS_DELTA: { segment: 0x04, address: 0x00FFD8B8, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
     /** Dashpot limiter delta. */
     MD_DP_DELTA: { segment: 0x04, address: 0x00FFD8BA, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
+
+    // ---- The request either side of the limiter, as far as the throttle sees it ----------------
+    //
+    // WHY (2026-10-21): the engine bucks and knocks at WDK 20-30 % and low rpm under load, with
+    // and without K HOLD, and one suspicion is that the torque request runs far ahead of what the
+    // air delivers, so the DME opens the throttle hard. `MD_Torque_Interventions...` (master
+    // 0x0166F6) is the whole request chain, every store a word, every one from this function:
+    //
+    //     MD_FW          = MD_WUNSCH_REL * (MD_IND_MAX - MD_IND_MIN) / 1000      (pedal, via md_pwg)
+    //     MD_SAWE_FILTER = FUN_00017400(MD_IND_MIN_GES)                          the minimum torque
+    //     t              = FUN_00017052(MD_FW)                                   the slew limiter
+    //     MD_IND_WUNSCH  = t + MD_SAWE_FILTER                                    0xFFD8BE
+    //     ...                                                                    + MD_LLRI, Torque_Limitation,
+    //     MD_FW_FILTER   = t                                                     + MD_RES, MD_LLRP, ...
+    //     MD_IND_WUNSCH_RED_KORR = clamp(..., MD_IND_MAX)                        0xFFD8C8
+    //     MD_RF_ROH      = KF_MD_MAX_MD_IND_OPT^-1(N, MD_IND_WUNSCH_RED_KORR)    the filling it needs
+    //
+    // and `egas_compute_throttle_target` (master 0x0270B0) turns MD_RF_ROH (through MD_RF_SOLL and
+    // FR_REGLER) into ML_SOLL and WDK_SOLL = KF_EGAS_WDK(N, RF_SOLL_WDK). So MD_IND_WUNSCH_RED_KORR
+    // is the torque the throttle is opened FOR, and MD_IND_WUNSCH the driver's request after the
+    // limiter and before the idle governor, limiters and reserve are added to it. Scale 0.1 Nm,
+    // unsigned: MD_FW is MD_WUNSCH_REL (KF_MD_FAHRER, x/10 %) times MD_IND_MAX (KF_MD_MAX_MD_IND_OPT,
+    // x/10 Nm) over 1000, and MD_IND_WUNSCH_RED_KORR is compared unsigned with K_MD_SK_MAX (x/10 Nm)
+    // and MD_IND_MAX. The catalog's block-83 `md_ind_wunsch` (U16, 0.1 Nm) is the freeze-frame's
+    // verbatim copy of 0xFFD8BE (master 0x024B18), so it agrees.
+    /** `MD_SAWE_FILTER` — not a channel. Its raw word is half of the identity
+     *  `MD_IND_WUNSCH = MD_FW_FILTER + MD_SAWE_FILTER` that `decodeTorqueRequest` checks. */
+    MD_SAWE_FILTER: { segment: 0x04, address: 0x00FFD8B4, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
+    /** `MD_DP_FAKTOR` — not a channel either. `md_interventions_init` (master 0x01602C) sets it to
+     *  0x400 and only `kfu_wint(KF_MD_DASHPOT_FAKTOR, N, MD_FW)` (master 0x017052) rewrites it, so it
+     *  is never 0 on a running DME — the check that a zero-filled window cannot pass. */
+    MD_DP_FAKTOR: { segment: 0x04, address: 0x00FFD8BC, size: 2, signed: false, scale: 1 / 1024, unit: '' },
+    /** `MD_IND_WUNSCH` — the driver's torque request after the slew limiter, plus the minimum torque. */
+    MD_IND_WUNSCH: { segment: 0x04, address: 0x00FFD8BE, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
+    /** `MD_IND_WUNSCH_RED_KORR` — the request the air path is sized for: what MD_RF_ROH, ML_SOLL and
+     *  WDK_SOLL are computed from. The reference catalog's "filling torque request". */
+    MD_IND_WUNSCH_RED_KORR: { segment: 0x04, address: 0x00FFD8C8, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
     /** Indicated torque at optimal ignition. Kept for the filter work; NOT for the inertia fit. */
     MD_IND_OPT_KORR: { segment: 0x04, address: 0x00FFD8E6, size: 2, signed: false, scale: 0.1, unit: 'Nm' },
     /**
@@ -509,6 +546,65 @@ export const Mss54HpRamSignals = {
     LAA_F2: { segment: 0x01, address: 0x00FF80D0, size: 2, signed: false, scale: 3.0517578125e-05, unit: '' },
     LAA_REGLER1: { segment: 0x01, address: 0x00FF80D2, size: 2, signed: false, scale: 3.0517578125e-05, unit: '' },
     LAA_REGLER2: { segment: 0x01, address: 0x00FF80D4, size: 2, signed: false, scale: 3.0517578125e-05, unit: '' },
+
+    // ---- The lambda sensors, and whether the controller was listening to them ------------------
+    //
+    // WHY (2026-10-21): the engine bucks and knocks at WDK 20-30 % and low rpm under load, and the
+    // operator suspects the mixture. `la_f_regler` cannot say: it is the closed-loop controller's
+    // output, and the moment the loop opens `FUN_0001d6a2` (slave) does
+    //
+    //     if ((LA_ST_EIN1 & 1) == 0) LA_F_REGLER1 = 0x8000                 1.000, whatever the mixture
+    //
+    // so in the open loop the trim reads "perfect" exactly where nobody is correcting anything. The
+    // narrowband voltage beside it still says rich or lean there, and these words are the DME's own
+    // copy of it, in the dual-port RAM between the trim and the LA_F_REGLER read this app already
+    // makes — one telegram reaches all of them. Every address is the slave's writer's and the
+    // calibration graph's (`r:master:ff80be`..`ff80dc`, the same symbols in both banks).
+    //
+    // USV1/USV2 (pre-cat, banks 1/2) and USN1/USN2 (post-cat) — `FUN_0001e530` / `FUN_0001e5b8`:
+    //
+    //     USVn = IIR_Filter_SS(((K_LAS_M * adc) >> 10) - K_LAS_NP, USVn, KF_LASV_TAU(N, RF))
+    //
+    // K_LAS_M is "mV/digit" x/1024 (1115 = 1.0889 here, the reference's 1.088 mV per ADC count) and
+    // K_LAS_NP "mV" x (0 here), so the word is MILLIVOLTS, signed (IIR_Filter_SS, `short`): 0 to
+    // (1115 * 1023) >> 10 = 1113 mV on this calibration, and a filter of readings in that range stays
+    // in it. Both inits write 0x1DB = 475 mV (master FUN_000110f2, slave FUN_0002a2b6) — the middle.
+    // The controller calls a bank rich above K_LAS_R_FETT (510 mV) and lean below K_LAS_R_MAGER
+    // (400 mV) (`FUN_0001d6a2`); the sensor-ready machine below uses K_LA_UF 618 / K_LA_UM 341 mV.
+    USV1: { segment: 0x01, address: 0x00FF80BE, size: 2, signed: true, scale: 0.001, unit: 'V' },
+    USV2: { segment: 0x01, address: 0x00FF80C0, size: 2, signed: true, scale: 0.001, unit: 'V' },
+    USN1: { segment: 0x01, address: 0x00FF80C2, size: 2, signed: true, scale: 0.001, unit: 'V' },
+    USN2: { segment: 0x01, address: 0x00FF80C4, size: 2, signed: true, scale: 0.001, unit: 'V' },
+    /**
+     * `LA_ST_EIN1` / `LA_ST_EIN2` — the lambda controller's switch-on state, per bank, one byte each.
+     * Written by the slave's `FUN_0001ebea` (slave 0x01EBEA), every bit:
+     *
+     *     bit 0  CLOSED LOOP — set iff (LA_ST_AUS & 0xFD) == 0 and bit 1; LA_ST_AUS is the list of
+     *            reasons to open the loop: RF above KL_LA_N(N) for K_LA_T_RF (bit 2), VL above
+     *            K_LA_N_VL (bit 5), BA_F_TI outside K_LA_BA_OFF_NEG..POS or TI_F_WE > 1 (bit 7), ...
+     *     bit 1  enabled: K_LA_FREIGABE, no sensor/heater fault, bits 2 and 3, sensor ready
+     *     bit 2  coolant above K_LA_TMOT_*_SCH          bit 3  sensor heated (LASV_TEMP or K_LA_LSHV_T)
+     *     4..7   the sensor-ready machine, ONE bit or none: 0x10 waiting for USV to leave
+     *            K_LA_UM..K_LA_UF, 0x20 settling (K_LA_T_EIN), 0x40 ready, 0x80 swinging
+     *
+     * The machine only ever writes `& 0xEF | 0x20`, `& 0xDF` then `| 0x40`, `& 0xBF | 0x80`,
+     * `& 0x7F` then `| 0x40`, `& 0x7F | 0x10`; `FUN_0002c10c` (slave) sends it back to waiting with
+     * `& 0x1F | 0x10` when a closed-loop sensor's swing falls below K_LA_USV_HUB_DIAG; the slave
+     * init writes 0x10 and the master's 0. So the top nibble is 0 or a single bit on every reading
+     * of the real byte, and `decodeLambdaSensors` checks that.
+     */
+    LA_ST_EIN1: { segment: 0x01, address: 0x00FF80C6, size: 1, signed: false, scale: 1, unit: '' },
+    LA_ST_EIN2: { segment: 0x01, address: 0x00FF80C7, size: 1, signed: false, scale: 1, unit: '' },
+    /**
+     * `BA_F_TI` — the transient (acceleration) enrichment factor on injection time, 0x400 = 1.000.
+     *
+     * `ba_segm` / `ba_f_ti_calc` (slave 0x0173DE / 0x0176CA) write it, and reset it to 0x400 outside
+     * VL|TL|LL, under overrun cut and at init. `ti_engine_running` (slave 0x01B0E2) multiplies it in
+     * as `(TI_F_WE * BA_F_TI) >> 7` beside the other ti factors, and FUN_0001ebea opens the lambda
+     * loop (LA_ST_AUS bit 7) when it leaves K_LA_BA_OFF_NEG..K_LA_BA_OFF_POS — both "x/1024" in the
+     * XDF, 0.940..1.040 here. So 1/1024, and a factor, unsigned.
+     */
+    BA_F_TI: { segment: 0x01, address: 0x00FF80DC, size: 2, signed: false, scale: 1 / 1024, unit: '' },
 
     // NO ADDITIVE-STORE CHANNEL. `TI_OFFSET_ADAPT1/2` live at 0xFFD922/24 in SLAVE RAM, and the
     // slave is not served on this image (see the header: 'MM' routes every slave segment to error
@@ -907,6 +1003,36 @@ export const GANG_MAX = 7;
 /** `NOISE_ST`'s bits that nothing writes — see the signal. Set on a reading means it is not the byte. */
 export const NOISE_ST_UNUSED_BITS = 0x7C;
 
+/**
+ * Every value LA_F_REGLER1/2 and LAA_F1/2 can hold on the 0401 calibration, raw (x/32768).
+ *
+ * `FUN_0001d6a2` / `FUN_0001dc42` (slave) clamp the short-term trim to K_LA_FMIN (0.700) below and,
+ * above, to K_LA_FMAX (1.300) — or K_LAS_FMAX (1.400) while the pre-cat sensor test runs
+ * (`LASV1_ST_TST & 0x10`), and a negative step out of that test can leave it there a while; the
+ * other writers put 0x8000. `FUN_00019e26` clamps LAA_F to K_LAA_FMIN..K_LAA_FMAX (0.75..1.25),
+ * inside. So K_LA_FMIN..K_LAS_FMAX holds all four on every reading of the real words — wider than
+ * `LAMBDA_TRUTH_GATE`'s 0.7..1.3 by exactly the sensor test. `decodeLambdaSensors` takes the four
+ * trim words in its telegram as the proof it landed: four words that must each sit within -30..+40 %
+ * of 0x8000 are not what an arbitrary address holds. `verify:lambda-torque` re-reads all six
+ * constants out of both shipped images.
+ */
+export const LA_F_RANGE_0401 = { min: 22938, max: 45875 } as const;
+
+/**
+ * The millivolts a lambda-sensor word can hold, given the two constants `FUN_0001e530` scales the
+ * ADC count by: `((K_LAS_M * adc) >> 10) - K_LAS_NP` over a 10-bit count, then a first-order filter
+ * that cannot leave the range of what it filters. Raw counts as the XDF stores them.
+ */
+export function lambdaSensorRangeMv(lasMRaw: number, lasNpMv: number): { min: number; max: number } {
+    return { min: -lasNpMv, max: Math.floor((lasMRaw * 1023) / 1024) - lasNpMv };
+}
+
+/** K_LAS_M and K_LAS_NP on 0401 (slave 0x4818 / 0x4816): 1115 and 0, so 0..1113 mV. Nothing in
+ *  this app writes either; `verify:lambda-torque` re-reads them out of both shipped images. */
+export const LAMBDA_SENSOR_CONSTANTS_0401 = { lasMRaw: 1115, lasNpMv: 0 } as const;
+export const LAMBDA_SENSOR_RANGE_MV_0401 = lambdaSensorRangeMv(
+    LAMBDA_SENSOR_CONSTANTS_0401.lasMRaw, LAMBDA_SENSOR_CONSTANTS_0401.lasNpMv);
+
 /** What `KNOCK_AGE_n` holds when the cylinder has not knocked within its memory — the DME's own
  *  init value and saturation, 0x4FB. A healthy drive reads exactly this on all six. */
 export const KNOCK_AGE_SATURATED = 0x4FB;
@@ -1283,23 +1409,58 @@ export const SLEW_STATE_RAM_READ = {
 } as const;
 
 /**
- * Twelve bytes: `MD_FW`, `MD_FW_FILTER`, `MD_LS_DELTA`, `MD_DP_DELTA` — the limiter's whole state.
+ * Twenty-six bytes, `MD_FW` (0xFFD8B0) through `MD_IND_WUNSCH_RED_KORR` (0xFFD8C9): the torque
+ * request from the pedal to the number the throttle is opened for, with the slew limiter's whole
+ * state in the middle of it.
  *
- * `MD_FW_FILTER - MD_FW` is what the limiter DID, measured rather than inferred from four maps
- * multiplied together, and the two DELTAs are the allowance it had while doing it. They are
- * consecutive words at 0xFFD8B0-0xFFD8BB, so the two channels the question needs bring the two that
- * explain them for no extra turnaround.
+ * It was twelve — `MD_FW`, `MD_FW_FILTER`, `MD_LS_DELTA`, `MD_DP_DELTA`, the read the VE log made
+ * one sample in sixty-four for the limiter question — and grew on 2026-10-21 to answer a different
+ * one: is the request far above what the air delivers. Fourteen more bytes on the same telegram
+ * buy `MD_IND_WUNSCH` (after the limiter) and `MD_IND_WUNSCH_RED_KORR` (after the idle governor,
+ * the limiters and the reserve — what MD_RF_ROH and WDK_SOLL are sized from), and `MD_SAWE_FILTER`
+ * / `MD_DP_FAKTOR`, read for the decode's proof and not logged. See the block before
+ * `MD_SAWE_FILTER` for the chain.
  *
- * A `MD_LS_DELTA` of 0 is unambiguous on THIS calibration and would not be on another: the freeze
+ * `MD_FW_FILTER - MD_FW` is still what the limiter DID, measured rather than inferred from four
+ * maps multiplied together, and the two DELTAs are the allowance it had while doing it. A
+ * `MD_LS_DELTA` of 0 is unambiguous on THIS calibration and would not be on another: the freeze
  * path needs `KF_MD_LS_WE > MD_SAWE_VERH`, and `KF_MD_LS_WE` is all zeroes here, so 0 means the
  * bypass — below `K_MD_DF_NMIN` (500 rpm), below `K_MD_DF_VMIN` (3 km/h), or no drive — rather
  * than an allowance of nothing.
+ *
+ * Not `MD_IND_OPT_KORR` (0xFFD8E6), the torque the current filling makes at optimal ignition: thirty
+ * bytes further on, +4.3 ms a sample at one in eight, and it is `KF_MD_MAX_MD_IND_OPT(RF, N)` times
+ * a lambda efficiency, so block 3's RF on every sample answers the "delivered" half nearly as well.
+ * (9 + 4 + 26) bytes on the wire plus one RAM turnaround: ~80 ms a read, ~10 ms a sample at 1/8.
  */
-export const SLEW_TORQUE_RAM_READ = {
+export const TORQUE_REQUEST_RAM_READ = {
     segment: Mss54HpRamSignals.MD_FW.segment,
     address: Mss54HpRamSignals.MD_FW.address,
-    count: (Mss54HpRamSignals.MD_DP_DELTA.address + Mss54HpRamSignals.MD_DP_DELTA.size)
+    count: (Mss54HpRamSignals.MD_IND_WUNSCH_RED_KORR.address + Mss54HpRamSignals.MD_IND_WUNSCH_RED_KORR.size)
         - Mss54HpRamSignals.MD_FW.address,
+} as const;
+
+/**
+ * Thirty-two bytes, `USV1` (0xFF80BE) through `BA_F_TI` (0xFF80DD): both banks' pre- and post-cat
+ * sensor voltages, the controller's switch-on state per bank, and the transient enrichment — with
+ * LA_F_REGLER1/2 and LAA_F1/2 in the middle, read again for the decode's proof.
+ *
+ * A separate exchange on block 19's lane and NOT a widening of `LAMBDA_TRIM_RAM_READ`, although that
+ * read already starts at 0xFF80CA and the trace that found these words suggested stretching it. In
+ * the timing model a byte on every sample costs 1.15 ms a sample, while an exchange costs ~50 ms
+ * of overhead (13 bytes of framing plus the 35 ms turnaround) once — 6.2 ms a sample at one in
+ * eight. Stretching the per-sample read to 0xFF80BE..0xFF80DF is 26 bytes = 29.8 ms on EVERY sample
+ * (11.5 % of the VE sample), and production would pay it too, because the trim read is tuning and
+ * is never dropped; this read is 10.8 ms a sample on preview and nothing on production. Widening
+ * only wins below about six bytes (n x 1.15 ms against 6.2 + n x 0.14 ms).
+ *
+ * `AQ_REL` two bytes further on is not read: block 3 carries `aq_rel` (offset 20) on every sample.
+ */
+export const LAMBDA_SENSOR_RAM_READ = {
+    segment: Mss54HpRamSignals.USV1.segment,
+    address: Mss54HpRamSignals.USV1.address,
+    count: (Mss54HpRamSignals.BA_F_TI.address + Mss54HpRamSignals.BA_F_TI.size)
+        - Mss54HpRamSignals.USV1.address,
 } as const;
 
 /**
@@ -1416,7 +1577,8 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         { name: 'LLS_INTEGRATOR_RAM_READ', ...LLS_INTEGRATOR_RAM_READ },
         { name: 'LLS_DUTY_RAM_READ', ...LLS_DUTY_RAM_READ },
         { name: 'SLEW_STATE_RAM_READ', ...SLEW_STATE_RAM_READ },
-        { name: 'SLEW_TORQUE_RAM_READ', ...SLEW_TORQUE_RAM_READ },
+        { name: 'TORQUE_REQUEST_RAM_READ', ...TORQUE_REQUEST_RAM_READ },
+        { name: 'LAMBDA_SENSOR_RAM_READ', ...LAMBDA_SENSOR_RAM_READ },
         ...RAM_PROBE_READS.map(r => ({ name: `RAM_PROBE_READS.${r.name}`, segment: r.segment, address: r.address, count: r.count })),
     ];
     for (const r of reads) {
@@ -1524,6 +1686,19 @@ export const RAM_PROBE_READS: readonly { name: string; segment: number; address:
         ['RF_KORR', R.RF_KORR], ['P_SAUG_M', R.P_SAUG_M], ['P_SAUG', R.P_SAUG],
         ['M_NORM', R.M_NORM], ['M_NORM_FAKT', R.M_NORM_FAKT],
         ['RF_P_SAUG', R.RF_P_SAUG], ['RF_DIAG_F', R.RF_DIAG_F],
+    ]);
+    // The proof words too: a read that lost MD_SAWE_FILTER or the four trim words would still
+    // decode its channels if the decoder skipped the check, and it must not.
+    mustCover(TORQUE_REQUEST_RAM_READ, 'TORQUE_REQUEST_RAM_READ', [
+        ['MD_FW', R.MD_FW], ['MD_FW_FILTER', R.MD_FW_FILTER], ['MD_SAWE_FILTER', R.MD_SAWE_FILTER],
+        ['MD_LS_DELTA', R.MD_LS_DELTA], ['MD_DP_DELTA', R.MD_DP_DELTA], ['MD_DP_FAKTOR', R.MD_DP_FAKTOR],
+        ['MD_IND_WUNSCH', R.MD_IND_WUNSCH], ['MD_IND_WUNSCH_RED_KORR', R.MD_IND_WUNSCH_RED_KORR],
+    ]);
+    mustCover(LAMBDA_SENSOR_RAM_READ, 'LAMBDA_SENSOR_RAM_READ', [
+        ['USV1', R.USV1], ['USV2', R.USV2], ['USN1', R.USN1], ['USN2', R.USN2],
+        ['LA_ST_EIN1', R.LA_ST_EIN1], ['LA_ST_EIN2', R.LA_ST_EIN2],
+        ['LA_F_REGLER1', R.LA_F_REGLER1], ['LA_F_REGLER2', R.LA_F_REGLER2],
+        ['LAA_F1', R.LAA_F1], ['LAA_F2', R.LAA_F2], ['BA_F_TI', R.BA_F_TI],
     ]);
 })();
 

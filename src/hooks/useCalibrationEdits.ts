@@ -132,6 +132,12 @@ export function useCalibrationEdits(baseBuffer: ArrayBuffer | null, conflictSpan
         }));
     }, [step]);
 
+    // Every staged edit dropped as ONE step, so the tab's Undo brings them all back. The assistant's
+    // "throw the test edits away" (tuner_discard_edits).
+    const discardAll = useCallback(() => {
+        step(null, () => ({ edits: EMPTY_EDITS, heldBack: new Set<string>() }));
+    }, [step]);
+
     // Not coalesced either: a whole row set at once is one step, and one undo.
     const fillParam = useCallback((def: CalParamDef, base: DecodedRun, physical: number) => {
         step(null, s => ({ ...s, edits: withFill(s.edits, def, base, physical).set }));
@@ -234,10 +240,10 @@ export function useCalibrationEdits(baseBuffer: ArrayBuffer | null, conflictSpan
 
     return useMemo(() => ({
         edits, heldBack, conflicts, armedEdits,
-        editCell, fillParam, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
+        editCell, fillParam, discardAll, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
         undo, redo, canUndo, canRedo,
     }), [edits, heldBack, conflicts, armedEdits,
-        editCell, fillParam, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
+        editCell, fillParam, discardAll, bulkOp, copyFromReference, revertParam, setHeld, restoreEdits,
         undo, redo, canUndo, canRedo]);
 }
 

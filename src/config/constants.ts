@@ -177,6 +177,22 @@ export const APP_CONFIG = {
         EXHAUST_VANOS_STATUS: 'Exhaust VANOS Status',
         VANOS_FAULT_STATUS: 'VANOS Fault Status',
         VANOS_ADAPTATION_STATUS: 'VANOS Adaptation Status',
+        // 2026-10-21, the bucking at WDK 20-30 %: the pedal and the throttle target (block 3), the
+        // torque request after the limiter and the one the throttle is opened for, the lambda
+        // sensors with the loop state and the tip-in enrichment (RAM), and the filling regulator
+        // (block 19). The app's own headers; the DME's symbols are accepted on the way back in.
+        PEDAL: 'Pedal Position',
+        THROTTLE_TARGET: 'Throttle Target',
+        MD_IND_WUNSCH: 'Torque Request Indicated',
+        MD_IND_WUNSCH_RED_KORR: 'Torque Request For Throttle',
+        USV1: 'Lambda Sensor Pre-Cat 1',
+        USV2: 'Lambda Sensor Pre-Cat 2',
+        USN1: 'Lambda Sensor Post-Cat 1',
+        USN2: 'Lambda Sensor Post-Cat 2',
+        LA_ST_EIN1: 'Lambda Control State 1',
+        LA_ST_EIN2: 'Lambda Control State 2',
+        BA_F_TI: 'Tip-in Fuel Factor',
+        FR_REGLER: 'Filling Controller',
     },
 
     /**
@@ -304,6 +320,24 @@ export const APP_CONFIG = {
         avan1St: ['exhaust vanos status', 'avan1_st'] as string[],
         vanEdSt: ['vanos fault status', 'van_ed_st'] as string[],
         vanAdapSt: ['vanos adaptation status', 'van_adap_st'] as string[],
+        // Block 3, so Testo has them on 12050B03: "TPS 1" is PWG_POTI_WINKEL — the PEDAL
+        // potentiometer despite the English — and "Throttle pos. expected" is DKP_WINKEL_SOLL, the
+        // only throttle target that block carries. This app's header first, then Testo's, then the
+        // reference catalog's symbol.
+        pwg1: ['pedal position', 'tps 1', 'pwg1'] as string[],
+        edkSoll: ['throttle target', 'throttle pos. expected', 'edk_soll'] as string[],
+        mdIndWunsch: ['torque request indicated', 'md_ind_wunsch'] as string[],
+        mdIndWunschRedKorr: ['torque request for throttle', 'md_ind_wunsch_red_korr'] as string[],
+        // NOT Testo's "Lambda n pre/post cat voltage": those are selection 2's raw A/D counts, and
+        // these are the DME's filtered USV/USN — the same sensor, not the same number.
+        usv1: ['lambda sensor pre-cat 1', 'usv1'] as string[],
+        usv2: ['lambda sensor pre-cat 2', 'usv2'] as string[],
+        usn1: ['lambda sensor post-cat 1', 'usn1'] as string[],
+        usn2: ['lambda sensor post-cat 2', 'usn2'] as string[],
+        laStEin1: ['lambda control state 1', 'la_st_ein1'] as string[],
+        laStEin2: ['lambda control state 2', 'la_st_ein2'] as string[],
+        baFTi: ['tip-in fuel factor', 'ba_f_ti'] as string[],
+        frRegler: ['filling controller', 'fr_regler'] as string[],
     },
 
     /**

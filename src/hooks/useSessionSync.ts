@@ -3,7 +3,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { TuningSession } from '@/lib/db/schema';
 import { markSessionSynced } from '@/lib/db/sessionRepository';
-import { needsSync, sessionFingerprint, syncSession } from '@/lib/session-sync/client';
+import { SyncError, needsSync, sessionFingerprint, syncSession } from '@/lib/session-sync/client';
+import { dialogText } from '@/lib/dialog-text';
 import { flushDiagnostics } from '@/lib/session-sync/diagnostics';
 import type { SyncStatus } from '@/lib/session-sync/status';
 import type { UploadState } from '@/components/SessionList';
@@ -21,6 +22,9 @@ import type { GateInfo } from '@/hooks/useGateStatus';
  * the app. `busy`/`error` are the app-level half, for the one control that acts on all of them at
  * once.
  */
+/** Why one session did not go. `stale`: the store holds a newer copy sent from another device. */
+export interface SyncFailure { message: string; stale: boolean; storeSyncedAt?: number }
+
 export function useSessionSync(input: {
     sessions: TuningSession[];
     /** Re-reads the local database after a sync, so a row's synced state reflects the record. */
@@ -51,14 +55,14 @@ export function useSessionSync(input: {
      * dropped connection replace rather than duplicate; a phone in a garage drops uploads often
      * enough that this is the normal path, not the exceptional one. Nothing local is touched.
      */
-    const syncOne = useCallback(async (session: TuningSession): Promise<string | null> => {
+    const syncOne = useCallback(async (session: TuningSession, opts: { force?: boolean } = {}): Promise<SyncFailure | null> => {
         // Taken BEFORE the upload, not after. A run that finishes recording while a slow upload is
         // in flight must leave the session outstanding — see markSessionSynced.
         const fingerprint = sessionFingerprint(session);
         setUploadState(prev => ({ ...prev, [session.id]: 'busy' }));
         try {
-            await syncSession(session);
-            await markSessionSynced(session.id, fingerprint);
+            const sent = await syncSession(session, opts);
+            await markSessionSynced(session.id, fingerprint, sent.syncedAt);
             setUploadState(prev => ({ ...prev, [session.id]: 'done' }));
             // The route is open right now, which is exactly when diagnostics kept from a garage
             // with no signal should go.
@@ -69,13 +73,18 @@ export function useSessionSync(input: {
             // the driver can retry, and the message is most useful next to the thing that failed.
             const message = (e as Error).message;
             setUploadState(prev => ({ ...prev, [session.id]: { error: message } }));
-            return message;
+            const stale = e instanceof SyncError && e.kind === 'stale';
+            return { message, stale, storeSyncedAt: stale ? (e as SyncError).storeSyncedAt : undefined };
         }
     }, []);
 
-    /** One row's send, from the session list. */
+    /** One row's send, from the session list. A newer copy from another device is asked about here,
+     *  where a person is looking at that row: replacing it is the one send that loses something. */
     const syncSessionRow = useCallback(async (session: TuningSession) => {
-        await syncOne(session);
+        const failure = await syncOne(session);
+        if (failure?.stale && confirm(dialogText().syncOverwriteNewer(session.label, failure.storeSyncedAt))) {
+            await syncOne(session, { force: true });
+        }
         await refresh();   // the row's synced state is now on the record
     }, [syncOne, refresh]);
 
@@ -96,7 +105,7 @@ export function useSessionSync(input: {
      * for the next, and stopping the loop would strand later sessions behind an earlier one's bad
      * luck. The count of failures is what the button reports.
      */
-    const syncAll = useCallback(async () => {
+    const syncAll = useCallback(async (force?: readonly string[]) => {
         const outstanding = pending;
         // Cleared before the early return, not after it, and that order is the whole point.
         //
@@ -118,9 +127,15 @@ export function useSessionSync(input: {
             return { skipped: state !== 'active' ? 'signed-out' : 'nothing' } as const;
         }
         const failures: string[] = [];
+        // Not sent because another device sent a newer copy since: kept apart from the failures, so
+        // the answer can say which, and nothing is overwritten by a press that did not ask to.
+        const stale: { session: TuningSession; storeSyncedAt?: number }[] = [];
         for (const session of outstanding) {
-            const failure = await syncOne(session);
-            if (failure) failures.push(failure);
+            const failure = force?.includes(session.id)
+                ? await syncOne(session, { force: true })
+                : await syncOne(session);
+            if (failure?.stale) stale.push({ session, storeSyncedAt: failure.storeSyncedAt });
+            else if (failure) failures.push(failure.message);
         }
         await refresh();
         setBusy(false);
@@ -131,7 +146,10 @@ export function useSessionSync(input: {
             : null);
         // Said back to whoever pressed it — the controls read the state above; the assistant bridge
         // reads this, because by the time it could read the state the press has moved on.
-        return { sent: outstanding.length - failures.length, failed: failures.length, firstError: failures[0] ?? null };
+        return {
+            sent: outstanding.length - failures.length - stale.length, failed: failures.length, firstError: failures[0] ?? null,
+            stale: stale.map(x => ({ id: x.session.id, seq: x.session.seq, label: x.session.label, storeSyncedAt: x.storeSyncedAt })),
+        };
     }, [pending, recheckGate, syncOne, refresh]);
 
     /**

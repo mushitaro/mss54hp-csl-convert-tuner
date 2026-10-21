@@ -2,11 +2,12 @@ import type { LiveMeasurement } from './types';
 import {
     AMBIENT_CHARGE_RAM_READ, AMBIENT_PRESSURE_AGREE_MBAR, AMBIENT_TEMP_RAM_READ,
     IDLE_VALVE_STATE_RAM_READ, KELVIN_OFFSET_C,
-    SLEW_STATE_RAM_READ, SLEW_TORQUE_RAM_READ,
+    SLEW_STATE_RAM_READ, TORQUE_REQUEST_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ,
     KNOCK_AGE_RAM_READ, KNOCK_AGE_SATURATED,
     KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ, MANIFOLD_NORM_0401, GANG_MAX, NOISE_ST_UNUSED_BITS,
     IDLE_VANOS_RAM_READ,
+    LAMBDA_SENSOR_RAM_READ, LA_F_RANGE_0401, LAMBDA_SENSOR_RANGE_MV_0401,
     Mss54HpRamSignals, P_UMG_BYTE_OFFSET_MBAR, P_UMG_ED_SUBSTITUTING, TAN_OFFSET_C, decodeRamSignal,
     type RamSignal,
 } from './ramMap';
@@ -228,7 +229,7 @@ export const AMBIENT_CHARGE_ADDRESS = AMBIENT_CHARGE_RAM_READ.address;
 export const AMBIENT_TEMP_ADDRESS = AMBIENT_TEMP_RAM_READ.address;
 export const IDLE_VALVE_STATE_ADDRESS = IDLE_VALVE_STATE_RAM_READ.address;
 export const SLEW_STATE_ADDRESS = SLEW_STATE_RAM_READ.address;
-export const SLEW_TORQUE_ADDRESS = SLEW_TORQUE_RAM_READ.address;
+export const TORQUE_REQUEST_ADDRESS = TORQUE_REQUEST_RAM_READ.address;
 export const LLS_AIR_ADDRESS = LLS_AIR_RAM_READ.address;
 export const LLS_INTEGRATOR_ADDRESS = LLS_INTEGRATOR_RAM_READ.address;
 export const LLS_DUTY_ADDRESS = LLS_DUTY_RAM_READ.address;
@@ -256,24 +257,56 @@ export function decodeSlewState(bytes: Uint8Array, address: number): Partial<Sle
 }
 
 /**
- * The four torque words the slew limiter runs on.
+ * The torque request telegram's six channels: the slew limiter's four words and the request after
+ * it, as far as the throttle sees it.
  *
- * No plausibility band on these either, and that is deliberate. `MD_FW_FILTER - MD_FW` is the
- * measurement; clamping either side to a band of somebody's choosing would quietly change the one
- * number this exchange exists to produce. They are torque in 0.1 Nm from the DME's own model, and
- * the DME's own bounds (`K_MD_SK_MAX` = 800 Nm) are already far outside anything an engine reaches.
+ * Not carried, for `SlewChannels`' reason and the knock sums': a request read at a tip-in is not the
+ * request seven samples later, and a count of them is a count of reads.
  */
-export function decodeSlewTorque(bytes: Uint8Array, address: number): Partial<SlewChannels> {
-    const out: Partial<SlewChannels> = {};
-    const put = (key: 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta', sig: RamSignal) => {
-        const v = decodeRamSignal(sig, bytes, address);
-        if (v !== null) out[key] = v;
+export type TorqueRequestChannels = Pick<
+    LiveMeasurement,
+    'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta' | 'mdIndWunsch' | 'mdIndWunschRedKorr'
+>;
+
+/**
+ * The twenty-six-byte torque telegram, decoded — all six channels or none.
+ *
+ * The proof that the read landed is the DME's own arithmetic, not a band. `MD_Torque_Interventions`
+ * (master 0x0166F6) stores, from one local, `MD_IND_WUNSCH = t + MD_SAWE_FILTER` and then
+ * `MD_FW_FILTER = t` (16-bit words, nothing else writes either once the engine runs), so
+ *
+ *     MD_IND_WUNSCH == MD_FW_FILTER + MD_SAWE_FILTER        (mod 2^16)
+ *
+ * on every reading of the real bytes — and on a read torn between those two stores, which is worth
+ * one read. Because `0 == 0 + 0` holds in any zero-filled window, `MD_DP_FAKTOR` must also be
+ * non-zero: `md_interventions_init` writes 0x400 and only a lookup in KF_MD_DASHPOT_FAKTOR (no zero
+ * cell here) rewrites it.
+ *
+ * No plausibility band on the torques themselves, for the reason there never was one on the slew
+ * words: `MD_FW_FILTER - MD_FW` is the measurement, and the DME's own bound (`K_MD_SK_MAX`, 800 Nm)
+ * is far outside anything an engine reaches. Tenths divided out, so 123.4 is 123.4 in a CSV.
+ */
+export function decodeTorqueRequest(bytes: Uint8Array, address: number): Partial<TorqueRequestChannels> {
+    const R = Mss54HpRamSignals;
+    const fw = rawOf(R.MD_FW, bytes, address);
+    const filter = rawOf(R.MD_FW_FILTER, bytes, address);
+    const sawe = rawOf(R.MD_SAWE_FILTER, bytes, address);
+    const ls = rawOf(R.MD_LS_DELTA, bytes, address);
+    const dp = rawOf(R.MD_DP_DELTA, bytes, address);
+    const dpFaktor = rawOf(R.MD_DP_FAKTOR, bytes, address);
+    const wunsch = rawOf(R.MD_IND_WUNSCH, bytes, address);
+    const redKorr = rawOf(R.MD_IND_WUNSCH_RED_KORR, bytes, address);
+    if (fw === null || filter === null || sawe === null || ls === null || dp === null
+        || dpFaktor === null || wunsch === null || redKorr === null) return {};
+    if (((filter + sawe) & 0xFFFF) !== wunsch || dpFaktor === 0) return {};
+    return {
+        mdFw: fw / 10,
+        mdFwFilter: filter / 10,
+        mdLsDelta: ls / 10,
+        mdDpDelta: dp / 10,
+        mdIndWunsch: wunsch / 10,
+        mdIndWunschRedKorr: redKorr / 10,
     };
-    put('mdFw', Mss54HpRamSignals.MD_FW);
-    put('mdFwFilter', Mss54HpRamSignals.MD_FW_FILTER);
-    put('mdLsDelta', Mss54HpRamSignals.MD_LS_DELTA);
-    put('mdDpDelta', Mss54HpRamSignals.MD_DP_DELTA);
-    return out;
 }
 
 /**
@@ -482,3 +515,65 @@ export function decodeVanos(bytes: Uint8Array, address: number): Partial<VanosCh
 }
 
 export const VANOS_ADDRESS = IDLE_VANOS_RAM_READ.address;
+
+/**
+ * The lambda sensors, the controller's switch-on state and the transient enrichment, from one
+ * telegram. Not carried: a narrowband voltage swings every half second in the closed loop, and in
+ * the open loop the sample it was read on is the only one it describes.
+ */
+export type LambdaSensorChannels = Pick<
+    LiveMeasurement,
+    'usv1' | 'usv2' | 'usn1' | 'usn2' | 'laStEin1' | 'laStEin2' | 'baFTi'
+>;
+
+/** The top nibble of LA_ST_EIN is the sensor-ready machine, and it only ever holds one bit or none. */
+const oneStateAtMost = (st: number) => {
+    const machine = st >> 4;
+    return (machine & (machine - 1)) === 0;
+};
+
+/**
+ * The thirty-two-byte lambda telegram, decoded — all seven channels or none.
+ *
+ * Three facts about how the slave writes these bytes, rather than bands somebody chose:
+ *
+ *   - LA_F_REGLER1/2 and LAA_F1/2, which sit inside this telegram, within K_LA_FMIN..K_LAS_FMAX —
+ *     the controllers' own clamps (see LA_F_RANGE_0401). Four words each within -30..+40 % of
+ *     0x8000 are not what a wrong address holds.
+ *   - every sensor word within what `((K_LAS_M * adc) >> 10) - K_LAS_NP` can produce from a 10-bit
+ *     count (0..1113 mV on 0401) — the filter after it cannot leave that range.
+ *   - LA_ST_EIN's sensor-ready nibble is 0 or one bit (see the signal).
+ *
+ * `range` is a parameter for the reason `decodeManifoldAir`'s `norm` is: another calibration's
+ * K_LAS_M / K_LAS_NP must be stated, not silently assumed. Volts and the enrichment factor are
+ * divided out rather than multiplied, so 0.475 is 0.475 in a CSV.
+ */
+export function decodeLambdaSensors(
+    bytes: Uint8Array,
+    address: number,
+    range: { min: number; max: number } = LAMBDA_SENSOR_RANGE_MV_0401,
+): Partial<LambdaSensorChannels> {
+    const R = Mss54HpRamSignals;
+    const trims = [R.LA_F_REGLER1, R.LA_F_REGLER2, R.LAA_F1, R.LAA_F2].map(s => rawOf(s, bytes, address));
+    const volts = [R.USV1, R.USV2, R.USN1, R.USN2].map(s => rawOf(s, bytes, address));
+    const st1 = rawOf(R.LA_ST_EIN1, bytes, address);
+    const st2 = rawOf(R.LA_ST_EIN2, bytes, address);
+    const ba = rawOf(R.BA_F_TI, bytes, address);
+    if (trims.some(t => t === null) || volts.some(v => v === null)
+        || st1 === null || st2 === null || ba === null) return {};
+    if (trims.some(t => (t as number) < LA_F_RANGE_0401.min || (t as number) > LA_F_RANGE_0401.max)) return {};
+    const mv = volts.map(v => signed16(v as number));
+    if (mv.some(v => v < range.min || v > range.max)) return {};
+    if (!oneStateAtMost(st1) || !oneStateAtMost(st2)) return {};
+    return {
+        usv1: mv[0] / 1000,
+        usv2: mv[1] / 1000,
+        usn1: mv[2] / 1000,
+        usn2: mv[3] / 1000,
+        laStEin1: st1,
+        laStEin2: st2,
+        baFTi: ba / 1024,
+    };
+}
+
+export const LAMBDA_SENSOR_ADDRESS = LAMBDA_SENSOR_RAM_READ.address;

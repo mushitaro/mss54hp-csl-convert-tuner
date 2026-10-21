@@ -24,6 +24,10 @@
  *                 screen and only after the owner heard the old and new value read back. Staging is
  *                 not writing: the BIN changes when a person saves, and the car when a person
  *                 WRITEs, on the screen.
+ *   sessions too  a new session, or a copy of one (NEXT: the car's bytes, the settings), and
+ *                 throwing away unsaved edits — the owner could not start a clean session by voice
+ *                 (driving test, 2026-10-21)
+ *   RAM           look a RAM symbol up by name or address, so an OBSERVE plan is the assistant's to make
  *   save & sync   SAVE the open session, send what changed to the cloud store, list the cloud's
  *                 sessions and bring one back into this device (2026-10-21, the owner's request) —
  *                 the screen's own SAVE, SYNC and the store panel's restore, each only after the
@@ -39,7 +43,7 @@
  *   and the facade has no method that could reach them.
  */
 import type { LogDataPoint } from '@/lib/types';
-import type { CodeUses, ParamChoice } from '@/lib/calibration/evidence';
+import type { CodeUses, ParamChoice, RamHit } from '@/lib/calibration/evidence';
 import { findRecipes, recipeParams, type Recipe, type RecipeStep, type Words } from '@/lib/calibration/recipes';
 import { cutMoment } from './moment';
 import {
@@ -51,6 +55,7 @@ export const TOOL_NAMES = [
     'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_observe', 'tuner_mark',
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
     'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
+    'tuner_new_session', 'tuner_discard_edits', 'tuner_ram',
 ] as const;
 
 /** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
@@ -155,10 +160,18 @@ export interface TabFacade {
     show(view: string): void;
     /** The sessions saved on this device. */
     sessions?(): readonly SessionSummary[];
-    /** Why opening another session would lose or break something right now, or null when it is safe. */
-    openRefusal?(): string | null;
+    /** Why opening another session would lose or break something right now, or null when it is safe.
+     *  `discard`: the owner chose to drop the unsaved work, so that alone no longer refuses. */
+    openRefusal?(discard?: boolean): string | null;
     /** Opens a saved session as its row's OPEN does. Resolves true when its BASE is now the workspace. */
     openSession?(id: string): Promise<boolean>;
+    /** NEW SESSION (no parent), or NEXT on a session's row (a draft that starts from that session's
+     *  car bytes and settings). Resolves with the new session, or why it could not. */
+    newSession?(parentId: string | null): Promise<{ seq: number; label: string; inherited: boolean } | { refused: string }>;
+    /** Drops every staged calibration edit, as one step the tab's Undo takes back. Returns how many. */
+    discardEdits?(): number;
+    /** RAM symbols by name or address (evidence.ts ramFind). */
+    ramFind?(query: string, limit: number): Promise<readonly RamHit[]>;
     /** Why the calibration cannot be read or edited right now (no BIN, archived, link busy), or null. */
     calibrationRefusal?(forEdit: boolean): string | null;
     /** Parameters whose name (or, failing that, description) matches, best first. */
@@ -178,8 +191,10 @@ export interface TabFacade {
     syncRefusal?(): string | null;
     /** The sessions SYNC would send: changed since they were last sent. */
     syncPending?(): readonly SessionSummary[];
-    /** Presses SYNC. */
-    syncUpload?(): Promise<{ sent: number; failed: number; firstError: string | null } | { skipped: 'signed-out' | 'nothing' }>;
+    /** Presses SYNC. `overwrite`: session ids the owner chose to send over a newer cloud copy. */
+    syncUpload?(overwrite?: readonly string[]): Promise<
+        | { sent: number; failed: number; firstError: string | null; stale?: readonly { id: string; seq: number; label: string; storeSyncedAt?: number }[] }
+        | { skipped: 'signed-out' | 'nothing' }>;
     /** The cloud store's sessions, newest first. */
     cloudSessions?(): Promise<readonly CloudSessionSummary[]>;
     /** Why bringing that one back would lose or break something now, or null. */
@@ -294,6 +309,24 @@ function stepNow(s: RecipeStep, item: CalibrationItem | undefined, q: Quantised,
         ...(q && !q.exact ? { note: `The bytes cannot hold ${fmt(target)} exactly; the nearest is ${fmt(q.value)}.` } : {}),
         why: say(s.why, lang),
     };
+}
+
+/**
+ * What an assistant is told when it called a change without `confirmed`. Two kinds of change:
+ *
+ *   asked     SAVE, a send, a new session, dropping staged edits (the tab's Undo takes them back).
+ *             The owner's own words asking for exactly this ARE the yes — "保存して" is not asked
+ *             again (driving test, 2026-10-21: two yeses for one save is what made it unusable by
+ *             voice). Read back only when the assistant is the one offering it.
+ *   read back Anything that loses something nobody can take back: unsaved work dropped by opening or
+ *             starting another session, another device's newer cloud copy, the copy on this device
+ *             replaced by the cloud's, the log stopped. The owner hears it and says yes, always.
+ */
+function askedOrReadBack(action: string, line: string): Error {
+    return new Error(`Not ${action}. If the owner asked for exactly this in their own words, that is the yes: call again with confirmed: true. If you are the one offering it, read it back first — "${line}" — and call with confirmed: true after a clear yes.`);
+}
+function readBackFirst(action: string, line: string): Error {
+    return new Error(`Not ${action}. This loses something, so read it back to the owner first — "${line}" — and call again with confirmed: true only after a clear yes.`);
 }
 
 /** A moment as the session list writes it: the tab's local day and minute. */
@@ -515,16 +548,15 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             const what = f.saveSummary();
             if (!what) throw new Error('No session is open. tuner_sessions and tuner_open_session open one.');
             if (!what.items.length) return { saved: false, session: what.session, reason: 'Nothing to save: everything in this session is already on this device.' };
-            // The same rule as stopping the log: the owner hears what will be kept, then says yes.
             if (args.confirmed !== true) {
-                throw new Error(`Not saved. Read it back to the owner first — "Save ${what.session}${what.name && what.name !== `Session ${what.session}` ? ` (${what.name})` : ''}: ${what.items.join('; ')}?" — and call again with confirmed: true only after a clear yes.`);
+                throw askedOrReadBack('saved', `Save ${what.session}${what.name && what.name !== `Session ${what.session}` ? ` (${what.name})` : ''}: ${what.items.join('; ')}?`);
             }
             const outcome = await f.save();
             if (outcome === 'no-base') throw new Error(`${what.session} has no BASE, so there is nothing to save a tune against. A BASE is read off the car or picked on the session's row, on the screen.`);
             if (outcome === 'nothing') return { saved: false, session: what.session, reason: 'The screen had nothing to write after all; nothing changed.' };
             return {
                 saved: true, session: what.session, kept: what.items,
-                note: 'Saved on this device. The car is unchanged — WRITE is done by a person on the screen. tuner_sync_upload sends it to the cloud.',
+                note: 'Saved on this device. Say what was kept. The car is unchanged — WRITE is done by a person on the screen. tuner_sync_upload sends it to the cloud.',
             };
         },
 
@@ -535,20 +567,36 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             if (refusal) throw new Error(refusal);
             const pending = f.syncPending();
             if (!pending.length) return { sent: 0, note: 'Nothing to send: every session on this device matches its cloud copy.' };
-            const list = pending.slice(0, 6).map(s => `#${s.seq}${s.label !== `Session #${s.seq}` ? ` ${s.label}` : ''}`).join(', ');
-            if (args.confirmed !== true) {
-                throw new Error(`Not sent. Read it back to the owner first — "Send ${pending.length} session${pending.length > 1 ? 's' : ''} to the cloud: ${list}${pending.length > 6 ? ', …' : ''}?" — and call again with confirmed: true only after a clear yes.`);
+            const label = (s: SessionSummary) => `#${s.seq}${s.label !== `Session #${s.seq}` ? ` ${s.label}` : ''}`;
+            const list = pending.slice(0, 6).map(label).join(', ');
+            // Sessions the owner chose to send over another device's newer copy, by number.
+            const wanted = Array.isArray(args.overwrite) ? args.overwrite.map(x => String(x).replace(/^#/, '').trim()) : [];
+            const overwrite = pending.filter(s => wanted.includes(String(s.seq)));
+            if (wanted.length && overwrite.length !== wanted.length) {
+                throw new Error(`overwrite names a session that is not waiting to be sent: ${wanted.filter(w => !overwrite.some(s => String(s.seq) === w)).map(w => `#${w}`).join(', ')}.`);
             }
-            const r = await f.syncUpload();
+            if (args.confirmed !== true) {
+                const line = `Send ${pending.length} session${pending.length > 1 ? 's' : ''} to the cloud: ${list}${pending.length > 6 ? ', …' : ''}?`;
+                throw overwrite.length
+                    ? readBackFirst('sent', `${line} ${overwrite.map(label).join(', ')} replace${overwrite.length === 1 ? 's' : ''} the newer cloud copy another device sent, and that copy is gone.`)
+                    : askedOrReadBack('sent', line);
+            }
+            const r = await f.syncUpload(overwrite.map(s => s.id));
             if ('skipped' in r) {
                 return r.skipped === 'signed-out'
                     ? { sent: 0, note: 'Not sent: the sign-in for the cloud has expired on this device. On the screen, SYNC offers to sign in on m3 again.' }
                     : { sent: 0, note: 'Nothing to send: every session on this device matches its cloud copy.' };
             }
+            const stale = r.stale ?? [];
             return {
                 sent: r.sent, failed: r.failed,
                 ...(r.firstError ? { error: r.firstError } : {}),
-                note: r.failed ? 'Some did not land; they stay marked to send, and SYNC (or this tool) tries them again.' : 'Sent. The copies on this device are unchanged.',
+                ...(stale.length ? {
+                    notSent: stale.map(s => ({ session: `#${s.seq}`, name: s.label, newerCopySent: s.storeSyncedAt ? localTime(s.storeSyncedAt) : 'since' })),
+                } : {}),
+                note: stale.length
+                    ? 'Some were not sent: another device sent a newer copy since. Ask the owner which to keep — bring the cloud copy back (tuner_cloud_restore), or send this one over it (overwrite with its number, read back first).'
+                    : r.failed ? 'Some did not land; they stay marked to send, and SYNC (or this tool) tries them again.' : 'Sent. The copies on this device are unchanged.',
             };
         },
 
@@ -593,6 +641,75 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             };
         },
 
+        tuner_new_session: async (args) => {
+            if (!f.newSession || !f.sessions) throw new Error('This build cannot start a session for the assistant.');
+            if (f.running()) throw new Error('A log is recording. A new session comes after it stops (read the stop back to the driver first).');
+            const all = f.sessions();
+            const from = args.from === undefined || args.from === null || args.from === '' ? null
+                : String(args.from).replace(/^#/, '').trim();
+            const parent = from === null ? null : all.find(s => String(s.seq) === from) ?? null;
+            if (from !== null && !parent) throw new Error(`No session #${from} on this device. tuner_sessions lists them.`);
+            if (parent && !parent.hasBase) throw new Error(`#${parent.seq} has no BIN to start from. Without one, a new session starts empty (no from).`);
+            const discard = args.discard === true;
+            const refusal = f.openRefusal?.(discard) ?? null;
+            if (refusal) throw new Error(refusal);
+            const lost = discard ? (f.saveSummary?.()?.items ?? []) : [];
+            const what = parent
+                ? `Start a new session from #${parent.seq} (NEXT: the bytes in the car and its settings, none of its unsaved edits)`
+                : 'Start a new, empty session (it needs a BIN: read off the car or picked, on the screen)';
+            if (args.confirmed !== true) {
+                throw lost.length
+                    ? readBackFirst('started', `${what}? This drops what is not saved in the open session: ${lost.join('; ')}.`)
+                    : askedOrReadBack('started', `${what}?`);
+            }
+            if (lost.length && !discard) throw new Error('The open session has unsaved work. Say discard: true (read back what is lost first), or save it first.');
+            const r = await f.newSession(parent?.id ?? null);
+            if ('refused' in r) throw new Error(r.refused);
+            return {
+                started: true, session: `#${r.seq}`, name: r.label, from: parent ? `#${parent.seq}` : null,
+                note: r.inherited
+                    ? 'Open on the screen, starting from that session: nothing of its unsaved work came with it. Changes made now are this session\'s.'
+                    : 'Open on the screen, empty. Its BIN is read off the car or picked on the screen.',
+            };
+        },
+
+        tuner_discard_edits: async (args) => {
+            if (!f.discardEdits || !f.calibrationFind) throw new Error('This build cannot drop edits for the assistant.');
+            if (f.running()) throw new Error('A log is recording. Edits are dropped parked, with the log stopped.');
+            const refusal = f.calibrationRefusal?.(true) ?? null;
+            if (refusal) throw new Error(refusal);
+            const unsaved = f.saveSummary?.()?.items.filter(i => /calibration edit/.test(i)) ?? [];
+            if (!unsaved.length) return { discarded: 0, note: 'No calibration edits are staged.' };
+            if (args.confirmed !== true) throw askedOrReadBack('dropped', `Drop ${unsaved.join('; ')}?`);
+            const n = f.discardEdits();
+            return {
+                discarded: n,
+                note: 'Dropped from the CALIBRATION tab. Undo on that tab brings them back while this session stays open; the BIN was never changed by them.',
+            };
+        },
+
+        tuner_ram: async (args) => {
+            if (!f.ramFind) throw new Error('This build cannot look RAM up for the assistant.');
+            const query = text(args.query, 60);
+            if (!query) throw new Error('Say what to look for: part of a name (evan, p_saug) or an address (DAT_00ffd1a2, 0xFFD1A2).');
+            const limit = Math.min(Math.max(Math.trunc(num(args.limit) ?? 10), 1), 30);
+            const hits = await f.ramFind(query, limit);
+            if (!hits.length) return { found: 0, note: `No RAM symbol named or at "${query}". Try part of the name.` };
+            return {
+                found: hits.length,
+                ram: hits.map(h => ({
+                    name: h.name,
+                    address: `${h.bank} 0x${h.address.toString(16).toUpperCase()}`,
+                    observe: h.observable
+                        ? `DAT_00${h.address.toString(16).padStart(6, '0')}`
+                        : (h.bank === 'slave' ? 'no: slave RAM cannot be read over DS2 on this calibration' : 'no: outside the RAM the DME serves (0xFF8000-0xFF8FFF, 0xFFD000-0xFFEFFF)'),
+                    readers: h.readers,
+                    ...(h.writes.length ? { setBy: h.writes.map(w => `${w.in}: ${w.value}`) } : {}),
+                })),
+                note: 'observe is the address to give tuner_observe. How wide it is (1, 2 or 4 bytes) comes from the code that sets it; when unsure, read 2 and say the reading is a guess.',
+            };
+        },
+
         tuner_open_session: async (args) => {
             if (!f.sessions || !f.openSession) throw new Error('This build cannot open a session for the assistant.');
             const all = f.sessions();
@@ -605,8 +722,13 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             const target = bySeq ?? byLabel[0];
             if (!target) throw new Error(`No session ${/^\d+$/.test(key) ? `#${key}` : `"${key}"`} on this device. tuner_sessions lists them.`);
             if (target.open) return { opened: false, reason: 'It is already the open session.', session: brief(target) };
-            const refusal = f.openRefusal?.() ?? null;
+            const discard = args.discard === true;
+            const refusal = f.openRefusal?.(discard) ?? null;
             if (refusal) throw new Error(refusal);
+            const lost = discard ? (f.saveSummary?.()?.items ?? []) : [];
+            if (lost.length && args.confirmed !== true) {
+                throw readBackFirst('opened', `Open #${target.seq} without saving? This drops what is not saved in the open session: ${lost.join('; ')}.`);
+            }
             const withBase = await f.openSession(target.id);
             return {
                 opened: true,

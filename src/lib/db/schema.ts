@@ -340,6 +340,10 @@ export interface TuningSession {
      *  what decides whether it is still current. */
     syncedAt?: number;
 
+    /** The store's own time for the copy this device last sent or brought back. Sent with the next
+     *  upload, so the store can refuse it when another device has sent a newer copy since. */
+    storeSyncedAt?: number;
+
     /** What was sent, as `sessionFingerprint` describes it (session-sync/client.ts).
      *
      *  A timestamp alone cannot answer the question the sync button asks. "Sent at 14:02" says

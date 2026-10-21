@@ -16,23 +16,37 @@ import type { BridgeStatus } from '@/lib/bridge/bridgeClient';
 const TEXT = {
     ja: {
         title: 'ASSISTANT',
-        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止、表示の切り替え、観察（OBSERVE）の計画の設定とログへの印付けを行えるようになります。車への接続・書き込み・フラッシュはできません。',
+        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止、表示の切り替え、セッションの作成・切り替え・保存、キャリブレーションの変更、クラウドとの同期、観察（OBSERVE）の計画と印付けを行えるようになります。車への接続・書き込み・フラッシュはできません。',
         on: 'オン', off: 'オフ',
         state: {
             off: 'オフ', connecting: '接続中…', live: '接続済み — アシスタントからこのタブに届きます',
-            retrying: '再接続待ち', stopped: '停止',
+            retrying: '再接続待ち', held: '別の端末がつながっています', stopped: '停止',
         } as Record<BridgeStatus['state'], string>,
+        held: (holder: string | null | undefined) => holder
+            ? `「${holder}」がアシスタントにつながっています。あちらが眠ると、ここが引き継ぎます。`
+            : '別の端末がアシスタントにつながっています。あちらが眠ると、ここが引き継ぎます。',
+        takeover: 'こちらに切り替える',
+        device: 'この端末の名前',
+        devicePlaceholder: '例：ナビ',
+        deviceHelp: 'アシスタントは、どの端末が答えているかをこの名前で言います。',
         calls: (n: number) => `応答 ${n} 件`,
         setup: 'アシスタント側では、コネクタ（リモート MCP）の追加が必要です。',
     },
     en: {
         title: 'ASSISTANT',
-        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, change the view, set an observation (OBSERVE) plan and put marks on the log. It cannot connect to, write to or flash the car.',
+        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, change the view, start, switch and save sessions, change calibration values, sync with your cloud, and set an observation (OBSERVE) plan and marks. It cannot connect to, write to or flash the car.',
         on: 'ON', off: 'OFF',
         state: {
             off: 'Off', connecting: 'Connecting…', live: 'Connected — your assistant can reach this tab',
-            retrying: 'Waiting to reconnect', stopped: 'Stopped',
+            retrying: 'Waiting to reconnect', held: 'Another device is connected', stopped: 'Stopped',
         } as Record<BridgeStatus['state'], string>,
+        held: (holder: string | null | undefined) => holder
+            ? `"${holder}" has the assistant. This device takes over when that one sleeps.`
+            : 'Another device has the assistant. This device takes over when that one sleeps.',
+        takeover: 'Switch here',
+        device: 'This device\'s name',
+        devicePlaceholder: 'e.g. Head unit',
+        deviceHelp: 'Your assistant says which device is answering by this name.',
         calls: (n: number) => `${n} answered`,
         setup: 'On the assistant\'s side, add the connector (remote MCP) once.',
     },
@@ -43,10 +57,14 @@ export const AssistantSection: React.FC<{
     status: BridgeStatus;
     /** Switching on asks first (the page owns that dialog); switching off does not. */
     onToggle: (next: boolean) => void;
-}> = ({ on, status, onToggle }) => {
+    /** "Switch here": take the assistant from the device that has it. */
+    onTakeover: () => void;
+    device: string | null;
+    onDevice: (name: string) => void;
+}> = ({ on, status, onToggle, onTakeover, device, onDevice }) => {
     const t = TEXT[useDialogLang()];
     const tone = status.state === 'live' ? 'text-sky-300'
-        : status.state === 'stopped' ? 'text-amber-500/80'
+        : status.state === 'stopped' || status.state === 'held' ? 'text-amber-500/80'
             : status.state === 'off' ? 'text-slate-500' : 'text-slate-400';
     return (
         <div className="space-y-2">
@@ -68,8 +86,33 @@ export const AssistantSection: React.FC<{
                 <p className={`text-[10px] ${tone}`}>
                     {t.state[status.state]}
                     {status.calls > 0 && <span className="text-slate-500"> · {t.calls(status.calls)}</span>}
-                    {status.detail && <span className="block text-[9px] text-slate-500 mt-0.5">{status.detail}</span>}
+                    {status.state === 'held'
+                        ? <span className="block text-[9px] text-slate-500 mt-0.5">{t.held(status.holder)}</span>
+                        : status.detail && <span className="block text-[9px] text-slate-500 mt-0.5">{status.detail}</span>}
                 </p>
+            )}
+            {on && status.state === 'held' && (
+                <button
+                    type="button"
+                    onClick={onTakeover}
+                    className="min-h-8 px-3 rounded border border-sky-500/50 text-sky-300 text-[10px] font-bold tracking-widest hover:bg-sky-500/10"
+                >
+                    {t.takeover}
+                </button>
+            )}
+            {on && (
+                <label className="block space-y-1">
+                    <span className="text-[9px] text-slate-500">{t.device}</span>
+                    <input
+                        type="text"
+                        maxLength={24}
+                        defaultValue={device ?? ''}
+                        placeholder={t.devicePlaceholder}
+                        onBlur={e => onDevice(e.currentTarget.value)}
+                        className="w-full min-h-8 px-2 rounded bg-slate-900 border border-slate-700 text-[11px] text-slate-200 placeholder:text-slate-600"
+                    />
+                    <span className="block text-[9px] text-slate-600">{t.deviceHelp}</span>
+                </label>
             )}
             <p className="text-[9px] text-slate-600">{t.intro}</p>
             <p className="text-[9px] text-slate-600">{t.setup}</p>

@@ -4,7 +4,7 @@ import {
     ServiceBlockDump, WriteOptions, WriteVerification, IdleSample,
 } from './types';
 import {
-    RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange, SLEW_TORQUE_RAM_READ,
+    RAM_PROBE_READS, Mss54HpRamSignals, isRamReadInRange, TORQUE_REQUEST_RAM_READ, LAMBDA_SENSOR_RAM_READ,
     LLS_AIR_RAM_READ, LLS_INTEGRATOR_RAM_READ, LLS_DUTY_RAM_READ, KNOCK_AGE_RAM_READ,
     KNOCK_SUM_RAM_READ, MANIFOLD_AIR_RAM_READ, IDLE_VANOS_RAM_READ,
 } from './ramMap';
@@ -635,15 +635,27 @@ export class MockDmeLink implements DmeLink {
         if (!isRamReadInRange(segment, address, count)) {
             throw new DmeLinkError(`RAM read 0x${address.toString(16)} +${count} is outside every declared window`);
         }
-        // The slew limiter's torque words are REFUSED rather than answered with zeroes.
+        // The torque request — the slew limiter's words and the request after it — is REFUSED
+        // rather than answered with zeroes.
         //
         // The bench models crank torque, not the driver's request either side of a filter it does
         // not simulate. Serving the window would return 0.0 Nm for `MD_FW` and `MD_FW_FILTER`,
         // which reads as "the limiter took nothing" — the exact conclusion a rehearsal is meant to
-        // reach only from the car. An absent channel is already handled everywhere; a fabricated
-        // zero is not distinguishable from a measurement.
-        if (address === SLEW_TORQUE_RAM_READ.address) {
-            throw new DmeLinkError('PRACTICE does not simulate the slew limiter; run this on the car');
+        // reach only from the car — and 0.0 for MD_IND_WUNSCH_RED_KORR, "nothing asked of the
+        // throttle", which is the other question these words exist for. An absent channel is
+        // already handled everywhere; a fabricated zero is not distinguishable from a measurement.
+        // (Zeroes would fail decodeTorqueRequest's MD_DP_FAKTOR check anyway; refused by name so a
+        // probe says why.)
+        if (address === TORQUE_REQUEST_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate the torque request; run this on the car');
+        }
+        // The lambda sensors too. The drive model fuels to a trim, not through a narrowband sensor
+        // and a controller that switches on and off, so any voltage or LA_ST_EIN served here would
+        // be the answer to the question these bytes exist to ask — rich or lean, loop open or
+        // closed — and only the car has that. Zero-filled they would fail the trim-word check and
+        // decode to nothing; refused by name for the probe's sake.
+        if (address === LAMBDA_SENSOR_RAM_READ.address) {
+            throw new DmeLinkError('PRACTICE does not simulate the lambda sensors; run this on the car');
         }
         /*
          * The ring is refused for the same reason, and it matters more here.
@@ -902,6 +914,12 @@ export class MockDmeLink implements DmeLink {
      * visibly brings them together: the one cylinder-to-cylinder spread PRACTICE can rehearse
      * honestly. No knock retard on top — inventing a knock event would put a fault on screen no
      * car reported, and the knock counters are refused for the same reason.
+     *
+     * Nothing else block 3 or block 19 carries for the torque path is added here either: no
+     * `pwg1`, `edkSoll` or `frRegler`. The drive model has no pedal map, no EGAS chain and no
+     * filling regulator, so a pedal, a throttle target or an FR_REGLER of 1.000 would each be the
+     * answer — "the DME did not open the throttle past the pedal" — to the question those columns
+     * are logged to ask. Absent, like the refused RAM reads.
      */
     private withIgnition(sample: LiveMeasurement): LiveMeasurement {
         const base = mockBaseIgnitionAngle(sample.rpm, sample.rf);

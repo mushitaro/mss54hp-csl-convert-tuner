@@ -88,6 +88,46 @@ export const STANDARD_MEASUREMENT_BLOCK = {
          * only channel that shows it happening.
          */
         ub: { symbol: 'ub', offset: 16, format: 'uint16', scale: 0.1, add: 0 } as FieldDef,
+
+        // --- the pedal and the throttle target --------------------------------------------------
+        //
+        // WHY (2026-10-21): the engine bucks at WDK 20-30 % and at low rpm under load, and one
+        // suspicion is that the DME opens the throttle far beyond what the pedal asks. That needs
+        // the pedal and the throttle TARGET beside `wdk1`, and both were already in this response:
+        // the master's own responder (decomp/master/030b84.txt case 0x1c, `12050B03`, payload offset
+        // = index - 3, the mapping `rf`, `tmot` and `wdk1` already prove) writes, itself,
+        //
+        //     puVar5[0x1a..0x1b] = PWG1        -> offset 23     puVar5[0x1e..0x1f] = WDK1     -> 27
+        //     puVar5[0x1c..0x1d] = PWG2        -> offset 25     puVar5[0x20..0x21] = WDK2     -> 29
+        //     puVar5[0x22..0x23] = EDK_SOLL    -> offset 31
+        //
+        // high byte first, master RAM, not zeroed and slave-filled — so no slave-fill question.
+        // Testo's MSS54 list names the same two on 12050B03: "TPS 1" PWG_POTI_WINKEL (the PEDAL
+        // potentiometer — Pedalwertgeber, whatever Testo's English says) and "Throttle pos. expected"
+        // DKP_WINKEL_SOLL; the reference catalog has `pwg1` and `edk_soll` at 23 and 31.
+        //
+        // `PWG1` — `pwg_calc` (master 0x022F98): `PWG1 = (K_PWG1_NORM * (PWG1_ABS - PWG1_A0) + ..) >> 11`,
+        // a signed word; the selected sensor is clamped to 0..1000 and compared with K_PWG_KD
+        // ("%", x/10) and fed to KL_PWG_SOLL_KOMFORT/SPORT (x axis "%", x/10). So 0.1 %, signed. The
+        // DME's own pedal value `PWG` (0xFFE6D0, the KF_MD_FAHRER input via PWG_SOLL) is this through a
+        // PT1 of K_PWG_TAU_NORM_UP = 0.02 s on the way up — the same number at this link's rate —
+        // and through KF_PWG_TAU_NORM_DOWN on the way down; PWG2 is the plausibility twin.
+        //
+        // `EDK_SOLL` — the throttle position controller's setpoint. `EGAS_SOLL_BERECH` (master
+        // 0x022934) sets EGAS_SOLL = WDK_SOLL in normal operation (EGAS_SOLL_STATUS 1) and
+        // EDK_SOLL = EGAS_SOLL, or steps it there by K_EDK_CYCL/10 of the gap per call when the
+        // jump is larger; `edk_regler_calc` (0x023A3A) regulates WDK1 onto it. So this IS
+        // `egas_compute_throttle_target`'s WDK_SOLL (KF_EGAS_WDK, x/10 %) as the actuator receives
+        // it, every sample, where the RAM word at 0xFFE6FE would cost an exchange. 0.1 %, signed
+        // (`(int)EGAS_SOLL - (int)EDK_SOLL`; K_PDR_SOLL_EDK, x/10 %, signed). In status 2 it
+        // follows MD_FW_REL instead and in 3..7 a diagnosis value — the pre-drive check, adaptation.
+        //
+        // NOT read, though free: `ml` (offset 4) and `tl` (6). `rf_calc` (master 0x0218D0) writes
+        // `ML = N * (RF * m_norm / 1000) / 25000` and `TL = RF_TI_CONST * RF / 2000` from the RF it
+        // just settled on, m_norm and RF_TI_CONST fixed for the key cycle, so both restate this
+        // block's `rf` beside `n`.
+        pwg1: { symbol: 'pwg1', offset: 23, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        edkSoll: { symbol: 'edk_soll', offset: 31, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
     },
 };
 
@@ -150,10 +190,25 @@ export const OPERATING_MEASUREMENTS_BLOCK = {
          *  built on, and the reason this block still has a slow lane on an idle run: it is the
          *  cross-check that the RAM address is the same number. */
         mdLlri: { symbol: 'md_llri', offset: 77, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
-        /** FR_REGLER — the filling regulator's own output. Never an input to the estimate; logged
-         *  because 40-fr-adaptation-bug.md makes it the confound of record for anything measured
-         *  at idle, and a Terra-program DME leaves a standing error in exactly this region. */
-        frRegler: { symbol: 'fr_regler', offset: 79, format: 'int15', scale: 0.1, add: 0 } as FieldDef,
+        /**
+         * FR_REGLER — the filling regulator's own output, 1.000 neutral. Logged because
+         * 40-fr-adaptation-bug.md makes it the confound of record for anything measured at idle,
+         * and since 2026-10-21 on the VE log too: it is the term that opens the throttle beyond
+         * the map when the air falls short of the request. `fr_calc` (master 0x0253DE) integrates
+         * `FR_RF_DELTA = RF * 10 - MD_RF_ROH` (actual filling minus the filling the torque request
+         * needs) in VL|TL|LL — every running state, not idle alone — and
+         * `egas_compute_throttle_target` (0x0270B0) multiplies it into the air request:
+         * `MD_RF_KORR = (FR_REGLER * MD_RF_SOLL) >> 15`, then ML_SOLL, then WDK_SOLL. So above
+         * 1.000 the DME is asking for more throttle than KF_EGAS_WDK gives for the request.
+         *
+         * `uint16` x 2^-15, NOT the `int15` x 0.1 this field carried until 2026-10-21 — which read
+         * 1.000 as -3276.8 and was never consumed, so no log holds the wrong number. The responder
+         * (030b84 case 0x18) copies the master's FR_REGLER (0xFFE9F6) here verbatim, high byte
+         * first; `fr_calc` stores it as `FR_REG_I - 0x8000` (FR_REG_I signed around 0), the
+         * multiply above is unsigned and shifts by 15, and the reference catalog's `U16 fr_regler,
+         * 3.0517578125E-05` and `Mss54HpRamSignals.FR_REGLER` (1/32768) agree.
+         */
+        frRegler: { symbol: 'fr_regler', offset: 79, format: 'uint16', scale: 3.0517578125e-05, add: 0 } as FieldDef,
 
         // --- ignition angle, per cylinder ---------------------------------------------------
         //
@@ -329,6 +384,10 @@ export function decodeStandardMeasurementBlock(payload: Uint8Array) {
         rf: decodeField(payload, f.rf),
         exhaustTemp: decodeField(payload, f.exhaustTemp),
         wdk1: decodeField(payload, f.wdk1),
+        // Signed, like wdk1: a pedal sensor below its learned zero, or a pre-drive-check
+        // setpoint, would otherwise read as 6500 %.
+        pwg1: decodeField(payload, f.pwg1),
+        edkSoll: decodeField(payload, f.edkSoll),
     };
 }
 

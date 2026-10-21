@@ -92,6 +92,12 @@ export interface LogDataPoint {
      *  load, so a sample taken above the WOT threshold carries a trim that is not controlling
      *  anything. Until this channel existed the log had no way to tell. */
     wdk1?: number;
+    /** `PWG1` — accelerator pedal sensor 1 (%), DS2 selection 3 payload 23-24; and `EDK_SOLL` — the
+     *  throttle target the position controller drives WDK1 onto (%), payload 31-32. Free and on
+     *  every sample, so pedal, target and plate share a row. Diagnostics, never an input to the VE
+     *  derivation. See STANDARD_MEASUREMENT_BLOCK. */
+    pwg1?: number;
+    edkSoll?: number;
 
     // --- tank ventilation -------------------------------------------------------------------
     // Free: DS2 selection 19, the same response stft1/stft2 already come out of.
@@ -165,7 +171,7 @@ export interface LogDataPoint {
      * Slowest lane. A bit a diagnosis latches does not move on a timescale a sample could catch.
      */
     llsSt?: number;
-    /** The slew limiter, as the DME ran it — see SLEW_STATE_RAM_READ / SLEW_TORQUE_RAM_READ.
+    /** The slew limiter, as the DME ran it — see SLEW_STATE_RAM_READ / TORQUE_REQUEST_RAM_READ.
      *  `mdDynSt` bit 6 says the tip-in path actually clipped; `mdFwFilter - mdFw` says by how
      *  much. Diagnostics for the drivability tables, never an input to the VE derivation. */
     mdDynSt?: number;
@@ -173,6 +179,22 @@ export interface LogDataPoint {
     mdFwFilter?: number;
     mdLsDelta?: number;
     mdDpDelta?: number;
+    /** `MD_IND_WUNSCH` (the request after the limiter, Nm) and `MD_IND_WUNSCH_RED_KORR` (the torque
+     *  the throttle is opened for, Nm), out of the same RAM telegram as the four above, one sample
+     *  in eight, absent on the rest. Diagnostics, never an input to the VE derivation. */
+    mdIndWunsch?: number;
+    mdIndWunschRedKorr?: number;
+    /** The pre-cat (`usv1`/`usv2`) and post-cat (`usn1`/`usn2`) sensor voltages (V), `LA_ST_EIN1/2`
+     *  (bit 0 = that bank's lambda loop closed) and `BA_F_TI` (transient enrichment, 1.000 = none).
+     *  RAM 0xFF80BE..0xFF80DD, one sample in eight, absent on the rest. Diagnostics, never an input
+     *  to the VE derivation. See LiveMeasurement. */
+    usv1?: number;
+    usv2?: number;
+    usn1?: number;
+    usn2?: number;
+    laStEin1?: number;
+    laStEin2?: number;
+    baFTi?: number;
     /**
      * `tz1`..`tz6` — the angle each cylinder was last fired at, degrees before TDC, AFTER knock
      * retard (DS2 selection 19 payload 22..33). Diagnostics for the ignition side, never an input
@@ -232,6 +254,8 @@ export interface LogDataPoint {
      * Optional because only the LLS profile reads them. Present, they replace two assumed map
      * inversions and make `Td` measurable without a cross-correlation — which stops working
      * precisely when the correction succeeds and the oscillation it locks onto goes away.
+     *
+     * A VE log carries `frRegler` as well, from block 19 one sample in eight and blank between.
      */
     frRegler?: number;
     llsTv?: number;

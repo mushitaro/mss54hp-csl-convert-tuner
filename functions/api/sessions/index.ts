@@ -1,5 +1,5 @@
 import {
-    Env, MAX_GZ_BYTES, MAX_ROW_BYTES, bad, conflict, decodeBase64, isGzip, ok, ownerOf, rowBytes,
+    type Env, MAX_GZ_BYTES, MAX_ROW_BYTES, bad, conflict, decodeBase64, isGzip, newerInStore, ok, ownerOf, rowBytes,
     tooLarge, unauthorized,
 } from '../../_shared';
 
@@ -48,6 +48,11 @@ interface SyncBody {
     sessionGz: string;
     logGz?: string | null;
     binariesGz?: string | null;
+    /** The store's `synced_at` for this session as the sender last saw it. Absent when it never saw
+     *  one (a session first sent before this field existed): then nothing is checked, as before. */
+    ifStoreSyncedAt?: number;
+    /** Replace the stored copy even if it is newer than `ifStoreSyncedAt`. The owner's choice. */
+    force?: boolean;
 }
 
 /**
@@ -99,8 +104,20 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, data }) 
         blobs[part.name] = bytes;
     }
 
+    // Another device's newer copy is not replaced without being asked. Checked before anything is
+    // written; the race between this read and the upsert is a second, and two devices of one owner
+    // sending the same session inside it is not the case this guards.
+    if (!body.force && typeof body.ifStoreSyncedAt === 'number') {
+        const row = await env.RUNS_DB
+            .prepare('SELECT synced_at FROM sessions WHERE id = ? AND owner = ?')
+            .bind(body.id, owner.id)
+            .first<{ synced_at: number }>();
+        if (row && row.synced_at !== body.ifStoreSyncedAt) return newerInStore(row.synced_at);
+    }
+
+    const syncedAt = Date.now();
     const values = [
-        body.id, Date.now(), body.label, body.createdAt, body.status ?? null, body.vin ?? null,
+        body.id, syncedAt, body.label, body.createdAt, body.status ?? null, body.vin ?? null,
         body.pointCount ?? 0, body.hasTune ? 1 : 0, body.hasRf ? 1 : 0, body.hasEgt ? 1 : 0,
         body.hasIdle ? 1 : 0,
         blobs.sessionGz, blobs.logGz, blobs.binariesGz, body.appBuild ?? null, owner.id,
@@ -135,5 +152,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, data }) 
     if (!result.meta.changes) return conflict();
 
     const stored = parts.reduce((n, p) => n + (blobs[p.name]?.byteLength ?? 0), 0);
-    return ok({ id: body.id, storedBytes: stored });
+    // The store's own time for this copy: the sender keeps it, and sends it back next time as
+    // ifStoreSyncedAt.
+    return ok({ id: body.id, storedBytes: stored, syncedAt });
 };

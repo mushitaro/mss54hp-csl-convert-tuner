@@ -18,6 +18,8 @@ export type FieldKey =
     // Read out of the same DS2 block as rpm/tmot/aq_rel, so they cost nothing extra to log.
     // `rfKorr` is the one derived member of the set — see calculator.ts for how it is measured.
     | 'exhaustTemp' | 'rf' | 'wdk1' | 'rfKorr'
+    // The pedal and the throttle target, free in the same block as wdk1.
+    | 'pwg1' | 'edkSoll'
     // The cross-check pair: each of the two measured channels above, re-derived from the OTHER
     // one through the DME's own tables. Instruments, not data — they exist to be laid against
     // their measured counterparts, and a residual is what they are for.
@@ -36,6 +38,11 @@ export type FieldKey =
     // The tip-in / dashpot slew limiter, on the same lane. Diagnostics for the drivability tables,
     // never an input to the VE derivation — see their entries.
     | 'mdDynSt' | 'mdFw' | 'mdFwFilter' | 'mdLsDelta' | 'mdDpDelta'
+    // The torque request after the limiter, and the request the throttle is opened for — the same
+    // RAM telegram as the four above since 2026-10-21.
+    | 'mdIndWunsch' | 'mdIndWunschRedKorr'
+    // The lambda sensors, the loop's on/off per bank and the transient enrichment, one telegram.
+    | 'usv1' | 'usv2' | 'usn1' | 'usn2' | 'laStEin1' | 'laStEin2' | 'baFTi'
     | 'frRegler' | 'llsTv' | 'mlSoll' | 'mlSollLls'
     // The ignition side: the final angle per cylinder (block 19, free) and how long ago knock
     // control last retarded each cylinder (twelve bytes of RAM on the block-19 lane).
@@ -241,6 +248,30 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         key: 'wdk1', symbol: 'wdk1', name: 'Throttle potentiometer 1 actual position',
         source: { selection: 3, offset: 27 }, unit: '%', format: v => v.toFixed(1),
         relevance: 'debug', chartAxis: 'y3', color: '#3FB3E0', // M-blue, between rf and correctedLoad
+    },
+    /**
+     * `pwg1` — the accelerator pedal, and `edk_soll` — the throttle target the position controller
+     * is driving `wdk1` onto. Free: the same 35 bytes, written by the master itself (see
+     * STANDARD_MEASUREMENT_BLOCK), and on every sample.
+     *
+     * The pair asks the question the 2026-10-21 bucking report raised: at WDK 20-30 % and low rpm,
+     * is the DME opening the throttle far past what the pedal asks? `edk_soll` is
+     * KF_EGAS_WDK(N, the air the torque request needs) — through FR_REGLER — so a target well above
+     * a steady pedal is the torque path, and `wdk1` lagging `edk_soll` is the actuator.
+     *
+     * On y3 beside `wdk1`, so switching them on lays pedal, target and plate on one axis.
+     * `debug`: nothing in the derivation reads them. They ride in production for free because
+     * block 3 is the sample.
+     */
+    pwg1: {
+        key: 'pwg1', symbol: 'pwg1', name: 'Accelerator pedal position',
+        source: { selection: 3, offset: 23 }, unit: '%', format: v => v.toFixed(1),
+        relevance: 'debug', chartAxis: 'y3', color: '#A8CFE6',
+    },
+    edkSoll: {
+        key: 'edkSoll', symbol: 'edk_soll', name: 'Throttle target (where the throttle is being driven)',
+        source: { selection: 3, offset: 31 }, unit: '%', format: v => v.toFixed(1),
+        relevance: 'debug', chartAxis: 'y3', color: '#5E93B8',
     },
     // Derived. `rf_korr` IS a DME variable name, but this column is not the DME's copy of it — it is
     // this app's measurement, (rf/100) / rf_soll, which only equals the DME's under the PATCH. So it
@@ -464,16 +495,96 @@ export const LOG_FIELD_REGISTRY: Record<FieldKey, FieldMeta> = {
         relevance: 'debug', color: '#9B84E8',
     },
     /**
+     * The request further down the same chain, out of the same telegram (TORQUE_REQUEST_RAM_READ).
+     *
+     * `MD_IND_WUNSCH` is `MD_FW_FILTER` plus the minimum torque; `MD_IND_WUNSCH_RED_KORR` is that
+     * after the idle governor, the limiters and the reserve — the torque MD_RF_ROH, ML_SOLL and the
+     * throttle target are computed FOR. Laid against `pwg1` it shows how hard the pedal map (and
+     * KL_MD_MAX_VL_RF_SU1 behind MD_IND_MAX) asks; laid against what block 3's `rf` delivers it
+     * shows whether the request runs ahead of the air, which `frRegler` then integrates.
+     *
+     * `debug`: an investigation of the bucking at WDK 20-30 %, not a tuning input.
+     */
+    mdIndWunsch: {
+        key: 'mdIndWunsch', symbol: 'MD_IND_WUNSCH', name: 'Torque request, after the slew limiter and minimum torque',
+        source: 'derived', unit: 'Nm', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#7E63DB',
+    },
+    mdIndWunschRedKorr: {
+        key: 'mdIndWunschRedKorr', symbol: 'MD_IND_WUNSCH_RED_KORR', name: 'Torque request the throttle is opened for',
+        source: 'derived', unit: 'Nm', format: v => v.toFixed(1),
+        relevance: 'debug', color: '#CBBCF2',
+    },
+    /**
+     * The narrowband sensors, which say rich or lean where `la_f_regler` cannot: with the loop open
+     * the DME pins the trim at 1.000, and only the voltage still answers. Above 0.51 V the
+     * controller itself calls a bank rich, below 0.40 V lean (K_LAS_R_FETT / K_LAS_R_MAGER). On y2
+     * beside the trims, whose ~1.0 scale the 0..1.1 V range shares.
+     *
+     * `debug`: nothing in the derivation reads them, and their exchange carries nothing else a tune
+     * is read from, so a production run drops it.
+     */
+    usv1: {
+        key: 'usv1', symbol: 'USV1', name: 'Pre-cat lambda sensor, bank 1 (above 0.51 V rich, below 0.40 V lean)',
+        source: 'derived', unit: 'V', format: v => v.toFixed(3),
+        relevance: 'debug', chartAxis: 'y2', color: '#F0A020',
+    },
+    usv2: {
+        key: 'usv2', symbol: 'USV2', name: 'Pre-cat lambda sensor, bank 2 (above 0.51 V rich, below 0.40 V lean)',
+        source: 'derived', unit: 'V', format: v => v.toFixed(3),
+        relevance: 'debug', chartAxis: 'y2', color: '#C77A10',
+    },
+    /** The post-cat sensors. Slower and steadier than the pre-cat pair — the catalyst's oxygen
+     *  store sits between — so a sustained rich or lean shows here after the pre-cat one swings. */
+    usn1: {
+        key: 'usn1', symbol: 'USN1', name: 'Post-cat lambda sensor, bank 1',
+        source: 'derived', unit: 'V', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#A05E0C',
+    },
+    usn2: {
+        key: 'usn2', symbol: 'USN2', name: 'Post-cat lambda sensor, bank 2',
+        source: 'derived', unit: 'V', format: v => v.toFixed(3),
+        relevance: 'debug', color: '#8A6A2A',
+    },
+    /**
+     * `LA_ST_EIN` — whether that bank's lambda loop was CLOSED on this read. Open, the trim beside
+     * it is held at 1.000 and says nothing about the mixture; read the voltage instead. Shown as the
+     * word and the raw byte, because the one fact anyone reads out of it should not need decoding.
+     */
+    laStEin1: {
+        key: 'laStEin1', symbol: 'LA_ST_EIN1', name: 'Lambda control, bank 1 (OPEN: the trim is held at 1.000)',
+        source: 'derived', unit: '',
+        format: v => `${(v & 1) ? 'CLOSED' : 'OPEN'} 0x${(v & 0xFF).toString(16).toUpperCase().padStart(2, '0')}`,
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    laStEin2: {
+        key: 'laStEin2', symbol: 'LA_ST_EIN2', name: 'Lambda control, bank 2 (OPEN: the trim is held at 1.000)',
+        source: 'derived', unit: '',
+        format: v => `${(v & 1) ? 'CLOSED' : 'OPEN'} 0x${(v & 0xFF).toString(16).toUpperCase().padStart(2, '0')}`,
+        relevance: 'debug', color: '#B9A6EE',
+    },
+    /** `BA_F_TI` — the transient enrichment on injection time. Above 1 the DME adds fuel for a
+     *  tip-in, below 1 it takes fuel away on a tip-out; past 1.04 / 0.94 it also opens the lambda
+     *  loop. On y2 with the trims it multiplies beside. */
+    baFTi: {
+        key: 'baFTi', symbol: 'BA_F_TI', name: 'Tip-in fuel factor (1.000 = none, above 1 = enriched)',
+        source: 'derived', unit: '', format: v => v.toFixed(3),
+        relevance: 'debug', chartAxis: 'y2', color: '#F64A50',
+    },
+    /**
      * THE RING, read directly — the four channels the micro-throttle mode exists to measure.
      *
      * `tuning` and not `debug`, on the category's own test: the LLS derivation reads them. They
      * replace two assumed map inversions (AQ_REL through KL_AQ_ABS_LLS, then KF_LLS_TV) and, in
      * FR_REGLER's case, a quantity that could not be inferred from a log at all.
      *
-     * Only the LLS profile provides them, so a VE run never carries the columns.
+     * Only the LLS profile provides the last three. `frRegler` is in a VE log too since
+     * 2026-10-21, out of block 19 one sample in eight: `fr_calc` runs in every running state, not
+     * at idle alone, and above 1.0 it is opening the throttle past KF_EGAS_WDK because the air fell
+     * short of the torque request — the other half of the bucking question `edkSoll` asks.
      */
     frRegler: {
-        key: 'frRegler', symbol: 'FR_REGLER', name: 'Idle filling controller, 1.0 neutral',
+        key: 'frRegler', symbol: 'FR_REGLER', name: 'Filling controller (1.0 neutral, above 1 opens the throttle further)',
         source: 'derived', unit: '', format: v => v.toFixed(4),
         relevance: 'tuning', chartAxis: 'y2', color: '#0A9BDB', // M-blue 500 — the loop's output
     },
@@ -857,8 +968,14 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     // seat. On the same slowest lane as LLS_ST, so switching a column on is how you find out the
     // data was already recorded.
     mdDynSt: false, mdFw: false, mdFwFilter: false, mdLsDelta: false, mdDpDelta: false,
-    // ON: these are what an LLS tune is read from, and the profile that provides them is the only
-    // one that polls them, so a VE run never sees the columns whatever this says.
+    // Off, the request further down that chain and the lambda sensors beside the trim: each
+    // answers the 2026-10-21 bucking question — did the request outrun the air, was the mixture
+    // rich or lean with the loop open — asked of a drive afterwards, not watched from the seat.
+    mdIndWunsch: false, mdIndWunschRedKorr: false,
+    usv1: false, usv2: false, usn1: false, usn2: false, laStEin1: false, laStEin2: false, baFTi: false,
+    // ON: these are what an LLS tune is read from. The last three are polled by the LLS profile
+    // alone, so a VE run never sees those columns whatever this says; `frRegler` a VE run does
+    // carry (block 19, one sample in eight), and shows by default as the tuning channel it is.
     frRegler: true, llsTv: true, mlSoll: true, mlSollLls: true,
     // Ambient temperature off with the other three air channels — it is the reference the intake
     // sensor is checked against, and that check is a job, not a view.
@@ -874,6 +991,8 @@ export const DEFAULT_FIELD_VISIBILITY: Record<FieldKey, boolean> = {
     // Off by default. It is a gate input rather than something to watch while driving — what you
     // want to see is the SAMPLES it rejected, not the raw plate angle.
     wdk1: false,
+    // Off with the plate: the pedal and the target are read against it after a drive.
+    pwg1: false, edkSoll: false,
     // Off by default, unlike the pair above. These are verification instruments rather than
     // channels: EGT (RF KORR) is blank on most rows by construction (only ~45 % of the rpm axis
     // has an invertible correction profile), and a mostly-empty column shown by default reads as

@@ -19,6 +19,14 @@ import { bridgeHandlers, TOOL_NAMES, type TabFacade } from '@/lib/bridge/tools';
  * arrives, so the socket is never reopened because the page re-rendered.
  */
 export const ASSISTANT_KEY = 'assistant-bridge:v1';
+/** The name the owner gives this device ("ナビ"), so the assistant — and another device's tab —
+ *  can say which device answers. Per device, like the switch. */
+export const DEVICE_KEY = 'assistant-bridge:device';
+const MAX_DEVICE_NAME = 24;
+
+export function readDeviceName(): string | null {
+    try { return localStorage.getItem(DEVICE_KEY)?.trim().slice(0, MAX_DEVICE_NAME) || null; } catch { return null; }
+}
 
 /** This page's answer when storage refuses, so a switch still works for the session. */
 let memoryOn: boolean | null = null;
@@ -44,6 +52,9 @@ export function useAssistantBridge(input: {
     const getSnapshot = useCallback(() => allowed && readOn(), [allowed]);
     const on = useSyncExternalStore(subscribe, getSnapshot, () => false);
     const [status, setStatus] = useState<BridgeStatus>({ state: 'off', detail: null, calls: 0 });
+    const [device, setDeviceState] = useState<string | null>(null);
+    useEffect(() => { if (allowed) setDeviceState(readDeviceName()); }, [allowed]);
+    const clientRef = useRef<BridgeClient | null>(null);
     const facadeRef = useRef(facade);
     const helloRef = useRef(hello);
     useEffect(() => {
@@ -67,12 +78,22 @@ export function useAssistantBridge(input: {
         const client = new BridgeClient({
             ticketUrl: '/api/bridge/ticket',
             handlers: () => bridgeHandlers(facadeRef.current),
-            hello: () => ({ ...helloRef.current, tools: TOOL_NAMES }),
+            hello: () => ({ ...helloRef.current, tools: TOOL_NAMES, device: readDeviceName() }),
             onStatus: setStatus,
         });
+        clientRef.current = client;
         client.start();
-        return () => client.stop();
+        return () => { client.stop(); clientRef.current = null; };
     }, [allowed, on]);
 
-    return { on, setOn, status: on ? status : { state: 'off' as const, detail: null, calls: 0 } };
+    const takeover = useCallback(() => { clientRef.current?.takeover(); }, []);
+    // Saved as typed; the next hello carries it (a held or live tab says hello again on its next
+    // socket, which a switch-here or the next reconnect opens).
+    const setDevice = useCallback((name: string) => {
+        if (!allowed) return;
+        const clean = name.trim().slice(0, MAX_DEVICE_NAME);
+        try { if (clean) localStorage.setItem(DEVICE_KEY, clean); else localStorage.removeItem(DEVICE_KEY); } catch { /* storage refused: the session still uses it */ }
+        setDeviceState(clean || null);
+    }, [allowed]);
+    return { on, setOn, takeover, device, setDevice, status: on ? status : { state: 'off' as const, detail: null, calls: 0 } };
 }

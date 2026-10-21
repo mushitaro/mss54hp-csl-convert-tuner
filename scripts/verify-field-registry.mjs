@@ -126,8 +126,11 @@ console.log('\n[the default view is the columns a tune is read from, and no more
          * columns at that moment. These four are what an LLS tune is read from, exactly as the
          * eight above are what a VE tune is read from.
          *
-         * Turning them on globally costs a VE run nothing: only the LLS profile lists them in a
-         * `provides`, so a VE log has no such columns and the switch has nothing to show. The
+         * Turning them on globally costs a VE run nothing: only the LLS profile lists three of them
+         * in a `provides`, so a VE log has no such columns and the switch has nothing to show. The
+         * fourth, `frRegler`, a VE log does carry since 2026-10-21 (block 19, free, one sample in
+         * eight) — and shows, because the filling regulator opening the throttle past the map is
+         * exactly what a VE drive that bucks has to be read against. The
          * alternative — a per-mode default map — would be a second place for "which columns
          * matter" to be stated, and the modes already disagree about that in `MODE_TABS` and
          * `MODE_WRITES` without needing a third.

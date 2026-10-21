@@ -89,6 +89,16 @@ export const serializeLogFile = (points: LogDataPoint[]): string => {
         ['avan1Ist', M.EXHAUST_CAM], ['avanSoll', M.EXHAUST_CAM_TARGET],
         ['evan1St', M.INTAKE_VANOS_STATUS], ['avan1St', M.EXHAUST_VANOS_STATUS],
         ['vanEdSt', M.VANOS_FAULT_STATUS], ['vanAdapSt', M.VANOS_ADAPTATION_STATUS],
+        // The bucking channels (2026-10-21), by the same rule. LA_ST_EIN goes out as a plain number
+        // for NOISE_ST's reason — the reader takes a `0x` cell back only for HEX_CSV_KEYS — and
+        // the voltages as volts, so 0.475 is a cell a spreadsheet plots.
+        ['pwg1', M.PEDAL], ['edkSoll', M.THROTTLE_TARGET],
+        ['mdIndWunsch', M.MD_IND_WUNSCH], ['mdIndWunschRedKorr', M.MD_IND_WUNSCH_RED_KORR],
+        ['usv1', M.USV1], ['usv2', M.USV2], ['usn1', M.USN1], ['usn2', M.USN2],
+        ['laStEin1', M.LA_ST_EIN1], ['laStEin2', M.LA_ST_EIN2], ['baFTi', M.BA_F_TI],
+        // FR_REGLER was in the log since the LLS ring and never in the CSV; a VE run carries it now,
+        // so a download that dropped it would lose the column the throttle question turns on.
+        ['frRegler', M.FR_REGLER],
     ] as const).filter(([key]) => points.some(p => p[key] !== undefined));
 
     const rows = points.map(p => {

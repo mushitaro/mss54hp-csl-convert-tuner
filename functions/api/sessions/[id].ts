@@ -15,12 +15,12 @@ export const onRequestGet: PagesFunction<Env, 'id'> = async ({ env, params, data
     if (!owner) return unauthorized();
 
     const row = await env.RUNS_DB
-        .prepare(`SELECT id, label, created_at, status, vin, point_count, app_build,
+        .prepare(`SELECT id, label, created_at, synced_at, status, vin, point_count, app_build,
                          session_json_gz, log_json_gz, binaries_json_gz
                   FROM sessions WHERE id = ? AND owner = ?`)
         .bind(String(params.id), owner.id)
         .first<{
-            id: string; label: string; created_at: number; status: string | null; vin: string | null;
+            id: string; label: string; created_at: number; synced_at: number; status: string | null; vin: string | null;
             point_count: number; app_build: string | null;
             session_json_gz: ArrayBuffer | number[];
             log_json_gz: ArrayBuffer | number[] | null;
@@ -33,6 +33,9 @@ export const onRequestGet: PagesFunction<Env, 'id'> = async ({ env, params, data
         id: row.id,
         label: row.label,
         createdAt: row.created_at,
+        // Kept by the device that restores it, and sent back as ifStoreSyncedAt: what lets the store
+        // tell this device's next upload from a stale one.
+        syncedAt: row.synced_at,
         status: row.status,
         vin: row.vin,
         pointCount: row.point_count,

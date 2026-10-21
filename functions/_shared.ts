@@ -37,6 +37,14 @@ export interface Env {
 export const MAX_GZ_BYTES = 900_000;
 
 export const ok = (body: unknown) => json(body, 200);
+
+/**
+ * The store holds a copy this sender has not seen: sent after the one the sender last had (from its
+ * own upload or a restore), so from another device. Replacing it would silently drop that device's
+ * work — the session list is per device and the store is where they meet. The sender is told when it
+ * was sent and decides: bring it back, or send again with `force`.
+ */
+export const newerInStore = (syncedAt: number) => json({ error: 'newer_in_store', syncedAt }, 409);
 export const bad = (message: string, status = 400) => json({ error: message }, status);
 export const noContent = () => new Response(null, { status: 204, headers: { 'cache-control': 'private, no-store' } });
 

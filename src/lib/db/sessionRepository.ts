@@ -398,8 +398,11 @@ export function appendFlashCounterReset(id: string, record: FlashCounterResetRec
  *  must leave the session outstanding, and it does — the fingerprint written here describes the
  *  older shape, so `needsSync` still returns true for the newer one. Computing it in here, after the
  *  await, would silently mark the new data as already sent. */
-export function markSessionSynced(id: string, fingerprint: string): Promise<TuningSession> {
-    return patchSession(id, s => ({ ...s, syncedAt: Date.now(), syncedFingerprint: fingerprint }));
+export function markSessionSynced(id: string, fingerprint: string, storeSyncedAt?: number): Promise<TuningSession> {
+    return patchSession(id, s => ({
+        ...s, syncedAt: Date.now(), syncedFingerprint: fingerprint,
+        ...(storeSyncedAt !== undefined ? { storeSyncedAt } : {}),
+    }));
 }
 
 export async function listSessions(): Promise<TuningSession[]> {

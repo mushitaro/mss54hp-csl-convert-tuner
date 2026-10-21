@@ -13,9 +13,11 @@
  * its own (1, 2, 5, 10, then every 30 s), with a fresh ticket each time — on a head unit the network
  * comes and goes with the car, and the owner turned this on to not think about it.
  *
- * One exception to reconnecting: closed with 4000, another tab took over the bridge. Reconnecting
- * would take it back, and two tabs would trade the socket every few seconds. This tab says so and
- * waits until ASSISTANT is switched off and on here.
+ * One assistant reaches one tab, and a live tab keeps it (2026-10-21). Opened on a second device —
+ * a laptop at home while the head unit logs on the road — this tab is refused (4002) and waits,
+ * 'held', naming the device that has it; so is a tab another one took the bridge from (4000). A held
+ * tab asks again once a minute and gets the bridge when the holder has gone quiet (asleep, closed),
+ * or at once when the owner presses "switch here" on it (`takeover`). Two live tabs never trade it.
  */
 import type { Handler } from './tools';
 
@@ -28,6 +30,9 @@ export type BridgeState =
     | 'live'
     /** Not connected, will try again on its own. */
     | 'retrying'
+    /** Another device's tab has the assistant. Asks again each minute; takes it when that one is
+     *  quiet, or at once with takeover(). */
+    | 'held'
     /** Not connected, and will not try again until ASSISTANT is switched off and on. */
     | 'stopped';
 
@@ -37,12 +42,15 @@ export interface BridgeStatus {
     detail: string | null;
     /** Calls answered since it was switched on. */
     calls: number;
+    /** 'held': the name of the device that has the assistant ('' when it has none, null when not
+     *  known — a tab that lost it to another cannot tell which). */
+    holder?: string | null;
 }
 
 export interface BridgeClientOptions {
     ticketUrl: string;
     handlers: () => Record<string, Handler>;
-    hello: () => { build: string | null; variant: string | null; tools: readonly string[] };
+    hello: () => { build: string | null; variant: string | null; tools: readonly string[]; device?: string | null };
     onStatus: (s: BridgeStatus) => void;
     /** Injectable for the verify script; the browser's own otherwise. */
     fetch?: typeof fetch;
@@ -51,6 +59,11 @@ export interface BridgeClientOptions {
 
 export const BRIDGE_PROTOCOL = 'tuner-bridge.v1';
 const BACKOFF_S = [1, 2, 5, 10, 30];
+/** How often a held tab asks again: long enough not to churn, short enough that the head unit has
+ *  the assistant back within a minute of the laptop going to sleep. */
+const HELD_RETRY_S = 60;
+/** The relay's refusal: another device's live tab has the assistant. */
+export const HELD_CLOSE_CODE = 4002;
 const PING_MS = 25_000;
 /** A handler that has not answered by now is reported as failed; the bridge itself waits 20 s. */
 const HANDLER_TIMEOUT_MS = 15_000;
@@ -64,6 +77,8 @@ export class BridgeClient {
     private timer: ReturnType<typeof setTimeout> | null = null;
     private ping: ReturnType<typeof setInterval> | null = null;
     private status: BridgeStatus = { state: 'off', detail: null, calls: 0 };
+    /** The next socket asks the relay to take the assistant from a live tab — the owner's press. */
+    private takeoverNext = false;
     private readonly o: BridgeClientOptions;
 
     // A plain field, not a parameter property: Node's type stripping (the verify scripts) refuses those.
@@ -91,12 +106,33 @@ export class BridgeClient {
         this.set('off', null);
     }
 
+    /** "Switch here": take the assistant from whichever device has it now. */
+    takeover(): void {
+        if (!this.running) this.running = true;
+        this.takeoverNext = true;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        const ws = this.ws;
+        this.ws = null;
+        this.clearPing();
+        try { ws?.close(1000, 'switching'); } catch { /* already closed */ }
+        void this.connect();
+    }
+
+    /** Held by another device: wait, and ask again in a minute. */
+    private hold(holder: string | null, detail: string) {
+        if (!this.running) return;
+        this.status = { ...this.status, state: 'held', detail, holder };
+        this.emit();
+        this.timer = setTimeout(() => { this.timer = null; void this.connect(); }, HELD_RETRY_S * 1000);
+    }
+
     private emit() {
         try { this.o.onStatus({ ...this.status }); } catch { /* a listener's problem is not the bridge's */ }
     }
 
     private set(state: BridgeState, detail: string | null) {
-        this.status = { ...this.status, state, detail };
+        this.status = { ...this.status, state, detail, holder: state === 'held' ? this.status.holder : undefined };
         this.emit();
     }
 
@@ -133,6 +169,8 @@ export class BridgeClient {
             if (!body.ticket || !body.url) { this.retry('The ticket answer was incomplete.'); return; }
             ticket = body.ticket;
             url = body.url;
+            if (this.takeoverNext) url += `${url.includes('?') ? '&' : '?'}takeover=1`;
+            this.takeoverNext = false;
         } catch {
             this.retry('No network.');
             return;
@@ -168,9 +206,13 @@ export class BridgeClient {
             this.ws = null;
             this.clearPing();
             if (!this.running) return;
+            if (ev.code === HELD_CLOSE_CODE) {
+                const holder = typeof ev.reason === 'string' && ev.reason.startsWith('held:') ? ev.reason.slice(5) : null;
+                this.hold(holder, `Another device${holder ? ` ("${holder}")` : ''} has the assistant. This tab takes it when that one goes quiet, or now with "switch here".`);
+                return;
+            }
             if (ev.code === 4000) {
-                this.running = false;
-                this.set('stopped', 'Another WORKS tab took over the assistant. Switch ASSISTANT off and on here to take it back.');
+                this.hold(null, 'Another device took the assistant. This tab takes it back when that one goes quiet, or now with "switch here".');
                 return;
             }
             this.retry('The bridge connection closed.');

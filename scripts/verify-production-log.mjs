@@ -65,12 +65,17 @@ console.log('\n[the production channel set, as a literal]');
     // category's test (nothing in the derivation reads them), and they are in a production log
     // anyway because block 19 carries `tetv`. That is the cheapest place an ignition question can
     // be answered from, and it costs the production rate nothing.
+    //
+    // The pedal and the throttle target joined on 2026-10-21 the same way: debug (the derivation
+    // reads neither), in the 35 bytes of block 3 every sample already fetches, so a production log
+    // carries them at no cost to its rate.
     const ridingAlong = recorded.filter(k => rel(k) === 'debug');
     check('debug channels riding along on a kept exchange',
         JSON.stringify(ridingAlong) === JSON.stringify(
             ['ambientTemp', 'lambdaFreeze', 'tankVentCheckState', 'tankVentDiag', 'wdk1',
                 'ignitionAngle1', 'ignitionAngle2', 'ignitionAngle3',
-                'ignitionAngle4', 'ignitionAngle5', 'ignitionAngle6'].sort()),
+                'ignitionAngle4', 'ignitionAngle5', 'ignitionAngle6',
+                'pwg1', 'edkSoll'].sort()),
         ridingAlong.join(', '));
 
     /*
@@ -121,11 +126,14 @@ console.log('\n[the exchanges a production run drops]');
     // manifold air and the cams joined the same day, by the same test: how deep a retard went,
     // whether the manifold sensor's air followed RF and whether the cams followed their targets are
     // investigations, and the derivation reads none of them.
-    check('exactly the eight debug-only exchanges',
+    // On 2026-10-21 the slew read grew into the torque request (same address, renamed) and the
+    // lambda sensors joined, by the same test: whether the request outran the air and whether the
+    // mixture was rich or lean with the loop open are asked of a drive, not read by the derivation.
+    check('exactly the nine debug-only exchanges',
         JSON.stringify(gone.sort()) === JSON.stringify(
-            ['KNOCK AGE', 'LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_FW_FILTER', 'P_UMG/TAN_M',
+            ['KNOCK AGE', 'LLS_ST', 'MD_DYN_ST', 'MD_FW/MD_IND_WUNSCH/MD_IND_WUNSCH_RED_KORR', 'P_UMG/TAN_M',
                 'NOISE_ST/GANG/KR_DTZ_SUM/KA_DTZ_SUM', 'RF_KORR/P_SAUG/RF_P_SAUG',
-                'EVAN1_IST/EVAN_SOLL/AVAN1_IST/AVAN_SOLL'].sort()),
+                'EVAN1_IST/EVAN_SOLL/AVAN1_IST/AVAN_SOLL', 'USV/USN/LA_ST_EIN/BA_F_TI'].sort()),
         gone.join(', '));
     console.log(`        preview  ${expectedHz(full).toFixed(3)} Hz  ${describeExchanges(full)}`);
     console.log(`        prod     ${expectedHz(prod).toFixed(3)} Hz  ${describeExchanges(prod)}`);
