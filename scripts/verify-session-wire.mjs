@@ -18,7 +18,7 @@
  * into the second feeds the regression a fabricated anchor at its most sensitive point.
  */
 import { nextLogRecord } from '../src/lib/db/sessionRepository.ts';
-import { asLogRecord, gzipJson, gunzipJson, toBase64, fromBase64 } from '../src/lib/session-sync/client.ts';
+import { asLogRecord, gzipJson, gunzipJson, toBase64, fromBase64, logWorthSending } from '../src/lib/session-sync/client.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + d)); if (!c) fails++; };
@@ -93,10 +93,12 @@ console.log('\n[what a save decides to SEND]');
     // decides what is worth SENDING, so they stay separate functions — but both have to name every
     // sample kind, and the sync did not name `idle`. An idle run whose projection came out empty
     // would have uploaded a session with no log at all — the same omission reaching a third file,
-    // under a comment saying it matched the first.
-    const worthSending = (log) => !!log && ((log.data?.length ?? 0) > 0
-        || (log.inertia?.length ?? 0) > 0 || (log.idle?.length ?? 0) > 0);
+    // under a comment saying it matched the first. It then missed `lls` the same way, which is why
+    // this now tests the exported rule rather than a copy of it.
+    const worthSending = logWorthSending;
     const idleOnly = [{ time: 0, rpm: 872, mdLlri: -6.9 }];
+    check('a micro-throttle-only record is worth sending', worthSending({ sessionId: ID, data: [], lls: [{ time: 0 }] }));
+    check('...and so is one holding only earlier runs', worthSending({ sessionId: ID, data: [], runs: [{ data }] }));
     check('an idle-only record is worth sending', worthSending({ sessionId: ID, data: [], idle: idleOnly }));
     check('...and so is an inertia-only one', worthSending({ sessionId: ID, data: [], inertia }));
     check('...and a projection-only one', worthSending({ sessionId: ID, data }));

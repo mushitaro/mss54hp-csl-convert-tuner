@@ -156,8 +156,26 @@ export function markGate(state: GateNews): void {
  * bytes on every `setSessionBase`, so re-reading the ECU into the same session changes it. Without
  * it, a session synced once with BASE #1 would never be offered again after BASE #2 replaced it.
  */
+/**
+ * Whether a stored log is worth sending: any sample of any kind, in the current run or an earlier one.
+ *
+ * Sent when there is EITHER kind of sample, matching `saveResearchRun`'s own rule: a run whose
+ * projection came out empty must not take its raw samples down with it. Every sample kind has to be
+ * named here. This mirrors the rule in `nextLogRecord`, which decides what a record HOLDS, and it
+ * has already gone wrong twice by copying an incomplete enumeration: an idle run whose projection
+ * came out empty would have uploaded a session with no log, and so would a micro-throttle one.
+ * Exported so verify:session-wire tests this rule rather than a copy of it.
+ */
+export const logWorthSending = (log: SessionLogRecord | null | undefined): boolean =>
+    !!log && ((log.data?.length ?? 0) > 0
+        || (log.inertia?.length ?? 0) > 0 || (log.idle?.length ?? 0) > 0 || (log.lls?.length ?? 0) > 0
+        || (log.runs?.length ?? 0) > 0);
+
 export const sessionFingerprint = (s: TuningSession): string =>
-    `${s.baseSha256 ?? '-'}|${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`;
+    `${s.baseSha256 ?? '-'}|${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`
+    // Only when there is more than one run, so every session sent before runs existed keeps the
+    // fingerprint it was sent with and is not offered again for nothing.
+    + ((s.logRuns ?? 0) > 1 ? `|r${s.logRuns}` : '');
 
 /**
  * Whether this session is worth sending and has not been sent as it now stands.
@@ -341,13 +359,7 @@ export async function syncSession(session: TuningSession, opts: { force?: boolea
 
     const wireBinaries: WireBinaries | null = binaries ? toWireBinaries(binaries) : null;
 
-    // Sent when there is EITHER kind of sample, matching `saveResearchRun`'s own rule: a run whose
-    // projection came out empty must not take its raw samples down with it.
-    // Every sample kind has to be named here. This mirrors the rule in `nextLogRecord`, which
-    // decides what a record HOLDS, and it has already gone wrong once by copying an incomplete
-    // enumeration: an idle run whose projection came out empty would upload a session with no log.
-    const hasSamples = !!log && ((log.data?.length ?? 0) > 0
-        || (log.inertia?.length ?? 0) > 0 || (log.idle?.length ?? 0) > 0);
+    const hasSamples = logWorthSending(log);
 
     const [sessionGz, logGz, binariesGz] = await Promise.all([
         gzipJson(session),
@@ -363,7 +375,8 @@ export async function syncSession(session: TuningSession, opts: { force?: boolea
             createdAt: session.createdAt,
             status: session.status,
             vin: session.baseOrigin?.kind === 'dme' ? session.baseOrigin.vin : undefined,
-            pointCount: log?.data?.length ?? 0,
+            // Every run's samples: the store's list says how much of a drive it holds.
+            pointCount: (log?.data?.length ?? 0) + (log?.runs ?? []).reduce((n, r) => n + r.data.length, 0),
             hasTune: !!session.sha256,
             hasRf: !!log?.data?.some(p => p.rf !== undefined),
             hasEgt: !!log?.data?.some(p => p.exhaustTemp !== undefined),

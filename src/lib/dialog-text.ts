@@ -141,6 +141,7 @@ const JA = {
         '\nOK        = このログを復元する(BASEも一緒に読み込みます)\n' +
         'キャンセル = 復元しない(このデータは破棄されます)',
     recoverFailed: 'データログを復元できませんでした。元のセッションのBINが見つかりません。',
+    keepRunFailed: '画面にあるデータログをセッションに残せなかったので、記録を始めませんでした。SAVE してから、もう一度 START を押してください。',
 
     // --- data log ---
     logFinished: (failure: string | null) =>
@@ -447,6 +448,7 @@ Send over it?`,
         '\nOK     = restore this log (the BASE is loaded with it)\n' +
         'Cancel = do not restore (this data will be discarded)',
     recoverFailed: 'The data log could not be restored — the original session\'s binary is missing.',
+    keepRunFailed: 'The data log on screen could not be kept in the session, so recording did not start. SAVE, then press START again.',
 
     logFinished: (failure: string | null) =>
         (failure

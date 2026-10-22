@@ -266,8 +266,10 @@ export interface TuningSession {
     /**
      * What this session's log was captured FOR — and therefore which DS2 blocks it holds.
      *
-     * One session, one log, one process: `SessionLogRecord` is keyed by session id and holds a
-     * single log, so the process is a property of the session rather than of a run within it.
+     * One session, one process: `SessionLogRecord` is keyed by session id, and every run it holds
+     * (`data` and the earlier `runs`) was recorded for the same process, because MODE locks the
+     * moment the session holds a log. So the process is a property of the session rather than of a
+     * run within it.
      *
      * Optional, and absent reads as 'VE'. That is not a lenient default but a historically correct
      * one — every session recorded before profiles existed polled blocks 3 and 19 and produced a VE
@@ -312,6 +314,12 @@ export interface TuningSession {
     settingsAt?: number;
     hasLog: boolean;
     logPointCount: number;
+
+    /** How many runs the stored log holds — the current one in `data` and the earlier ones in
+     *  `SessionLogRecord.runs` — for the list to say "2 RUNS" without loading the log. `hasLog`,
+     *  `logPointCount` and `averageHz` describe the current run only, as they always have.
+     *  Optional and additive — no DB_VERSION bump; absent reads as one run when `hasLog`. */
+    logRuns?: number;
 
     /** Mean sample rate of the stored log, in Hz. Derived in saveTune from the log's own `time`
      *  column, so a DS2 run and a CSV import are measured the same way and neither has to report it.
@@ -358,9 +366,39 @@ export interface TuningSession {
     syncedFingerprint?: string;
 }
 
+/**
+ * A run this session recorded before the one in `SessionLogRecord.data`: its projection and its raw
+ * samples, kept whole. Moved here by `nextLogRecord` the moment a different run is saved over it.
+ */
+export interface StoredRun {
+    runId?: string;
+    data: LogDataPoint[];
+    inertia?: InertiaSample[];
+    idle?: IdleSample[];
+    lls?: LlsSample[];
+}
+
 export interface SessionLogRecord {
     sessionId: string;
     data: LogDataPoint[];
+
+    /**
+     * Which run `data` (and the raw arrays beside it) holds: the id the workspace gave it when its
+     * recording started, its CSV was read or its crash record was restored.
+     *
+     * What lets a save tell "the same run again" (a re-save after moving a filter) from "a new run"
+     * (a second START in the same session). It could not before: a second recording replaced the
+     * first in `data`, and session #982 lost its first OBSERVE run of four tip-ins that way. Absent
+     * on every record written before it, and a save that carries no id is a re-save of what is
+     * stored — the old behaviour, so a reopened old session re-saves without growing a run.
+     */
+    runId?: string;
+
+    /**
+     * The runs recorded in this session before the current one, oldest first. Run 1 is `runs[0]`
+     * and the current run is number `runs.length + 1`. Optional and additive — no DB_VERSION bump.
+     */
+    runs?: StoredRun[];
 
     /**
      * The raw samples of an inertia run, stored unprojected.

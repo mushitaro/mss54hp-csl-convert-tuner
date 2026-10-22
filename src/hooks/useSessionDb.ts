@@ -61,7 +61,7 @@ export function useSessionDb() {
     const saveSessionTune = useCallback(async (params: {
         sessionId: string; binaryFileName: string; tunedBinaryBuffer: ArrayBuffer;
         veMapSnapshot?: VEMap; tuneSettings: TuneSettings; log: LogDataPoint[] | null;
-        settingsAt?: number;
+        runId?: string; settingsAt?: number;
     }) => {
         const s = await saveTune(params);
         await refresh();
@@ -75,7 +75,7 @@ export function useSessionDb() {
 
     const saveResearch = useCallback(async (params: {
         sessionId: string; process: ProcessId; log: LogDataPoint[];
-        inertia?: InertiaSample[]; idle?: IdleSample[];
+        inertia?: InertiaSample[]; idle?: IdleSample[]; runId?: string;
     }) => {
         const s = await saveResearchRun(params);
         await refresh();
@@ -115,6 +115,8 @@ export function useSessionDb() {
     }, [refresh]);
 
     const loadLog = useCallback((id: string) => getSessionLog(id), []);
+    /** The whole stored log — the current run with its `runId`, and the earlier `runs`. */
+    const loadLogRecord = useCallback((id: string) => getSessionLogRecord(id), []);
     /**
      * The raw idle samples of a stored run, or null.
      *
@@ -131,6 +133,6 @@ export function useSessionDb() {
         sessions, loading, error, refresh,
         newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
         recordFlashCounterReset, remove,
-        loadLog, loadIdleRun, loadBinaries,
+        loadLog, loadLogRecord, loadIdleRun, loadBinaries,
     };
 }

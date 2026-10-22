@@ -135,6 +135,8 @@ export interface SessionSummary {
     hasBase: boolean;
     hasLog: boolean;
     logPoints: number;
+    /** Runs the stored log holds; `logPoints` is the last one's. */
+    logRuns?: number;
     mode: string;
     open: boolean;
 }
@@ -349,6 +351,8 @@ function brief(s: SessionSummary) {
         mode: s.mode,
         bin: s.hasBase,
         log: s.hasLog ? s.logPoints : null,
+        // Said only when there is more than one, so the answer for every other session is unchanged.
+        ...((s.logRuns ?? 0) > 1 ? { runs: `${s.logRuns} runs; log is the last one's sample count` } : {}),
     };
 }
 

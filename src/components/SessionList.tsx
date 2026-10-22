@@ -98,7 +98,8 @@ interface Props {
      * `setBase` writes once.
      */
     onInspectBase: (session: TuningSession) => Promise<LogicPatches | null>;
-    onDownloadLog: (session: TuningSession) => void;
+    /** `run` is 1-based; omitted, the session's current (last) run. */
+    onDownloadLog: (session: TuningSession, run?: number) => void;
     /**
      * Loads a Testo CSV into the WORKSPACE, which is why it takes no session: a log is read into
      * the session that is open, and only one is.
@@ -895,10 +896,19 @@ export const SessionList: React.FC<Props> = ({
                                                     {session.averageHz.toFixed(1)}Hz
                                                 </span>
                                             )}
+                                            {/* The count and rate are the last run's; this says there are
+                                                more, each kept whole and downloadable from the row's sheet. */}
+                                            {(session.logRuns ?? 0) > 1 && (
+                                                <span className="text-slate-600" title="Runs recorded in this session. The count and rate are the last run's; every run is in the row's menu.">
+                                                    {session.logRuns} RUNS
+                                                </span>
+                                            )}
                                             {session.hasLog && (
                                                 <DownloadCell
                                                     onClick={() => onDownloadLog(session)}
-                                                    title="Download this session's log as a Testo-format CSV"
+                                                    title={(session.logRuns ?? 0) > 1
+                                                        ? "Download this session's last run as a Testo-format CSV — every run is under Actions"
+                                                        : "Download this session's log as a Testo-format CSV"}
                                                 />
                                             )}
                                             {/* Next to the download rather than in the row menu: on a
@@ -991,7 +1001,7 @@ export const SessionList: React.FC<Props> = ({
                                             and DELETE there whatever else this session can do. On a
                                             desk it appears only when there is a branch or a finalize
                                             to offer — the columns and the trash carry the rest. */}
-                                        <div className={(canNext || canFinalize) ? 'contents' : 'contents min-[1280px]:hidden'}>
+                                        <div className={(canNext || canFinalize || (session.logRuns ?? 0) > 1) ? 'contents' : 'contents min-[1280px]:hidden'}>
                                             <button
                                                 onClick={() => openMenu(session)}
                                                 className="ml-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-indigo-400 transition-colors px-2 py-1 rounded hover:bg-slate-800"
@@ -1057,6 +1067,26 @@ export const SessionList: React.FC<Props> = ({
                                                             >
                                                                 Finalize <span className="text-slate-600">{st.finalize}</span>
                                                             </button>
+                                                        </>
+                                                    )}
+                                                    {/* Every run, on a desk as well as a card: the LOG column's
+                                                        download cell is the last run's only. One file per run —
+                                                        a CSV holds one run, and the parser reads it back as one. */}
+                                                    {session.hasLog && (session.logRuns ?? 1) > 1 && (
+                                                        <>
+                                                            {(canNext || canFinalize) && <div className="my-1 border-t border-slate-800" />}
+                                                            <div className="px-3 pt-1 pb-0.5 text-[8px] font-bold uppercase tracking-widest text-slate-600">
+                                                                Runs
+                                                            </div>
+                                                            {Array.from({ length: session.logRuns! }, (_, i) => (
+                                                                <button
+                                                                    key={i}
+                                                                    onClick={() => { setMenuFor(null); onDownloadLog(session, i + 1); }}
+                                                                    className={SHEET_ROW}
+                                                                >
+                                                                    Download LOG CSV · RUN {i + 1}
+                                                                </button>
+                                                            ))}
                                                         </>
                                                     )}
 
@@ -1132,7 +1162,7 @@ export const SessionList: React.FC<Props> = ({
                                                                 Download TUNED
                                                             </button>
                                                         )}
-                                                        {session.hasLog && (
+                                                        {session.hasLog && (session.logRuns ?? 1) <= 1 && (
                                                             <button
                                                                 onClick={() => { setMenuFor(null); onDownloadLog(session); }}
                                                                 className={SHEET_ROW}

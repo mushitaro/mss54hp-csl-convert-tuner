@@ -14,6 +14,7 @@ import {
 import type {
     TuningSession,
     SessionLogRecord,
+    StoredRun,
     SessionBinariesRecord,
     BaseOrigin,
     TuneSettings,
@@ -156,6 +157,9 @@ export interface SaveTuneInput {
     veMapSnapshot?: VEMap;
     tuneSettings: TuneSettings;
     log: LogDataPoint[] | null;
+    /** The run `log` is (`SessionLogRecord.runId`). A different one than stored keeps the stored run
+     *  as an earlier run rather than writing over it. */
+    runId?: string;
     /** When these settings were taken — `TuningSession.settingsAt`. Defaults to now; a write passes
      *  the flash's own timestamp, because the settings it saves are the ones it sent. */
     settingsAt?: number;
@@ -191,19 +195,53 @@ export interface SaveTuneInput {
 export function nextLogRecord(
     sessionId: string,
     prior: SessionLogRecord | undefined,
-    incoming: { data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[]; lls?: LlsSample[] },
+    incoming: {
+        data?: LogDataPoint[]; inertia?: InertiaSample[]; idle?: IdleSample[]; lls?: LlsSample[];
+        /** The run this save carries (`SessionLogRecord.runId`). Omitted, it is the stored run again. */
+        runId?: string;
+    },
 ): SessionLogRecord | null {
+    // A different run: the stored one moves to `runs` whole — projection and raw samples together —
+    // and the new run starts clean. Merging its raw arrays onto the old ones would pair one run's
+    // `data` with another run's `inertia`.
+    if (incoming.runId !== undefined && prior && prior.runId !== incoming.runId && holdsSamples(prior)) {
+        const kept: StoredRun = { runId: prior.runId, data: prior.data };
+        if (prior.inertia?.length) kept.inertia = prior.inertia;
+        if (prior.idle?.length) kept.idle = prior.idle;
+        if (prior.lls?.length) kept.lls = prior.lls;
+        const next: SessionLogRecord = {
+            sessionId,
+            runId: incoming.runId,
+            data: incoming.data ?? [],
+            runs: [...(prior.runs ?? []), kept],
+        };
+        if (prior.egas) next.egas = prior.egas;
+        if (incoming.inertia?.length) next.inertia = incoming.inertia;
+        if (incoming.idle?.length) next.idle = incoming.idle;
+        if (incoming.lls?.length) next.lls = incoming.lls;
+        return next;
+    }
     const merged: SessionLogRecord = {
         ...prior,
         sessionId,
         data: incoming.data ?? prior?.data ?? [],
     };
+    if (incoming.runId !== undefined) merged.runId = incoming.runId;
     if (incoming.inertia?.length) merged.inertia = incoming.inertia;
     if (incoming.idle?.length) merged.idle = incoming.idle;
     if (incoming.lls?.length) merged.lls = incoming.lls;
-    const holdsNothing = merged.data.length === 0
-        && !merged.inertia?.length && !merged.idle?.length && !merged.lls?.length;
-    return holdsNothing ? null : merged;
+    return holdsSamples(merged) || merged.runs?.length ? merged : null;
+}
+
+/** Whether the record's current run holds any samples of any kind. */
+function holdsSamples(r: SessionLogRecord): boolean {
+    return r.data.length > 0 || !!r.inertia?.length || !!r.idle?.length || !!r.lls?.length;
+}
+
+/** How many runs a stored log holds: the earlier ones and, when it holds anything, the current one. */
+export function runCount(record: SessionLogRecord | null | undefined): number {
+    if (!record) return 0;
+    return (record.runs?.length ?? 0) + (holdsSamples(record) ? 1 : 0);
 }
 
 export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
@@ -235,7 +273,6 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             // conditional spread would let a previous log's rate survive a re-save with a new one.
             averageHz: sampleRateHz(input.log ?? []),
         };
-        store.put(updated);
 
         const binStore = tx.objectStore(SESSION_BINARIES_STORE);
         const bins = await promisify<SessionBinariesRecord | undefined>(binStore.get(input.sessionId));
@@ -249,9 +286,11 @@ export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
             // only copy an estimator can read and cannot be reconstructed from `data`.
             const logStore = tx.objectStore(SESSION_LOGS_STORE);
             const prior = await promisify<SessionLogRecord | undefined>(logStore.get(input.sessionId));
-            const record = nextLogRecord(input.sessionId, prior, { data: input.log! });
+            const record = nextLogRecord(input.sessionId, prior, { data: input.log!, runId: input.runId });
             if (record) logStore.put(record);
+            updated.logRuns = runCount(record);
         }
+        store.put(updated);
         await txDone(tx);
         return updated;
     });
@@ -290,6 +329,8 @@ export async function saveResearchRun(input: {
     /** The unprojected samples, when this is a micro-throttle run. Same rule again, plus road
      *  speed: without it the stopped head and tail of the log cannot be dropped. */
     lls?: LlsSample[];
+    /** The run this is (`SessionLogRecord.runId`); see `SaveTuneInput.runId`. */
+    runId?: string;
 }): Promise<TuningSession> {
     return withDb(async db => {
         const tx = db.transaction([SESSIONS_STORE, SESSION_LOGS_STORE], 'readwrite');
@@ -304,7 +345,6 @@ export async function saveResearchRun(input: {
             logPointCount: input.log.length,
             averageHz: sampleRateHz(input.log),
         };
-        store.put(updated);
         // Written whenever there is EITHER kind of sample, and deliberately not nested inside a
         // `log.length` guard. The two arrays fail independently — a projection that produced
         // nothing must not be allowed to discard the raw samples, which are the only copy the
@@ -312,9 +352,11 @@ export async function saveResearchRun(input: {
         const logStore = tx.objectStore(SESSION_LOGS_STORE);
         const prior = await promisify<SessionLogRecord | undefined>(logStore.get(input.sessionId));
         const record = nextLogRecord(input.sessionId, prior, {
-            data: input.log, inertia: input.inertia, idle: input.idle, lls: input.lls,
+            data: input.log, inertia: input.inertia, idle: input.idle, lls: input.lls, runId: input.runId,
         });
         if (record) logStore.put(record);
+        updated.logRuns = runCount(record ?? prior);
+        store.put(updated);
         await txDone(tx);
         return updated;
     });

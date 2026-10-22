@@ -334,6 +334,14 @@ export default function Home() {
   const [observePlan, setObservePlan] = useState<ObservePlan>(EMPTY_PLAN);
   /** Labels waiting for the next sample — see markNow. */
   const pendingMarksRef = useRef<string[]>([]);
+  /**
+   * Which run the workspace log is (`SessionLogRecord.runId`): a fresh id when a recording starts or
+   * a CSV is read, the stored id when a session is opened, none when there is no log.
+   *
+   * What SAVE hands the store so it can tell a re-save from a new run. Without it the second START in
+   * a session wrote over the first run at the next SAVE — #982 lost its first run that way.
+   */
+  const workspaceRunIdRef = useRef<string | undefined>(undefined);
   const connectedVin = dmeLink.identity?.vin ?? null;
   useEffect(() => {
     setVerifyMode(initialVerifyMode(connectedVin));
@@ -862,6 +870,7 @@ export default function Home() {
     veCalc.reset();
     logFileState.clear();
     liveRun.reset();
+    workspaceRunIdRef.current = undefined;
     // The workspace this move was armed for is going away, so the move has to go with it — otherwise
     // it fires later against whatever gets loaded next.
     pendingTabRef.current = null;
@@ -938,6 +947,7 @@ export default function Home() {
 
   const handleLogUpload = async (file: File) => {
     const processed = await logFileState.parseAndSetLog(file);
+    if (processed) workspaceRunIdRef.current = crypto.randomUUID();
     if (processed && currentMap) {
       runCalculation(currentMap, processed);
       goToTab('diff'); // jump to the result only on the initial CSV load
@@ -1074,6 +1084,7 @@ export default function Home() {
     if (confirm(dialogText().clearLog)) {
       logFileState.clear();
       veCalc.reset();
+      workspaceRunIdRef.current = undefined;
       if (activeTab === 'log' || activeTab === 'new' || activeTab === 'diff' || activeTab === 'lambda') {
         goToTab('current');
       }
@@ -1246,10 +1257,14 @@ export default function Home() {
     downloadBlob(bins.tunedBinaryBuffer, session.binaryFileName ?? `${fileSafe(session.label)}_TUNED.bin`, MIME_BIN);
   };
 
-  const handleDownloadSessionLog = async (session: TuningSession) => {
-    const points = await sessionDb.loadLog(session.id);
+  /** `run` is 1-based over the stored runs, the current one last; omitted, the current run. */
+  const handleDownloadSessionLog = async (session: TuningSession, run?: number) => {
+    const record = await sessionDb.loadLogRecord(session.id);
+    const earlier = record?.runs ?? [];
+    const points = run === undefined || run === earlier.length + 1 ? record?.data : earlier[run - 1]?.data;
     if (!points?.length) { alert(dialogText().noStoredLog); return; }
-    downloadBlob(serializeLogFile(points), `${fileSafe(session.label)}_log.csv`, MIME_CSV);
+    const name = run === undefined ? `${fileSafe(session.label)}_log.csv` : `${fileSafe(session.label)}_run${run}_log.csv`;
+    downloadBlob(serializeLogFile(points), name, MIME_CSV);
   };
 
   const syncStatus = sync.status;
@@ -2466,7 +2481,11 @@ export default function Home() {
 
     let rebuilt = false;
     if (session.hasLog) {
-      const rawLog = await sessionDb.loadLog(session.id);
+      // The record rather than the projection, for its run id: a SAVE of this log is a re-save, and
+      // a START from here keeps it as an earlier run.
+      const record = await sessionDb.loadLogRecord(session.id);
+      const rawLog = record?.data;
+      workspaceRunIdRef.current = record?.runId;
       if (rawLog && rawLog.length > 0) {
         // The bytes AS THE DME RAN THEM, which is not the BASE. This log was captured against a car
         // carrying whatever `armed` says: the full-load gate reads a table WRITE PATCH-ON rewrites
@@ -2651,6 +2670,8 @@ export default function Home() {
     // Adopted as the run's buffer, so a later flush appends to this drive rather than starting a
     // second one beside it.
     liveRun.adopt(points);
+    // A run that never reached the store: its recovery id is its run id.
+    workspaceRunIdRef.current = runId;
     /* Gates passed explicitly, same stale-scope reason as the rebuild in handleOpenSession: the
        effect that pushes `lambdaLimits` into the hook has not run in this scope, so without this the
        recovered drive would be filtered through the OUTGOING session's binary. Both gates — the
@@ -2816,6 +2837,7 @@ export default function Home() {
           tunedBinaryBuffer: patched,
           tuneSettings: buildSettings(),
           log: logFileState.rawLogData,
+          runId: workspaceRunIdRef.current,
         });
         // `saveSessionTune` stores the log but not what KIND of run it was, and
         // this branch now runs in front of `saveResearch` — which was the only
@@ -2840,6 +2862,7 @@ export default function Home() {
         sessionId: target.id,
         process: logProcess,
         log: logFileState.rawLogData,
+        runId: workspaceRunIdRef.current,
       });
       // What makes the cell read SAVED. This path has no dialog of its own — the tune path asks
       // whether to stay in the session, this one has nothing to ask — so before this it was the
@@ -2862,6 +2885,7 @@ export default function Home() {
       veMapSnapshot: newMap,
       tuneSettings: buildSettings(),
       log: logFileState.rawLogData,
+      runId: workspaceRunIdRef.current,
     });
 
     // `target.id` rather than the render's own: ensureDraft may have just created the session this
@@ -3107,6 +3131,23 @@ export default function Home() {
     // OBSERVE's watched reads go on after the gate and the narrowing, like any read the profile does
     // not describe: the plan is checked above, and the link checks every window again.
     const exchanges = logProcess === 'OBSERVE' ? [...verified, ...watchExchanges(observePlan)] : verified;
+    // The run already on screen is KEPT before this one replaces it in memory. A second START in a
+    // session used to write over the first run — in memory here, in the recovery store below, and
+    // in the session at the next SAVE — which is how #982 lost its first run. Stored as the
+    // session's current run (a re-save when it is already there), so the next SAVE moves it to
+    // `runs`. Refused rather than risked: if it cannot be kept, nothing starts.
+    if (currentSession && !isArchived && logFileState.rawLogData?.length) {
+      try {
+        await sessionDb.saveResearch({
+          sessionId: currentSession.id, process: logProcess,
+          log: logFileState.rawLogData, runId: workspaceRunIdRef.current,
+        });
+      } catch {
+        alert(dialogText().keepRunFailed);
+        return;
+      }
+    }
+    workspaceRunIdRef.current = crypto.randomUUID();
     // What the run is for, on its first sample, so the log explains itself without the plan beside it.
     pendingMarksRef.current = logProcess === 'OBSERVE' ? [planMark(observePlan)] : [];
     liveExchangesRef.current = exchanges;
@@ -3745,6 +3786,8 @@ export default function Home() {
     logFileState.clear();
     veCalc.reset();
     liveRun.reset();
+    // Only the run on screen goes. A run kept at START is already in the session and stays there.
+    workspaceRunIdRef.current = undefined;
     // Throwing the run away is a decision, so the recovery copy goes too — otherwise the next load
     // would offer back the very drive the user just chose to redo.
     void discardLiveRun().catch(() => { });
@@ -4008,7 +4051,7 @@ export default function Home() {
     },
     sessions: () => sessionDb.sessions.map(s => ({
       id: s.id, seq: s.seq, label: s.label, status: s.status, createdAt: s.createdAt,
-      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
+      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, logRuns: s.logRuns, mode: s.process ?? 'VE',
       open: s.id === currentSession?.id,
     })),
     // Opening replaces the workspace, so the assistant may do it only where nothing can be lost or
@@ -4139,7 +4182,7 @@ export default function Home() {
     },
     syncPending: () => sync.pending.map(s => ({
       id: s.id, seq: s.seq, label: s.label, status: s.status, createdAt: s.createdAt,
-      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, mode: s.process ?? 'VE',
+      hasBase: !!s.baseOrigin, hasLog: s.hasLog, logPoints: s.logPointCount, logRuns: s.logRuns, mode: s.process ?? 'VE',
       open: s.id === currentSession?.id,
     })),
     syncUpload: (overwrite) => sync.syncAll(overwrite),
