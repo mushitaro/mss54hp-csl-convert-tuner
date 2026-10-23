@@ -271,9 +271,12 @@ export function notebookLine(entries: readonly NotebookEntry[], run: number | nu
         parts.push(forked ? `PLAN v${plan.body.v} ×2` : `PLAN v${plan.body.v}`);
         const total = plan.body.steps.length;
         if (total) {
-            const done = stepsDone(entries, run);
-            const next = plan.body.steps.find(s => !done.has(s.n))?.n ?? total;
-            parts.push(`STEP ${done.size >= total ? total : next}/${total}`);
+            // How many steps are done, in any order — not "the next one": steps are not cleared in
+            // sequence (steps.ts). A step is done when marked as often as it asks for.
+            const counts = new Map<number, number>();
+            for (const e of entries) if (e.body.kind === 'step' && e.body.run === run) counts.set(e.body.n, (counts.get(e.body.n) ?? 0) + 1);
+            const done = plan.body.steps.filter(s => (counts.get(s.n) ?? 0) >= (s.times ?? 1)).length;
+            parts.push(`STEPS ${done}/${total}`);
         }
     }
     const asks = openAsks(entries).length;

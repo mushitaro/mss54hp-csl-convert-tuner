@@ -58,7 +58,7 @@ interface Props {
     baseOrigin?: React.ReactNode;
     logName?: string;
     logPoints?: number;
-    /** The session's notebook in a line — `PLAN v3 · STEP 2/4 · ASK 2` — or null when it holds
+    /** CO-WORK in a line — `PLAN v3 · STEPS 2/4 · ASK 2` — or null when it holds
      *  nothing yet. Omitted (undefined) where the notebook is not part of the build, and then the
      *  line is not drawn at all; within one build it is always drawn, so the band keeps its height. */
     notebook?: string | null;
@@ -186,7 +186,7 @@ const READOUT_COLUMN = 'w-[min(15rem,100%)] mx-auto';
  */
 const Field: React.FC<{ label: string; children?: React.ReactNode }> = ({ label, children }) => (
     <div className="flex items-baseline gap-3 py-1 [@media(max-height:560px)]:py-0.5">
-        <span className="w-10 shrink-0 text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+        <span className="w-14 shrink-0 whitespace-nowrap text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">
             {children ?? <span className="text-slate-700">—</span>}
         </span>
@@ -516,7 +516,7 @@ export const MobileMenu: React.FC<Props> = ({
                                 )}
                             </Field>
                             {notebook !== undefined && (
-                                <Field label="Note">
+                                <Field label="CO-WORK">
                                     {notebook && (
                                         <span className="truncate text-[10px]">
                                             {notebook.split(' · ').map((part, i) => (

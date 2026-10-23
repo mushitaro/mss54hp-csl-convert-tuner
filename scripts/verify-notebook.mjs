@@ -22,6 +22,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { entryProblem, mergeEntries, currentPlan, nextPlanVersion, statusOf, openAsks, stepsDone, lastNote, notebookLine } from '../src/lib/notebook/rules.ts';
+import { stepCounts, stepDone, stepHolds, liveHold, stepGears, checkable } from '../src/lib/notebook/steps.ts';
 import { planEntryFromObserve, observeFromPlanEntry, samePlan } from '../src/lib/notebook/observePlan.ts';
 import { sessionFingerprint } from '../src/lib/session-sync/client.ts';
 import { onRequestGet, onRequestPost } from '../functions/api/sessions/[id]/notebook.ts';
@@ -234,7 +235,7 @@ console.log('\n[the page and the sync client]');
         ['sessionEntries', 'unsentEntries', 'deleteSessionEntries'].every(f => new RegExp(`function ${f}[\\s\\S]{0,120}notebookDbExists\\(\\)`).test(store)));
 }
 
-console.log('\n[what the screens read: the strip, the plan\'s ticks, the menu\'s line]');
+console.log('\n[what the screens read: the step board, the menu\'s line]');
 {
     const p1 = e('desk', { kind: 'plan', v: 1, purpose: 'v1', steps: [{ n: 1, do: 'a' }, { n: 2, do: 'b' }, { n: 3, do: 'c' }] }, 10);
     const p2 = e('chat', { kind: 'plan', v: 2, re: p1.id, purpose: 'v2 chat', steps: [{ n: 1, do: 'a' }] }, 20);
@@ -251,9 +252,11 @@ console.log('\n[what the screens read: the strip, the plan\'s ticks, the menu\'s
     check('...and none for a run with no workspace', stepsDone([s1], null).size === 0);
     const n1 = e('driver', { kind: 'note', run: 6, t: 20, text: 'first', via: 'voice' }, 50);
     const n2 = e('owner', { kind: 'note', run: null, t: null, text: 'last', via: 'screen' }, 60);
-    check('the strip shows the last note', lastNote([n1, n2])?.id === n2.id);
+    check('the last note is the latest written', lastNote([n1, n2])?.id === n2.id);
     const ask = e('desk', { kind: 'ask', to: 'driver', text: 'q' }, 70);
-    check('the menu\'s line: plan, step, questions', notebookLine([p1, p2, p2b, chose, s1, ask], 6) === 'PLAN v2 · STEP 2/3 · ASK 1', notebookLine([p1, p2, p2b, chose, s1, ask], 6));
+    check('the menu\'s line: plan, steps done (any order), questions', notebookLine([p1, p2, p2b, chose, s1, ask], 6) === 'PLAN v2 · STEPS 1/3 · ASK 1', notebookLine([p1, p2, p2b, chose, s1, ask], 6));
+    const s3 = e('chat', { kind: 'step', run: 6, t: 50, n: 3 }, 45);
+    check('...counting a step done out of order', notebookLine([p1, p2, p2b, chose, s3], 6) === 'PLAN v2 · STEPS 1/3', notebookLine([p1, p2, p2b, chose, s3], 6));
     check('...says a fork', /PLAN v2 ×2/.test(notebookLine([p1, p2, p2b], 6) ?? ''));
     check('...and nothing for an empty notebook', notebookLine([], 1) === null);
 }
@@ -262,26 +265,62 @@ console.log('\n[the screens]');
 {
     const src = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
     const page = src('../src/app/page.tsx');
-    check('the DASH strip is drawn whenever the notebook is on, session or not — it never comes and goes',
-        /\{notebookOn && \(\s*<NotebookStrip/.test(page));
-    const strip = src('../src/components/NotebookStrip.tsx');
-    check('...in a fixed 40px', strip.includes('h-[40px] flex-none'));
-    check('...and its step line is DONE only while a log records', strip.includes('const canMark = recording && !!next && !forked'));
+    check('nothing of CO-WORK sits in the hub area: the strip that asked a passenger to tap is gone',
+        !page.includes('NotebookStrip') && !page.includes('onStepDone'));
+    check('CO-WORK shows on DASH\'s upper area, over the tab\'s picture and under the live strip',
+        /\{graphOnScreen && coworkOnScreen && \(\s*<div className=\{`absolute inset-0 z-10/.test(page)
+        && page.indexOf('<LiveTelemetryStrip') < page.indexOf('<CoworkDisplay'));
+    check('...what the assistant chose, while it holds for that session and tab, else the board on the CO-WORK tab',
+        page.includes('coworkDisplay && coworkDisplay.sessionId === currentSession.id && coworkDisplay.tab === activeTab ? coworkDisplay')
+        && page.includes("activeTab === 'cowork' ? { view: 'steps' as const"));
+    check('...set only through the assistant (tuner_display), never a control on the screen',
+        (page.match(/setCoworkDisplay\(/g) ?? []).length === 3 && page.includes('display: (view, opts) =>'));
     const mark = page.slice(page.indexOf('const markNow = ('), page.indexOf('const jumpToLogTime'));
     check('a step marked done becomes a notebook entry on this run', mark.includes("kind: 'step', run, t:") && mark.includes('workspaceRunRef.current'));
     check('...written as the assistant\'s when the assistant marked it', page.includes("mark: (label: string) => markNow(label, 'chat')"));
     check('the log chart is given the marks', page.includes('marks={chartMarks}'));
     check('...the driver\'s notes on the run the log views show among them (an earlier one when it is shown)',
         /e\.body\.kind === 'note' && e\.body\.run === markedRun/.test(page) && page.includes('const markedRun = viewedRun ?? workspaceRun;'));
-    check('the M menu carries the notebook\'s line where the notebook is on', page.includes('notebook={notebookOn ? notebookLine(notebook.entries, workspaceRun) : undefined}'));
+    check('the M menu carries CO-WORK\'s line where it is on', page.includes('notebook={notebookOn ? notebookLine(notebook.entries, workspaceRun) : undefined}')
+        && src('../src/components/MobileMenu.tsx').includes('<Field label="CO-WORK">'));
     const chart = src('../src/components/LogTimeSeriesChart.tsx');
     check('the chart draws only the marks inside the window', /marks\.filter\(m => m\.t >= first && m\.t <= last\)/.test(chart));
     check('...and a tap on a label opens its words', chart.includes('captureevents: true') && chart.includes('onClickAnnotation'));
-    const panel = src('../src/components/NotebookPanel.tsx');
-    check('NOTEBOOK takes no note while a log records', panel.includes('{!recording && <NoteInput'));
-    check('...and answers are closed then too', panel.includes('disabled={recording} onAnswer'));
-    check('...and a fork is chosen by setting the others aside', /heads\.filter\(h => h\.id !== keep\)[\s\S]{0,120}to: 'withdrawn'/.test(panel));
-    check('a note on the screen is the owner\'s, by the screen', panel.includes("by: 'owner', body: { kind: 'note', run: null, t: null, text, via: 'screen' }"));
+    const panel = src('../src/components/CoworkPanel.tsx');
+    check('the CO-WORK tab writes nothing: no input, no answer, no plan form, no choosing on the screen',
+        !/<textarea|<input|onAdd|notebook\.add|entryProblem/.test(panel));
+    check('...and says that answers and choices go to the assistant', panel.includes('answerByVoice') && panel.includes('Tell the assistant which to drive by'));
+    check('...and draws the same step board as DASH', panel.includes('<StepBoard steps={body.steps} counts={counts} />'));
+    const display = src('../src/components/CoworkDisplay.tsx');
+    check('the values view knows a value by the name tuner_moment\'s rows use (coolant, egt …), before anything else',
+        display.includes("import { COLUMNS } from '@/lib/bridge/moment'") && /resolveChannel[\s\S]{0,400}COLUMNS\.find/.test(display));
+}
+
+console.log('\n[steps: any order, counted, and where the log shows them held]');
+{
+    const step = { n: 2, do: 'hold', gear: '4/5', rpm: [2400, 2800], ro: [6, 8], holdS: 3, times: 2 };
+    check('a step names its gears', JSON.stringify(stepGears(step)) === '[4,5]' && stepGears({ n: 1, do: 'x' }).length === 0);
+    check('...and one that names nothing is done on the driver\'s word, never found in the data', !checkable({ n: 1, do: 'warm up' }) && stepHolds([{ time: 0, rpm: 2500, rawLoad: 7 }], { n: 1, do: 'warm up' }).length === 0);
+    const at = (t, rpm, ro, gear) => ({ time: t, rpm, rawLoad: ro, correctedLoad: ro, ...(gear ? { gear } : {}) });
+    const run = [
+        at(0, 2000, 5, 4), at(0.5, 2500, 7), at(1, 2550, 7), at(1.5, 2600, 7.5), at(2, 2600, 7.5), at(2.5, 2650, 7.2), at(3, 2650, 7.1), at(3.5, 2700, 7.0),
+        at(4, 3100, 9), at(4.5, 2500, 7), at(5, 2500, 7),
+        at(8, 2500, 7), at(8.5, 2500, 7), at(9, 2550, 7), at(9.5, 2550, 7), at(10, 2550, 7), at(10.5, 2600, 7), at(11, 2600, 7), at(11.5, 2600, 7),
+    ];
+    const holds = stepHolds(run, step);
+    check('a hold is found where gear, rpm and RO all held for the step\'s seconds', holds.length === 2 && holds[0].from === 0.5 && holds[0].to === 3.5, JSON.stringify(holds));
+    check('...a short stay is not one, and a gap in the samples breaks a stretch', holds[1].from === 8 && holds[1].to === 11.5, JSON.stringify(holds));
+    check('...with the gear carried forward from the last sample that read it', stepHolds(run.map(p => ({ ...p, gear: undefined })).map((p, i) => i === 0 ? { ...p, gear: 3 } : p), step).length === 0);
+    check('RO is the corrected opening the VE map reads, where the log has it', stepHolds([at(0, 2500, 7, 4), at(1, 2500, 7), at(2, 2500, 7), at(3, 2500, 7)].map(p => ({ ...p, rawLoad: 20 })), step).length === 1);
+    const live = liveHold(run.slice(0, 8), step);
+    check('the live target reads the latest values, and how long they have held', live.inBand && live.seconds === 3 && live.gear === 4 && live.rpm === 2700, JSON.stringify(live));
+    const marks = [
+        e('chat', { kind: 'step', run: 3, t: 40, n: 5 }, 1), e('chat', { kind: 'step', run: 3, t: 10, n: 2 }, 2),
+        e('chat', { kind: 'step', run: 3, t: 60, n: 2 }, 3), e('chat', { kind: 'step', run: 2, t: 5, n: 2 }, 4),
+    ];
+    const counts = stepCounts(marks, 3);
+    check('steps are counted in any order, every mark, this run only', counts.get(5) === 1 && counts.get(2) === 2 && counts.size === 2);
+    check('...and a step is done when marked as often as it asks', stepDone(step, counts) && !stepDone({ ...step, n: 5, times: 3 }, counts) && stepDone({ n: 5, do: 'x' }, counts));
 }
 
 console.log('\n[the desk: npm run notebook]');

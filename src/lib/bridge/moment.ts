@@ -75,7 +75,10 @@ export interface Moment {
     notes: string[];
 }
 
-const COLUMNS: { name: string; get: (p: LogDataPoint) => number | undefined; digits: number }[] = [
+/** The columns of a moment's rows, by the names the assistant reads them under. CO-WORK's values view
+ *  (tuner_display) shows a column by the same name, so a name the assistant saw in a row is one it
+ *  can put on the screen. */
+export const COLUMNS: { name: string; get: (p: LogDataPoint) => number | undefined; digits: number }[] = [
     { name: 'rpm', get: p => p.rpm, digits: 0 },
     { name: 'aq_rel', get: p => p.rawLoad, digits: 2 },
     { name: 'wdk', get: p => p.wdk1, digits: 1 },

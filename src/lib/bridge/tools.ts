@@ -55,14 +55,15 @@ import {
     stepMark, watchKey, type ObservePlan,
 } from '@/lib/log-engine/observe';
 import {
-    currentPlan, nextPlanVersion, openAsks, statusOf, stepsDone,
+    currentPlan, nextPlanVersion, openAsks, statusOf,
     type Evidence, type NotebookAuthor, type NotebookBody, type NotebookEntry, type PlanStep, type PlanWatch,
 } from '@/lib/notebook/rules';
 import { observeFromPlanEntry } from '@/lib/notebook/observePlan';
+import { stepCounts, stepDone, stepHolds } from '@/lib/notebook/steps';
 
 export const TOOL_NAMES = [
     'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_plan', 'tuner_mark',
-    'tuner_note', 'tuner_finding', 'tuner_notebook',
+    'tuner_note', 'tuner_finding', 'tuner_cowork', 'tuner_display',
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
     'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
     'tuner_new_session', 'tuner_discard_edits', 'tuner_ram',
@@ -234,6 +235,12 @@ export interface TabFacade {
     notebookAdd?(items: { by: NotebookAuthor; body: NotebookBody }[]): Promise<readonly NotebookEntry[]>;
     /** The samples of one run of the open session, read from the device; null when there is no such run. */
     runSamples?(run: number): Promise<readonly LogDataPoint[] | null>;
+    /** The run on screen as the analysis reads it (filtered, with the corrected RO), for where a
+     *  step's conditions held; null when no log is on screen. */
+    runRows?(): readonly LogDataPoint[] | null;
+    /** Puts a view on DASH's upper area — what the assistant chose to show the driver — or ('off')
+     *  gives it back to the tab. Null when done, else why not. */
+    display?(view: 'target' | 'steps' | 'values' | 'graph' | 'off', opts?: { step?: number; channels?: string[] }): string | null;
 }
 
 export type Handler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -880,7 +887,7 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 return {
                     plan: plan ? planBrief(plan) : null,
                     ...(forked ? { fork: heads.map(planBrief), note: 'Two rewrites of one plan are open. Put both to the driver and let them choose (tuner_finding kind status, to withdrawn, on the other); never pick.' } : {}),
-                    stepsDone: Object.fromEntries(stepsDone(book.entries, book.run)),
+                    stepsDone: Object.fromEntries(stepCounts(book.entries, book.run)),
                     ...(plan ? {} : { note: 'No plan yet. Write one with purpose and steps once the owner agrees to it.' }),
                 };
             }
@@ -977,7 +984,7 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     // An answer to a question put to the driver is the driver's words, relayed.
                     const book = await f.notebook();
                     const ask = book.entries.find(e => e.id === re);
-                    if (!ask || ask.body.kind !== 'ask') throw new Error(`No question with id "${re}". tuner_notebook lists the open ones.`);
+                    if (!ask || ask.body.kind !== 'ask') throw new Error(`No question with id "${re}". tuner_cowork lists the open ones.`);
                     if (ask.body.to === 'driver' || ask.body.to === 'owner') by = 'driver';
                     body = { kind: 'answer', re, text: words };
                     break;
@@ -996,10 +1003,22 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             };
         },
 
-        tuner_notebook: async (args) => {
-            if (!f.notebook) throw new Error('This build has no notebook.');
+        tuner_cowork: async (args) => {
+            if (!f.notebook) throw new Error('This build has no CO-WORK.');
             const book = await f.notebook({ fetch: true });
             const { plan, heads, forked } = currentPlan(book.entries);
+            // Each step of the plan against the run on screen: how often it is marked done (any order),
+            // and where the log shows its conditions held — candidates for the assistant to judge and
+            // mark (tuner_mark with at_log_time), never marked by the tab itself.
+            const counts = stepCounts(book.entries, book.run);
+            const rows = f.runRows?.() ?? null;
+            const steps = plan?.body.kind === 'plan' ? plan.body.steps.map(st => {
+                const holds = rows ? stepHolds(rows, st) : [];
+                return {
+                    n: st.n, do: st.do, done: counts.get(st.n) ?? 0, of: st.times ?? 1, complete: stepDone(st, counts),
+                    ...(holds.length ? { candidates: holds.slice(-8) } : {}),
+                };
+            }) : [];
             const only = num(args.run);
             const limit = Math.min(Math.max(Math.trunc(num(args.limit) ?? 60), 1), 200);
             const shown = book.entries
@@ -1010,15 +1029,44 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 runs: book.runs,
                 plan: plan ? planBrief(plan) : null,
                 ...(forked ? { fork: heads.map(planBrief), forkNote: 'Two rewrites of one plan are open: put both to the driver, never pick.' } : {}),
-                stepsDone: Object.fromEntries(stepsDone(book.entries, book.run)),
+                steps,
                 openQuestions: openAsks(book.entries).map(e => entryBrief(e, book.entries)),
                 entries: shown.slice(-limit).map(e => entryBrief(e, book.entries)),
-                ...(book.entries.length === 0 ? { note: 'Nothing written in this session\'s notebook yet.' } : {}),
+                ...(book.entries.length === 0 ? { note: 'Nothing written in this session\'s CO-WORK yet.' } : {}),
             };
         },
 
+        tuner_display: async (args) => {
+            if (!f.display) throw new Error('This build cannot show CO-WORK.');
+            const view = typeof args.view === 'string' ? args.view.trim().toLowerCase() : '';
+            if (!['target', 'steps', 'values', 'graph', 'off'].includes(view)) throw new Error('view is target, steps, values, graph or off.');
+            const step = num(args.step);
+            const channels = Array.isArray(args.channels) ? args.channels.map(c => text(c, 40)).filter((c): c is string => !!c).slice(0, 6) : undefined;
+            const refused = f.display(view as 'target' | 'steps' | 'values' | 'graph' | 'off', { ...(step !== undefined ? { step } : {}), ...(channels ? { channels } : {}) });
+            if (refused) throw new Error(refused);
+            return { showing: view === 'off' ? 'the tab\'s own picture' : view, ...(step !== undefined ? { step } : {}), ...(channels ? { channels } : {}) };
+        },
+
         tuner_mark: async (args) => {
-            if (!f.running()) return { marked: false, reason: 'No log is recording.' };
+            // A step done earlier — found afterwards in the data (tuner_cowork's candidates) or in the
+            // driver's words — goes into CO-WORK on the run's clock. No mark goes into the log for it:
+            // the sample is past. Steps are marked in any order, as often as they happen.
+            const at = num(args.at_log_time);
+            if (at !== undefined) {
+                if (!f.notebook || !f.notebookAdd) throw new Error('This build has no CO-WORK.');
+                const n = num(args.step);
+                if (n === undefined) throw new Error('at_log_time marks a step done: give step as well.');
+                const book = await f.notebook();
+                const { plan } = currentPlan(book.entries);
+                if (!plan || plan.body.kind !== 'plan') throw new Error('There is no plan in CO-WORK to mark a step of.');
+                const st = plan.body.steps.find(x => x.n === n);
+                if (!st) throw new Error(`No step ${n}: the plan has steps 1 to ${plan.body.steps.length}.`);
+                if (book.run === null) throw new Error('No run is on screen to mark a step in.');
+                const added = await f.notebookAdd([{ by: 'chat', body: { kind: 'step', run: book.run, t: Math.max(0, at), n } }]);
+                const counts = stepCounts([...book.entries, ...added], book.run);
+                return { marked: true, step: n, run: book.run, at_log_time: at, done: counts.get(n) ?? 0, of: st.times ?? 1, complete: stepDone(st, counts) };
+            }
+            if (!f.running()) return { marked: false, reason: 'No log is recording. To mark a step done after the fact, give step and at_log_time.' };
             // The steps of the notebook's plan when there is one — a VE drive has a plan too — and the
             // OBSERVE screen's otherwise. They are the same steps when the plan has addresses.
             const book = f.notebook ? await f.notebook().catch(() => null) : null;

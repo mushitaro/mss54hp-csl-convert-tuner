@@ -167,7 +167,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the twenty-two tools', TOOL_NAMES.length === 22 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the twenty-three tools', TOOL_NAMES.length === 23 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -728,7 +728,10 @@ console.log('\n[the notebook through the bridge: the driver\'s words, findings, 
             return made;
         },
         runSamples: async run => (run === 1 ? Array.from({ length: 30 }, (_, i) => ({ time: i, rpm: 1500, rawLoad: 5, wdk1: 0, stft1: 1, stft2: 1, pwg1: 44 })) : null),
+        runRows: () => pts.map(p => ({ ...p, correctedLoad: 7, gear: 4 })),
+        display: (view, opts) => { shown.push({ view, ...opts }); return view === 'values' && !opts?.channels?.length ? 'Name the values to show.' : null; },
     };
+    const shown = [];
     const h = bridgeHandlers(f);
 
     running = true;
@@ -754,13 +757,44 @@ console.log('\n[the notebook through the bridge: the driver\'s words, findings, 
     const counter = await h.tuner_finding({ kind: 'read', text: 'pedal stayed at 44 %: a shift, not a lift', sure: 'high', re: claim.id });
     check('a reading that disagrees points at the other, which stays', /DISPUTED/.test(counter.note ?? '') && book.some(e => e.id === claim.id), JSON.stringify(counter));
     const q = await h.tuner_finding({ kind: 'ask', to: 'driver', text: 'アクセルは戻しましたか', about: { run: 1, from: 2, to: 4, channels: ['pwg1'] } });
-    const nb = await h.tuner_notebook({});
-    check('tuner_notebook lists the open question, and the disputed reading as disputed',
+    const nb = await h.tuner_cowork({});
+    check('tuner_cowork lists the open question, and the disputed reading as disputed',
         nb.openQuestions.length === 1 && nb.openQuestions[0].id === q.id && nb.entries.find(e => e.id === claim.id)?.status === 'disputed', JSON.stringify(nb.openQuestions));
     check('...and which run is on screen out of how many', nb.runOnScreen === 2 && nb.runs === 2);
     const ans = await h.tuner_finding({ kind: 'answer', re: q.id, text: '戻していない。変速した' });
     check('the driver\'s answer to a question put to the driver is written as the driver\'s', ans.written === 'answer' && book.at(-1).by === 'driver', JSON.stringify(book.at(-1)));
-    check('...and the question is no longer open', (await h.tuner_notebook({})).openQuestions.length === 0);
+    check('...and the question is no longer open', (await h.tuner_cowork({})).openQuestions.length === 0);
+
+    // CO-WORK's steps: marked by the assistant in any order, from the data's candidates.
+    book.push({ id: 'plan-0000-cowork', sessionId: 'session-0001', at: 900, by: 'desk', body: { kind: 'plan', v: 1, purpose: 'holds', steps: [
+        { n: 1, do: 'warm up' },
+        { n: 2, do: 'hold 4th', gear: '4', rpm: [2000, 2400], ro: [6, 8], holdS: 5, times: 2 },
+    ] } });
+    const cw = await h.tuner_cowork({});
+    const s2 = cw.steps.find(x => x.n === 2);
+    check('tuner_cowork gives each step how often it is done, and where the data shows it held',
+        s2 && s2.done === 0 && s2.of === 2 && s2.candidates?.length === 1 && s2.candidates[0].from === 0 && !cw.steps.find(x => x.n === 1).candidates, JSON.stringify(cw.steps));
+    const later = await h.tuner_mark({ step: 2, at_log_time: s2.candidates[0].to });
+    check('a step is marked done after the fact, at its moment, by the assistant — with no log recording',
+        later.marked && later.done === 1 && later.of === 2 && !later.complete && book.at(-1).body.kind === 'step' && book.at(-1).by === 'chat' && book.at(-1).body.t === s2.candidates[0].to, JSON.stringify(later));
+    const first = await h.tuner_mark({ step: 1, at_log_time: 0 });
+    check('...in any order: step 1 after step 2', first.marked && first.complete, JSON.stringify(first));
+    err = null;
+    try { await h.tuner_mark({ step: 9, at_log_time: 1 }); } catch (e) { err = e.message; }
+    check('...and a step the plan does not have is refused', /No step 9/.test(err ?? ''), err);
+    const notNow = await h.tuner_mark({ step: 2 });
+    check('without at_log_time, a mark still needs a log recording', notNow.marked === false && /at_log_time/.test(notNow.reason), JSON.stringify(notNow));
+    const tgt = await h.tuner_display({ view: 'target', step: 2 });
+    check('tuner_display puts a step\'s target on the screen', tgt.showing === 'target' && shown.at(-1).view === 'target' && shown.at(-1).step === 2, JSON.stringify(shown.at(-1)));
+    const vals = await h.tuner_display({ view: 'values', channels: ['stft1', 'stft2', '  '] });
+    check('...or the values named, blanks dropped', JSON.stringify(shown.at(-1).channels) === '["stft1","stft2"]' && vals.showing === 'values');
+    err = null;
+    try { await h.tuner_display({ view: 'values' }); } catch (e) { err = e.message; }
+    check('...and the screen\'s own refusal comes back', /Name the values/.test(err ?? ''), err);
+    err = null;
+    try { await h.tuner_display({ view: 'dance' }); } catch (e) { err = e.message; }
+    check('...and a view it does not have is refused', /target, steps, values, graph or off/.test(err ?? ''), err);
+    check('...and off gives the area back to the tab', (await h.tuner_display({ view: 'off' })).showing === "the tab's own picture");
     err = null;
     try { await h.tuner_finding({ kind: 'answer', re: 'entry-9999', text: 'x' }); } catch (e) { err = e.message; }
     check('an answer to no question is refused', /No question/.test(err ?? ''), err);

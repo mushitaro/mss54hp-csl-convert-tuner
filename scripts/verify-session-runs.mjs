@@ -168,8 +168,8 @@ console.log('\n[the page: an earlier run on LOG and GRAPH, to read]');
     check('the assistant is told when an earlier run is on the log views', page.includes('viewing: { run: viewedRun,'));
     check('...and reads stored runs by the same numbering',
         page.includes('return storedRunData(await sessionDb.loadLogRecord(currentSession.id), run);'));
-    const panel = readFileSync(new URL('../src/components/NotebookPanel.tsx', import.meta.url), 'utf8');
-    check('NOTEBOOK jumps to a moment of any run, but only the live one while recording',
+    const panel = readFileSync(new URL('../src/components/CoworkPanel.tsx', import.meta.url), 'utf8');
+    check('CO-WORK jumps to a moment of any run, but only the live one while recording',
         panel.includes('(place[0] === run || (!recording && place[0] >= 1 && place[0] <= runs))'));
 }
 

@@ -136,8 +136,9 @@ import { AssistantSection } from '@/components/AssistantSection';
 import { buildId, canSync, listStoredSessions, pullNotebook, restoreSession } from '@/lib/session-sync/client';
 import { currentPlan, nextPlanVersion, notebookLine, type NotebookAuthor } from '@/lib/notebook/rules';
 import { useNotebook } from '@/hooks/useNotebook';
-import NotebookPanel from '@/components/NotebookPanel';
-import NotebookStrip from '@/components/NotebookStrip';
+import CoworkPanel from '@/components/CoworkPanel';
+import CoworkDisplay, { type CoworkView } from '@/components/CoworkDisplay';
+import { stepCounts } from '@/lib/notebook/steps';
 import type { ChartMark } from '@/components/LogTimeSeriesChart';
 import { sessionEntries } from '@/lib/notebook/store';
 import { observeFromPlanEntry, planEntryFromObserve, samePlan } from '@/lib/notebook/observePlan';
@@ -1362,14 +1363,35 @@ export default function Home() {
   const currentSession = activeSessionId ? sessionDb.sessions.find(s => s.id === activeSessionId) ?? null : null;
   const isArchived = currentSession?.status === 'archived';
 
-  /** The open session's notebook. Its surfaces — the NOTEBOOK tab, the DASH strip, the marks on the
+  /** The open session's CO-WORK record. Its surfaces — the CO-WORK tab, DASH's upper area, the marks on the
    *  log chart, the M menu's line — are WORKS-only (features.ts), and off them nothing is read. It
    *  re-reads when SYNC lands (`syncedAt`) or this device writes in it (`notebookAt`). */
-  const notebookOn = featureEnabled('notebook', featurePreview);
+  const notebookOn = featureEnabled('cowork', featurePreview);
   const notebook = useNotebook(currentSession?.id ?? null, notebookOn, sessionDb.writeNotebook,
     `${currentSession?.syncedAt ?? 0}|${currentSession?.notebookAt ?? 0}`);
   /** How many runs the session holds, the one on screen included. */
   const sessionRuns = Math.max(currentSession?.logRuns ?? (currentSession?.hasLog ? 1 : 0), workspaceRun ?? 0);
+
+  /**
+   * What the assistant put on DASH's upper area (CoworkDisplay): a step's target, the step board, or
+   * values it named. Set only by the assistant (tuner_display) — the driver asks for a view by voice,
+   * never by touching the screen (operator, 2026-10-23). It belongs to the session and the tab it was
+   * set on: open another session, or let the owner change tab while parked, and the tab's own picture
+   * is back — derived, not reset by an effect.
+   */
+  const [coworkDisplay, setCoworkDisplay] = useState<{
+    view: Exclude<CoworkView, 'graph'>; step: number | null; channels: string[]; sessionId: string | null; tab: string;
+  } | null>(null);
+  /** What the upper area shows for CO-WORK now: the assistant's choice while it still holds, else the
+   *  step board on the CO-WORK tab itself, else nothing (the tab's own picture). */
+  const coworkOnScreen = !notebookOn || !currentSession ? null
+    : coworkDisplay && coworkDisplay.sessionId === currentSession.id && coworkDisplay.tab === activeTab ? coworkDisplay
+      : activeTab === 'cowork' ? { view: 'steps' as const, step: null, channels: [], sessionId: currentSession.id, tab: activeTab }
+        : null;
+  const coworkPlan = useMemo(() => currentPlan(notebook.entries).plan, [notebook.entries]);
+  const coworkSteps = coworkPlan?.body.kind === 'plan' ? coworkPlan.body.steps : null;
+  const coworkCounts = useMemo(() => stepCounts(notebook.entries, workspaceRun), [notebook.entries, workspaceRun]);
+  const dialogLang = useDialogLang();
 
   /**
    * VALID and the drop census, as the MAP saw them rather than as the filter left them.
@@ -2260,7 +2282,7 @@ export default function Home() {
     { id: 'observe', label: 'OBSERVE (EXP.)', enabled: true },
     // On a session, whatever it holds: a plan is written before there is a log, and the questions the
     // desk left are read before the next drive.
-    { id: 'notebook', label: 'NOTEBOOK', enabled: !!currentSession },
+    { id: 'cowork', label: 'CO-WORK', enabled: !!currentSession },
     // Read-only, and the same prerequisite as IDLE. This is where the idle thresholds can be
     // checked against the bytes they were decoded from, cell by cell. It exists as its own tab so
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
@@ -3256,7 +3278,7 @@ export default function Home() {
     const out: ChartMark[] = [];
     for (const p of viewRaw ?? []) {
       for (const m of marksOf(p.mark)) {
-        if (m.startsWith('OBSERVE:')) continue;   // the plan, on the first sample — it is in NOTEBOOK
+        if (m.startsWith('OBSERVE:')) continue;   // the plan, on the first sample — it is in CO-WORK
         const step = /^step (\d+):\s*/.exec(m);
         out.push(step ? { t: p.time, kind: 'step', label: step[1], text: m } : { t: p.time, kind: 'mark', label: '•', text: m });
       }
@@ -4243,9 +4265,10 @@ export default function Home() {
         log: processedLog && logProcess !== 'OBSERVE' ? { valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut } : null,
         canStartLog: startRefusal() ?? 'yes',
         observe: observeStatus(),
-        // The notebook in a line, and which run is on screen — tuner_notebook reads the whole book.
+        // CO-WORK in a line, and which run is on screen — tuner_cowork reads the whole record.
         ...(notebookOn && currentSession ? {
-          notebook: notebookLine(notebook.entries, workspaceRun) ?? 'empty',
+          cowork: notebookLine(notebook.entries, workspaceRun) ?? 'empty',
+          display: coworkOnScreen ? { view: coworkOnScreen.view, ...(coworkOnScreen.step !== null ? { step: coworkOnScreen.step } : {}), ...(coworkOnScreen.channels.length ? { channels: coworkOnScreen.channels } : {}) } : `the ${activeTab} tab's own`,
           runOnScreen: workspaceRun, runs: sessionRuns,
           ...(viewedRun !== null ? {
             viewing: { run: viewedRun, note: `LOG and GRAPH show run ${viewedRun}, an earlier run, to read. The maps, the analysis and SAVE are still run ${workspaceRun}'s. tuner_moment with run ${viewedRun} reads it.` },
@@ -4444,6 +4467,24 @@ export default function Home() {
     notebookAdd: async (items) => {
       if (!notebookOn || !currentSession) throw new Error('No session is open, so there is no notebook to write in. Open one first (tuner_open_session).');
       return notebook.add(items);
+    },
+    // The run on screen as the analysis reads it — filtered, with the corrected RO the VE map's axis
+    // uses — for the stretches where a step's conditions held (steps.ts stepHolds).
+    runRows: () => processedLog?.data ?? null,
+    display: (view, opts) => {
+      if (!notebookOn || !currentSession) return 'No session is open, so there is no CO-WORK to show. Open one first.';
+      if (view === 'off') { setCoworkDisplay(null); return null; }
+      if (view === 'graph') {
+        // The log chart is the graph: the LOG tab's own, on the same upper area.
+        setCoworkDisplay(null);
+        goToTab('log');
+        setNarrowPane(splitGraph ? 'graph' : 'dash');
+        return null;
+      }
+      setCoworkDisplay({ view, step: opts?.step ?? null, channels: opts?.channels ?? [], sessionId: currentSession.id, tab: activeTab });
+      // The upper area is where it shows: GRAPH on a split head unit, DASH on a phone.
+      setNarrowPane(splitGraph ? 'graph' : 'dash');
+      return null;
     },
     runSamples: async (run) => {
       if (!currentSession) return null;
@@ -4650,7 +4691,9 @@ export default function Home() {
     // idle session GRAPH would have landed on the empty box this whole flag exists to prevent.
     (activeTab === 'log' && processedLog && logProcess !== 'IDLE') ||
     // CALIBRATION: the selected parameter's chart/table, once it has decodable values.
-    (activeTab === 'calibration' && calSelectedDef?.run && binaryBuffer)
+    (activeTab === 'calibration' && calSelectedDef?.run && binaryBuffer) ||
+    // CO-WORK: what the assistant put there, or the step board on the CO-WORK tab.
+    !!coworkOnScreen
   );
 
   /**
@@ -5517,18 +5560,6 @@ export default function Home() {
                   })()}
                 </div>
               </div>
-
-              {/* The notebook on DASH: the step being driven and the driver's last words. A fixed 40px in
-                  every state of a WORKS build — it never comes and goes, so it cannot move the hub. */}
-              {notebookOn && (
-                <NotebookStrip
-                  entries={notebook.entries}
-                  run={workspaceRun}
-                  recording={dmeLink.state === 'tuning'}
-                  onStepDone={(n, text) => markNow(`step ${n}: ${text}`, 'owner')}
-                  onOpen={() => { goToTab('notebook'); setNarrowPane('map'); }}
-                />
-              )}
 
               {/* DASHBOARD CLUSTER — outer div measures real available space; inner div renders the
                   hub/wings at natural size and gets a computed transform:scale to fit exactly. */}
@@ -6709,14 +6740,13 @@ export default function Home() {
                 </div>
               )}
 
-              {activeTab === 'notebook' && notebookOn && (
+              {activeTab === 'cowork' && notebookOn && (
                 <div className="h-full w-full overflow-y-auto p-3">
-                  <NotebookPanel
+                  <CoworkPanel
                     entries={notebook.entries}
                     run={workspaceRun}
                     runs={sessionRuns}
                     recording={dmeLink.state === 'tuning'}
-                    onAdd={notebook.add}
                     onJump={(run, t) => void jumpToLogTime(t, run)}
                   />
                 </div>
@@ -6985,6 +7015,22 @@ export default function Home() {
                   reference operating point WHILE it can still be steered onto it. */}
               {dmeLink.state === 'tuning' && logProcess === 'LLS' && <LlsLiveStrip feed={liveRun.readout} />}
               {dmeLink.state === 'tuning' && logProcess !== 'IDLE' && logProcess !== 'LLS' && <LiveTelemetryStrip feed={liveRun.readout} />}
+              {/* CO-WORK on DASH's upper area: what the assistant chose to show (CoworkDisplay), over
+                  the tab's own picture and under the live strip. Shown, never operated. */}
+              {graphOnScreen && coworkOnScreen && (
+                <div className={`absolute inset-0 z-10 bg-slate-950 ${dmeLink.state === 'tuning' ? 'pt-14' : 'pt-2'}`}>
+                  <CoworkDisplay
+                    view={coworkOnScreen.view}
+                    steps={coworkSteps}
+                    counts={coworkCounts}
+                    step={coworkOnScreen.step}
+                    channels={coworkOnScreen.channels}
+                    samples={logFileState.rawLogData ?? []}
+                    recording={dmeLink.state === 'tuning'}
+                    lang={dialogLang}
+                  />
+                </div>
+              )}
               {graphOnScreen && (activeTab === 'current' && deferredCharts.currentMap) && <MapVisualizer mapData={deferredCharts.currentMap} title="" zAxisLabel="RF %" />}
               {graphOnScreen && (activeTab === 'new' && deferredCharts.newMap) && <MapVisualizer mapData={deferredCharts.newMap} title="" zAxisLabel="RF %" />}
               {/* SHAPE shows the surface it would leave behind — the applied repair if there is one,
