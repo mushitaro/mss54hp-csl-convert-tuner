@@ -61,13 +61,18 @@ for (const p of ['public/apple-touch-icon.png', 'public/apple-touch-icon-precomp
 }
 
 console.log('[root icons — branded builds and the gate]');
-const brand = read('scripts/brand-preview.mjs').toString();
-const check = read('scripts/check-branding.mjs').toString();
-for (const [path, from] of [['favicon.ico', 'mapping-dev-favicon.ico'], ['apple-touch-icon.png', 'mapping-dev-256.png'], ['apple-touch-icon-precomposed.png', 'mapping-dev-256.png']]) {
-    const pair = new RegExp(`\\['${path.replace(/\./g, '\\.')}',\\s*join\\('icons',\\s*'${from.replace(/\./g, '\\.')}'\\)\\]`);
-    if (!pair.test(brand)) fail(`brand-preview.mjs does not put ${from} at /${path}`);
-    else if (!pair.test(check)) fail(`check-branding.mjs does not read /${path} back against ${from}`);
-    else ok(`/${path}: brand-preview writes ${from}, check-branding reads it back`);
+// The deploy tooling is not on main (release-scope.mjs), so on main there is nothing to read here.
+if (!existsSync(resolve(ROOT, 'scripts', 'brand-preview.mjs')) || !existsSync(resolve(ROOT, 'scripts', 'check-branding.mjs'))) {
+    ok('SKIP the branding: brand-preview.mjs / check-branding.mjs are not in this tree (main)');
+} else {
+    const brand = read('scripts/brand-preview.mjs').toString();
+    const check = read('scripts/check-branding.mjs').toString();
+    for (const [path, from] of [['favicon.ico', 'mapping-dev-favicon.ico'], ['apple-touch-icon.png', 'mapping-dev-256.png'], ['apple-touch-icon-precomposed.png', 'mapping-dev-256.png']]) {
+        const pair = new RegExp(`\\['${path.replace(/\./g, '\\.')}',\\s*join\\('icons',\\s*'${from.replace(/\./g, '\\.')}'\\)\\]`);
+        if (!pair.test(brand)) fail(`brand-preview.mjs does not put ${from} at /${path}`);
+        else if (!pair.test(check)) fail(`check-branding.mjs does not read /${path} back against ${from}`);
+        else ok(`/${path}: brand-preview writes ${from}, check-branding reads it back`);
+    }
 }
 const middleware = resolve(ROOT, 'functions', '_middleware.ts');
 if (!existsSync(middleware)) {
