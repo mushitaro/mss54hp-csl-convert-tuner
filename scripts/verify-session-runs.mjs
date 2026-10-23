@@ -122,6 +122,12 @@ console.log('\n[the page: START keeps the run on screen, SAVE carries the id]');
     check('opening a session takes its stored run id', open.includes('workspaceRunIdRef.current = record?.runId'));
     const reset = page.slice(page.indexOf('const resetDerived = () =>'), page.indexOf('const handleUploadBase'));
     check('a workspace reset forgets the run id', reset.includes('workspaceRunIdRef.current = undefined'));
+    check('a log read back on opening is already kept: not unsaved work, not saved again',
+        open.includes('setLogOnDevice(rawLog?.length ? { sessionId: session.id,')
+        && page.includes("(nothingToSave ? 'saved' : logIsOnDevice ? 'runRecorded' : 'logOnly')"));
+    check('...only while it is that session\'s run, whole',
+        page.includes('logOnDevice.sessionId === currentSession?.id')
+        && page.includes('logOnDevice.run === workspaceRun && logOnDevice.length === (logFileState.rawLogData?.length ?? 0)'));
 }
 
 console.log('\n[an earlier run, by number]');

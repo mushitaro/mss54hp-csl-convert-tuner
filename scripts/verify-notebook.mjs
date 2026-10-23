@@ -214,6 +214,8 @@ console.log('\n[the page and the sync client]');
         start.includes("logProcess === 'OBSERVE' && currentSession) await keepObservePlan(") && start.indexOf('keepObservePlan(') < start.indexOf('liveRun.start('));
     const open = page.slice(page.indexOf('const handleOpenSession = async'), page.indexOf('const restoreRun = async'));
     check('opening a session brings its plan back', open.includes('void adoptNotebookPlan(session.id)'));
+    check('...as the OBSERVE plan only when it names addresses to watch (a VE plan is not one)',
+        page.includes('if (!plan || !stored || stored.reads.length === 0) return;'));
     check('...without replacing a plan already on screen', /if \(onScreen\.title\.trim\(\) \|\| onScreen\.reads\.length \|\| activeSteps\(onScreen\)\.length\) return onScreen;/.test(page));
     const next = page.slice(page.indexOf('const handleNext = async'), page.indexOf('const saveSession = async'));
     check('NEXT carries the plan to the child', next.includes('void carryNotebookPlan(parent.id, created.id)'));

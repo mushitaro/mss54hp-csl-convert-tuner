@@ -2361,6 +2361,16 @@ export default function Home() {
   const [savedInputs, setSavedInputs] = useState<SaveInputs | null>(null);
   const nothingToSave = !!savedInputs
     && (Object.keys(saveInputs) as (keyof SaveInputs)[]).every(k => savedInputs[k] === saveInputs[k]);
+  /**
+   * The log opening a session read back from this device: which session, which run, how many
+   * samples. That log is already stored, so it is not work to save — but `savedInputs` only learns
+   * what is stored from a SAVE, and a session opened with a log and no map read as 'logOnly'. Opening
+   * #982 (an OBSERVE run of 1,601 samples) then refused to open another session over "unsaved" work
+   * and offered to SAVE it again (2026-10-23, the VE session).
+   */
+  const [logOnDevice, setLogOnDevice] = useState<{ sessionId: string; run: number | null; length: number } | null>(null);
+  const logIsOnDevice = !!logOnDevice && logOnDevice.sessionId === currentSession?.id
+    && logOnDevice.run === workspaceRun && logOnDevice.length === (logFileState.rawLogData?.length ?? 0);
 
   /**
    * The step before sync: record the tune into THIS DEVICE's database.
@@ -2404,7 +2414,7 @@ export default function Home() {
             // is nothing further to save" about the only thing that was.
             calEdits.armedEdits.length > 0 ? (nothingToSave ? 'saved' : 'ready')
             : logFileState.rawLogData?.length
-            ? (nothingToSave ? 'saved' : 'logOnly')
+            ? (nothingToSave ? 'saved' : logIsOnDevice ? 'runRecorded' : 'logOnly')
             // An idle or inertia run is written to the session as it ends, so by the time this is
             // read the samples are already on the device. Reporting 'baseOnly' here said "BASE
             // saved" over a session that also holds a drive, which reads as the run being lost.
@@ -2414,7 +2424,7 @@ export default function Home() {
             // label never moved, the cell stayed pressable, and there was no way to tell a save
             // that had happened from one that had not.
             : nothingToSave ? 'saved' : 'ready',
-  }), [dmeLink.state, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave,
+  }), [dmeLink.state, currentSession, newMap, isArchived, logFileState.rawLogData, nothingToSave, logIsOnDevice,
     // Without this the button never noticed the first calibration edit: the memo
     // held the phase it was built with, so SAVE stayed dark over unsaved work.
     calEdits.armedEdits.length]);
@@ -2547,6 +2557,8 @@ export default function Home() {
       workspaceRunIdRef.current = record?.runId;
       // The stored current run is the last one.
       setWorkspaceRun(rawLog?.length ? (session.logRuns ?? 1) : null);
+      // Read back from the device, so already kept: SAVE has nothing of it to add (logIsOnDevice).
+      setLogOnDevice(rawLog?.length ? { sessionId: session.id, run: session.logRuns ?? 1, length: rawLog.length } : null);
       if (rawLog && rawLog.length > 0) {
         // The bytes AS THE DME RAN THEM, which is not the BASE. This log was captured against a car
         // carrying whatever `armed` says: the full-load gate reads a table WRITE PATCH-ON rewrites
@@ -2626,7 +2638,9 @@ export default function Home() {
     }
     const { plan } = currentPlan(await sessionEntries(sessionId).catch(() => []));
     const stored = plan ? observeFromPlanEntry(plan) : null;
-    if (!plan || !stored) return;
+    // Only an observation plan — one that names addresses to watch — is an OBSERVE plan. A VE plan
+    // copied there read as a broken one ("Name at least one address to watch.") on #982 and #983.
+    if (!plan || !stored || stored.reads.length === 0) return;
     setObservePlan(onScreen => {
       if (onScreen.title.trim() || onScreen.reads.length || activeSteps(onScreen).length) return onScreen;
       observePlanByRef.current = plan.by;
