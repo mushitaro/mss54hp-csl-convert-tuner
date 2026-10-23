@@ -321,6 +321,11 @@ export interface TuningSession {
      *  Optional and additive — no DB_VERSION bump; absent reads as one run when `hasLog`. */
     logRuns?: number;
 
+    /** When this device last wrote in the session's notebook (src/lib/notebook). Part of the sync
+     *  fingerprint once set, so a plan or a note written after the last send makes the session
+     *  outstanding. Not set by entries pulled from the store. Optional and additive. */
+    notebookAt?: number;
+
     /** Mean sample rate of the stored log, in Hz. Derived in saveTune from the log's own `time`
      *  column, so a DS2 run and a CSV import are measured the same way and neither has to report it.
      *

@@ -16,6 +16,13 @@ import { FieldKey, LOG_FIELD_REGISTRY, TOGGLEABLE_FIELDS, isFieldPresent, DEFAUL
  * The gestures are named here and nowhere else, which is why this line is the one that had to grow
  * when the chart learnt to pinch: it is where a reader goes to find out what the chart will do.
  */
+const EARLIER_HINT = {
+    ja: (shown: number, workspace: number) => `ラン ${shown} は前のランで、読むためだけに表示しています。`
+        + `マップ、解析、SAVE は今もラン ${workspace} のものです。RUN ${workspace} を押すと戻ります。`,
+    en: (shown: number, workspace: number) => `Run ${shown} is an earlier run, shown to read. The maps, the `
+        + `analysis and SAVE are still run ${workspace}'s. Press RUN ${workspace} to go back.`,
+};
+
 const WINDOW_HINT = {
     ja: 'ログの一部だけを表示しています。表示範囲は、下のスライダーを動かすか、グラフを横にスワイプすると移動します。'
         + 'グラフはピンチで拡大縮小できます（拡大は表示範囲の中だけで、どのデータを見ているかは変わりません）。',
@@ -41,6 +48,11 @@ interface Props {
      * Defaults to true, which is what it is for anything that renders it unconditionally.
      */
     active?: boolean;
+    /** At the head of the record count: the RUN switch, when the session holds more than one run. */
+    lead?: React.ReactNode;
+    /** Set when the rows are an earlier run than the one the workspace holds — the ⓘ says what that
+     *  means for everything else on screen. */
+    earlierRun?: { shown: number; workspace: number };
 }
 
 // Factor is a computed diagnostic (rawLoad / correctedLoad, driven by the Alpha-N table), so it is
@@ -86,7 +98,7 @@ const colWidth = (label: string) => Math.round(24 + Math.max(label.length * 6.5,
  * During a run its data really does change twice a second and the memo cannot help then; that is
  * what the windowing below is for.
  */
-export const LogDataTable: React.FC<Props> = React.memo(function LogDataTable({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, active = true }) {
+export const LogDataTable: React.FC<Props> = React.memo(function LogDataTable({ data, selectedIndex, onRowClick, totalCount, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, active = true, lead, earlierRun }) {
     /**
      * `data` is already the shared window, so this renders it whole and indexes it directly.
      *
@@ -203,24 +215,31 @@ export const LogDataTable: React.FC<Props> = React.memo(function LogDataTable({ 
     return (
         <div className="h-full flex flex-col bg-slate-900/50">
             <div className="px-4 py-2 border-b border-slate-800 text-xs text-slate-400">
-                <div className="flex justify-between items-center gap-2">
-                    <span>Displaying {displayData.length.toLocaleString()} of {effectiveTotal.toLocaleString()} records</span>
+                {/* Wraps rather than squeezes: on a phone the RUN switch takes most of the row, and
+                    the count goes to a line of its own instead of truncating to nothing. */}
+                <div className="flex flex-wrap justify-between items-center gap-x-2 gap-y-1">
+                    {lead}
+                    <span className="min-w-0 flex-auto truncate">Displaying {displayData.length.toLocaleString()} of {effectiveTotal.toLocaleString()} records</span>
                     {/* Keyed on the window being partial, not on this table truncating anything — it
                         no longer does. Offered only then, because with the whole log on screen there
-                        is no view to move and nothing the hint would be about. `p-1.5 -mr-1.5` is
+                        is no view to move and nothing the hint would be about — or when the rows are
+                        an earlier run, which the hint has to say means for the rest of the screen. `p-1.5 -mr-1.5` is
                         the filter panel's own ⓘ box: a 24px target that adds no height to the row. */}
-                    {effectiveTotal > displayData.length && (
+                    {(effectiveTotal > displayData.length || earlierRun) && (
                         <button
                             type="button"
                             onClick={() => setHintOpen(v => !v)}
                             aria-expanded={hintOpen}
-                            aria-label="About the windowed view"
+                            aria-label="About this view"
                             className={`p-1.5 -mr-1.5 rounded shrink-0 transition-colors ${hintOpen ? 'text-blue-400' : 'text-slate-600 hover:text-slate-400'}`}
                         >
                             <Info className="w-3 h-3" />
                         </button>
                     )}
                 </div>
+                {hintOpen && earlierRun && (
+                    <p className="text-[9px] text-indigo-400 leading-relaxed pt-1">{EARLIER_HINT[lang](earlierRun.shown, earlierRun.workspace)}</p>
+                )}
                 {hintOpen && effectiveTotal > displayData.length && (
                     <p className="text-[9px] text-slate-500 leading-relaxed pt-1">{WINDOW_HINT[lang]}</p>
                 )}

@@ -5,6 +5,8 @@ import type { LogDataPoint } from '@/lib/types';
 import type { TuningSession, SessionBinariesRecord, SessionLogRecord } from '@/lib/db/schema';
 import { getSessionLogRecord, getSessionBinaries, putSessionRaw } from '@/lib/db/sessionRepository';
 import { api, isPreviewBuild } from './owner-sync';
+import { addEntries, markSent, unsentEntries } from '@/lib/notebook/store';
+import type { NotebookEntry } from '@/lib/notebook/rules';
 import { previewNoticeAcknowledged } from './preview-notice';
 
 /**
@@ -175,7 +177,10 @@ export const sessionFingerprint = (s: TuningSession): string =>
     `${s.baseSha256 ?? '-'}|${s.sha256 ?? '-'}|${s.logPointCount}|${s.flashHistory.length}|${s.status}`
     // Only when there is more than one run, so every session sent before runs existed keeps the
     // fingerprint it was sent with and is not offered again for nothing.
-    + ((s.logRuns ?? 0) > 1 ? `|r${s.logRuns}` : '');
+    + ((s.logRuns ?? 0) > 1 ? `|r${s.logRuns}` : '')
+    // Likewise only once its notebook has been written in: a note or a plan written after the last
+    // send makes the session outstanding, so SYNC carries it.
+    + (s.notebookAt ? `|n${s.notebookAt}` : '');
 
 /**
  * Whether this session is worth sending and has not been sent as it now stands.
@@ -367,7 +372,7 @@ export async function syncSession(session: TuningSession, opts: { force?: boolea
         wireBinaries ? gzipJson(wireBinaries) : Promise.resolve(null),
     ]);
 
-    return await call<SyncResult>('/api/sessions', {
+    const result = await call<SyncResult>('/api/sessions', {
         method: 'POST',
         body: {
             id: session.id,
@@ -392,6 +397,41 @@ export async function syncSession(session: TuningSession, opts: { force?: boolea
             binariesGz: binariesGz ? toBase64(binariesGz) : null,
         },
     });
+    // The notebook after the session row, which the store's notebook needs to exist first; then
+    // what the desk added since. Either failing fails the sync, so the session stays outstanding
+    // and is sent again — both halves are idempotent.
+    await pushNotebook(session.id);
+    await pullNotebook(session.id);
+    return result;
+}
+
+// --- Notebook ---------------------------------------------------------------------------------
+
+/**
+ * Sends what this device wrote in the session's notebook and the store has not got. The store adds
+ * each entry once (INSERT OR IGNORE), so a send interrupted half-way is simply sent again.
+ */
+export async function pushNotebook(sessionId: string): Promise<number> {
+    const refused = refusal();
+    if (refused) throw refused;
+    const unsent = await unsentEntries(sessionId);
+    for (let i = 0; i < unsent.length; i += 200) {
+        const batch = unsent.slice(i, i + 200);
+        const r = await call<{ ids: string[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/notebook`, {
+            method: 'POST', body: { entries: batch },
+        });
+        await markSent(r.ids);
+    }
+    return unsent.length;
+}
+
+/**
+ * Brings in what the store has of the session's notebook and this device has not: the desk's
+ * questions and plans, another device's notes. Adds only — an entry here is never replaced.
+ */
+export async function pullNotebook(sessionId: string): Promise<number> {
+    const r = await call<{ entries: NotebookEntry[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/notebook`);
+    return (await addEntries(r.entries, { sent: true })).length;
 }
 
 // --- Pull -------------------------------------------------------------------------------------
@@ -450,6 +490,9 @@ export async function restoreSession(id: string): Promise<TuningSession> {
     }
 
     await putSessionRaw(session, log, binaries);
+    // Its notebook comes back with it. Not fatal: the session is back whole, and the notebook is
+    // pulled again whenever the session is opened or sent.
+    await pullNotebook(session.id).catch(() => { /* retried on open and on SYNC */ });
     return session;
 }
 

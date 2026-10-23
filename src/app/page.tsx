@@ -133,15 +133,24 @@ import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
 import { readDeviceName, useAssistantBridge } from '@/hooks/useAssistantBridge';
 import type { TabFacade } from '@/lib/bridge/tools';
 import { AssistantSection } from '@/components/AssistantSection';
-import { buildId, listStoredSessions, restoreSession } from '@/lib/session-sync/client';
+import { buildId, canSync, listStoredSessions, pullNotebook, restoreSession } from '@/lib/session-sync/client';
+import { currentPlan, nextPlanVersion, notebookLine, type NotebookAuthor } from '@/lib/notebook/rules';
+import { useNotebook } from '@/hooks/useNotebook';
+import NotebookPanel from '@/components/NotebookPanel';
+import NotebookStrip from '@/components/NotebookStrip';
+import type { ChartMark } from '@/components/LogTimeSeriesChart';
+import { sessionEntries } from '@/lib/notebook/store';
+import { observeFromPlanEntry, planEntryFromObserve, samePlan } from '@/lib/notebook/observePlan';
 import { previewNoticeAcknowledged } from '@/lib/session-sync/preview-notice';
 import { timeScaleSeconds } from '@/lib/log-engine/filter';
 import { isAndroidPlatform } from '@/lib/dme-link/byteTransport';
 import { serializeLogFile } from '@/lib/log-engine/serializer';
 import { sampleRateHz } from '@/lib/log-engine/rate';
-import { sha256Hex } from '@/lib/db/sessionRepository';
+import { sha256Hex, storedRunData } from '@/lib/db/sessionRepository';
 import { writeClaimsTune, useBinaryFile, type PatchExtras } from '@/hooks/useBinaryFile';
 import { useLogFile } from '@/hooks/useLogFile';
+import { useRunView } from '@/hooks/useRunView';
+import RunSwitch from '@/components/RunSwitch';
 import { useVeCalculation } from '@/hooks/useVeCalculation';
 import { useComparison, type MapVariant } from '@/hooks/useComparison';
 import { useSessionDb } from '@/hooks/useSessionDb';
@@ -342,6 +351,17 @@ export default function Home() {
    * a session wrote over the first run at the next SAVE — #982 lost its first run that way.
    */
   const workspaceRunIdRef = useRef<string | undefined>(undefined);
+  /**
+   * Which run of the session the workspace log is, by number: the run the log chart is drawing and
+   * the run a step or a note made now belongs to. Set where `workspaceRunIdRef` is. State for what
+   * renders from it, and a ref for the handlers that read it after an await.
+   */
+  const [workspaceRun, setWorkspaceRunState] = useState<number | null>(null);
+  const workspaceRunRef = useRef<number | null>(null);
+  const setWorkspaceRun = (n: number | null) => { workspaceRunRef.current = n; setWorkspaceRunState(n); };
+  /** Who last set the OBSERVE plan on screen — the assistant or the owner — for the notebook entry
+   *  the next run writes it as. */
+  const observePlanByRef = useRef<NotebookAuthor>('owner');
   const connectedVin = dmeLink.identity?.vin ?? null;
   useEffect(() => {
     setVerifyMode(initialVerifyMode(connectedVin));
@@ -490,10 +510,32 @@ export default function Home() {
    *  in one place is what lets a selection survive a scrub instead of being reset by it — outside the
    *  window the relative index simply misses, which both views already render as "nothing selected"
    *  without needing an extra branch. */
-  const windowRelativeSelection = selectedLogIndex === null ? null : selectedLogIndex - logWindowStart;
+  /**
+   * An earlier run on LOG and GRAPH, to read (useRunView). Everything that says what the two log
+   * views show reads the `view…` names below: the earlier run's when one is shown, the workspace's
+   * otherwise. One switch for both, so the table and the chart cannot be on different runs.
+   */
+  const runView = useRunView(
+    LOG_WINDOW_SIZE,
+    { sessionId: activeSessionId, workspaceRun, recording: dmeLink.state === 'tuning' },
+    filterConfig, interpolationTable, logFileState.lambdaLimits,
+  );
+  const viewedRun = runView.run;
+  const earlierOnView = viewedRun !== null;
+  const viewLog = earlierOnView ? runView.processed : processedLog;
+  const viewLogWindow = earlierOnView ? runView.rows : displayedLogWindow;
+  const viewRaw = earlierOnView ? runView.samples : logFileState.rawLogData;
+  const viewWindowStart = earlierOnView ? runView.windowStart : logWindowStart;
+  const setViewWindowStart = earlierOnView ? runView.setWindowStart : setLogWindowStart;
+  const viewMaxWindowStart = earlierOnView ? runView.maxWindowStart : maxWindowStart;
+  const viewPanWindow = earlierOnView ? runView.panWindow : panWindow;
+  const viewSelectedIndex = earlierOnView ? runView.selectedIndex : selectedLogIndex;
+  const setViewSelectedIndex = earlierOnView ? runView.setSelectedIndex : setSelectedLogIndex;
+
+  const windowRelativeSelection = viewSelectedIndex === null ? null : viewSelectedIndex - viewWindowStart;
   const selectAbsoluteFromWindow = useCallback(
-    (windowIndex: number) => setSelectedLogIndex(logWindowStart + windowIndex),
-    [logWindowStart, setSelectedLogIndex],
+    (windowIndex: number) => setViewSelectedIndex(viewWindowStart + windowIndex),
+    [viewWindowStart, setViewSelectedIndex],
   );
 
   const { mapData, hitMap, weightMap, tunedRfKorr } = veCalc;
@@ -871,6 +913,7 @@ export default function Home() {
     logFileState.clear();
     liveRun.reset();
     workspaceRunIdRef.current = undefined;
+    setWorkspaceRun(null);
     // The workspace this move was armed for is going away, so the move has to go with it — otherwise
     // it fires later against whatever gets loaded next.
     pendingTabRef.current = null;
@@ -947,7 +990,10 @@ export default function Home() {
 
   const handleLogUpload = async (file: File) => {
     const processed = await logFileState.parseAndSetLog(file);
-    if (processed) workspaceRunIdRef.current = crypto.randomUUID();
+    if (processed) {
+      workspaceRunIdRef.current = crypto.randomUUID();
+      setWorkspaceRun((currentSession?.logRuns ?? (currentSession?.hasLog ? 1 : 0)) + 1);
+    }
     if (processed && currentMap) {
       runCalculation(currentMap, processed);
       goToTab('diff'); // jump to the result only on the initial CSV load
@@ -1085,6 +1131,7 @@ export default function Home() {
       logFileState.clear();
       veCalc.reset();
       workspaceRunIdRef.current = undefined;
+      setWorkspaceRun(null);
       if (activeTab === 'log' || activeTab === 'new' || activeTab === 'diff' || activeTab === 'lambda') {
         goToTab('current');
       }
@@ -1314,6 +1361,15 @@ export default function Home() {
 
   const currentSession = activeSessionId ? sessionDb.sessions.find(s => s.id === activeSessionId) ?? null : null;
   const isArchived = currentSession?.status === 'archived';
+
+  /** The open session's notebook. Its surfaces — the NOTEBOOK tab, the DASH strip, the marks on the
+   *  log chart, the M menu's line — are WORKS-only (features.ts), and off them nothing is read. It
+   *  re-reads when SYNC lands (`syncedAt`) or this device writes in it (`notebookAt`). */
+  const notebookOn = featureEnabled('notebook', featurePreview);
+  const notebook = useNotebook(currentSession?.id ?? null, notebookOn, sessionDb.writeNotebook,
+    `${currentSession?.syncedAt ?? 0}|${currentSession?.notebookAt ?? 0}`);
+  /** How many runs the session holds, the one on screen included. */
+  const sessionRuns = Math.max(currentSession?.logRuns ?? (currentSession?.hasLog ? 1 : 0), workspaceRun ?? 0);
 
   /**
    * VALID and the drop census, as the MAP saw them rather than as the filter left them.
@@ -2202,13 +2258,16 @@ export default function Home() {
     // Always enabled: the plan is written before there is a log or a car, and the bytes it watched
     // are read off whatever log is loaded.
     { id: 'observe', label: 'OBSERVE (EXP.)', enabled: true },
+    // On a session, whatever it holds: a plan is written before there is a log, and the questions the
+    // desk left are read before the next drive.
+    { id: 'notebook', label: 'NOTEBOOK', enabled: !!currentSession },
     // Read-only, and the same prerequisite as IDLE. This is where the idle thresholds can be
     // checked against the bytes they were decoded from, cell by cell. It exists as its own tab so
     // that IDLE MODE is self-sufficient: otherwise the only route to the item browser is through
     // RF KORR, which needs a VE drive before it will open.
     { id: 'calibration', label: 'CALIBRATION', enabled: !!binaryFileState.binaryBuffer },
   ], [currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr, idleTables,
-    binaryFileState.binaryBuffer, logProcess, idleHasRows]);
+    binaryFileState.binaryBuffer, logProcess, idleHasRows, currentSession]);
 
   // MODE chooses the tabs AND their sequence; the variant then closes whatever it closes. Built by
   // walking the mode's list rather than filtering the page's, so a mode reads in its own order —
@@ -2486,6 +2545,8 @@ export default function Home() {
       const record = await sessionDb.loadLogRecord(session.id);
       const rawLog = record?.data;
       workspaceRunIdRef.current = record?.runId;
+      // The stored current run is the last one.
+      setWorkspaceRun(rawLog?.length ? (session.logRuns ?? 1) : null);
       if (rawLog && rawLog.length > 0) {
         // The bytes AS THE DME RAN THEM, which is not the BASE. This log was captured against a car
         // carrying whatever `armed` says: the full-load gate reads a table WRITE PATCH-ON rewrites
@@ -2549,7 +2610,46 @@ export default function Home() {
     // DASH, which is the pane the work actually begins in.)
     goToTab(rebuilt ? 'new' : 'current');
     setNarrowPane('dash');
+    void adoptNotebookPlan(session.id);
     return true;
+  };
+
+  /**
+   * On opening a session: brings in what the store has of its notebook (WORKS only, best effort),
+   * then puts the notebook's current plan on the OBSERVE screen — when the screen holds no plan. A
+   * plan the assistant set a moment ago, before asking for this session to be opened, is kept.
+   */
+  const adoptNotebookPlan = async (sessionId: string) => {
+    if (canSync()) {
+      const pulled = await pullNotebook(sessionId).catch(() => 0 /* offline, or not in the store yet */);
+      if (pulled) notebook.reload();
+    }
+    const { plan } = currentPlan(await sessionEntries(sessionId).catch(() => []));
+    const stored = plan ? observeFromPlanEntry(plan) : null;
+    if (!plan || !stored) return;
+    setObservePlan(onScreen => {
+      if (onScreen.title.trim() || onScreen.reads.length || activeSteps(onScreen).length) return onScreen;
+      observePlanByRef.current = plan.by;
+      return stored;
+    });
+  };
+
+  /**
+   * Writes the OBSERVE plan a run is about to use into the session's notebook — unless the
+   * notebook's current plan already says the same — as the next version, rewriting that one. Who
+   * wrote it is whoever last set it: the assistant (`tuner_plan`) or the owner at the screen.
+   * Never fatal: the run's first mark still carries the title and the reads.
+   */
+  const keepObservePlan = async (sessionId: string) => {
+    try {
+      const entries = await sessionEntries(sessionId);
+      const { plan: current } = currentPlan(entries);
+      if (samePlan(observePlan, current)) return;
+      await sessionDb.writeNotebook(sessionId, [planEntryFromObserve(observePlan, {
+        id: crypto.randomUUID(), sessionId, at: Date.now(), by: observePlanByRef.current,
+        v: nextPlanVersion(entries), re: current?.id,
+      })]);
+    } catch { /* see above */ }
   };
 
   /**
@@ -2670,8 +2770,12 @@ export default function Home() {
     // Adopted as the run's buffer, so a later flush appends to this drive rather than starting a
     // second one beside it.
     liveRun.adopt(points);
-    // A run that never reached the store: its recovery id is its run id.
+    // A run that never reached the store: its recovery id is its run id, and it comes after every
+    // run the session already holds.
     workspaceRunIdRef.current = runId;
+    setWorkspaceRun((session.logRuns ?? (session.hasLog ? 1 : 0)) + 1);
+    // And the plan it was recorded to, which a reload took off the screen with it.
+    void adoptNotebookPlan(sessionId);
     /* Gates passed explicitly, same stale-scope reason as the rebuild in handleOpenSession: the
        effect that pushes `lambdaLimits` into the hook has not run in this scope, so without this the
        recovered drive would be filtered through the OUTGOING session's binary. Both gates — the
@@ -2706,6 +2810,25 @@ export default function Home() {
   };
 
   /**
+   * Copies the parent's current plan into a NEXT child's notebook, as the child's plan v1 pointing
+   * back at it (`carriedFrom`). Nothing when the parent has no notebook, and never fatal: a child
+   * without its parent's plan is a session like any other.
+   */
+  const carryNotebookPlan = async (parentId: string, childId: string) => {
+    try {
+      const { plan } = currentPlan(await sessionEntries(parentId));
+      if (!plan || plan.body.kind !== 'plan') return;
+      // The child's v1 rewrites nothing in the child's book; it points back with carriedFrom.
+      const body = { ...plan.body, v: 1, carriedFrom: plan.id };
+      delete body.re;
+      await sessionDb.writeNotebook(childId, [{
+        id: crypto.randomUUID(), sessionId: childId, at: Date.now(), by: plan.by,
+        body,
+      }]);
+    } catch { /* see above */ }
+  };
+
+  /**
    * NEXT — the one way to continue a session: a new draft whose BASE is the parent's CAR IMAGE,
    * carrying the parent's switches and filter settings. The inheritance itself is `nextStart`
    * (lib/db/carImage.ts); this gathers what it inherits FROM.
@@ -2724,6 +2847,7 @@ export default function Home() {
    * next stage of a campaign, and the stage after an EGT run is a VE run — `deriveRoute` reads the
    * parent's process to say so.
    */
+
   const handleNext = async (parent: TuningSession, from?: { carImage: ArrayBuffer }): Promise<TuningSession | null> => {
     const parentOpen = parent.id === activeSessionId && !!binaryBuffer;
     let carImage: ArrayBuffer;
@@ -2772,6 +2896,9 @@ export default function Home() {
       // TUNED and no sha256 go with them — the list offers nothing the child does not have.
       tuneSettings: start.settings,
     });
+    // The plan the parent was working to goes with it: the next drive is usually this child, and a
+    // plan the desk wrote into the parent between drives is meant for it.
+    void carryNotebookPlan(parent.id, created.id);
     // The same landing CONTINUE makes, and for the same reason: a new session is the start of a
     // job, and the first thing it needs is the hub — connect, write the patch, start a run. The map
     // is one tap away and is where you go once there is something to look at.
@@ -3061,9 +3188,72 @@ export default function Home() {
 
   /** Puts a label on the log at the next sample: an OBSERVE step done, a free MARK. Only while a log
    *  records — a mark with no sample to land on would be a mark on nothing. */
-  const markNow = (label: string) => {
-    if (dmeLink.state === 'tuning') pendingMarksRef.current.push(label);
+  const markNow = (label: string, by: NotebookAuthor = 'owner') => {
+    if (dmeLink.state !== 'tuning') return;
+    pendingMarksRef.current.push(label);
+    // A step done is also a notebook entry, by number, on this run's clock — what the DASH strip and
+    // the plan tick from, and what the desk reads. The log keeps its mark as before. The time is the
+    // latest sample's; the mark lands on the next, a fraction of a second later.
+    const step = /^step (\d+):/.exec(label);
+    const run = workspaceRunRef.current;
+    if (step && notebookOn && currentSession && run !== null) {
+      const samples = liveRun.samplesRef.current;
+      const t = samples.length ? samples[samples.length - 1].time : 0;
+      void notebook.add([{ by, body: { kind: 'step', run, t: Math.max(0, t), n: Number(step[1]) } }]).catch(() => { /* the log mark stands */ });
+    }
   };
+
+  /**
+   * Puts run `n` of the open session on LOG and GRAPH: the workspace's own when `n` is the run it
+   * holds, else an earlier one read back from this device's store, to read (useRunView). Centred on
+   * `atTime` when given. False when it cannot be shown — a log records, or the run holds no log.
+   */
+  const showRun = async (n: number, atTime?: number): Promise<boolean> => {
+    if (n === workspaceRunRef.current) { runView.close(); return true; }
+    const id = activeSessionId;
+    if (!id || dmeLink.state === 'tuning') return false;
+    const samples = storedRunData(await sessionDb.loadLogRecord(id), n);
+    return samples ? runView.show(n, samples, atTime) : false;
+  };
+
+  /** Shows a moment of a run on the log chart: selects the nearest sample, moves the shared window to
+   *  it, and puts the chart in front. Without `run`, or with the workspace's, the run on screen. */
+  const jumpToLogTime = async (t: number, run?: number) => {
+    if (run !== undefined && run !== workspaceRunRef.current) {
+      if (!await showRun(run, t)) return;
+    } else {
+      const rows = processedLog?.data;
+      if (!rows?.length) return;
+      runView.close();
+      let best = 0;
+      for (let i = 1; i < rows.length; i++) if (Math.abs(rows[i].time - t) < Math.abs(rows[best].time - t)) best = i;
+      setLogWindowStart(Math.max(0, Math.min(maxWindowStart, best - Math.floor(LOG_WINDOW_SIZE / 2))));
+      setSelectedLogIndex(best);
+    }
+    goToTab('log');
+    setNarrowPane(splitGraph ? 'graph' : 'dash');
+  };
+
+  /** The marks of the run on the log views and the driver's words in it, for the log chart
+   *  (LogTimeSeriesChart `marks`). */
+  const markedRun = viewedRun ?? workspaceRun;
+  const chartMarks = useMemo<ChartMark[]>(() => {
+    if (!notebookOn) return [];
+    const out: ChartMark[] = [];
+    for (const p of viewRaw ?? []) {
+      for (const m of marksOf(p.mark)) {
+        if (m.startsWith('OBSERVE:')) continue;   // the plan, on the first sample — it is in NOTEBOOK
+        const step = /^step (\d+):\s*/.exec(m);
+        out.push(step ? { t: p.time, kind: 'step', label: step[1], text: m } : { t: p.time, kind: 'mark', label: '•', text: m });
+      }
+    }
+    for (const e of notebook.entries) {
+      if (e.body.kind === 'note' && e.body.run === markedRun && e.body.t !== null) {
+        out.push({ t: e.body.t, kind: 'driver', label: e.by === 'driver' ? 'D' : 'N', text: e.body.text });
+      }
+    }
+    return out;
+  }, [notebookOn, viewRaw, notebook.entries, markedRun]);
 
   const handleStartTune = async () => {
     const profile = LOG_PROFILES[logProcess];
@@ -3136,18 +3326,22 @@ export default function Home() {
     // in the session at the next SAVE — which is how #982 lost its first run. Stored as the
     // session's current run (a re-save when it is already there), so the next SAVE moves it to
     // `runs`. Refused rather than risked: if it cannot be kept, nothing starts.
+    let held = currentSession?.logRuns ?? (currentSession?.hasLog ? 1 : 0);
     if (currentSession && !isArchived && logFileState.rawLogData?.length) {
       try {
-        await sessionDb.saveResearch({
+        const kept = await sessionDb.saveResearch({
           sessionId: currentSession.id, process: logProcess,
           log: logFileState.rawLogData, runId: workspaceRunIdRef.current,
         });
+        held = kept.logRuns ?? held;
       } catch {
         alert(dialogText().keepRunFailed);
         return;
       }
     }
     workspaceRunIdRef.current = crypto.randomUUID();
+    setWorkspaceRun(held + 1);
+    if (logProcess === 'OBSERVE' && currentSession) await keepObservePlan(currentSession.id);
     // What the run is for, on its first sample, so the log explains itself without the plan beside it.
     pendingMarksRef.current = logProcess === 'OBSERVE' ? [planMark(observePlan)] : [];
     liveExchangesRef.current = exchanges;
@@ -3788,6 +3982,7 @@ export default function Home() {
     liveRun.reset();
     // Only the run on screen goes. A run kept at START is already in the session and stays there.
     workspaceRunIdRef.current = undefined;
+    setWorkspaceRun(null);
     // Throwing the run away is a decision, so the recovery copy goes too — otherwise the next load
     // would offer back the very drive the user just chose to redo.
     void discardLiveRun().catch(() => { });
@@ -4034,6 +4229,14 @@ export default function Home() {
         log: processedLog && logProcess !== 'OBSERVE' ? { valid: processedLog.validCount, dropped: processedLog.droppedCount, leftOut } : null,
         canStartLog: startRefusal() ?? 'yes',
         observe: observeStatus(),
+        // The notebook in a line, and which run is on screen — tuner_notebook reads the whole book.
+        ...(notebookOn && currentSession ? {
+          notebook: notebookLine(notebook.entries, workspaceRun) ?? 'empty',
+          runOnScreen: workspaceRun, runs: sessionRuns,
+          ...(viewedRun !== null ? {
+            viewing: { run: viewedRun, note: `LOG and GRAPH show run ${viewedRun}, an earlier run, to read. The maps, the analysis and SAVE are still run ${workspaceRun}'s. tuner_moment with run ${viewedRun} reads it.` },
+          } : {}),
+        } : {}),
       };
     },
     samples: facadeSamples,
@@ -4212,9 +4415,30 @@ export default function Home() {
       return { raw: q.raw, value: q.value, exact: q.exact, bits: def.run.bits };
     },
     observePlan: () => observePlan,
+    // The notebook, for the assistant: the device's copy, after a fetch from the store when asked
+    // for one (reading before a drive) — not when writing while driving, where a round trip to the
+    // store would hold up the driver's words.
+    notebook: async (opts) => {
+      const id = currentSession?.id;
+      if (!notebookOn || !id) return { entries: [], run: null, runs: 0 };
+      if (opts?.fetch && canSync()) {
+        const pulled = await pullNotebook(id).catch(() => 0);
+        if (pulled) notebook.reload();
+      }
+      return { entries: await sessionEntries(id), run: workspaceRunRef.current, runs: sessionRuns };
+    },
+    notebookAdd: async (items) => {
+      if (!notebookOn || !currentSession) throw new Error('No session is open, so there is no notebook to write in. Open one first (tuner_open_session).');
+      return notebook.add(items);
+    },
+    runSamples: async (run) => {
+      if (!currentSession) return null;
+      return storedRunData(await sessionDb.loadLogRecord(currentSession.id), run);
+    },
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
     // asked for before anything runs.
     setObservePlan: (plan) => {
+      observePlanByRef.current = 'chat';
       setObservePlan(plan);
       if (plan.reads.length) { goToTab('observe'); setNarrowPane('map'); }
     },
@@ -4226,7 +4450,7 @@ export default function Home() {
       if (modeLock === 'has-log') return 'this session already holds a log, so its mode is fixed. On the screen: NEW SESSION, then MODE → OBSERVE (the plan stays set).';
       return 'no open session takes a mode change. On the screen: NEW SESSION, then MODE → OBSERVE (the plan stays set).';
     },
-    mark: markNow,
+    mark: (label: string) => markNow(label, 'chat'),
   };
   const assistantAllowed = isPreviewBuild && featureEnabled('assistantBridge', isPreviewBuild) && previewNoticeAcknowledged();
   const assistant = useAssistantBridge({
@@ -4386,8 +4610,8 @@ export default function Home() {
    */
   const chartFeed = useMemo(() => ({
     currentMap, newMap, diffVisualMap, lambdaVisualMap, rfKorrSurface, warmupMap, shapeSurface,
-    logWindow: displayedLogWindow,
-  }), [currentMap, newMap, diffVisualMap, lambdaVisualMap, rfKorrSurface, warmupMap, shapeSurface, displayedLogWindow]);
+    logWindow: viewLogWindow,
+  }), [currentMap, newMap, diffVisualMap, lambdaVisualMap, rfKorrSurface, warmupMap, shapeSurface, viewLogWindow]);
   const deferredCharts = useDeferredValue(chartFeed);
 
   /** Whether the visualisation box has anything in it for the current view. GRAPH is a destination,
@@ -5279,6 +5503,18 @@ export default function Home() {
                   })()}
                 </div>
               </div>
+
+              {/* The notebook on DASH: the step being driven and the driver's last words. A fixed 40px in
+                  every state of a WORKS build — it never comes and goes, so it cannot move the hub. */}
+              {notebookOn && (
+                <NotebookStrip
+                  entries={notebook.entries}
+                  run={workspaceRun}
+                  recording={dmeLink.state === 'tuning'}
+                  onStepDone={(n, text) => markNow(`step ${n}: ${text}`, 'owner')}
+                  onOpen={() => { goToTab('notebook'); setNarrowPane('map'); }}
+                />
+              )}
 
               {/* DASHBOARD CLUSTER — outer div measures real available space; inner div renders the
                   hub/wings at natural size and gets a computed transform:scale to fit exactly. */}
@@ -6450,11 +6686,24 @@ export default function Home() {
                 <div className="h-full w-full overflow-y-auto p-3">
                   <ObservePanel
                     plan={observePlan}
-                    onPlanChange={setObservePlan}
+                    onPlanChange={p => { observePlanByRef.current = 'owner'; setObservePlan(p); }}
                     recording={dmeLink.state === 'tuning' && logProcess === 'OBSERVE'}
                     points={logFileState.rawLogData ?? []}
                     onMark={markNow}
                     practice={dmeLink.mockMode}
+                  />
+                </div>
+              )}
+
+              {activeTab === 'notebook' && notebookOn && (
+                <div className="h-full w-full overflow-y-auto p-3">
+                  <NotebookPanel
+                    entries={notebook.entries}
+                    run={workspaceRun}
+                    runs={sessionRuns}
+                    recording={dmeLink.state === 'tuning'}
+                    onAdd={notebook.add}
+                    onJump={(run, t) => void jumpToLogTime(t, run)}
                   />
                 </div>
               )}
@@ -6533,7 +6782,7 @@ export default function Home() {
               {/* ...and the VE table stands down in that mode. An idle session that has been saved
                   and reopened DOES have a `processedLog` — the stored projection — so this would
                   otherwise render five near-empty columns on top of the pane above. */}
-              {(activeTab === 'log' && processedLog && logProcess !== 'IDLE') && (
+              {(activeTab === 'log' && viewLog && logProcess !== 'IDLE') && (
                 <div className="h-full w-full pb-0">
                   {/* The same deferred window the chart reads — the one-window-two-views rule
                       survives the deferral because both defer TOGETHER. */}
@@ -6541,9 +6790,21 @@ export default function Home() {
                     data={deferredCharts.logWindow}
                     selectedIndex={windowRelativeSelection}
                     onRowClick={selectAbsoluteFromWindow}
-                    totalCount={processedLog.data.length}
+                    totalCount={viewLog.data.length}
                     visibleFields={fieldVisibility.visibleFields}
-                    presenceData={logFileState.rawLogData ?? undefined}
+                    presenceData={viewRaw ?? undefined}
+                    /* Which run the rows are, when the session holds more than one — the switch for
+                       both log views, in the pane every layout shows on LOG. */
+                    lead={(
+                      <RunSwitch
+                        runs={sessionRuns}
+                        workspace={workspaceRun}
+                        shown={viewedRun ?? workspaceRun}
+                        disabled={dmeLink.state === 'tuning'}
+                        onPick={(n) => void showRun(n)}
+                      />
+                    )}
+                    earlierRun={viewedRun !== null && workspaceRun !== null ? { shown: viewedRun, workspace: workspaceRun } : undefined}
                     /* On screen only when this pane is. A point clicked on the chart is clicked
                        from the OTHER narrow pane, and the scroll to its row cannot happen until
                        this one is showing — see the effect this feeds. */
@@ -6826,7 +7087,7 @@ export default function Home() {
                   head unit — this box is `display:none` unless GRAPH is the selected destination, so
                   the LOG tab was building ten traces of up to 2,000 points each, on every flush,
                   inside a hidden box. The invisible-pane bug, one chart late. */}
-              {(graphOnScreen && activeTab === 'log' && processedLog && logProcess !== 'IDLE') && (
+              {(graphOnScreen && activeTab === 'log' && viewLog && logProcess !== 'IDLE') && (
                 <div className="h-full w-full pb-0 relative">
                   {/* Chart Container - Absolute fill; chart flexes, window-scrub slider docked below it
                       (moved off the tab bar so tab scrolling isn't squeezed by it). */}
@@ -6837,12 +7098,13 @@ export default function Home() {
                         selectedIndex={windowRelativeSelection}
                         onPointClick={selectAbsoluteFromWindow}
                         visibleFields={fieldVisibility.visibleFields}
-                        presenceData={logFileState.rawLogData ?? undefined}
+                        presenceData={viewRaw ?? undefined}
                         live={dmeLink.state === 'tuning'}
                         fitToken={chartFitToken}
-                        onPanWindow={panWindow}
-                        canPanWindow={maxWindowStart > 0}
-                        logKey={logFileState.logFile?.name ?? 'none'}
+                        onPanWindow={viewPanWindow}
+                        canPanWindow={viewMaxWindowStart > 0}
+                        logKey={`${logFileState.logFile?.name ?? 'none'}#${viewedRun ?? 'workspace'}`}
+                        marks={chartMarks}
                       />
                     </div>
                     {/* The window scrub. It drives what BOTH this chart and the row table are looking
@@ -6853,22 +7115,29 @@ export default function Home() {
                         step is clamped to the range: it used to be a flat 100 while max could be as
                         little as 1, so a log that HAD outgrown the window still could not be scrubbed. */}
                     {(() => {
-                      const canScrub = maxWindowStart > 0;
-                      const step = Math.max(1, Math.min(100, maxWindowStart));
-                      const windowEnd = Math.min(processedLog.data.length, logWindowStart + LOG_WINDOW_SIZE);
+                      const canScrub = viewMaxWindowStart > 0;
+                      const step = Math.max(1, Math.min(100, viewMaxWindowStart));
+                      const windowEnd = Math.min(viewLog.data.length, viewWindowStart + LOG_WINDOW_SIZE);
                       return (
                         <div className="flex-none flex items-center gap-3 px-2.5 pt-2 pb-0.5">
+                          {/* Which run the window is in — the chart's half of the table's RUN switch.
+                              Named, not offered: the switch is on the table, where every layout has it. */}
+                          {sessionRuns > 1 && (viewedRun ?? workspaceRun) !== null && (
+                            <span className={`text-[10px] font-mono whitespace-nowrap ${earlierOnView ? 'text-indigo-400' : 'text-slate-400'}`}>
+                              RUN {viewedRun ?? workspaceRun}
+                            </span>
+                          )}
                           <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
-                            WIN: {logWindowStart.toLocaleString()} - {windowEnd.toLocaleString()}
+                            WIN: {viewWindowStart.toLocaleString()} - {windowEnd.toLocaleString()}
                           </span>
                           <input
                             type="range"
                             min={0}
-                            max={maxWindowStart}
+                            max={viewMaxWindowStart}
                             step={step}
-                            value={logWindowStart}
+                            value={viewWindowStart}
                             disabled={!canScrub}
-                            onChange={(e) => setLogWindowStart(Number(e.target.value))}
+                            onChange={(e) => setViewWindowStart(Number(e.target.value))}
                             title={canScrub
                               ? 'Scroll the window through the log — the chart and the rows move together'
                               : 'The whole log fits in one window'}
@@ -6876,7 +7145,7 @@ export default function Home() {
                               ? 'cursor-pointer accent-blue-500 hover:accent-blue-400'
                               : 'cursor-not-allowed accent-slate-600 opacity-50'}`}
                           />
-                          <span className="text-[9px] text-slate-600 font-mono whitespace-nowrap">/ {processedLog.validCount.toLocaleString()}</span>
+                          <span className="text-[9px] text-slate-600 font-mono whitespace-nowrap">/ {viewLog.validCount.toLocaleString()}</span>
                           {/* doubleClick is off so click-to-select stays unambiguous, which leaves no
                               built-in way out of a zoom. This is it. */}
                           <button
@@ -7144,6 +7413,7 @@ export default function Home() {
           ) : undefined}
           logName={logFile?.name}
           logPoints={processedLog?.validCount}
+          notebook={notebookOn ? notebookLine(notebook.entries, workspaceRun) : undefined}
         />
       )}
 

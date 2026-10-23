@@ -16,7 +16,10 @@
  *               one combustion of that cylinder; 1275 means none for ~60 s; ramMap.ts KNOCK_AGE)
  *   angleLow    one cylinder fired well below the others on the same read
  *   gear        the gear changed
- *   fuelCut     both trims exactly 1.000 with the throttle shut: the injectors were off
+ *   trimsReset  both trims exactly 1.000 with the throttle shut, and where the pedal was. Named for
+ *               what was measured, not what it means: with the pedal up too it is the overrun fuel
+ *               cut; with the pedal still down it is a shift or an intervention. It was called
+ *               fuelCut, and a desk read a 2nd→3rd shift as "a fuel cut before the tip-in" (#982).
  *   throttle    the pedal moved more than a few points between two samples
  *   linkGap     nothing was recorded for that long before this sample
  *   mark        a label put on the log: an OBSERVE plan, a step done, a driver's "mark that"
@@ -48,13 +51,15 @@ export const WATCH_PIN_MAX_CHANGES = 40;
 export interface MomentEvent {
     /** Seconds relative to the moment (negative = before it). */
     t: number;
-    kind: 'accelLoss' | 'knock' | 'angleLow' | 'gear' | 'fuelCut' | 'throttle' | 'linkGap' | 'mark';
+    kind: 'accelLoss' | 'knock' | 'angleLow' | 'gear' | 'trimsReset' | 'throttle' | 'linkGap' | 'mark';
     detail: string;
 }
 
 export interface Moment {
     /** Where the window came from. */
-    source: 'live run' | 'loaded log';
+    /** Where the samples came from: the run recording now, the log on screen, or an earlier run of
+     *  the open session read from the device (`stored run N`). */
+    source: 'live run' | 'loaded log' | `stored run ${number}`;
     /** Seconds before the question the moment was taken to be. */
     secondsAgo: number;
     windowS: number;
@@ -205,7 +210,11 @@ export function cutMoment(input: {
             events.push({ t: rel(b.time), kind: 'gear', detail: `gear ${a.gear} → ${b.gear}` });
         }
         if (b.stft1 === 1 && b.stft2 === 1 && (b.wdk1 ?? 100) < 2 && !(a.stft1 === 1 && a.stft2 === 1 && (a.wdk1 ?? 100) < 2)) {
-            events.push({ t: rel(b.time), kind: 'fuelCut', detail: 'both trims at exactly 1.000 with the throttle shut: overrun fuel cut' });
+            const pedal = b.pwg1 !== undefined ? `, pedal ${round(b.pwg1, 1)} %` : ', pedal not logged';
+            events.push({
+                t: rel(b.time), kind: 'trimsReset',
+                detail: `both trims at exactly 1.000 with the throttle shut${pedal}: pedal up too = overrun fuel cut; pedal still down = a shift or an intervention`,
+            });
         }
     }
 

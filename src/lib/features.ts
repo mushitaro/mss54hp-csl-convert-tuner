@@ -36,12 +36,13 @@
  *  the page owns layout; this file only answers "may this render in this variant". */
 export type TabId =
     | 'startup' | 'current' | 'lambda' | 'new' | 'diff' | 'log'
-    | 'rfkorr' | 'warmup' | 'inertia' | 'shape' | 'idle' | 'lls' | 'calibration' | 'observe';
+    | 'rfkorr' | 'warmup' | 'inertia' | 'shape' | 'idle' | 'lls' | 'calibration' | 'observe' | 'notebook';
 
 export type FeatureStage = 'stable' | 'experimental' | 'preview-only';
 
 export type FeatureName =
-    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'observe' | 'sessionSync' | 'assistantBridge';
+    | 've' | 'rfKorr' | 'shape' | 'idle' | 'lls' | 'inertia' | 'calibration' | 'observe' | 'sessionSync' | 'assistantBridge'
+    | 'notebook';
 
 export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly TabId[] }> = {
     // The trunk. WARMUP is inside it, not beside it: the warmup table is generated from the VE
@@ -100,6 +101,16 @@ export const FEATURES: Record<FeatureName, { stage: FeatureStage; tabs: readonly
      * render.
      */
     assistantBridge: { stage: 'preview-only', tabs: [] },
+    /**
+     * NOTEBOOK — the session's experiment notebook (src/lib/notebook): the plan for a drive, the
+     * driver's own words on the log's clock, and what was found, as the car and the desk wrote them.
+     * Its surfaces are the tab, the DASH strip, the marks on the log chart and the M menu's line.
+     *
+     * `preview-only` by decision, for the reason the two above are: it travels with SYNC and the
+     * assistant, and the privacy policy describes it as a WORKS feature (§10). A production build
+     * never opens its database (store.ts).
+     */
+    notebook: { stage: 'preview-only', tabs: ['notebook'] },
 };
 
 /**
@@ -172,8 +183,11 @@ export function enabledModes(isPreview: boolean): ModeId[] {
  * covers the other direction — every tab must be reachable from at least one mode, or adding one
  * makes it invisible everywhere.
  */
+// NOTEBOOK last in every mode. Not second, though a drive starts there: second is the run's own
+// panel, by the rule below, and the notebook does not displace it. The DASH strip and the M menu
+// open it from anywhere.
 const VE_TABS = [
-    'startup', 'current', 'lambda', 'new', 'diff', 'log', 'shape', 'warmup', 'rfkorr', 'calibration',
+    'startup', 'current', 'lambda', 'new', 'diff', 'log', 'shape', 'warmup', 'rfkorr', 'calibration', 'notebook',
 ] as const;
 
 export const MODE_TABS = {
@@ -183,17 +197,17 @@ export const MODE_TABS = {
     EGT: VE_TABS,
     // The run first. Standing beside a car with the bonnet up, IDLE is the screen; IDLE LOG is the
     // evidence behind what it just said, and CALIBRATION is the bytes every threshold came from.
-    IDLE: ['startup', 'idle', 'log', 'calibration'],
+    IDLE: ['startup', 'idle', 'log', 'calibration', 'notebook'],
     // Same shape as IDLE, for the same reason: the run is the screen, LOG is the evidence behind
     // it, CALIBRATION is the bytes. Unlike IDLE this one is driven, so the log tab is not optional
     // — Td and the operating band come out of the samples, not out of the map.
-    LLS: ['startup', 'lls', 'log', 'calibration'],
+    LLS: ['startup', 'lls', 'log', 'calibration', 'notebook'],
     // No log tab: an inertia run has no per-sample view yet. The estimate and its regression are
     // the panel's, and a tab that opened on nothing would be a destination that does nothing.
-    INERTIA: ['startup', 'inertia', 'calibration'],
+    INERTIA: ['startup', 'inertia', 'calibration', 'notebook'],
     // The plan and the watched bytes first; LOG is the run behind them; CALIBRATION is where the
     // unnamed symbol was met, and where the name it earns is checked against the code.
-    OBSERVE: ['startup', 'observe', 'log', 'calibration'],
+    OBSERVE: ['startup', 'observe', 'log', 'calibration', 'notebook'],
 } as const satisfies Record<string, readonly TabId[]>;
 
 /**

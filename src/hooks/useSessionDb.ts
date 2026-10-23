@@ -18,8 +18,11 @@ import {
     getSessionLogRecord,
     getSessionBinaries,
     deleteSession,
+    touchNotebook,
 } from '@/lib/db/sessionRepository';
 import type { InertiaSample, IdleSample } from '@/lib/dme-link/types';
+import { addEntries, deleteSessionEntries } from '@/lib/notebook/store';
+import type { NotebookEntry } from '@/lib/notebook/rules';
 
 export function useSessionDb() {
     const [sessions, setSessions] = useState<TuningSession[]>([]);
@@ -111,7 +114,23 @@ export function useSessionDb() {
 
     const remove = useCallback(async (id: string) => {
         await deleteSession(id);
+        // Its notebook too. Its own database, so not in the same transaction; an entry left behind
+        // belongs to no session and is never read.
+        await deleteSessionEntries(id).catch(() => { /* see above */ });
         await refresh();
+    }, [refresh]);
+
+    /**
+     * Adds entries this device wrote to the session's notebook and marks the session outstanding
+     * for SYNC. Refused — with the rule's own sentence — when an entry breaks the notebook's rules.
+     */
+    const writeNotebook = useCallback(async (sessionId: string, entries: NotebookEntry[]) => {
+        const added = await addEntries(entries, { sent: false });
+        if (added.length) {
+            await touchNotebook(sessionId, Math.max(...added.map(e => e.at)));
+            await refresh();
+        }
+        return added;
     }, [refresh]);
 
     const loadLog = useCallback((id: string) => getSessionLog(id), []);
@@ -132,7 +151,7 @@ export function useSessionDb() {
     return {
         sessions, loading, error, refresh,
         newDraft, setBase, saveSessionTune, rename, archive, setProcess, saveResearch, recordFlash, recordAdaptationReset,
-        recordFlashCounterReset, remove,
+        recordFlashCounterReset, remove, writeNotebook,
         loadLog, loadLogRecord, loadIdleRun, loadBinaries,
     };
 }

@@ -58,6 +58,10 @@ interface Props {
     baseOrigin?: React.ReactNode;
     logName?: string;
     logPoints?: number;
+    /** The session's notebook in a line — `PLAN v3 · STEP 2/4 · ASK 2` — or null when it holds
+     *  nothing yet. Omitted (undefined) where the notebook is not part of the build, and then the
+     *  line is not drawn at all; within one build it is always drawn, so the band keeps its height. */
+    notebook?: string | null;
     /**
      * Where the press that opened this landed, while it is still down — so this mount can be the
      * middle of a drag rather than the end of a tap. The coordinates matter, not just the fact:
@@ -217,7 +221,7 @@ const boardColumns = (count: number) => (count <= 4 ? Math.max(count, 1) : count
 export const MobileMenu: React.FC<Props> = ({
     onClose, tabs, activeTab, onSelectTab, identity, linkState,
     flashText, flashColor, flashEnabled, onOpenFlash,
-    session, baseOrigin, logName, logPoints, dragFrom, onDragEnd, onReload, onOpenCredits,
+    session, baseOrigin, logName, logPoints, notebook, dragFrom, onDragEnd, onReload, onOpenCredits,
     updateAvailable, reloading, installState, onInstall, sync, save, onSave, onNewSession, storePanel,
     buildLabel,
 }) => {
@@ -511,6 +515,20 @@ export const MobileMenu: React.FC<Props> = ({
                                     </span>
                                 )}
                             </Field>
+                            {notebook !== undefined && (
+                                <Field label="Note">
+                                    {notebook && (
+                                        <span className="truncate text-[10px]">
+                                            {notebook.split(' · ').map((part, i) => (
+                                                <React.Fragment key={part}>
+                                                    {i > 0 && <span className="text-slate-600"> · </span>}
+                                                    <span className={part.startsWith('ASK') ? 'text-amber-300' : undefined}>{part}</span>
+                                                </React.Fragment>
+                                            ))}
+                                        </span>
+                                    )}
+                                </Field>
+                            )}
                         </div>
 
                         {/* The failure, in text, on the device that cannot hover.

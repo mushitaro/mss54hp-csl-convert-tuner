@@ -13,9 +13,12 @@
  *
  * Plus the two places a run count travels: the sync fingerprint (unchanged for every session with
  * one run, so nothing already sent is offered again) and the store's point count.
+ *
+ * And the way back to a kept run: LOG and GRAPH show an earlier run to read (useRunView), both
+ * through one switch, without loading it into the workspace its maps and SAVE are about.
  */
 import { readFileSync } from 'node:fs';
-import { nextLogRecord, runCount } from '../src/lib/db/sessionRepository.ts';
+import { nextLogRecord, runCount, storedRunData } from '../src/lib/db/sessionRepository.ts';
 import { sessionFingerprint, logWorthSending } from '../src/lib/session-sync/client.ts';
 
 let fails = 0;
@@ -119,6 +122,49 @@ console.log('\n[the page: START keeps the run on screen, SAVE carries the id]');
     check('opening a session takes its stored run id', open.includes('workspaceRunIdRef.current = record?.runId'));
     const reset = page.slice(page.indexOf('const resetDerived = () =>'), page.indexOf('const handleUploadBase'));
     check('a workspace reset forgets the run id', reset.includes('workspaceRunIdRef.current = undefined'));
+}
+
+console.log('\n[an earlier run, by number]');
+{
+    const record = { sessionId: ID, data: run3, runs: [{ data: run1 }, { data: run2 }] };
+    check('run 1 is the oldest kept run', storedRunData(record, 1) === run1);
+    check('run 2 is the next', storedRunData(record, 2) === run2);
+    check('the last number is the current run', storedRunData(record, 3) === run3);
+    check('past the last there is none', storedRunData(record, 4) === null);
+    check('...nor before the first, nor between', storedRunData(record, 0) === null && storedRunData(record, 1.5) === null);
+    check('a run that kept no log samples (inertia, idle) has none to show',
+        storedRunData({ sessionId: ID, data: run2, runs: [{ data: [], idle: idle1 }] }, 1) === null);
+    check('no record, no run', storedRunData(null, 1) === null);
+}
+
+console.log('\n[the page: an earlier run on LOG and GRAPH, to read]');
+{
+    const page = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8');
+    const hook = readFileSync(new URL('../src/hooks/useRunView.ts', import.meta.url), 'utf8');
+    check('the chart and the table read one window, chosen in one place',
+        page.includes('logWindow: viewLogWindow,') && page.split('data={deferredCharts.logWindow}').length === 3);
+    check('...which is the earlier run\'s when one is shown',
+        page.includes('const viewLogWindow = earlierOnView ? runView.rows : displayedLogWindow;'));
+    check('...and one selection, converted once for both',
+        page.includes('const windowRelativeSelection = viewSelectedIndex === null ? null : viewSelectedIndex - viewWindowStart;'));
+    check('both views take their columns from the run they show',
+        page.split('presenceData={viewRaw ?? undefined}').length === 3);
+    check('the chart refits when the run changes', page.includes("#${viewedRun ?? 'workspace'}`}"));
+    check('the chart\'s marks are the shown run\'s',
+        page.includes('e.body.run === markedRun') && page.includes('for (const p of viewRaw ?? [])'));
+    const show = page.slice(page.indexOf('const showRun = async'), page.indexOf('const jumpToLogTime'));
+    check('an earlier run is read back from the store, never loaded into the workspace',
+        show.includes('storedRunData(await sessionDb.loadLogRecord(id), n)')
+        && !/loadRawLog|setWorkspaceRun|workspaceRunIdRef\.current =/.test(show));
+    check('...and not while a log records', show.includes("dmeLink.state === 'tuning') return false"));
+    check('the view is the opener\'s: none while recording, gone when the session or its run moves on',
+        hook.includes('(o.recording ? null : `${o.sessionId}|${o.workspaceRun}`)') && hook.includes('shown.owner === key'));
+    check('the assistant is told when an earlier run is on the log views', page.includes('viewing: { run: viewedRun,'));
+    check('...and reads stored runs by the same numbering',
+        page.includes('return storedRunData(await sessionDb.loadLogRecord(currentSession.id), run);'));
+    const panel = readFileSync(new URL('../src/components/NotebookPanel.tsx', import.meta.url), 'utf8');
+    check('NOTEBOOK jumps to a moment of any run, but only the live one while recording',
+        panel.includes('(place[0] === run || (!recording && place[0] >= 1 && place[0] <= runs))'));
 }
 
 console.log(fails === 0 ? '\nAll checks passed.\n' : `\n${fails} check(s) FAILED.\n`);

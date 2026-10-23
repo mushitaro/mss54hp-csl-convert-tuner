@@ -187,7 +187,7 @@ console.log('\n[the registry]');
 {
     check('OBSERVE is offered in WORKS only', selectableModes(true).includes('OBSERVE') && !selectableModes(false).includes('OBSERVE'), JSON.stringify([selectableModes(true), selectableModes(false)]));
     check('...because its feature is experimental and owns the observe tab', FEATURES.observe.stage === 'experimental' && JSON.stringify(FEATURES.observe.tabs) === '["observe"]');
-    check('its tabs: startup, its own panel second, the log, calibration', JSON.stringify(MODE_TABS.OBSERVE) === '["startup","observe","log","calibration"]');
+    check('its tabs: startup, its own panel second, the log, calibration, the notebook last', JSON.stringify(MODE_TABS.OBSERVE) === '["startup","observe","log","calibration","notebook"]');
     check('it offers no WRITE row — an observation names, it never derives', Array.isArray(MODE_WRITES.OBSERVE) && MODE_WRITES.OBSERVE.length === 0);
     check('its profile is block 3 alone, runnable, with nothing required', LOG_PROFILES.OBSERVE.exchanges.length === 1 && LOG_PROFILES.OBSERVE.exchanges[0].kind === 'block'
         && LOG_PROFILES.OBSERVE.runnable && LOG_PROFILES.OBSERVE.requires.length === 0);

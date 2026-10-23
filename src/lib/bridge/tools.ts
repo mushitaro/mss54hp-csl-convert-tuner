@@ -1,8 +1,8 @@
 /**
  * What this tab answers when its owner's assistant asks — the tab's half of the assistant bridge.
  *
- * The bridge (TSUNAGI///Matrix, matrix-tsunagi/bridge) relays seven tools to here and nothing else;
- * any other name is refused. Each answer is built from what the page ALREADY holds — the samples the
+ * The bridge (TSUNAGI///Matrix, matrix-tsunagi/bridge) relays the tools in TOOL_NAMES to here and
+ * nothing else; any other name is refused. Each answer is built from what the page ALREADY holds — the samples the
  * run recorded, the link's state, the census — so a question never adds a request to the K-line and
  * a log in progress never waits on one. The page supplies a facade (page.tsx) and this file holds
  * the rules that do not depend on React, so verify:assistant-bridge can hold them.
@@ -13,8 +13,12 @@
  *   start a log   only from where START TUNE itself would start without asking anything
  *   stop the log  only with `confirmed: true` — the assistant must read it back to the driver first
  *   show a view   the tabs this build has
- *   observe       set the OBSERVE plan (what the next observation run watches and asks for) and
- *                 switch the session to OBSERVE while its mode is still open — never during a run
+ *   notebook      the session's experiment notebook (2026-10-23): read it (the plan, the runs, the
+ *                 driver's words, findings, open questions); write the plan for the next drive —
+ *                 with OBSERVE addresses it is also the OBSERVE plan, and switches the session to
+ *                 OBSERVE while its mode is still open; keep the driver's own words, on the log's
+ *                 clock; add a fact (with its evidence), a reading, a question, an answer. Plans and
+ *                 findings are written parked; the driver's words and step marks while a log records.
  *   mark          put a label on the recording log: a step done, a "mark that" from the driver
  *   sessions      list the sessions saved on this device, and open one (2026-10-21) — the same
  *                 open the session list's row does, refused while anything is in flight on the link
@@ -47,12 +51,18 @@ import type { CodeUses, ParamChoice, RamHit } from '@/lib/calibration/evidence';
 import { findRecipes, recipeParams, type Recipe, type RecipeStep, type Words } from '@/lib/calibration/recipes';
 import { cutMoment } from './moment';
 import {
-    EMPTY_PLAN, OBSERVE_MAX_READS, OBSERVE_MAX_STEPS, activeSteps, observeHz, parseAddress, planProblems,
+    OBSERVE_MAX_READS, OBSERVE_MAX_STEPS, activeSteps, observeHz, parseAddress, planProblems,
     stepMark, watchKey, type ObservePlan,
 } from '@/lib/log-engine/observe';
+import {
+    currentPlan, nextPlanVersion, openAsks, statusOf, stepsDone,
+    type Evidence, type NotebookAuthor, type NotebookBody, type NotebookEntry, type PlanStep, type PlanWatch,
+} from '@/lib/notebook/rules';
+import { observeFromPlanEntry } from '@/lib/notebook/observePlan';
 
 export const TOOL_NAMES = [
-    'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_observe', 'tuner_mark',
+    'tuner_status', 'tuner_moment', 'tuner_start_log', 'tuner_stop_log', 'tuner_show', 'tuner_plan', 'tuner_mark',
+    'tuner_note', 'tuner_finding', 'tuner_notebook',
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
     'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
     'tuner_new_session', 'tuner_discard_edits', 'tuner_ram',
@@ -214,6 +224,16 @@ export interface TabFacade {
     enterObserve(): string | null;
     /** Puts a label on the log at the next sample. Only called while a log records. */
     mark(label: string): void;
+    /**
+     * The open session's notebook, and which run is on screen (null when no log is) out of how many.
+     * `fetch`: bring in what the store has first (the desk's questions and plans) — slow, so not for
+     * what is written while driving.
+     */
+    notebook?(opts?: { fetch?: boolean }): Promise<{ entries: readonly NotebookEntry[]; run: number | null; runs: number }>;
+    /** Adds entries to the open session's notebook. Throws the rule's own sentence when one is refused. */
+    notebookAdd?(items: { by: NotebookAuthor; body: NotebookBody }[]): Promise<readonly NotebookEntry[]>;
+    /** The samples of one run of the open session, read from the device; null when there is no such run. */
+    runSamples?(run: number): Promise<readonly LogDataPoint[] | null>;
 }
 
 export type Handler = (args: Record<string, unknown>) => Promise<unknown>;
@@ -371,14 +391,120 @@ export function planFromArgs(args: Record<string, unknown>): ObservePlan {
     };
 }
 
+/** Evidence as the assistant sends it: { run, from, to, channels, decode }. Undefined when absent. */
+function evidenceFromArgs(v: unknown): Evidence | undefined {
+    if (!v || typeof v !== 'object') return undefined;
+    const o = v as Record<string, unknown>;
+    const channels = Array.isArray(o.channels) ? o.channels.map(c => text(c, 40)).filter(Boolean) : [];
+    return {
+        run: num(o.run) ?? NaN, from: num(o.from) ?? NaN, to: num(o.to) ?? NaN, channels,
+        ...(text(o.decode, 200) ? { decode: text(o.decode, 200) } : {}),
+    };
+}
+const evidenceLine = (e: Evidence) =>
+    `run ${e.run}, ${e.from}–${e.to} s, ${e.channels.join(', ')}${e.decode ? `, read as ${e.decode}` : ''}`;
+
+/** A moment with the driver's words and the steps done that fall in its window, on its clock. */
+function withNotes(m: ReturnType<typeof cutMoment>, entries: readonly NotebookEntry[], run: number | null) {
+    if (run === null) return m;
+    const from = m.at - m.windowS / 2, to = m.at + m.windowS / 2;
+    const said = entries.flatMap((e): { t: number; driver?: string; stepDone?: number }[] => {
+        const b = e.body;
+        if (b.kind === 'note' && b.run === run && b.t !== null && b.t >= from && b.t <= to) return [{ t: Math.round((b.t - m.at) * 100) / 100, driver: b.text }];
+        if (b.kind === 'step' && b.run === run && b.t >= from && b.t <= to) return [{ t: Math.round((b.t - m.at) * 100) / 100, stepDone: b.n }];
+        return [];
+    });
+    return said.length ? { ...m, notebook: said } : m;
+}
+
+const range = (v: unknown): [number, number] | undefined =>
+    Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' && typeof v[1] === 'number' ? [v[0], v[1]] : undefined;
+
+/** Plan steps as the assistant sends them: a string each, or { do, gear, rpm, ro, hold_s, times }. */
+function stepsFromArgs(v: unknown): PlanStep[] {
+    if (!Array.isArray(v)) return [];
+    return v.slice(0, OBSERVE_MAX_STEPS + 1).map((x): PlanStep | null => {
+        if (typeof x === 'string') return text(x, 160) ? { n: 0, do: text(x, 160) } : null;
+        if (!x || typeof x !== 'object') return null;
+        const o = x as Record<string, unknown>;
+        const d = text(o.do, 160);
+        if (!d) return null;
+        const rpm = range(o.rpm), ro = range(o.ro), hold = num(o.hold_s), times = num(o.times);
+        return {
+            n: 0, do: d,
+            ...(text(o.gear, 20) ? { gear: text(o.gear, 20) } : {}),
+            ...(rpm ? { rpm } : {}),
+            ...(ro ? { ro } : {}),
+            ...(hold !== undefined ? { holdS: hold } : {}),
+            ...(times !== undefined ? { times: Math.trunc(times) } : {}),
+        };
+    }).filter((x): x is PlanStep => x !== null).map((x, i) => ({ ...x, n: i + 1 }));
+}
+
+/** A plan entry as the assistant hears it. */
+function planBrief(e: NotebookEntry) {
+    if (e.body.kind !== 'plan') return null;
+    const b = e.body;
+    return {
+        id: e.id, version: b.v, by: e.by, written: localTime(e.at), purpose: b.purpose,
+        ...(b.hypothesis ? { hypothesis: b.hypothesis } : {}),
+        ...(b.criteria ? { criteria: b.criteria } : {}),
+        steps: b.steps,
+        ...(b.watch?.length ? { watch: b.watch } : {}),
+        ...(b.carriedFrom ? { carriedFrom: 'the parent session\'s plan (NEXT)' } : {}),
+    };
+}
+
+/** Which run an entry belongs to, when it belongs to one. */
+function entryRun(e: NotebookEntry): number | null {
+    const b = e.body;
+    if (b.kind === 'step') return b.run;
+    if (b.kind === 'note') return b.run;
+    if (b.kind === 'fact') return b.evidence.run;
+    if (b.kind === 'read') return b.evidence?.run ?? null;
+    if (b.kind === 'ask') return b.about?.run ?? null;
+    return null;
+}
+
+/** One entry, said compactly: who, when, what, and where it stands. */
+function entryBrief(e: NotebookEntry, all: readonly NotebookEntry[]) {
+    const b = e.body;
+    const status = statusOf(all, e.id);
+    const base = { id: e.id, by: e.by, written: localTime(e.at), ...(status ? { status } : {}) };
+    switch (b.kind) {
+        case 'note': return { ...base, kind: e.by === 'driver' ? 'driver said' : 'owner wrote', text: b.text, ...(b.run !== null ? { at: `run ${b.run}, ${b.t} s` } : {}) };
+        case 'step': return { ...base, kind: 'step done', step: b.n, at: `run ${b.run}, ${b.t} s` };
+        case 'fact': return { ...base, kind: 'fact', text: b.text, evidence: evidenceLine(b.evidence) };
+        case 'read': return { ...base, kind: 'reading', text: b.text, sure: b.sure, ...(b.evidence ? { evidence: evidenceLine(b.evidence) } : {}), ...(b.re ? { disagreesWith: b.re } : {}) };
+        case 'ask': return { ...base, kind: 'question', to: b.to, text: b.text, ...(b.about ? { about: evidenceLine(b.about) } : {}) };
+        case 'answer': return { ...base, kind: 'answer', to: b.re, text: b.text };
+        case 'status': return { ...base, kind: 'status', of: b.re, to: b.to };
+        case 'plan': return { ...base, kind: 'plan', version: b.v };
+    }
+}
+
 export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
     return {
         tuner_status: async () => f.status(),
 
         tuner_moment: async (args) => {
+            const book = f.notebook ? await f.notebook().catch(() => null) : null;
+            const want = num(args.run);
+            // An earlier run of the session, read from the device — when one is asked for by number
+            // and it is not the one on screen.
+            if (want !== undefined && want !== (book?.run ?? null)) {
+                const points = f.runSamples ? await f.runSamples(Math.trunc(want)) : null;
+                if (!points?.length) throw new Error(`No run ${want} in this session${book ? ` (it holds ${book.runs})` : ''}.`);
+                const m = cutMoment({
+                    samples: points, nowLogTime: points[points.length - 1].time,
+                    secondsAgo: num(args.seconds_ago), windowS: num(args.window_s), atLogTime: num(args.at_log_time),
+                    source: `stored run ${Math.trunc(want)}`,
+                });
+                return book ? withNotes(m, book.entries, Math.trunc(want)) : m;
+            }
             const s = f.samples();
             if (!s) throw new Error('There is no log on this tab: no run is recording and none is loaded.');
-            return cutMoment({
+            const m = cutMoment({
                 samples: s.points,
                 nowLogTime: s.nowLogTime,
                 secondsAgo: num(args.seconds_ago),
@@ -386,6 +512,7 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 atLogTime: num(args.at_log_time),
                 source: s.live ? 'live run' : 'loaded log',
             });
+            return book ? withNotes(m, book.entries, book.run) : m;
         },
 
         tuner_start_log: async () => {
@@ -710,7 +837,7 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                     readers: h.readers,
                     ...(h.writes.length ? { setBy: h.writes.map(w => `${w.in}: ${w.value}`) } : {}),
                 })),
-                note: 'observe is the address to give tuner_observe. How wide it is (1, 2 or 4 bytes) comes from the code that sets it; when unsure, read 2 and say the reading is a guess.',
+                note: 'observe is the address to give tuner_plan in watch. How wide it is (1, 2 or 4 bytes) comes from the code that sets it; when unsure, read 2 and say the reading is a guess.',
             };
         },
 
@@ -743,34 +870,162 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
             };
         },
 
-        tuner_observe: async (args) => {
-            // A plan is what a run is OF, so it is frozen for as long as one records — the same rule
-            // the panel follows. Stopping is the driver's yes, through tuner_stop_log.
-            if (f.running()) throw new Error('A log is recording, and its plan cannot change under it. Stop it first (read it back to the driver), then set the plan.');
-            if (args.clear === true) {
-                f.setObservePlan(EMPTY_PLAN);
-                return { cleared: true };
+        tuner_plan: async (args) => {
+            if (!f.notebook || !f.notebookAdd) throw new Error('This build has no notebook.');
+            const book = await f.notebook({ fetch: true });
+            const { plan, heads, forked } = currentPlan(book.entries);
+            const purpose = text(args.purpose, 300);
+            // No purpose: a read.
+            if (!purpose) {
+                return {
+                    plan: plan ? planBrief(plan) : null,
+                    ...(forked ? { fork: heads.map(planBrief), note: 'Two rewrites of one plan are open. Put both to the driver and let them choose (tuner_finding kind status, to withdrawn, on the other); never pick.' } : {}),
+                    stepsDone: Object.fromEntries(stepsDone(book.entries, book.run)),
+                    ...(plan ? {} : { note: 'No plan yet. Write one with purpose and steps once the owner agrees to it.' }),
+                };
             }
-            const plan = planFromArgs(args);
-            const problems = planProblems(plan);
-            if (problems.length) throw new Error(`The plan was not set: ${problems.join(' ')}`);
-            f.setObservePlan(plan);
-            const modeRefusal = f.enterObserve();
+            // A plan is what a run is OF, so it is frozen for as long as one records.
+            if (f.running()) throw new Error('A log is recording, and the plan it runs to cannot change under it. Stop it first (read it back to the driver), then write the plan.');
+            if (forked) throw new Error('Two rewrites of the current plan are open. Ask the driver which to drive by, set the other aside (tuner_finding kind status, to withdrawn), then rewrite.');
+            const steps = stepsFromArgs(args.steps);
+            // Addresses, checked as the OBSERVE panel checks them. Omitted: the current plan's stay.
+            let watch: PlanWatch[] | undefined = plan?.body.kind === 'plan' ? plan.body.watch : undefined;
+            if (Array.isArray(args.watch)) {
+                const probe: ObservePlan = {
+                    title: purpose,
+                    reads: args.watch.slice(0, OBSERVE_MAX_READS + 1).map(r => {
+                        const o = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>;
+                        const address = typeof o.address === 'number' ? o.address : parseAddress(String(o.address ?? '')) ?? NaN;
+                        return { address, count: num(o.bytes) ?? 2, every: (num(o.every) ?? 2) as ObservePlan['reads'][number]['every'], label: text(o.label, 60) };
+                    }),
+                    steps: steps.map(x => x.do),
+                };
+                const problems = probe.reads.length ? planProblems(probe) : [];
+                if (problems.length) throw new Error(`The plan was not written: ${problems.join(' ')}`);
+                watch = probe.reads.map(r => ({ address: watchKey(r.address), bytes: r.count, every: r.every, ...(r.label ? { label: r.label } : {}) }));
+            }
+            const body: NotebookBody = {
+                kind: 'plan', v: nextPlanVersion(book.entries),
+                ...(plan ? { re: plan.id } : {}),
+                purpose,
+                ...(text(args.hypothesis, 2000) ? { hypothesis: text(args.hypothesis, 2000) } : {}),
+                ...(text(args.criteria, 2000) ? { criteria: text(args.criteria, 2000) } : {}),
+                steps,
+                ...(watch?.length ? { watch } : {}),
+            };
+            const [entry] = await f.notebookAdd([{ by: 'chat', body }]);
+            // With addresses, it is also the plan on the OBSERVE screen, and asks for OBSERVE.
+            let modeRefusal: string | null = null;
+            const onScreen = watch?.length && entry ? observeFromPlanEntry(entry) : null;
+            if (onScreen) {
+                f.setObservePlan(onScreen);
+                modeRefusal = f.enterObserve();
+            }
             return {
-                set: true,
-                reads: plan.reads.map(r => ({ address: watchKey(r.address), bytes: r.count, every: r.every, label: r.label })),
-                steps: activeSteps(plan),
-                expectedHz: Number(observeHz(plan).toFixed(2)),
-                mode: modeRefusal ? 'not OBSERVE' : 'OBSERVE',
-                next: modeRefusal
-                    ? `The plan is on the OBSERVE tab, but the session is not in OBSERVE mode: ${modeRefusal}`
-                    : 'The session is in OBSERVE mode with this plan. Ask the owner whether they are ready, then tuner_start_log. The plan is written into the log as its first mark.',
+                written: `plan v${(body as { v: number }).v}`,
+                ...(plan?.body.kind === 'plan' ? { rewrites: `v${plan.body.v}` } : {}),
+                steps: steps.length,
+                ...(onScreen ? {
+                    watch: watch!.map(w => w.address),
+                    expectedHz: Number(observeHz(onScreen).toFixed(2)),
+                    mode: modeRefusal ? 'not OBSERVE' : 'OBSERVE',
+                    ...(modeRefusal ? { modeNote: `The plan is on the OBSERVE tab, but the session is not in OBSERVE mode: ${modeRefusal}` } : {}),
+                } : {}),
+                next: 'Read it back to the driver before the drive: whose plan it is, its version, its steps. Ask whether they are ready before tuner_start_log.',
+            };
+        },
+
+        tuner_note: async (args) => {
+            if (!f.notebook || !f.notebookAdd) throw new Error('This build has no notebook.');
+            const words = text(args.text, 2000);
+            if (!words) throw new Error('Say the driver\'s words, as they said them.');
+            const book = await f.notebook();
+            const s = f.samples();
+            // On the log's clock: now, while a log records; or a moment of the run on screen, parked.
+            let run: number | null = null;
+            let t: number | null = null;
+            const at = num(args.at_log_time);
+            if (f.running() && s?.live && book.run !== null) { run = book.run; t = Math.max(0, s.nowLogTime); }
+            else if (at !== undefined && book.run !== null) { run = book.run; t = Math.max(0, at); }
+            await f.notebookAdd([{ by: 'driver', body: { kind: 'note', run, t, text: words, via: 'voice' } }]);
+            return { kept: true, at: run === null || t === null ? 'not tied to a moment of a run' : `run ${run}, ${Math.round(t * 10) / 10} s` };
+        },
+
+        tuner_finding: async (args) => {
+            if (!f.notebook || !f.notebookAdd) throw new Error('This build has no notebook.');
+            if (f.running()) throw new Error('A log is recording. Findings are written parked; keep the driver\'s words now with tuner_note, and write this after STOP.');
+            const kind = text(args.kind, 10);
+            const words = text(args.text, 2000);
+            const re = text(args.re, 64);
+            let by: NotebookAuthor = 'chat';
+            let body: NotebookBody;
+            switch (kind) {
+                case 'fact':
+                    body = { kind: 'fact', text: words, evidence: evidenceFromArgs(args.evidence) as Evidence };
+                    break;
+                case 'read': {
+                    const ev = evidenceFromArgs(args.evidence);
+                    body = { kind: 'read', text: words, sure: text(args.sure, 4) as 'low', ...(ev ? { evidence: ev } : {}), ...(re ? { re } : {}) };
+                    break;
+                }
+                case 'ask': {
+                    const about = evidenceFromArgs(args.about);
+                    body = { kind: 'ask', to: (text(args.to, 10) || 'driver') as NotebookAuthor, text: words, ...(about ? { about } : {}) };
+                    break;
+                }
+                case 'answer': {
+                    // An answer to a question put to the driver is the driver's words, relayed.
+                    const book = await f.notebook();
+                    const ask = book.entries.find(e => e.id === re);
+                    if (!ask || ask.body.kind !== 'ask') throw new Error(`No question with id "${re}". tuner_notebook lists the open ones.`);
+                    if (ask.body.to === 'driver' || ask.body.to === 'owner') by = 'driver';
+                    body = { kind: 'answer', re, text: words };
+                    break;
+                }
+                case 'status':
+                    body = { kind: 'status', re, to: text(args.status, 10) as 'withdrawn' };
+                    break;
+                default:
+                    throw new Error('kind must be fact, read, ask, answer or status.');
+            }
+            const [entry] = await f.notebookAdd([{ by, body }]);
+            return {
+                written: kind, id: entry?.id,
+                ...(kind === 'read' && re ? { note: 'The entry it disagrees with stays, and now reads DISPUTED. Nothing was overwritten.' } : {}),
+                ...(kind === 'ask' ? { note: 'Put it to the driver when they are parked, or before the next drive.' } : {}),
+            };
+        },
+
+        tuner_notebook: async (args) => {
+            if (!f.notebook) throw new Error('This build has no notebook.');
+            const book = await f.notebook({ fetch: true });
+            const { plan, heads, forked } = currentPlan(book.entries);
+            const only = num(args.run);
+            const limit = Math.min(Math.max(Math.trunc(num(args.limit) ?? 60), 1), 200);
+            const shown = book.entries
+                .filter(e => e.body.kind !== 'plan')
+                .filter(e => only === undefined || entryRun(e) === only);
+            return {
+                runOnScreen: book.run,
+                runs: book.runs,
+                plan: plan ? planBrief(plan) : null,
+                ...(forked ? { fork: heads.map(planBrief), forkNote: 'Two rewrites of one plan are open: put both to the driver, never pick.' } : {}),
+                stepsDone: Object.fromEntries(stepsDone(book.entries, book.run)),
+                openQuestions: openAsks(book.entries).map(e => entryBrief(e, book.entries)),
+                entries: shown.slice(-limit).map(e => entryBrief(e, book.entries)),
+                ...(book.entries.length === 0 ? { note: 'Nothing written in this session\'s notebook yet.' } : {}),
             };
         },
 
         tuner_mark: async (args) => {
             if (!f.running()) return { marked: false, reason: 'No log is recording.' };
-            const plan = f.observePlan();
+            // The steps of the notebook's plan when there is one — a VE drive has a plan too — and the
+            // OBSERVE screen's otherwise. They are the same steps when the plan has addresses.
+            const book = f.notebook ? await f.notebook().catch(() => null) : null;
+            const noted = book ? currentPlan(book.entries).plan : null;
+            const plan: ObservePlan = noted?.body.kind === 'plan'
+                ? { title: noted.body.purpose, reads: [], steps: noted.body.steps.map(x => x.do) }
+                : f.observePlan();
             const step = num(args.step);
             const steps = activeSteps(plan);
             let label: string;

@@ -17,7 +17,7 @@ let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
 
 const ALL_TABS = ['startup', 'current', 'lambda', 'new', 'diff', 'log',
-    'rfkorr', 'warmup', 'inertia', 'shape', 'idle', 'lls', 'calibration', 'observe'];
+    'rfkorr', 'warmup', 'inertia', 'shape', 'idle', 'lls', 'calibration', 'observe', 'notebook'];
 
 console.log('\n[every tab has exactly one owner]');
 {
@@ -40,6 +40,12 @@ console.log('\n[assistantBridge never reaches production — it needs a backend 
 check("assistantBridge stage is 'preview-only'", FEATURES.assistantBridge.stage === 'preview-only', FEATURES.assistantBridge.stage);
 check('...and it owns no tab', FEATURES.assistantBridge.tabs.length === 0);
 check('...and production does not enable it', !featureEnabled('assistantBridge', false));
+
+console.log('\n[the notebook never reaches production — the privacy policy describes it as WORKS-only (§10)]');
+check("notebook stage is 'preview-only'", FEATURES.notebook.stage === 'preview-only', FEATURES.notebook.stage);
+check('...and production does not enable it', !featureEnabled('notebook', false));
+check('...and its tab stands last in every mode, after the run\'s own panel',
+    Object.values(MODE_TABS).every(tabs => tabs[tabs.length - 1] === 'notebook'));
 
 console.log('\n[featureEnabled truth table]');
 {

@@ -1,4 +1,7 @@
-import { Env, bad, blobToBase64, noContent, ok, ownerOf, unauthorized } from '../../_shared';
+import { bad, blobToBase64, noContent, ok, ownerOf, unauthorized } from '../../_shared';
+// Type-only, on its own line: verify:notebook loads this file through Node's type stripping, which
+// cannot tell a type in a named import from a value.
+import type { Env } from '../../_shared';
 
 /**
  * GET /api/sessions/:id — the whole session back, ready to be written into the local database.
@@ -59,5 +62,8 @@ export const onRequestDelete: PagesFunction<Env, 'id'> = async ({ env, params, d
     const result = await env.RUNS_DB.prepare('DELETE FROM sessions WHERE id = ? AND owner = ?')
         .bind(String(params.id), owner.id).run();
     if (!result.meta.changes) return bad('No such session.', 404);
+    // Its notebook goes with it: entries of a session the store no longer has would be read by no one.
+    await env.RUNS_DB.prepare('DELETE FROM notebook_entries WHERE session_id = ? AND owner = ?')
+        .bind(String(params.id), owner.id).run();
     return noContent();
 };

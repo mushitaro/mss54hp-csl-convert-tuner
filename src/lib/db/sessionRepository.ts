@@ -244,6 +244,18 @@ export function runCount(record: SessionLogRecord | null | undefined): number {
     return (record.runs?.length ?? 0) + (holdsSamples(record) ? 1 : 0);
 }
 
+/**
+ * The samples of run `n` of a stored log, numbered as `runs` numbers them: an earlier run from
+ * `runs`, or the current one, which is number `runs.length + 1`. Null when there is no such run, or
+ * when it holds no log samples (an inertia or idle run keeps its own arrays, not `data`).
+ */
+export function storedRunData(record: SessionLogRecord | null | undefined, n: number): LogDataPoint[] | null {
+    if (!record || !Number.isInteger(n) || n < 1) return null;
+    const earlier = record.runs ?? [];
+    const data = n <= earlier.length ? earlier[n - 1].data : n === earlier.length + 1 ? record.data : null;
+    return data?.length ? data : null;
+}
+
 export async function saveTune(input: SaveTuneInput): Promise<TuningSession> {
     const sha256 = await sha256Hex(input.tunedBinaryBuffer);
     return withDb(async db => {
@@ -384,6 +396,11 @@ export function renameSession(id: string, label: string): Promise<TuningSession>
  *  because it has no trim channel, not because of this field. */
 export function setSessionProcess(id: string, process: ProcessId): Promise<TuningSession> {
     return patchSession(id, s => ({ ...s, process }));
+}
+
+/** Records that this device wrote in the session's notebook — see `TuningSession.notebookAt`. */
+export function touchNotebook(id: string, at: number): Promise<TuningSession> {
+    return patchSession(id, s => ({ ...s, notebookAt: Math.max(at, s.notebookAt ?? 0) }));
 }
 
 export function archiveSession(id: string): Promise<TuningSession> {

@@ -4,7 +4,8 @@
  *   the moment   cutMoment finds the window on the tab's clock and the events in it: a loss of
  *                acceleration with the throttle held, a knock retard placed in time from its counter
  *                (n combustions at r rpm = n * 120 / r s before the read), a cylinder fired low, a
- *                gear change, an overrun fuel cut, a link gap; it thins long windows without dropping
+ *                gear change, both trims reset with the throttle shut (and where the pedal was), a
+ *                link gap; it thins long windows without dropping
  *                a slow-lane row, and says when there is nothing to cut
  *   the rules    stopping needs `confirmed: true`; starting refuses with the screen's own reason;
  *                only this build's views can be shown; an unknown tool is not answered
@@ -17,6 +18,10 @@
  *   the ticket   the function's format: v1.<payload>.<HMAC-SHA256>, sixty seconds, this owner
  *   save & sync  SAVE, sending to the cloud and bringing a session back, each only with
  *                `confirmed: true` after a read-back; no VIN in the cloud's listing
+ *   notebook     the plan (written as the next version, refused while a log records, a fork never
+ *                rewritten), the driver's own words on the run's clock, findings refused while
+ *                recording and without evidence, a reading that disagrees standing beside the other,
+ *                an answer as the driver's; the moment of an earlier run, and the words in a window
  *   calibration  reading a parameter (its value, its byte, the XDF's choices, how the code tests
  *                it); staging a change only with `confirmed: true`, a whole row as one fill; the
  *                recipes compared with the open BIN, step by step, with how sure each is
@@ -30,6 +35,7 @@ import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
+import { entryProblem } from '../src/lib/notebook/rules.ts';
 import { BridgeClient, BRIDGE_PROTOCOL, HELD_CLOSE_CODE } from '../src/lib/bridge/bridgeClient.ts';
 // The ticket is minted by WORKS's backend, and functions/ is not on main (release-scope.mjs
 // NOT_FOR_MAIN: main is static). Loaded only where the backend is, so this suite runs on main too —
@@ -128,7 +134,7 @@ console.log('\n[gear, fuel cut, link gap]');
     const m = cutMoment({ samples: [...s, ...afterGap], nowLogTime: 24, secondsAgo: 12, windowS: 24, source: 'live run' });
     const kinds = m.events.map(e => e.kind);
     check('the gear change', kinds.includes('gear') && m.events.find(e => e.kind === 'gear').detail === 'gear 4 → 5');
-    check('the fuel cut, once at its start', kinds.filter(k => k === 'fuelCut').length === 1, JSON.stringify(kinds));
+    check('trims reset with the throttle shut, once at its start (named for what was measured)', kinds.filter(k => k === 'trimsReset').length === 1, JSON.stringify(kinds));
     check('the link gap, with its length', m.events.some(e => e.kind === 'linkGap' && /6 s/.test(e.detail)), JSON.stringify(m.events.filter(e => e.kind === 'linkGap')));
     check('no acceleration is computed across the gap', !m.events.some(e => e.kind === 'accelLoss' && e.t > 7.5 && e.t < 8.5));
     check('the gap row carries linkGapS', m.columns.includes('linkGapS'));
@@ -161,7 +167,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the nineteen tools', TOOL_NAMES.length === 19 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the twenty-two tools', TOOL_NAMES.length === 22 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -633,10 +639,11 @@ console.log('\n[the moment: the air side and the cams]');
     check('...and the cam gap is ist minus soll', row?.[m.columns.indexOf('evanDev')] === -8 && row?.[m.columns.indexOf('avanDev')] === -4, JSON.stringify(row));
 }
 
-console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
+console.log('\n[the plan through the bridge: OBSERVE addresses, the mode, the marks]');
 {
     let running = false, plan = { title: '', reads: [], steps: [] }, modeRefusal = null, entered = 0;
     const marked = [];
+    const book = [];
     const f = {
         status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => running,
         stopLog: () => {}, views: () => [], show: () => {},
@@ -644,39 +651,54 @@ console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
         setObservePlan: p => { plan = p; },
         enterObserve: () => { entered++; return modeRefusal; },
         mark: label => { marked.push(label); },
+        notebook: async () => ({ entries: [...book], run: 1, runs: 1 }),
+        notebookAdd: async items => {
+            const made = items.map((x, i) => ({ id: `entry-${String(book.length + i + 1).padStart(4, '0')}`, sessionId: 'session-0001', at: 1000 + book.length + i, ...x }));
+            for (const e of made) { const p = entryProblem(e); if (p) throw new Error(`Notebook entry refused: ${p}`); }
+            book.push(...made);
+            return made;
+        },
     };
     const h = bridgeHandlers(f);
     const good = {
-        title: 'what holds torque back on a 3rd-gear tip-in',
-        reads: [{ address: 'DAT_00ffd1a2', bytes: 2, every: 2, label: 'DAT_00ffd1a2' }, { address: '0xFF8123', bytes: 1, every: 4 }],
+        purpose: 'what holds torque back on a 3rd-gear tip-in',
+        watch: [{ address: 'DAT_00ffd1a2', bytes: 2, every: 2, label: 'DAT_00ffd1a2' }, { address: '0xFF8123', bytes: 1, every: 4 }],
         steps: ['idle 30 s', '  ', 'blip to 3000 twice'],
     };
 
+    const empty = await h.tuner_plan({});
+    check('with no purpose, tuner_plan reads — and says there is none yet', empty.plan === null && /No plan yet/.test(empty.note ?? ''), JSON.stringify(empty));
     let err = null;
-    try { await h.tuner_observe({ ...good, reads: [{ address: 'FF0000', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
-    check('a plan with a read outside the windows is refused, with the reason, and not set', /not set.*outside/.test(err ?? '') && plan.title === '', err);
+    try { await h.tuner_plan({ ...good, watch: [{ address: 'FF0000', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
+    check('a plan with a read outside the windows is refused, with the reason, and not written', /not written.*outside/.test(err ?? '') && book.length === 0, err);
     err = null;
-    try { await h.tuner_observe({ ...good, reads: [{ address: 'FUN_0003c2e8', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
+    try { await h.tuner_plan({ ...good, watch: [{ address: 'FUN_0003c2e8', bytes: 2, every: 2 }] }); } catch (e) { err = e.message; }
     check('an address that is not an address is named as not filled in', /not filled in/.test(err ?? ''), err);
 
-    const set = await h.tuner_observe(good);
-    check('a good plan is set, addresses read as written in the disassembly', set.set === true && plan.reads[0].address === 0xFFD1A2 && plan.reads[1].address === 0xFF8123
-        && JSON.stringify(set.reads.map(r => r.address)) === '["FFD1A2","FF8123"]', JSON.stringify(set));
-    check('...blank steps dropped', JSON.stringify(set.steps) === '["idle 30 s","blip to 3000 twice"]', JSON.stringify(set.steps));
-    check('...the session asked into OBSERVE, and the answer says to ask the owner before tuner_start_log', entered === 1 && set.mode === 'OBSERVE' && /tuner_start_log/.test(set.next));
-    check('...with the rate it will run at', typeof set.expectedHz === 'number' && set.expectedHz > 0 && set.expectedHz < 8, String(set.expectedHz));
+    const set = await h.tuner_plan(good);
+    check('a good plan is written as v1, by the assistant', set.written === 'plan v1' && book[0].by === 'chat' && book[0].body.v === 1, JSON.stringify(set));
+    check('...its addresses as written in the disassembly, on the OBSERVE screen too',
+        JSON.stringify(set.watch) === '["FFD1A2","FF8123"]' && plan.reads[0].address === 0xFFD1A2 && plan.reads[1].address === 0xFF8123, JSON.stringify(set.watch));
+    check('...blank steps dropped, numbered', JSON.stringify(book[0].body.steps.map(s => `${s.n}:${s.do}`)) === '["1:idle 30 s","2:blip to 3000 twice"]');
+    check('...the session asked into OBSERVE, with the rate it will run at', entered === 1 && set.mode === 'OBSERVE' && set.expectedHz > 0 && set.expectedHz < 8, JSON.stringify(set));
+    check('...and the answer says to read it back before the drive', /Read it back/.test(set.next));
     modeRefusal = 'this session already holds a log, so its mode is fixed.';
-    const fixed = await h.tuner_observe(good);
-    check('a session whose mode is fixed: the plan is set and the answer says what the screen needs', fixed.mode === 'not OBSERVE' && /NEW SESSION|holds a log/.test(fixed.next), fixed.next);
+    const fixed = await h.tuner_plan({ ...good, steps: ['idle 30 s'] });
+    check('a rewrite is the next version, pointing at the one it rewrites', fixed.written === 'plan v2' && book[1].body.re === book[0].id && fixed.rewrites === 'v1', JSON.stringify(fixed));
+    check('...and with the mode fixed, the answer says what the screen needs', fixed.mode === 'not OBSERVE' && /holds a log/.test(fixed.modeNote ?? ''), JSON.stringify(fixed));
+    const noWatch = await h.tuner_plan({ purpose: 'same addresses, new steps', steps: ['idle 30 s', 'tip-in'] });
+    check('addresses left out are kept from the plan it rewrites', JSON.stringify(book[2].body.watch?.map(w => w.address)) === '["FFD1A2","FF8123"]', JSON.stringify(noWatch));
+    const read = await h.tuner_plan({});
+    check('reading gives the current plan, who wrote it', read.plan?.version === 3 && read.plan?.by === 'chat', JSON.stringify(read.plan));
 
     running = true;
     err = null;
-    try { await h.tuner_observe(good); } catch (e) { err = e.message; }
+    try { await h.tuner_plan(good); } catch (e) { err = e.message; }
     check('no plan change while a log records', /cannot change under it/.test(err ?? ''), err);
     const m1 = await h.tuner_mark({ label: '  driver: that hesitation  ' });
     check('a free mark lands as said, trimmed', m1.marked === true && marked.at(-1) === 'driver: that hesitation');
     const m2 = await h.tuner_mark({ step: 2 });
-    check('a step mark is the panel\'s own label for it, so its checklist ticks', m2.label === 'step 2: blip to 3000 twice' && marked.at(-1) === m2.label, m2.label);
+    check('a step mark is the plan\'s own label for it, from the notebook\'s plan', m2.label === 'step 2: tip-in' && marked.at(-1) === m2.label, m2.label);
     err = null;
     try { await h.tuner_mark({ step: 3 }); } catch (e) { err = e.message; }
     check('a step the plan does not have is refused', /No step 3: the plan has steps 1 to 2/.test(err ?? ''), err);
@@ -686,8 +708,70 @@ console.log('\n[OBSERVE through the bridge: the plan, the mode, the marks]');
     running = false;
     const m3 = await h.tuner_mark({ label: 'x' });
     check('no mark without a recording log', m3.marked === false && marked.length === 2);
-    const cleared = await h.tuner_observe({ clear: true });
-    check('clear empties the plan', cleared.cleared === true && plan.reads.length === 0 && plan.title === '');
+}
+
+console.log('\n[the notebook through the bridge: the driver\'s words, findings, questions]');
+{
+    let running = false, now = 42.5;
+    const book = [];
+    const pts = Array.from({ length: 20 }, (_, i) => ({ time: i, rpm: 2000 + i * 20, rawLoad: 10, wdk1: 20, stft1: 1.02, stft2: 1.01 }));
+    const f = {
+        status: () => ({}), startRefusal: () => null, startLog: () => {}, running: () => running,
+        samples: () => (running ? { points: pts, live: true, nowLogTime: now } : { points: pts, live: false, nowLogTime: 19 }),
+        stopLog: () => {}, views: () => [], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        notebook: async () => ({ entries: [...book], run: 2, runs: 2 }),
+        notebookAdd: async items => {
+            const made = items.map((x, i) => ({ id: `entry-${String(book.length + i + 1).padStart(4, '0')}`, sessionId: 'session-0001', at: 1000 + book.length + i, ...x }));
+            for (const e of made) { const p = entryProblem(e); if (p) throw new Error(`Notebook entry refused: ${p}`); }
+            book.push(...made);
+            return made;
+        },
+        runSamples: async run => (run === 1 ? Array.from({ length: 30 }, (_, i) => ({ time: i, rpm: 1500, rawLoad: 5, wdk1: 0, stft1: 1, stft2: 1, pwg1: 44 })) : null),
+    };
+    const h = bridgeHandlers(f);
+
+    running = true;
+    const said = await h.tuner_note({ text: '2速から3速に上げて、そのまま踏んだ' });
+    check('the driver\'s words are kept as theirs, on the run\'s clock, while a log records',
+        said.kept && book[0].by === 'driver' && book[0].body.kind === 'note' && book[0].body.run === 2 && book[0].body.t === 42.5 && book[0].body.via === 'voice', JSON.stringify(book[0]));
+    let err = null;
+    try { await h.tuner_note({ text: '  ' }); } catch (e) { err = e.message; }
+    check('a note with no words is refused', /driver's words/.test(err ?? ''), err);
+    err = null;
+    try { await h.tuner_finding({ kind: 'fact', text: 'x', evidence: { run: 2, from: 1, to: 2, channels: ['rpm'] } }); } catch (e) { err = e.message; }
+    check('a finding is not written while a log records — the words are, by tuner_note', /written parked/.test(err ?? ''), err);
+    running = false;
+
+    const parked = await h.tuner_note({ text: '今のは下り坂だった', at_log_time: 12 });
+    check('parked, a note can be put at a moment of the run on screen', /run 2, 12 s/.test(parked.at) && book[1].body.t === 12, JSON.stringify(parked));
+    err = null;
+    try { await h.tuner_finding({ kind: 'fact', text: 'trim 1.02 → 0.93 → 1.00' }); } catch (e) { err = e.message; }
+    check('a fact without evidence is refused, in the rule\'s words', /evidence is required/.test(err ?? ''), err);
+    const fact = await h.tuner_finding({ kind: 'fact', text: 'trim 1.02 → 0.93 → 1.00', evidence: { run: 2, from: 3, to: 9, channels: ['stft1'], decode: 'u16/32768' } });
+    check('a fact with run, range and channels is written', fact.written === 'fact' && book[2].body.evidence.channels[0] === 'stft1', JSON.stringify(fact));
+    const claim = await h.tuner_finding({ kind: 'read', text: 'a fuel cut before the tip-in', sure: 'mid' });
+    const counter = await h.tuner_finding({ kind: 'read', text: 'pedal stayed at 44 %: a shift, not a lift', sure: 'high', re: claim.id });
+    check('a reading that disagrees points at the other, which stays', /DISPUTED/.test(counter.note ?? '') && book.some(e => e.id === claim.id), JSON.stringify(counter));
+    const q = await h.tuner_finding({ kind: 'ask', to: 'driver', text: 'アクセルは戻しましたか', about: { run: 1, from: 2, to: 4, channels: ['pwg1'] } });
+    const nb = await h.tuner_notebook({});
+    check('tuner_notebook lists the open question, and the disputed reading as disputed',
+        nb.openQuestions.length === 1 && nb.openQuestions[0].id === q.id && nb.entries.find(e => e.id === claim.id)?.status === 'disputed', JSON.stringify(nb.openQuestions));
+    check('...and which run is on screen out of how many', nb.runOnScreen === 2 && nb.runs === 2);
+    const ans = await h.tuner_finding({ kind: 'answer', re: q.id, text: '戻していない。変速した' });
+    check('the driver\'s answer to a question put to the driver is written as the driver\'s', ans.written === 'answer' && book.at(-1).by === 'driver', JSON.stringify(book.at(-1)));
+    check('...and the question is no longer open', (await h.tuner_notebook({})).openQuestions.length === 0);
+    err = null;
+    try { await h.tuner_finding({ kind: 'answer', re: 'entry-9999', text: 'x' }); } catch (e) { err = e.message; }
+    check('an answer to no question is refused', /No question/.test(err ?? ''), err);
+
+    const m = await h.tuner_moment({ at_log_time: 12, window_s: 8 });
+    check('a moment of the run on screen carries the driver\'s words in its window', m.notebook?.some(x => x.driver === '今のは下り坂だった' && x.t === 0), JSON.stringify(m.notebook));
+    const earlier = await h.tuner_moment({ run: 1, at_log_time: 3, window_s: 6 });
+    check('a moment of an earlier run is read from the device, and says so', earlier.source === 'stored run 1' && earlier.samples > 0, JSON.stringify({ source: earlier.source, samples: earlier.samples }));
+    err = null;
+    try { await h.tuner_moment({ run: 5 }); } catch (e) { err = e.message; }
+    check('a run the session does not have is refused', /No run 5/.test(err ?? ''), err);
 }
 
 console.log('\n[a moment of an observation run]');

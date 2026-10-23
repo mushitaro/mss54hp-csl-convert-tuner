@@ -56,6 +56,11 @@ export const NOT_FOR_MAIN = [
     'scripts/wrangler.mjs',
     // The store's own check: it loads functions/api/sessions, which main does not carry.
     'scripts/verify-store-stale.mjs',
+    // The notebook's check, for the same reason: it loads functions/api/sessions/[id]/notebook.
+    'scripts/verify-notebook.mjs',
+    // The desk's notebook tool reads and writes the store through the operator's Cloudflare login.
+    'scripts/notebook.mjs',
+    'scripts/notebook-desk.mjs',
     // They say where the VINs are, which is a signpost worth not putting up in public.
     'docs/release-environments.md',
     'docs/preview-deployment.md',
@@ -75,8 +80,8 @@ export const NOT_FOR_MAIN = [
  */
 export const NOT_FOR_MAIN_SCRIPTS = [
     'preview', 'deploy:preview', 'deploy:staging', 'build:preview', 'publish:preview', 'release', 'ship',
-    'gate:verify', 'verify:release-scope', 'verify:store-stale', 'wrangler',
-    'db:migrate:local', 'db:migrate:remote', 'db:sessions', 'db:diagnostics',
+    'gate:verify', 'verify:release-scope', 'verify:store-stale', 'verify:notebook', 'wrangler',
+    'db:migrate:local', 'db:migrate:remote', 'db:sessions', 'db:diagnostics', 'notebook',
 ];
 
 /**

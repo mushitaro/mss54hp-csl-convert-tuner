@@ -5,7 +5,7 @@ import { Layout, Config, Data } from 'plotly.js';
 import { FieldKey, LOG_FIELD_REGISTRY, isFieldPresent, DEFAULT_FIELD_VISIBILITY } from '@/lib/field-registry/registry';
 import type { PlotParams } from 'react-plotly.js';
 import { ChartLoading } from './ChartLoading';
-import type { PlotMouseEvent } from 'plotly.js';
+import type { PlotMouseEvent, Shape } from 'plotly.js';
 
 // Dynamically import Plotly to avoid SSR issues
 // Typed as react-plotly.js's own props: `dynamic()` widens the component to one with no props, so
@@ -145,14 +145,44 @@ interface Props {
     /** Identifies the log on screen, NOT the window into it. Feeds uirevision: a new log should drop
      *  the zoom, scrubbing the same log should not. Live logging keeps one key while data grows. */
     logKey?: string;
+    /** Moments drawn down the chart: a step marked done (dashed), the driver's own words (solid),
+     *  any other mark in the log (dotted). In log seconds; only the ones inside the window are drawn.
+     *  The label is the few characters over the line; tapping it shows `text`. */
+    marks?: readonly ChartMark[];
 }
+
+export interface ChartMark {
+    t: number;
+    kind: 'step' | 'driver' | 'mark';
+    label: string;
+    text: string;
+}
+
+/** Neutral, ranked by whose words they are: the driver's brightest, a step quieter, a bare mark the
+ *  quietest. Pointer-family greys rather than accents — these say where something happened, not what
+ *  a channel read (tsunagi-m-design §1.3). */
+const MARK_STYLE: Record<ChartMark['kind'], { color: string; label: string; dash: 'solid' | 'dash' | 'dot' }> = {
+    // `label` a step brighter than the line: a 10px glyph in the line's own grey was there and
+    // could not be read.
+    driver: { color: '#DFDFE6', label: '#F2F2F5', dash: 'solid' },
+    step: { color: '#70707E', label: '#C6C6CF', dash: 'dash' },
+    mark: { color: '#4C4C58', label: '#9A9AA8', dash: 'dot' },
+};
 
 /** Wrapped in React.memo so the page's per-sample re-render during a log run stops at this boundary.
  *  Without it the live HUD's state updates would drag a full Plotly pass along ~8 times a second. */
 export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
-    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0, onPanWindow, canPanWindow = false, logKey = 'none',
+    data, selectedIndex, onPointClick, visibleFields = DEFAULT_FIELD_VISIBILITY, presenceData, live = false, fitToken = 0, onPanWindow, canPanWindow = false, logKey = 'none', marks,
 }: Props) {
     const lastHoveredIndex = React.useRef<number | null>(null);
+    /** The mark whose words are open over the chart, after its label was tapped. */
+    const [openMark, setOpenMark] = React.useState<ChartMark | null>(null);
+    /** The marks inside the window, in the order their labels are drawn — what an annotation's index means. */
+    const shownMarks = useMemo(() => {
+        if (!marks?.length || data.length === 0) return [];
+        const first = data[0].time, last = data[data.length - 1].time;
+        return marks.filter(m => m.t >= first && m.t <= last);
+    }, [marks, data]);
     const wrapperRef = React.useRef<HTMLDivElement>(null);
     /**
      * The current window, for the gesture effect to read WITHOUT depending on it.
@@ -684,25 +714,39 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
         xaxis: { ...BASE_LAYOUT.xaxis, autorange: true },
         uirevision: `${logKey}:${fitToken}`,
         transition: (!live && data.length <= TRANSITION_MAX_POINTS) ? TOGGLE_TRANSITION : undefined,
-        shapes: selectedIndex !== undefined && selectedIndex !== null && data[selectedIndex] ? [
+        // Labels at the FOOT of the plot, just above the time axis: the legend owns the top edge, and
+        // a label drawn there was hidden under it.
+        annotations: shownMarks.map(m => ({
+            x: m.t, xref: 'x' as const, y: 0, yref: 'paper' as const, yanchor: 'bottom' as const, yshift: 2,
+            text: m.label, showarrow: false, captureevents: true, hovertext: m.text,
+            bgcolor: 'rgba(0,0,0,0.75)', borderpad: 2,
+            font: { size: 10, color: MARK_STYLE[m.kind].label, family: 'ui-monospace, monospace' },
+        })),
+        shapes: [
+            ...shownMarks.map((m): Partial<Shape> => ({
+                type: 'line', x0: m.t, x1: m.t, y0: 0, y1: 1, xref: 'x', yref: 'paper',
+                line: { color: MARK_STYLE[m.kind].color, width: 1, dash: MARK_STYLE[m.kind].dash },
+            })),
+            ...(selectedIndex !== undefined && selectedIndex !== null && data[selectedIndex] ? [
             {
-                type: 'line',
+                type: 'line' as const,
                 x0: data[selectedIndex].time,
                 x1: data[selectedIndex].time,
                 y0: 0,
                 y1: 1,
-                xref: 'x',
-                yref: 'paper',
+                xref: 'x' as const,
+                yref: 'paper' as const,
                 line: {
                     // Neutral on purpose. This is a pointer, not a status, and with the accent set
                     // down to three hues a crosshair that borrowed one would read as a reading.
                     color: '#F2F2F5', // slate-100
                     width: 2,
-                    dash: 'solid',
+                    dash: 'solid' as const,
                 },
             },
-        ] : [],
-    }), [data, selectedIndex, live, fitToken, logKey]);
+            ] : []),
+        ],
+    }), [data, selectedIndex, live, fitToken, logKey, shownMarks]);
 
     return (
         <div
@@ -711,7 +755,7 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
             // back-navigation gesture before pointermove is ever delivered, so the window pan below
             // could never start. `pan-y` gives up only the axis this chart does not use, leaving a
             // vertical swipe as the ordinary page gesture it should be.
-            className="w-full h-full min-h-[300px] touch-pan-y"
+            className="relative w-full h-full min-h-[300px] touch-pan-y"
             onClick={(e) => {
                 if (onPointClick) {
                     // [FIX] Global Bounds Check first: Ignore clicks in margins (Legend, X-Axis)
@@ -763,8 +807,24 @@ export const LogTimeSeriesChart = React.memo(function LogTimeSeriesChart({
                         lastHoveredIndex.current = e.points[0].pointIndex ?? null;
                     }
                 }}
+                // A mark's label: its words, over the chart. Hover shows them on a desk; a phone has
+                // no hover, so the tap is what opens them. react-plotly.js wires `onClickAnnotation`
+                // (plotly_clickannotation); its typings just do not list it.
+                {...({ onClickAnnotation: (e: Readonly<{ index: number }>) => setOpenMark(shownMarks[e.index] ?? null) } as Partial<PlotParams>)}
             // Click is handled on the wrapper above, not here, to avoid double triggers.
             />
+            {openMark && (
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setOpenMark(null); }}
+                    className="absolute left-2 right-2 top-8 z-10 rounded bg-slate-800 px-3 py-2 text-left shadow-xl"
+                >
+                    <span className="block text-[8px] font-bold tracking-widest uppercase" style={{ color: MARK_STYLE[openMark.kind].label }}>
+                        {openMark.kind === 'driver' ? 'DRIVER' : openMark.kind === 'step' ? 'STEP' : 'MARK'} · {openMark.t.toFixed(1)} s
+                    </span>
+                    <span className="block text-[12px] leading-snug text-slate-100">{openMark.text}</span>
+                </button>
+            )}
         </div>
     );
 });
