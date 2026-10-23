@@ -1,7 +1,7 @@
 {
     "name": "mss54hp-csl-convert-tuner",
     "meshProject": "dme-mapping",
-    "version": "2.2.1",
+    "version": "3.0.0",
     "private": true,
     "license": "MIT",
     "scripts": {
@@ -182,6 +182,9 @@
         "verify:cal-docs": "node scripts/verify-cal-docs.mjs",
         "//verify:release-scope": "The release and WORKS-source exclusion lists hold what they must: every deploy tool and the backend off main, every package script that names them stripped, nothing main keeps importing a file main drops, and WORKS's source (the `preview` branch) publishing its backend while leaving the VIN-bearing paths behind.",
         "verify:release-scope": "node scripts/verify-release-scope.mjs",
+        "//verify:root-icons": "The icons at the well-known paths: /favicon.ico (PNG entries 16/32/48) and /apple-touch-icon(-precomposed).png are the M ICON mapping set, brand-preview and check-branding swap and read back the dev twins on staging and WORKS, and the WORKS gate lets the three through without a session. Readers that ask by name (iOS, link previews, bookmark rebuilds) got 404 before.",
+        "verify:root-icons": "node scripts/verify-root-icons.mjs",
+        "gen:root-icons": "node scripts/gen-root-icons.mjs",
         "verify:supporters": "node scripts/verify-supporters.mjs"
     },
     "dependencies": {

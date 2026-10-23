@@ -5919,7 +5919,7 @@ export default function Home() {
               belongs to. */}
           <span className={`shrink-0 ml-auto min-[900px]:ml-0 text-[9px] font-mono text-slate-500 whitespace-nowrap
             ${updateAvailable ? 'hidden min-[900px]:inline' : ''}`}>
-            V2.2.1 β
+            V3.0.0 β
           </span>
 
           <div className="hidden min-[900px]:flex flex-1 min-w-0 items-center gap-4 text-[9px] font-mono text-slate-500 whitespace-nowrap overflow-hidden ml-8 pl-8 border-l border-slate-800">

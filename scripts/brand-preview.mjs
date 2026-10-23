@@ -190,6 +190,21 @@ for (const file of files(OUT, ['.txt'])) {
     if (after !== before) { writeFileSync(file, after); payloads++; }
 }
 
+// --- The well-known paths ----------------------------------------------------------------------
+// /favicon.ico and /apple-touch-icon(-precomposed).png are asked for by name, by readers that never
+// look at the head (iOS, link previews, bookmark rebuilds — see scripts/gen-root-icons.mjs). The
+// export carries production's files there; a branded build serves the dev twins in their place, or
+// such a reader would show the black-on-white mark for a build whose every other icon is the dev set.
+const ROOT_ICONS = [
+    ['favicon.ico', join('icons', 'mapping-dev-favicon.ico')],
+    ['apple-touch-icon.png', join('icons', 'mapping-dev-256.png')],
+    ['apple-touch-icon-precomposed.png', join('icons', 'mapping-dev-256.png')],
+];
+for (const [path, from] of ROOT_ICONS) {
+    if (!existsSync(join(OUT, from))) fail(`${from} (the dev twin of /${path}) is not in ${OUT}. Run npm run gen:root-icons.`);
+    writeFileSync(join(OUT, path), readFileSync(join(OUT, from)));
+}
+
 // --- Search engines ----------------------------------------------------------------------------
 // Only production is for finding. A branded build is the same pages under another origin, and
 // indexed it would compete with the release it rehearses — staging is open to anyone with the URL.

@@ -28,5 +28,10 @@ export const onRequest = createGate({
         '/icons/mapping-dev-maskable-512.png',
         '/icons/mapping-dev-256.png',
         '/icons/mapping-dev-32.png',
+        // Asked for by name, without a cookie, by iOS, link previews and bookmark rebuilds; the build
+        // puts the dev twins here (brand-preview.mjs, gen-root-icons.mjs).
+        '/favicon.ico',
+        '/apple-touch-icon.png',
+        '/apple-touch-icon-precomposed.png',
     ],
 });

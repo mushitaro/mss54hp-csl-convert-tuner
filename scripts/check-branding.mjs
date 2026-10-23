@@ -94,6 +94,20 @@ if (robots === null || !/^Disallow:\s*\/\s*$/m.test(robots) || /^Allow:/m.test(r
 if (existsSync(join(OUT, 'sitemap.xml'))) fail('sitemap.xml is still in the export');
 else ok('no sitemap.xml');
 
+// The well-known paths, read by name by iOS, link previews and bookmark rebuilds: each must be the
+// dev twin brand-preview.mjs copied there, byte for byte — production's file left at /favicon.ico is
+// a black-on-white mark on a build whose every other icon is the dev set.
+for (const [path, from] of [
+    ['favicon.ico', join('icons', 'mapping-dev-favicon.ico')],
+    ['apple-touch-icon.png', join('icons', 'mapping-dev-256.png')],
+    ['apple-touch-icon-precomposed.png', join('icons', 'mapping-dev-256.png')],
+]) {
+    if (!existsSync(join(OUT, path))) fail(`/${path} is not in ${OUT}`);
+    else if (!existsSync(join(OUT, from))) fail(`${from} is not in ${OUT}`);
+    else if (!readFileSync(join(OUT, path)).equals(readFileSync(join(OUT, from)))) fail(`/${path} is not the dev twin ${from}`);
+    else ok(`/${path}: the dev twin`);
+}
+
 if (!docs) fail(`no .html in ${OUT}`);
 else if (!failures) ok(`${docs} document(s): one app-variant "${VARIANT}", one app-label "${LABEL}", dev icons only, no sync-token`);
 
