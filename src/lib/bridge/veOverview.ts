@@ -100,9 +100,9 @@ const LEGEND: Record<string, string> = {
     veNew: 'what this derivation writes there; null where refused',
     changePct: '(veNew / veNow - 1) x 100',
     askPct: '(mean trim x rf_korr near the cell - 1) x 100: what the samples asked for, written or not',
-    samples: 'samples binned to the cell',
+    samples: 'samples binned to the cell. Samples taken while lambda was still recovering from an rf_korr step are not binned, so a lambda-ramp cell can read 0 here and still have been driven',
     weight: 'sum of their bilinear shares; the weight bar tests this',
-    state: 'written | settled (written, no change) | the gate\'s refusal | no-data | below-reach',
+    state: 'written | settled (written, no change) | the gate\'s refusal | no-data | below-reach. lambda-ramp: every sample near the cell was mid-ramp, none could be used',
 };
 
 const round = (v: number, digits: number) => Number(v.toFixed(digits));

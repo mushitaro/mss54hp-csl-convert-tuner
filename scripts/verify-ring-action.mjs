@@ -33,6 +33,7 @@ import { readLogicPatches } from '../src/lib/binary-engine/patcher.ts';
 import { BinaryParser } from '../src/lib/binary-engine/parser.ts';
 import { writeClaimsTune } from '../src/hooks/useBinaryFile.ts';
 import { MANIFEST_TEXT } from '../src/lib/manifest-text.ts';
+import { DIALOG_TEXT } from '../src/lib/dialog-text.ts';
 
 let fails = 0;
 const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n + (c ? '' : ' — ' + (d ?? ''))); if (!c) fails++; };
@@ -171,6 +172,19 @@ console.log('\n[ALPHA-N loads OFF, and the page asks the chain with the build\'s
         /binaryBuffer && newMap && downloadCarriesTune && dmeLink\.state !== 'tuning'/.test(page));
     check('WRITE asks writeClaimsTune with WARMUP too',
         page.includes('writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras, writeWarmup)'));
+
+    // The second run must start from the wheel: a clean STOP leaves the link up and asks nothing.
+    const finish = page.slice(page.indexOf('const finishLog = async'), page.indexOf('const finishLogRef'));
+    const cleanExit = finish.indexOf('if (!failure) return;');
+    check('a clean STOP returns before the disconnect and before any dialog',
+        cleanExit > 0 && cleanExit < finish.indexOf('dmeLink.disconnect()') && cleanExit < finish.indexOf('await ask('));
+    check('...after the run is flushed and the tab move armed',
+        finish.indexOf('await liveRun.finish()') < cleanExit && finish.indexOf('pendingTabRef.current =') < cleanExit);
+    check('a lost link is still torn down and explained', /dmeLink\.disconnect\(\)[\s\S]*t\.logLost\(failure\)/.test(finish));
+    for (const [lang, t] of Object.entries(DIALOG_TEXT)) {
+        const s = t.logLost('x');
+        check(`${lang}: the lost-link steps arm ALPHA-N before WRITE`, s.indexOf('ALPHA-N') >= 0 && s.indexOf('ALPHA-N') < s.lastIndexOf('WRITE'), s);
+    }
 }
 
 console.log('\n[a WRITE ring never confirms as "no tune"]');

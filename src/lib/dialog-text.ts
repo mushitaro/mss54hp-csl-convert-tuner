@@ -144,29 +144,27 @@ const JA = {
     keepRunFailed: '画面にあるデータログをセッションに残せなかったので、記録を始めませんでした。SAVE してから、もう一度 START を押してください。',
 
     // --- data log ---
-    logFinished: (failure: string | null) =>
-        (failure
-            ? '⚠ 通信が途切れたため、データログを中断しました。\n\n' +
-            `理由: ${failure}\n\n` +
-            '※ ここまでに記録したサンプルは保持しています。\n\n'
-            : 'データログを終了しました。\n\n') +
-        'DMEへ書き込む場合は、次の手順で進めてください:\n' +
-        '1. エンジンを停止(キーを OFF)\n' +
-        '2. 再度イグニッションを ON にする(エンジンはかけない)\n' +
+    // 通信が途切れてログが止まったときだけ出す。STOP で止めたときは接続を残し、何も出さない
+    // （リングが START TUNE に戻り、その下の案内が書き込み方を言う）。
+    logLost: (failure: string) =>
+        '⚠ 通信が途切れたため、データログを中断しました。\n\n' +
+        `理由: ${failure}\n\n` +
+        '※ ここまでに記録したサンプルは保持しています。\n' +
+        '※ 接続はここで解除しました。\n\n' +
+        '続けて記録するなら、CONNECTION で接続し直して START TUNE。\n\n' +
+        'DMEへ書き込むなら:\n' +
+        '1. WRITE の ALPHA-N を ON\n' +
+        '2. エンジンを停止し、イグニッションを ON に戻す(エンジンはかけない)\n' +
         '3. CONNECTION で接続し直す → WRITE\n\n' +
-        '※ エンジンが回っているとDMEが書き込みを拒否します。\n' +
-        '※ エンジンを止めると通信が切れるため、接続はここで解除しました。\n\n' +
-        '書き込まない場合は、このまま DOWNLOAD TUNED で書き出せます(WRITEが送るバイト列そのもの)。',
+        '書き込まずに書き出すなら、ALPHA-N を ON にしてから DOWNLOAD TUNED(WRITE が送るバイト列そのもの)。',
     // OBSERVE: the same stop, without the WRITE route — an observation run derives nothing to write.
-    observeFinished: (failure: string | null) =>
-        (failure
-            ? '⚠ 通信が途切れたため、観察ランを中断しました。\n\n' +
-            `理由: ${failure}\n\n` +
-            '※ ここまでに記録したサンプルは保持しています。\n\n'
-            : '観察ランを終了しました。\n\n') +
+    observeLost: (failure: string) =>
+        '⚠ 通信が途切れたため、観察ランを中断しました。\n\n' +
+        `理由: ${failure}\n\n` +
+        '※ ここまでに記録したサンプルは保持しています。\n' +
+        '※ 接続はここで解除しました。\n\n' +
         '記録は OBSERVE タブの BYTES と、ログの Watch・Mark 列に残っています。\n' +
-        'このランは書き込むものを作りません。名前は、何と一緒に動いたかを見て、あとで付けます。\n\n' +
-        '※ 接続はここで解除しました。',
+        'このランは書き込むものを作りません。名前は、何と一緒に動いたかを見て、あとで付けます。',
 
     // --- flashing the DME ---
     writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
@@ -242,7 +240,7 @@ const JA = {
      * 走行中のログでリンクが切れ、同じケーブルで再接続しているあいだ（liveSupervisor.ts）。
      *
      * 三つとも「ログは止まっていない」を言う。この行を見る人が最初に知りたいのはそれで、
-     * 赤（エラー）ではなく黄（注意）なのもそのため。止まるときは別の文（logFinished）が出る。
+     * 赤（エラー）ではなく黄（注意）なのもそのため。止まるときは別の文（logLost）が出る。
      * 電話の幅では二行に切れるので、短く保つ。
      */
     linkLost: (): string => 'リンクが切れました — 同じケーブルで再接続しています。ログは止めていません。',
@@ -450,28 +448,24 @@ Send over it?`,
     recoverFailed: 'The data log could not be restored — the original session\'s binary is missing.',
     keepRunFailed: 'The data log on screen could not be kept in the session, so recording did not start. SAVE, then press START again.',
 
-    logFinished: (failure: string | null) =>
-        (failure
-            ? '⚠ The data log stopped because the link was lost.\n\n' +
-            `Reason: ${failure}\n\n` +
-            'Note: the samples recorded up to that point have been kept.\n\n'
-            : 'Data log finished.\n\n') +
-        'To write to the DME, continue like this:\n' +
-        '1. Stop the engine (key OFF)\n' +
-        '2. Switch the ignition back ON (do not start the engine)\n' +
+    logLost: (failure: string) =>
+        '⚠ The data log stopped because the link was lost.\n\n' +
+        `Reason: ${failure}\n\n` +
+        'Note: the samples recorded up to that point have been kept.\n' +
+        'Note: the connection was released here.\n\n' +
+        'To record another run, reconnect with CONNECTION, then START TUNE.\n\n' +
+        'To write to the DME:\n' +
+        '1. Under WRITE, turn ALPHA-N on\n' +
+        '2. Stop the engine and switch the ignition back ON (do not start the engine)\n' +
         '3. Reconnect with CONNECTION → WRITE\n\n' +
-        'Note: the DME refuses the write while the engine is running.\n' +
-        'Note: stopping the engine drops the link, so the connection was released here.\n\n' +
-        'If you are not writing, you can export it as it is with DOWNLOAD TUNED (the exact bytes WRITE sends).',
-    observeFinished: (failure: string | null) =>
-        (failure
-            ? '⚠ The observation run stopped because the link was lost.\n\n' +
-            `Reason: ${failure}\n\n` +
-            'Note: the samples recorded up to that point have been kept.\n\n'
-            : 'Observation run finished.\n\n') +
+        'To export without writing, turn ALPHA-N on, then DOWNLOAD TUNED (the exact bytes WRITE sends).',
+    observeLost: (failure: string) =>
+        '⚠ The observation run stopped because the link was lost.\n\n' +
+        `Reason: ${failure}\n\n` +
+        'Note: the samples recorded up to that point have been kept.\n' +
+        'Note: the connection was released here.\n\n' +
         'What it saw is under BYTES on the OBSERVE tab, and in the log\'s Watch and Mark columns.\n' +
-        'This run makes nothing to write. The names come afterwards, from what moved with what.\n\n' +
-        'Note: the connection was released here.',
+        'This run makes nothing to write. The names come afterwards, from what moved with what.',
 
     writeConfirm: (a: { tuned: boolean; patchOn: boolean; drift: string[]; android: boolean; verifyMode: 'quick' | 'full'; boostBaud: number | null; tankVentOff: boolean; kHold: boolean; route: RouteId }) =>
         'Writing to the DME.\n\n' +
@@ -639,10 +633,11 @@ Send over it?`,
     btnDiscard: 'Discard',
 };
 
-const TEXT: Record<DialogLang, NativeDialogText> = { ja: JA, en: EN };
+/** Both languages, for the verify scripts that read the copy back; the app calls dialogText(). */
+export const DIALOG_TEXT: Record<DialogLang, NativeDialogText> = { ja: JA, en: EN };
 
 /** The native-dialog copy in the display language. Call it at the point of use — it is cheap, and
  *  reading `navigator` lazily keeps this module safe to import from anywhere. */
 export function dialogText(): NativeDialogText {
-    return TEXT[detectDialogLang()];
+    return DIALOG_TEXT[detectDialogLang()];
 }

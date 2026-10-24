@@ -3181,8 +3181,14 @@ export default function Home() {
    * connected, with no key-cycle instruction, and (because a partial log still produces a newMap) with
    * the hub silently re-armed to WRITE. That is one click from flashing with the engine running.
    *
-   * Order matters: disconnect BEFORE alert, because alert blocks the main thread and would freeze the
-   * read pump behind the dialog.
+   * A clean STOP keeps the link (operator, 2026-10-24). A session keeps several runs, and the next
+   * thing after STOP is as often the next run as the write; the driver cannot be asked to press
+   * CONNECTION and dismiss a dialog at the wheel. Nothing here needs the link gone: WRITE resyncs and
+   * logs in again before the erase, and the DME refuses the erase (0xA2) while the engine turns
+   * (writePartialBinInner), so a key cycle with the link still on screen loses nothing. The ring says
+   * START TUNE, and the notice under it names the switch that writes the tune.
+   *
+   * A lost link is still torn down and explained: the supervisor gave up on it, so it is dead.
    */
   const finishLog = async (failure: string | null) => {
     if (finishedRef.current) return;
@@ -3199,19 +3205,15 @@ export default function Home() {
     // and TUNED MAP is already open behind it.
     pendingTabRef.current = flushed ? 'new' : null;
 
-    // Logging runs with the engine going; writing needs it stopped, and stopping it ends the DME's
-    // diagnostic session. So this connection physically cannot survive into the write — keeping it
-    // on screen would just mean WRITE times out after the key cycle. Drop it and say what to do.
-    //
-    // Still before the message, though it no longer has to be: `alert` blocked the main thread and
-    // would have frozen the read pump behind the dialog, which is what this ordering was written
-    // for. `ask` renders and awaits instead, so nothing is frozen — but disconnecting first is also
-    // just the truthful order, since the message it shows describes a link that is already gone.
+    // A clean STOP ends here, connected — see above.
+    if (!failure) return;
+
+    // Before the message: the message describes a link that is already gone.
     await dmeLink.disconnect();
     const t = dialogText();
     await ask({
       title: t.titleLogFinished, icon: <FileSpreadsheet className="w-3 h-3" />,
-      body: logProcess === 'OBSERVE' ? t.observeFinished(failure) : t.logFinished(failure), confirmLabel: t.btnOk,
+      body: logProcess === 'OBSERVE' ? t.observeLost(failure) : t.logLost(failure), confirmLabel: t.btnOk,
     });
   };
 
@@ -3508,8 +3510,8 @@ export default function Home() {
         liveRun.addSample(point);
       },
       (failure) => {
-        // Publish BEFORE the teardown, not after. `finishLog` disconnects and then blocks on a
-        // dialog, and the record is built from live link state; the timing window is already closed
+        // Publish BEFORE the teardown, not after. On a lost link `finishLog` disconnects and then
+        // blocks on a dialog, and the record is built from live link state; the timing window is already closed
         // and published by this point, so this is both the earliest and the last safe moment.
         //
         // This is the first time a datalog has ever produced a diagnostic record. The rate figures
@@ -4086,8 +4088,8 @@ export default function Home() {
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
    *  render, never stored.
    *
-   *  An ARMED tune outranks everything: that's what lets STOP drop the connection for the key cycle
-   *  and still come back to WRITE. Then a BASE in a draft means record a run. Nothing loaded means
+   *  An ARMED tune outranks everything: that's what brings the ring back to WRITE after the key
+   *  cycle, whether the link stayed on screen or was reconnected. Then a BASE in a draft means record a run. Nothing loaded means
    *  fetch a BASE. Because it's read off the data, it cannot disagree with the data — the whole class
    *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
    *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
