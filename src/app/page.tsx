@@ -117,6 +117,7 @@ import { bytesAsRecorded, bytesAsRun, patchOnImage, readLogicPatches, type Logic
 import { buildImage, sameBytes } from '@/lib/binary-engine/buildImage';
 import { armedPatchesFromHistory, patchOnFlash } from '@/lib/db/flashState';
 import { resolveCarImage, seedToggles, sessionToggles, nextStart, storedWriteRfKorr } from '@/lib/db/carImage';
+import { tuneAwaitsArm, veRingAction } from '@/lib/hub/ringAction';
 import {
   RF_KORR_COL_LABEL, RF_KORR_ROW_LABEL, rfKorrViewData, type RfKorrView,
 } from '@/lib/ve-calculator/rfKorrView';
@@ -3663,7 +3664,7 @@ export default function Home() {
     const flashedSettings = buildSettings();
     // The one question every part of this handler asks: did these bytes carry a derived table? It
     // names the confirm, decides whether the session is archived and how the flash is filed.
-    const claimsTune = writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras);
+    const claimsTune = writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras, writeWarmup);
 
     // Lineage, before anything else and before the erase.
     //
@@ -3767,8 +3768,8 @@ export default function Home() {
       /*
        * Two kinds of write arrive here, and `claimsTune` is the whole difference between them.
        *
-       *   A TUNE — a derived table went out (ALPHA-N, RF KORR, SHAPE, IDLE, LLS, calibration edits;
-       *   writeClaimsTune). The bytes are now in an ECU, so the session becomes a record of what was
+       *   A TUNE — a derived table went out (ALPHA-N, WARMUP, RF KORR, SHAPE, IDLE, LLS, calibration
+       *   edits; writeClaimsTune). The bytes are now in an ECU, so the session becomes a record of what was
        *   flashed: its TUNED is stored (from a draft) and it is archived. Leaving it a draft let it
        *   be tuned on, which drifts its TUNED away from the bytes its own flash history points at;
        *   NEXT is the way to continue, on the car image.
@@ -4085,13 +4086,21 @@ export default function Home() {
   /** What the ring offers while the link is connected and idle — derived from the workspace on every
    *  render, never stored.
    *
-   *  A tune to flash outranks everything: that's what lets STOP drop the connection for the key cycle
-   *  and still come back to WRITE. Then a BASE with no tune yet means record one. Nothing loaded means
+   *  An ARMED tune outranks everything: that's what lets STOP drop the connection for the key cycle
+   *  and still come back to WRITE. Then a BASE in a draft means record a run. Nothing loaded means
    *  fetch a BASE. Because it's read off the data, it cannot disagree with the data — the whole class
    *  of "button says the wrong thing" bugs (a new session keeping WRITE, a reconnect offering READ
    *  over a loaded BASE, READ re-appearing after a read) came from storing this and re-syncing by hand.
    *
-   *  'writePatch' sits between them and covers the steps that have no derived map but still have
+   *  ARMED, not derived (operator, 2026-10-24, option A). The first test used to be `newMap`, so one
+   *  run that derived a map held the ring on WRITE for good — while a session now keeps several runs
+   *  (7b1ebc5), and the operator stood at the car with a second run to record and no START TUNE.
+   *  Writing the tune is now the explicit act of arming ALPHA-N (or WARMUP) on the WRITE wing, and
+   *  ALPHA-N loads OFF for it (useBinaryFile). A derived map nobody armed falls through to START TUNE,
+   *  and the notice line under the ring says the tune is there and which switch writes it.
+   *  The VE chain is `veRingAction` (lib/hub/ringAction.ts), pure so verify:ring-action can pin it.
+   *
+   *  'writePatch' sits between them and covers the steps that have no armed tune but still have
    *  bytes worth sending: arming the patch before the first log run, taking a finished tune back off
    *  patch afterwards, and re-writing a patch set the car holds only part of. It outranks 'tune' on
    *  purpose — with the patch not yet in the ECU, START TUNE would record STFT through the DME's own
@@ -4113,8 +4122,8 @@ export default function Home() {
      * are ordinary bytes, and a mode that could arm one and not send it would be a dead end.
      */
     logProcess === 'IDLE'
-      // An ARMED proposal outranks starting another run, the way `newMap` outranks START TUNE in
-      // the VE chain and for the same reason: the next thing to do with a derivation you have
+      // An ARMED proposal outranks starting another run, the way an armed tune outranks START TUNE
+      // in the VE chain and for the same reason: the next thing to do with a derivation you have
       // decided to keep is to send it. Without this the ring said START IDLE over an armed
       // proposal and WRITE was unreachable — the seal was open and nothing could pass through it.
       //
@@ -4132,9 +4141,9 @@ export default function Home() {
        *
        * Reported from the car: an armed LLS row and the ring still offering START TUNE, with no
        * way to reach WRITE (operator, 2026-09-22). The cause is the one the comment above already
-       * names — the VE chain's first test is `newMap`, a micro-throttle run never derives one, so
-       * the whole chain falls through to `tune`. Adding a second mode whose artifact is not a VE
-       * map reproduced the identical defect the IDLE branch was written to fix.
+       * names — the VE chain's first test is a derived VE map, a micro-throttle run never derives
+       * one, so the whole chain falls through to `tune`. Adding a second mode whose artifact is not
+       * a VE map reproduced the identical defect the IDLE branch was written to fix.
        *
        * The other two reasons carry over unchanged. Its profile `requires` nothing, so a pending
        * patch write must not outrank the run and send the operator to WRITE PATCH while they are
@@ -4151,19 +4160,19 @@ export default function Home() {
             // image whose six tables will not decode cannot start this run either.
             : (llsTables && currentSession && !isArchived) ? 'tune'
               : 'read'
-      : newMap ? 'write'
-      // Route A step 1: a correction table with no VE map behind it. An EGT run produces exactly
-      // that — its log has no trim, so `newMap` stays null — and without this branch there would be
-      // no way to send it. buildPatchedBuffer already writes KF_RF_KORR_DRREL outside its
-      // `if (newMap)`, so the bytes have always been reachable; only the offer was missing.
-      : (rfKorrArmed && currentMap && currentSession && !isArchived) ? 'writePatch'
-        // CALIBRATION edits with no derived map behind them — the same shape as the rfKorr
-        // branch above: bytes worth sending, no VE derivation, so without this the ring would
-        // offer START TUNE over an armed edit and the only way to flash it would not exist.
-        : (calEdits.armedEdits.length > 0 && currentMap && currentSession && !isArchived) ? 'writePatch'
-          : (writeChangesCar && currentMap && currentSession) ? 'writePatch'
-            : (currentMap && currentSession && !isArchived) ? 'tune'
-              : 'read';
+      // Every other mode. The rungs, and which rows count as armed for the tune (ALPHA-N, WARMUP;
+      // SHAPE rides on ALPHA-N), are stated in lib/hub/ringAction.ts.
+      : veRingAction({
+        tuneDerived: !!newMap,
+        writeVe: binaryFileState.writeVe,
+        writeWarmup,
+        rfKorrArmed,
+        calEditsArmed: calEdits.armedEdits.length > 0,
+        writeChangesCar,
+        hasBase: !!currentMap,
+        hasSession: !!currentSession,
+        archived: isArchived,
+      });
 
   // ── ASSISTANT: what this tab answers its owner's assistant with (lib/bridge/tools.ts) ──────────
   //
@@ -5144,6 +5153,29 @@ export default function Home() {
    *  corner instead, reachable and out of the way. */
   const [restoreGroup] = groupById('restore');
 
+  /**
+   * A derived tune sitting unarmed — START TUNE on the ring (or CONNECTION, off the cable) with a
+   * map behind it that nothing will write yet.
+   *
+   * The state option A creates (lib/hub/ringAction.ts), and the one that has to be SAID: a run that
+   * derived a map and then shows START TUNE, with no other word, reads as a run that was lost. The
+   * notice line under the ring names the switch that writes it.
+   *
+   * Read off the ALPHA-N row as the wing will draw it — after the feature and mode filters, with its
+   * own locks — so the line can never name a row that is not on screen or cannot be thrown (a learned
+   * trim store, RESTORE VE, an armed RF KORR each lock it, and each says why on the row itself).
+   */
+  const alphaNRow = rightWingGroups[0]?.rows.find(r => r.id === 'alphan');
+  const tuneWaiting = tuneAwaitsArm({
+    action: idleAction,
+    tuneDerived: !!newMap,
+    alphaNArmable: alphaNRow?.kind === 'toggle' && !alphaNRow.disabled,
+  });
+  /** Whether the live build carries a derived table — what DOWNLOAD TUNED's label promises, asked
+   *  the way the filename and WRITE ask it, so the session bar's two exports cannot disagree with
+   *  the file they produce. */
+  const downloadCarriesTune = writeClaimsTune(newMap, binaryFileState.writeVe, writeExtras, writeWarmup);
+
   const dmeButtonConfig = (() => {
     switch (dmeLink.state) {
       case 'disconnected': return { label: 'CONNECTION', Icon: PlugZap, onClick: handleDmeConnect, disabled: false, spin: false };
@@ -5517,6 +5549,15 @@ export default function Home() {
                       && !writeChangesCar
                       ? manifestText.carHoldsThis
                       : null;
+                    // A tune derived and not armed: the ring says START TUNE (or CONNECTION off the
+                    // cable) over a map nothing will write yet, and without this line that reads as
+                    // the run being lost. Says which switch writes it and, on the cable, that START
+                    // TUNE is the other choice — the two next steps, named. Last, like the line
+                    // above: an instruction, never displacing a fault.
+                    const tuneReady = !tuneWaiting ? null
+                      : dmeLink.state === 'connected' ? manifestText.tuneReady
+                        : dmeLink.state === 'disconnected' ? manifestText.tuneReadyOffline
+                          : null;
                     /**
                      * The ring has gone stale, which is what a VE write does to it.
                      *
@@ -5544,7 +5585,8 @@ export default function Home() {
                         ? `IDLE UNAVAILABLE: ${idleTablesRefusal}` : null)
                       ?? warning
                       ?? ringStale
-                      ?? carHoldsThis;
+                      ?? carHoldsThis
+                      ?? tuneReady;
                     if (!notice) return null;
                     // Two levels now, not three. The third was the near-white `info` tone, which
                     // existed only for the measurement line dropped above — with nothing quiet left
@@ -6284,8 +6326,13 @@ export default function Home() {
               )}
 
               <div className="ml-auto flex items-center gap-4 shrink-0">
-                {/* Two exports of the same builder, split on whether a tune exists, so exactly one of
-                    them is ever on screen. Both stand down while the DME is recording: 'tuning' is
+                {/* Two exports of the same builder, split on whether the build CARRIES a tune
+                    (`writeClaimsTune`, the question the filename prefix asks), so the label and the
+                    file agree. It was split on whether a tune EXISTS, which was the same thing while
+                    ALPHA-N loaded armed; since 2026-10-24 it loads OFF, and DOWNLOAD TUNED over an
+                    unarmed map would have handed over a `Base_` file under a TUNED label. Unarmed,
+                    the notice line under the ring says to arm ALPHA-N, and this becomes DOWNLOAD
+                    TUNED the moment it is. Both stand down while the DME is recording: 'tuning' is
                     the live log run, the map moves with every sample, and a file or session record
                     written mid-run would claim to be the result of a run that had not finished. STOP
                     is what makes the numbers final; both come back the moment it does.
@@ -6303,7 +6350,7 @@ export default function Home() {
                     tune, so they cannot apply in this no-tune state anyway.
                     The same expression drives the _PatchON suffix in buildFileName, so the button and
                     the file it produces cannot disagree about whether this BIN is patched. */}
-                {binaryBuffer && !newMap && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning' && (
+                {binaryBuffer && (!newMap || !downloadCarriesTune) && (applyPatch || applyWotDisable) && dmeLink.state !== 'tuning' && (
                   <button
                     onClick={handleDownloadBin}
                     className="group inline-flex items-center gap-1.5"
@@ -6313,7 +6360,7 @@ export default function Home() {
                     <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest group-hover:text-blue-400 transition-colors">Download Patch-On</span>
                   </button>
                 )}
-                {binaryBuffer && newMap && dmeLink.state !== 'tuning' && (
+                {binaryBuffer && newMap && downloadCarriesTune && dmeLink.state !== 'tuning' && (
                   <button
                     onClick={handleDownloadBin}
                     className="group inline-flex items-center gap-1.5"

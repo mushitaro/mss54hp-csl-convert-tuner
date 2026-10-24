@@ -190,9 +190,10 @@ console.log('\n[the hub summary and the any-armed count are the same answer]');
     // The stored value outlives the evidence: a session reopened against another binary can carry
     // writeRfKorr = true with nothing derivable. The summary answers "what will happen".
     //
-    // This is also what licenses ALPHA-N starting armed (useBinaryFile, 2026-08-30). A fresh BASE
-    // with no drive has no derivation, so that row is disabled, so it contributes nothing here --
-    // armed is not written. If this check ever fails, the VE default is no longer safe.
+    // This is also what made ALPHA-N safe to start armed (useBinaryFile, 2026-08-30 to 2026-10-24).
+    // It loads OFF now, but a current draft can still reopen with a saved `writeVe: true` over a BASE
+    // that has no drive yet: that row is disabled, so it contributes nothing here -- armed is not
+    // written. If this check ever fails, a stored arm is no longer safe.
     check('a DISABLED toggle is not listed however it is stored',
         armedLabels(g([row({ label: 'VE', checked: true, disabled: true })])).length === 0);
     check('sealed, info and readout rows are never listed',

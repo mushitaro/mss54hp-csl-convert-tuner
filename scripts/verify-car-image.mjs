@@ -265,7 +265,16 @@ console.log('\n[seeding: pending intent, or the car]');
     check('settings OLDER than the last flash are not current', !settingsAreCurrent(stale));
     check('...the logic patches are left to the car image', seedToggles(stale)?.applyRfKorrHold === undefined
         && sessionToggles(stale, kHold).applyRfKorrHold === true);
-    check('...and the rest of the draft\'s arming is kept', seedToggles(stale)?.writeVe === true);
+    // ALPHA-N is the exception (2026-10-24): it comes back ON only from CURRENT settings, because an
+    // armed ALPHA-N over a derived map puts WRITE on the ring and the session's next run could not
+    // start. The rest of a stale draft's arming is kept, as before.
+    check('...and the rest of the draft\'s arming is kept',
+        seedToggles({ ...stale, tuneSettings: settings({ writeWarmup: true }) })?.writeWarmup === true);
+    check('...ALPHA-N aside: stale settings open it OFF, whatever they saved', seedToggles(stale)?.writeVe === false);
+    check('a CURRENT draft keeps the ALPHA-N it saved — the operator\'s own arm', seedToggles(stage2)?.writeVe === true
+        && seedToggles({ ...stage2, tuneSettings: settings({ writeVe: false }) })?.writeVe === false);
+    check('...and one that saved none opens it OFF (absent is no choice, for seeding)',
+        seedToggles({ ...stage2, tuneSettings: { ...settings(), writeVe: undefined } })?.writeVe === false);
     const legacy = { status: 'draft', tuneSettings: settings(), flashHistory: [realHeld] };
     check('no settingsAt with a real flash behind it reads as older — the rule it reopened under before',
         !settingsAreCurrent(legacy));
@@ -303,8 +312,10 @@ console.log('\n[NEXT: the parent\'s car, switches and filters]');
     check('the switches are the parent\'s', start.settings.applyPatch === true && start.settings.applyRfKorrHold === false
         && start.settings.applyTankVentDisable === false && start.settings.applyWotDisable === false);
     check('the filters and the RO table are the parent\'s', start.settings.filterConfig.minTemp === 71 && start.settings.interpolationTable === table);
-    check('ALPHA-N armed as on any fresh load; the derived rows are not carried',
-        start.settings.writeVe === true && start.settings.writeRfKorr === false && start.settings.writeWarmup === false
+    // OFF, stored (2026-10-24). It was stored TRUE, and the child's settings are its current intent
+    // until its first SAVE, so every child reopened with ALPHA-N armed.
+    check('ALPHA-N OFF as on any fresh load; the derived rows are not carried',
+        start.settings.writeVe === false && start.settings.writeRfKorr === false && start.settings.writeWarmup === false
         && start.settings.restoreVe === false && start.settings.highDeltaGuard === undefined && start.settings.calibrationEdits === undefined);
     // The parent switched K HOLD off and did not write it: the child offers that write at once.
     const childBuild = build(start.base, start.base, toggles({
@@ -419,6 +430,7 @@ console.log('\n[the car image is stored by a real flash, never by a rehearsal]')
     check('...its settings are persisted and dated', after.tuneSettings?.applyRfKorrHold === true && typeof after.settingsAt === 'number');
     check('...and it claims no TUNED', !after.sha256 && !(await repo.getSessionBinaries(child.id)).tunedBinaryBuffer);
     check('...so its reopen keeps them (no flash yet)', settingsAreCurrent(after) && seedToggles(after)?.applyPatch === true);
+    check('...and does not carry ALPHA-N ON into the child', seedToggles(after)?.writeVe === false);
 }
 
 console.log('\n[the sync wire carries the car image, and an old copy without one still restores]');

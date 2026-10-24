@@ -2,7 +2,9 @@
  * The file workflow, pinned to the bytes the app hands back.
  *
  * README "A. File workflow": UPLOAD BIN (a partial BIN), TESTO CSV (a drive log), DOWNLOAD TUNED.
- * This runs that path headlessly under a first load's defaults and checks the tuned BIN against a
+ * This runs that path headlessly under a first load's defaults — with ALPHA-N armed, which since
+ * 2026-10-24 is the operator's tap between the CSV and DOWNLOAD TUNED (it loads OFF, so a session
+ * can record a second run; the notice under the ring asks for it) — and checks the tuned BIN against a
  * golden SHA-256 that was measured from the APP — the production build in headless Chrome, the
  * fixture files set on the two upload inputs and the Download Tuned blob hashed — not from this
  * script. The two agreeing is what makes the hash mean "what the app produces" rather than "what
@@ -99,8 +101,9 @@ const check = (n, c, d) => { console.log('  ' + (c ? 'PASS' : 'FAIL') + '  ' + n
 const baseBytes = fs.readFileSync(BIN);
 const base = baseBytes.buffer.slice(baseBytes.byteOffset, baseBytes.byteOffset + baseBytes.byteLength);
 const map = new M.BinaryParser(base).getVETable();
-// What uploadBinary arms from the bytes on a fresh load; the rest of its toggles default off, and
-// writeVe on (useBinaryFile.ts ~285-300). `readLogicPatches` reports the floor both ways, as
+// What uploadBinary arms from the bytes on a fresh load; the rest of its toggles default off —
+// writeVe too since 2026-10-24, so the build below arms ALPHA-N, the one tap the file workflow takes
+// before DOWNLOAD TUNED appears (page.tsx). `readLogicPatches` reports the floor both ways, as
 // patchStatus does: held seeds K HOLD, and a dropped floor rides into the as-run image unarmed.
 const toggles = M.readLogicPatches(base);
 // The as-run image, and both of its readers — the EGT tables (the rf_korr floor is one of them)
@@ -168,7 +171,8 @@ const tuned = new Uint8Array(M.buildImage({
     toggles: {
         applyPatch: toggles.applyPatch, applyWotDisable: toggles.applyWotDisable,
         applyTankVentDisable: toggles.applyTankVentDisable, applyRfKorrHold: !!toggles.applyRfKorrHold,
-        // A first load's defaults: every derived row off, ALPHA-N armed (useBinaryFile.uploadBinary).
+        // A first load's defaults (useBinaryFile.uploadBinary: every derived row off), plus ALPHA-N
+        // armed by the operator — DOWNLOAD TUNED is offered only once the build carries the tune.
         writeWarmup: false, restoreWotFuel: false, restoreVe: false, restoreWarmup: false, writeVe: true,
     },
     extras: {},

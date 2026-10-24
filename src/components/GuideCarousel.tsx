@@ -35,7 +35,7 @@ import type { DialogLang } from '@/lib/dialog-text';
 export const GUIDE_LABELS = [
     'NEW SESSION', 'UPLOAD BIN', 'TESTO CSV', 'DOWNLOAD TUNED',
     'CONNECTION', 'READ', 'START TUNE', 'STOP', 'WRITE',
-    'PRACTICE', 'BASE',
+    'ALPHA-N', 'PRACTICE', 'BASE',
 ] as const;
 
 interface Slide {
@@ -67,10 +67,10 @@ const JA: GuideText = {
                 'PC の Chrome・Edge と、Android の Chrome で動きます。無料・オープンソース（MIT）。',
             ],
         },
-        { heading: 'ファイルから（ケーブル不要）', steps: ['NEW SESSION', 'UPLOAD BIN と TESTO CSV', 'DOWNLOAD TUNED'] },
+        { heading: 'ファイルから（ケーブル不要）', steps: ['NEW SESSION', 'UPLOAD BIN と TESTO CSV', 'WRITE の ALPHA-N を ON', 'DOWNLOAD TUNED'] },
         {
             heading: '車とつないで（K+DCAN ケーブル）',
-            steps: ['CONNECTION', 'READ', '走りながら START TUNE', 'STOP', 'WRITE'],
+            steps: ['CONNECTION', 'READ', '走りながら START TUNE', 'STOP', 'WRITE の ALPHA-N を ON', 'WRITE'],
             note: '※ 書き込みはエンジンの動きを変えます。WRITE の前に BASE を保管してください。',
         },
         { body: ['PRACTICE にチェックを入れると、模擬の DME ですべて試せます。'] },
@@ -87,10 +87,10 @@ const EN: typeof JA = {
                 'Runs in Chrome or Edge on a computer, and in Chrome on Android. Free and open source (MIT).',
             ],
         },
-        { heading: 'From files — no cable', steps: ['NEW SESSION', 'UPLOAD BIN and TESTO CSV', 'DOWNLOAD TUNED'] },
+        { heading: 'From files — no cable', steps: ['NEW SESSION', 'UPLOAD BIN and TESTO CSV', 'WRITE: turn ALPHA-N on', 'DOWNLOAD TUNED'] },
         {
             heading: 'With the car — K+DCAN cable',
-            steps: ['CONNECTION', 'READ', 'START TUNE while you drive', 'STOP', 'WRITE'],
+            steps: ['CONNECTION', 'READ', 'START TUNE while you drive', 'STOP', 'WRITE: turn ALPHA-N on', 'WRITE'],
             // No ※: it is a Japanese mark, and to an English reader it is a symbol to decode.
             note: 'Writing changes how the engine runs. Keep your BASE before you WRITE.',
         },

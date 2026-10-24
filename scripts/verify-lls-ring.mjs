@@ -602,17 +602,23 @@ console.log('\n[a mode whose artifact is not a VE map still has a way to WRITE]'
      *
      * Structural, reading the source, because the expression sits inside a React component with no
      * seam to call. The extraction fails loudly rather than finding nothing.
+     *
+     * Since 2026-10-24 the VE chain is `veRingAction` (lib/hub/ringAction.ts, pinned as a function
+     * by verify:ring-action) and is the chain's LAST branch, so "tested before newMap" became
+     * "tested before veRingAction": the IDLE and LLS branches stay inline here, and still have to
+     * come first or a VE answer would be given for a mode that derives no VE map.
      */
     const page = readFileSync('src/app/page.tsx', 'utf8');
     const start = page.indexOf('const idleAction');
-    const end = page.indexOf(": 'read';", start);
-    check('the hub action chain was found', start >= 0 && end > start, `${start} / ${end}`);
+    const veAt = page.indexOf('veRingAction(', start);
+    const end = page.indexOf('});', veAt);
+    check('the hub action chain was found', start >= 0 && veAt > start && end > veAt, `${start} / ${veAt} / ${end}`);
     const chain = page.slice(start, end);
 
     for (const mode of ['IDLE', 'LLS']) {
         const at = chain.indexOf(`logProcess === '${mode}'`);
         check(`${mode} has its own branch in the chain`, at >= 0, 'no branch — it will fall through to tune');
-        check(`...and it is tested BEFORE newMap`, at >= 0 && at < chain.indexOf('newMap ?'),
+        check(`...and it is tested BEFORE the VE chain`, at >= 0 && at < chain.indexOf('veRingAction('),
             'the VE test runs first, so this mode can never reach a write');
     }
     check('the LLS branch offers a write when its proposal has cells',

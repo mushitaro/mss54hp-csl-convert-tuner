@@ -117,9 +117,10 @@ Checksums are corrected automatically. Works in any Chromium browser.
 Talks to the DME directly, so no separate reader/logger/flasher is needed:
 
 ```
-CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (ignition off 10s) → done
-                                                            ├→ Download Tuned (verify in TunerPro first)
-                                                            └→ Re-tune        (discard)
+CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP ─┬→ START TUNE (another run, same session)
+                                                       └→ arm ALPHA-N → WRITE ─→ (ignition off 10s) → done
+                                                                      ├→ Download Tuned (verify in TunerPro first)
+                                                                      └→ Re-tune        (discard)
 ```
 
 - **CONNECTION** — connects and shows VIN / AIF / software number / **flash counter**
@@ -134,7 +135,9 @@ CONNECTION → READ → [RESET ADAPT] → START TUNE → STOP → WRITE ─→ (
   poll interval: requests are sent back-to-back, so the sample rate *is* the round-trip time. It is
   measured rather than assumed and shown live as **HZ** next to the sample count, and the run's mean
   rate is stored with the session and listed beside its point count.
-- **STOP** — ends logging; you can then use **Download Tuned** to inspect the result before committing
+- **STOP** — ends logging. The ring offers **START TUNE** again, so a session can keep several runs.
+  `ALPHA-N` under WRITE loads OFF: arm it when the map is ready, and the ring turns to **WRITE** and
+  **Download Tuned** appears, to inspect the result before committing
 - **WRITE** — flashes the tuned BIN (checksum corrected, then verified — QUICK or FULL, see Safety).
   Each session knows the BIN in its car — the bytes of its last real flash, or its BASE if it never
   wrote — and WRITE is offered only when the BIN it would send differs from that one, byte for byte.

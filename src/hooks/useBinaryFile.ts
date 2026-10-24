@@ -83,13 +83,23 @@ export function derivedBaseName(name: string): string {
  * `ラベルは約束` — a button that says PATCH-OFF while sending a derived table, and a file called
  * Base_ that contains one, are the same defect said twice. Asking once is what stops the next mode
  * having to find all four.
+ *
+ * `writeWarmup` joined on 2026-10-24, for the same reason in a fifth place. WARMUP's table is built
+ * FROM the tuned map (`buildImage`, `if (newMap && writeWarmup)`), and it used to ride in on ALPHA-N:
+ * with ALPHA-N armed by default, a WARMUP armed alone was rare enough that nobody saw it file as
+ * `Base_`, leave its session a draft and confirm as "no tune". ALPHA-N now loads OFF, and the hub's
+ * ring counts an armed WARMUP as an armed tune (lib/hub/ringAction.ts) — so this has to as well, or
+ * the ring would say WRITE over a write that calls itself configuration. Optional only so the
+ * scripts that predate it keep their meaning (absent = not armed); both callers in the app pass it.
  */
 export function writeClaimsTune(
   newMap: VEMap | null,
   writeVe: boolean,
   extras?: PatchExtras,
+  writeWarmup?: boolean,
 ): boolean {
   return (writeVe && !!newMap)
+    || (!!writeWarmup && !!newMap)
     || !!extras?.tunedRfKorr
     || !!extras?.tunedShape
     || !!extras?.tunedIdleTv
@@ -167,31 +177,31 @@ export function useBinaryFile() {
   // across the whole cold-exhaust region — it is not something a build should arm on its own.
   const [writeRfKorr, setWriteRfKorr] = useState<boolean>(false);
   /**
-   * The VE map itself, behind a toggle like everything else it is written beside — and the ONE
-   * toggle that starts armed (operator, 2026-08-30).
+   * The VE map itself, behind a toggle like everything else it is written beside — and, like every
+   * other write toggle, OFF on every load (operator, 2026-10-24).
    *
    * It used to be implicit: a derived map was written whenever it existed, which made VE the one
    * table the WRITE manifest could not speak for. Putting it behind a row fixed that, and the row
-   * stays. What changes is only where it starts.
+   * stays.
    *
-   * The reason it may start armed while nothing else does is that VE is the ONLY table this app
-   * exists to produce. Every other row is an extra taken deliberately — a patch, a restore, a
-   * second table, a mode on this one. Someone who loaded a BASE, drove, and opened WRITE is there
-   * to write the map they just derived; making them tick it as well is a step that has exactly one
-   * sensible answer, and a step with one sensible answer is not a decision, it is a tax.
+   * From 2026-08-30 it started ARMED, on the argument that VE is the only table this app exists to
+   * produce, so someone who drove and opened WRITE is there to write it and ticking the row as well
+   * was a tax. That held while a session was one run. Since 7b1ebc5 a session keeps several, and
+   * the armed default turned into the opposite tax: the hub's ring offered WRITE the moment the
+   * first run derived a map, and START TUNE for the second run could not be reached at all (「同じ
+   * セッションで2個以上取れるようにしてあるはずなのに、画面がWRITEを要求していてSTART TUNEできない」).
+   * Option A, approved: after a run the ring is START TUNE, and writing the tune is the explicit act
+   * of arming this row. The ring counts it (lib/hub/ringAction.ts), and the notice line under the
+   * ring says so while a derived map waits unarmed — so the step is asked for by name, not hidden.
    *
-   * ARMED IS NOT WRITTEN, and that is what makes this safe rather than a return to the implicit
-   * behaviour. The row is disabled until a derivation exists, and `armedLabels` refuses a disabled
-   * toggle however it is stored (verify:features), so a fresh BASE with no drive contributes
-   * nothing. Past that, WRITE still names every table in the confirmation before any byte moves,
-   * and the filename's Tune_/Base_ prefix still follows the manifest rather than the derivation.
-   *
-   * A stored DRAFT reopens under the arming it saved (`seedToggles`, lib/db/carImage.ts). An
-   * ARCHIVED session reopens with this OFF: its map is re-derived on reopen under today's rules,
-   * which is not the map in the car, and with the build starting from the car image an armed
-   * ALPHA-N is the one thing that would re-send it under a patch change nobody meant as a tune.
+   * A stored DRAFT whose settings are current reopens under the arming it saved (`seedToggles`,
+   * lib/db/carImage.ts); every other load — a fresh upload or READ, NEXT's child, a draft whose
+   * settings predate its last flash, an archived session — opens with this OFF. For an archived one
+   * that is also the safety half it always was: its map is re-derived on reopen under today's
+   * rules, which is not the map in the car, and with the build starting from the car image an
+   * armed ALPHA-N would re-send it under a patch change nobody meant as a tune.
    */
-  const [writeVe, setWriteVe] = useState<boolean>(true);
+  const [writeVe, setWriteVe] = useState<boolean>(false);
   /** Whether the SHAPE repair's cells go into the next write. Off by default and reset with
    *  every load, like every other derived artefact: these cells carry no direct measurement,
    *  so writing them is a decision the operator takes each time rather than one that persists
@@ -249,10 +259,11 @@ export function useBinaryFile() {
       setRestoreWarmup(overrides?.restoreWarmup ?? false);
       setWriteRfKorr(overrides?.writeRfKorr ?? false);
       // SHAPE keeps the "no trace in the bytes" rule of the three above: OFF on every load.
-      // VE starts ARMED — see its declaration. Loading a BASE cannot write anything by itself, and
-      // the row is disabled until there is a derivation to arm, so this is where the operator's
-      // one sensible answer is already filled in rather than asked for.
-      setWriteVe(overrides?.writeVe ?? true);
+      // So does VE since 2026-10-24 — see its declaration. Armed by default, the first run's map
+      // held the hub's ring on WRITE and the session's next run could not be started; arming it is
+      // now the step that says "write this tune", and only a current draft's saved choice
+      // (seedToggles) brings it back ON.
+      setWriteVe(overrides?.writeVe ?? false);
       setWriteShape(overrides?.writeShape ?? false);
       setTunedIdleTv(null);
       setTunedLlsTv(null);
@@ -336,7 +347,7 @@ export function useBinaryFile() {
     // ship as `Base_` — the same lie in the other direction. Without any of them the artifact is
     // the BASE with the logic toggles applied: real (it is the PATCH-ON BIN you flash for a log
     // run), but not a tune.
-    const claimsTune = writeClaimsTune(newMap, writeVe, extras);
+    const claimsTune = writeClaimsTune(newMap, writeVe, extras, writeWarmup);
     const prefix = claimsTune ? 'Tune' : 'Base';
     return `${prefix}_${dateStr}_${baseName}${patchSuffix}${tevSuffix}${holdSuffix}.bin`;
   };
@@ -384,11 +395,11 @@ export function useBinaryFile() {
     setApplyTankVentDisable(false);
     setApplyRfKorrHold(false);
     setWriteRfKorr(false);
-    // Back to the DEFAULT, not to false — this list exists so the next BASE starts where a fresh
-    // load would, and a fresh load arms VE. Resetting it to false here would make the second
-    // binary of a session behave differently from the first, which is the class of bug this list
-    // was written to end rather than to join.
-    setWriteVe(true);
+    // Back to the DEFAULT — this list exists so the next BASE starts where a fresh load would, and
+    // a fresh load leaves VE unarmed (2026-10-24; it armed it before). Whatever the default is, it
+    // is set here and in uploadBinary alike, or the second binary of a session behaves differently
+    // from the first, which is the class of bug this list was written to end rather than to join.
+    setWriteVe(false);
     setTunedIdleTv(null);
   };
 

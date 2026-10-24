@@ -147,11 +147,26 @@ export interface SeededToggles {
  *
  *     draft, settings current     every toggle from the settings — the operator's pending intent
  *     draft, settings older       the four logic patches detected from the car image; the rest of
- *                                 the settings (ALPHA-N, RF KORR, WARMUP, the restores) kept, since
- *                                 nothing derived has gone out from a draft
- *     draft, no settings          everything detected / defaulted, as a fresh load
+ *                                 the settings (RF KORR, WARMUP, the restores) kept, since nothing
+ *                                 derived has gone out from a draft — and ALPHA-N OFF
+ *     draft, no settings          everything detected / defaulted, as a fresh load (ALPHA-N OFF)
  *     archived                    the logic patches detected from the car image, and every derived
  *                                 row OFF — ALPHA-N included
+ *
+ * ALPHA-N comes back ON only from a current draft's saved choice (operator, 2026-10-24). An armed
+ * ALPHA-N over a derived map is what puts WRITE on the hub's ring (lib/hub/ringAction.ts), and a
+ * session keeps several runs now, so a reopen that armed it by default would hand back the ring
+ * that made the next run unstartable. A current draft's `writeVe: true` is the operator's own arm,
+ * saved — `buildSettings` stores the ARMED value, so it is true only where a map existed and the
+ * row was ON. (A draft saved after a run under the old armed default carries true as well, and
+ * reopens armed; the ring then says WRITE, and turning ALPHA-N off brings START TUNE back — which
+ * before this change it did not.) Absent means no choice was recorded and reads OFF. That is a
+ * reading of PENDING INTENT only: for reproducing what an archived flash carried, absent still
+ * reads TRUE (TuneSettings.writeVe), because before the field the map was always written.
+ *
+ * Settings older than the last flash are not current intent, and for ALPHA-N they cannot be a
+ * pending tune anyway: a write pins its settings at the flash, and a draft's real flash was a
+ * patch-only write — one that carried the map would have archived the session.
  *
  * ALPHA-N off on an archived session is the safety half. Its map is re-derived on reopen under
  * today's rules, which are not the rules it was written under, so a re-derived map is not the map in
@@ -180,9 +195,8 @@ export function seedToggles(
         restoreVe: s.restoreVe ?? false,
         restoreWarmup: s.restoreWarmup ?? false,
         writeRfKorr: storedWriteRfKorr(s),
-        // Absent writeVe reads TRUE: sessions from before the field always wrote the map. See
-        // TuneSettings.writeVe.
-        writeVe: s.writeVe ?? true,
+        // OFF unless the settings are current — see the header.
+        writeVe: false,
     };
     if (!settingsAreCurrent(session)) return rest;
     return {
@@ -192,6 +206,9 @@ export function seedToggles(
         applyTankVentDisable: !!s.applyTankVentDisable,
         applyRfKorrHold: !!s.applyRfKorrHold,
         ...rest,
+        // The operator's saved arm. Absent is no choice, so OFF — the seeding reading, not the
+        // reproduction one (TuneSettings.writeVe); see the header.
+        writeVe: s.writeVe ?? false,
     };
 }
 
@@ -246,9 +263,9 @@ export interface NextStart {
  * `which: 'car'` makes `parentSessionId` the parent itself, so the tree, the badge ("from #N") and
  * the high-Δ guard's ancestor walk all go to the session this one actually continues.
  *
- * Only the four logic switches and the filter settings travel. The derived rows (ALPHA-N's arming
- * aside, which starts armed as on any fresh load) belong to the parent's drive, the high-Δ guard is
- * the parent's own measurement and is read through the ancestor walk rather than copied, and the
+ * Only the four logic switches and the filter settings travel. The derived rows — ALPHA-N included,
+ * which opens OFF as on any fresh load — belong to the parent's drive, the high-Δ guard is the
+ * parent's own measurement and is read through the ancestor walk rather than copied, and the
  * calibration edits are already inside the bytes if they were written.
  */
 export function nextStart(
@@ -275,9 +292,12 @@ export function nextStart(
             restoreVe: false,
             restoreWarmup: false,
             writeRfKorr: false,
-            // Armed, as every fresh load arms it — and stored true rather than left absent so the
-            // record says what was meant. The row stays disabled until a drive derives a map.
-            writeVe: true,
+            // OFF, as every fresh load leaves it (2026-10-24) — and stored rather than left absent
+            // so the record says what was meant. It was stored TRUE, and because these settings are
+            // the child's current intent until its first SAVE, every child reopened with ALPHA-N
+            // armed: the first run's map then put WRITE on the ring and the next run could not
+            // start (lib/hub/ringAction.ts). Arming it is the operator's step, taken in the child.
+            writeVe: false,
         },
     };
 }

@@ -107,6 +107,14 @@ interface ManifestCopy {
     /** Under a dead WRITE ring: the build equals the car image byte for byte, so there is nothing
      *  to send. Names what to change — one line on a desk, two at 375 (the notice slot's budget). */
     carHoldsThis: string;
+    /** Under a START TUNE ring with a derived map nobody armed (lib/hub/ringAction.ts). Since
+     *  2026-10-24 ALPHA-N loads OFF so a session can record a second run; this is what keeps the
+     *  tune from reading as lost. Names both next steps — the switch that writes it, and the run.
+     *  Same budget as `carHoldsThis`. */
+    tuneReady: string;
+    /** The same state off the cable, where the ring says CONNECTION and START TUNE is not on
+     *  screen: the switch is still the step, and it is what DOWNLOAD TUNED and WRITE both carry. */
+    tuneReadyOffline: string;
 }
 
 const EN: ManifestCopy = {
@@ -240,6 +248,8 @@ const EN: ManifestCopy = {
         + 'OFF: the edit is kept on screen and nothing is written. Revert it from the tab itself.',
 
     carHoldsThis: 'The car holds exactly these bytes — change a WRITE or PATCH row to write.',
+    tuneReady: 'A tune is ready — arm ALPHA-N under WRITE to write it, or START TUNE for another run.',
+    tuneReadyOffline: 'A tune is ready — arm ALPHA-N under WRITE to download or write it.',
 };
 
 const JA: ManifestCopy = {
@@ -377,6 +387,8 @@ const JA: ManifestCopy = {
         + '入ります。OFF: 編集は画面に残り、何も書かれません。取り消しはタブ側の REVERT から。',
 
     carHoldsThis: '車にはこのバイトがそのまま入っています — 書くなら WRITE か PATCH の行を変えてください。',
+    tuneReady: 'チューンができています。書くなら WRITE の ALPHA-N を ON、続けて記録するなら START TUNE。',
+    tuneReadyOffline: 'チューンができています。ダウンロードか書き込みをするなら WRITE の ALPHA-N を ON。',
 };
 
 export const MANIFEST_TEXT: Record<DialogLang, ManifestCopy> = { ja: JA, en: EN };
