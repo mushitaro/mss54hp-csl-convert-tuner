@@ -42,14 +42,23 @@
  *                 known recipes that touch it; and the recipes themselves, compared with the open
  *                 BIN (tuner_recipes) — so "what value makes it manual?" is answered from sources,
  *                 with how sure, instead of from the parameter's name.
+ *   the whole     the whole VE map — what this drive's derivation writes in each cell, what it
+ *                 refused and why, where nothing was driven (tuner_ve_map) — and the whole run —
+ *                 where the drive spent its time on the map, the trims there, the events
+ *                 (tuner_run_overview) — one answer each, while driving too (2026-10-24, #984:
+ *                 tuner_moment's two minutes could not answer "where is the map still short?").
+ *                 Read off what the page already computed (veOverview.ts, runOverview.ts).
  *
  *   NOT connect, write, flash or arm a write. A person does those on the screen. There is no tool,
  *   and the facade has no method that could reach them.
  */
-import type { LogDataPoint } from '@/lib/types';
+import type { InterpolationPoint, LogDataPoint } from '@/lib/types';
+import type { LambdaRampParams } from '@/lib/ve-calculator/rampState';
 import type { CodeUses, ParamChoice, RamHit } from '@/lib/calibration/evidence';
 import { findRecipes, recipeParams, type Recipe, type RecipeStep, type Words } from '@/lib/calibration/recipes';
 import { cutMoment } from './moment';
+import { veOverview, type VeOverviewInput } from './veOverview';
+import { runOverview } from './runOverview';
 import {
     OBSERVE_MAX_READS, OBSERVE_MAX_STEPS, activeSteps, observeHz, parseAddress, planProblems,
     stepMark, watchKey, type ObservePlan,
@@ -66,7 +75,7 @@ export const TOOL_NAMES = [
     'tuner_note', 'tuner_finding', 'tuner_cowork', 'tuner_display',
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
     'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
-    'tuner_new_session', 'tuner_discard_edits', 'tuner_ram',
+    'tuner_new_session', 'tuner_discard_edits', 'tuner_ram', 'tuner_ve_map', 'tuner_run_overview',
 ] as const;
 
 /** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
@@ -241,12 +250,30 @@ export interface TabFacade {
     /** Puts a view on DASH's upper area — what the assistant chose to show the driver — or ('off')
      *  gives it back to the tab. Null when done, else why not. */
     display?(view: 'target' | 'steps' | 'values' | 'graph' | 'off', opts?: { step?: number; channels?: string[] }): string | null;
+    /** The VE map as the page holds it — the BASE, the derived map, the calculation's per-cell maps
+     *  and what WRITE would take — for tuner_ve_map. */
+    veOverviewInput?(): VeOverviewInput;
+    /** What a whole run is read with besides its samples: the session's opening table (null when the
+     *  filter's correction is off), the as-run BIN's lambda ramps, and the VE map's axes to bin on
+     *  when a BIN is open — so a grid row of tuner_run_overview is a cell of tuner_ve_map. */
+    runOverviewContext?(): {
+        interpolationTable: InterpolationPoint[] | null;
+        rampParams: LambdaRampParams | null;
+        axes: { rpm: readonly number[]; ro: readonly number[] } | null;
+    };
 }
 
 export type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+/** A [from, to] range as the assistant sends it, low end first; undefined unless both are numbers. */
+const pair = (v: unknown): [number, number] | undefined => {
+    if (!Array.isArray(v) || v.length !== 2) return undefined;
+    const a = num(v[0]);
+    const b = num(v[1]);
+    return a === undefined || b === undefined ? undefined : [Math.min(a, b), Math.max(a, b)];
+};
 
 const fmt = (v: number | null | undefined) => (v === null || v === undefined ? 'unreadable' : String(Math.round(v * 1e6) / 1e6));
 const hex = (v: number) => `0x${v.toString(16).toUpperCase()}`;
@@ -520,6 +547,47 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 source: s.live ? 'live run' : 'loaded log',
             });
             return book ? withNotes(m, book.entries, book.run) : m;
+        },
+
+        tuner_ve_map: async (args) => {
+            if (!f.veOverviewInput) throw new Error('This build cannot read its VE map for the assistant.');
+            const band = { ...(pair(args.rpm) ? { rpm: pair(args.rpm)! } : {}), ...(pair(args.ro) ? { ro: pair(args.ro)! } : {}) };
+            const maxRows = num(args.max_rows);
+            return veOverview(f.veOverviewInput(), {
+                ...(band.rpm || band.ro ? { band } : {}),
+                includeEmpty: args.include_empty === true,
+                ...(maxRows !== undefined ? { maxRows: Math.max(1, Math.min(400, Math.trunc(maxRows))) } : {}),
+            });
+        },
+
+        tuner_run_overview: async (args) => {
+            const book = f.notebook ? await f.notebook().catch(() => null) : null;
+            const want = num(args.run);
+            let samples: readonly LogDataPoint[];
+            let source: 'live run' | 'loaded log' | `stored run ${number}`;
+            // Which run, as tuner_moment chooses it: one asked for by number that is not on screen is
+            // read back from the device.
+            if (want !== undefined && want !== (book?.run ?? null)) {
+                const points = f.runSamples ? await f.runSamples(Math.trunc(want)) : null;
+                if (!points?.length) throw new Error(`No run ${want} in this session${book ? ` (it holds ${book.runs})` : ''}.`);
+                samples = points;
+                source = `stored run ${Math.trunc(want)}`;
+            } else {
+                const s = f.samples();
+                if (!s?.points.length) throw new Error('There is no log on this tab: no run is recording and none is loaded.');
+                samples = s.points;
+                source = s.live ? 'live run' : 'loaded log';
+            }
+            const ctx = f.runOverviewContext?.() ?? { interpolationTable: null, rampParams: null, axes: null };
+            const stepS = num(args.step_s);
+            const from = num(args.from);
+            const to = num(args.to);
+            return runOverview({ samples, interpolationTable: ctx.interpolationTable, source, rampParams: ctx.rampParams }, {
+                ...(stepS !== undefined ? { stepS } : {}),
+                ...(from !== undefined ? { from } : {}),
+                ...(to !== undefined ? { to } : {}),
+                ...(ctx.axes ? { axes: ctx.axes } : {}),
+            });
         },
 
         tuner_start_log: async () => {

@@ -37,6 +37,7 @@ import LlsPanel from '@/components/LlsPanel';
 import ObservePanel from '@/components/ObservePanel';
 import { EMPTY_PLAN, activeSteps, marksOf, planMark, planProblems, stepMark, summariseWatch, watchExchanges, watchKey, windowOf, type ObservePlan } from '@/lib/log-engine/observe';
 import { WriteManifest, ManifestCorner, type ManifestGroup } from '@/components/WriteManifest';
+import { armedLabels } from '@/lib/writeManifest';
 import {
   enabledTabs, featureEnabled, DEV_VARIANT_IS_PREVIEW, MODE_TABS,
   writeRowInMode,
@@ -4501,6 +4502,25 @@ export default function Home() {
       if (!currentSession) return null;
       return storedRunData(await sessionDb.loadLogRecord(currentSession.id), run);
     },
+    // The whole VE map and the whole run for the assistant (tuner_ve_map, tuner_run_overview): the
+    // calculation's own results as this page holds them, read again by veOverview.ts and
+    // runOverview.ts, never recomputed. The run is binned on the VE map's nodes when a BIN is open,
+    // so each grid row is a cell tuner_ve_map lists (#984: 86 % of a drive fell in one 2.5 % band).
+    veOverviewInput: () => {
+      const write = manifestGroups.find(g => g.id === 'write');
+      return {
+        currentMap: binaryFileState.currentMap,
+        newMap: veCalc.newMap,
+        calc: veCalc,
+        veWriteArmed,
+        rowsArmed: write ? armedLabels(write) : [],
+      };
+    },
+    runOverviewContext: () => ({
+      interpolationTable: filterConfig.enableCorrection ? interpolationTable : null,
+      rampParams: egtTables?.lambda ?? null,
+      axes: binaryFileState.currentMap ? { rpm: binaryFileState.currentMap.xAxis, ro: binaryFileState.currentMap.yAxis } : null,
+    }),
     // The plan goes on the screen as it is set, so whoever is at the screen sees what the assistant
     // asked for before anything runs.
     setObservePlan: (plan) => {

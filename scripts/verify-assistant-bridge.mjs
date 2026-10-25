@@ -35,6 +35,8 @@ import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { cutMoment, KNOCK_AGE_NONE, MAX_ROWS } from '../src/lib/bridge/moment.ts';
 import { bridgeHandlers, TOOL_NAMES } from '../src/lib/bridge/tools.ts';
+import { VECalculator } from '../src/lib/ve-calculator/calculator.ts';
+import { APP_CONFIG } from '../src/config/constants.ts';
 import { entryProblem } from '../src/lib/notebook/rules.ts';
 import { BridgeClient, BRIDGE_PROTOCOL, HELD_CLOSE_CODE } from '../src/lib/bridge/bridgeClient.ts';
 // The ticket is minted by WORKS's backend, and functions/ is not on main (release-scope.mjs
@@ -167,7 +169,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the twenty-three tools', TOOL_NAMES.length === 23 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the twenty-five tools', TOOL_NAMES.length === 25 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -195,6 +197,57 @@ console.log('\n[the rules a tool call meets]');
     check('a view is matched without case or spaces', shown === 'log');
     const m = await h.tuner_moment({ seconds_ago: 5, window_s: 10 });
     check('moment reads the facade\'s samples', m.source === 'live run' && m.at === 25, JSON.stringify({ s: m.source, at: m.at }));
+}
+
+console.log('\n[the whole VE map and the whole run: the page\'s results, read again, never recomputed]');
+{
+    const RPM = APP_CONFIG.MSS54HP.AXIS_RPM;
+    const LOAD = APP_CONFIG.MSS54HP.AXIS_LOAD;
+    const BASE = { xAxis: RPM, yAxis: LOAD, data: LOAD.map((_, r) => RPM.map((__, c) => Math.round((0.2 + r * 0.03 + c * 0.005) * 1000) / 1000)) };
+    const drive = [];
+    for (let v = 0; v < 3; v++) for (let k = 0; k < 5; k++) {
+        drive.push({ time: v * 5 + k * 0.2, rpm: 2700, rawLoad: 7.5, correctedLoad: 7.5, stft1: 0.95, stft2: 0.95, rf: 30, kRamp: false });
+    }
+    const calc = new VECalculator().calculateNewVEMap(BASE, drive, { applyRfKorr: false });
+    const stored = { 1: pull(0, 60), 2: pull(0, 20) };
+    let input = { currentMap: BASE, newMap: calc.newMap, calc, veWriteArmed: false, rowsArmed: [] };
+    let ctxCalls = 0;
+    const f = {
+        status: () => ({}), samples: () => ({ points: drive, live: true, nowLogTime: 14 }), startRefusal: () => null, startLog: () => {},
+        running: () => true, stopLog: () => {}, views: () => [], show: () => {},
+        observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        notebook: async () => ({ entries: [], run: 3, runs: 3 }),
+        runSamples: async n => stored[n] ?? null,
+        veOverviewInput: () => input,
+        runOverviewContext: () => { ctxCalls++; return { interpolationTable: null, rampParams: null, axes: { rpm: RPM, ro: LOAD } }; },
+    };
+    const h = bridgeHandlers(f);
+    const all = await h.tuner_ve_map({});
+    check('tuner_ve_map reads the page\'s calculation: the driven cell, written',
+        all.counts?.written >= 1 && all.rows.some(r => r[0] === 2700 && r[1] === 7.5), JSON.stringify(all.counts));
+    check('...and says what WRITE would take', all.tune.derived === true && all.tune.veWriteArmed === false && JSON.stringify(all.tune.rowsArmed) === '[]');
+    const band = await h.tuner_ve_map({ rpm: [2800, 2600], ro: [5, 10], include_empty: true });
+    const drivenInBand = all.rows.filter(r => r[0] >= 2600 && r[0] <= 2800 && r[1] >= 5 && r[1] <= 10).length;
+    check('a band reaches it, low end first, and include_empty lists the cells nobody drove there',
+        JSON.stringify(band.band?.rpm) === '[2600,2800]' && band.rows.length > drivenInBand, JSON.stringify({ band: band.band, rows: band.rows.length, drivenInBand }));
+    const capped = await h.tuner_ve_map({ include_empty: true, max_rows: 3 });
+    check('max_rows caps the rows', capped.rows.length === 3, String(capped.rows.length));
+    input = { currentMap: null, newMap: null, calc: null };
+    check('no BIN open: the answer says so, it does not throw', /No BIN/.test((await h.tuner_ve_map({})).notes[0]));
+
+    const live = await h.tuner_run_overview({});
+    check('tuner_run_overview reads the run on screen, as tuner_moment does',
+        live.source === 'live run' && live.totals?.samples === drive.length, JSON.stringify(live.totals));
+    check('...binned on the VE map\'s nodes, so a grid row is a tuner_ve_map cell',
+        /nodes/.test(live.grid.bins) && live.grid.rows.every(r => RPM.includes(r[0]) && LOAD.includes(r[1])) && ctxCalls === 1, live.grid.bins);
+    const earlier = await h.tuner_run_overview({ run: 1, step_s: 10, from: 5, to: 45 });
+    check('an earlier run is read back from the device, with its step and window',
+        earlier.source === 'stored run 1' && earlier.timeline.stepS === 10 && earlier.totals?.from >= 5 && earlier.totals?.to <= 45,
+        JSON.stringify({ s: earlier.source, step: earlier.timeline.stepS, t: earlier.totals }));
+    let err = null;
+    try { await h.tuner_run_overview({ run: 7 }); } catch (e) { err = e.message; }
+    check('...and a run the session does not have is refused', /No run 7 .*holds 3/.test(err ?? ''), err);
+    check('neither answer carries a VIN or a file name', !/vin|\.bin\b|\.csv\b/i.test(JSON.stringify([all, live, earlier])));
 }
 
 console.log('\n[sessions: which is open, the list, opening one]');
