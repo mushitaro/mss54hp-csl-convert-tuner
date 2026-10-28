@@ -12,7 +12,8 @@
  * to Chrome as "this app has no icon". They are WORKS's own (dev) set, because
  * brand-preview.mjs points every reference at it — production's icons are never requested here.
  * Anything added to the manifest or the head has to be added here too, or it is served only to
- * signed-in pages.
+ * signed-in pages. The one entry that is neither is `/.well-known/assetlinks.json`, for the head
+ * unit's launcher — see its comment below.
  */
 import { createGate } from './_owner-gate/gate';
 
@@ -33,5 +34,13 @@ export const onRequest = createGate({
         '/favicon.ico',
         '/apple-touch-icon.png',
         '/apple-touch-icon-precomposed.png',
+        // Read by Chrome, with no cookie, to decide whether TSUNAGI///Manifold (the head unit's
+        // launcher, app.tsunagi.e46m3.launcher) may open this build as a full-screen Trusted Web
+        // Activity. A 401 here is not an error Chrome reports anywhere: it shows its toolbar and
+        // carries on, so the only symptom is an address bar on the car's screen. The file names one
+        // package and one signing-certificate fingerprint, both already public (the production
+        // build serves the same file, and the launcher's README prints the fingerprint).
+        // Measured 401 here on 2026-10-28, before this line existed.
+        '/.well-known/assetlinks.json',
     ],
 });
