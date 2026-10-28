@@ -76,6 +76,7 @@ export const TOOL_NAMES = [
     'tuner_sessions', 'tuner_open_session', 'tuner_calibration', 'tuner_calibration_edit', 'tuner_recipes',
     'tuner_save', 'tuner_sync_upload', 'tuner_cloud_sessions', 'tuner_cloud_restore',
     'tuner_new_session', 'tuner_discard_edits', 'tuner_ram', 'tuner_ve_map', 'tuner_run_overview',
+    'tuner_connect', 'tuner_disconnect', 'tuner_open_monitoring',
 ] as const;
 
 /** A calibration parameter as the tab reads it off the open session's BASE and its edits. */
@@ -174,6 +175,19 @@ export interface TabFacade {
     running(): boolean;
     /** Presses STOP. Does not wait for the "log finished" dialog the owner reads afterwards. */
     stopLog(): void;
+    /** Why reconnecting the cable by voice is refused now, or null when it may: only from idle, and
+     *  only a cable this page was allowed on the screen before (operator, 2026-10-28). */
+    connectRefusal?(): Promise<string | null>;
+    /** CONNECTION on that cable; null once connected, else why it is not. */
+    connect?(): Promise<string | null>;
+    /** Why releasing the cable is refused now (a log recording, a busy link), or null. */
+    disconnectRefusal?(): string | null;
+    /** Releases the cable, as disconnecting on the screen does. */
+    disconnect?(): Promise<void>;
+    /** Why switching to MONITORING WORKS is refused now (a log, a busy link, unsaved work), or null. */
+    switchRefusal?(): string | null;
+    /** Releases the cable and opens MONITORING WORKS in this window. */
+    switchToMonitoring?(): Promise<void>;
     /** The views this build can show. */
     views(): readonly string[];
     /** Views this build has that are closed for now, because nothing they show is loaded yet. */
@@ -610,6 +624,40 @@ export function bridgeHandlers(f: TabFacade): Record<ToolName, Handler> {
                 note: observing
                     ? 'STOP pressed. The observation run is kept: tuner_status has its marks and what each watched address did, and tuner_moment reads any part of it. It made nothing to write.'
                     : 'STOP pressed. The run is kept; the screen shows the result and how to write it, which is done by a person.',
+            };
+        },
+
+        // The cable and the other app, by voice (operator, 2026-10-28). Reconnecting is only to a cable
+        // allowed on the screen before; choosing a new one, writing and flashing stay on the screen.
+        tuner_connect: async () => {
+            if (!f.connect || !f.connectRefusal) throw new Error('This build cannot reconnect the cable for the assistant.');
+            const refused = await f.connectRefusal();
+            if (refused) throw new Error(refused);
+            const failed = await f.connect();
+            if (failed) throw new Error(`Not connected: ${failed}`);
+            return { connected: true, note: 'Connected to the cable allowed on this device before. Logging and reading can go on from here; writing and flashing stay on the screen.' };
+        },
+
+        tuner_disconnect: async (args) => {
+            if (!f.disconnect || !f.disconnectRefusal) throw new Error('This build cannot release the cable for the assistant.');
+            const refused = f.disconnectRefusal();
+            if (refused) throw new Error(refused);
+            if (args.confirmed !== true) throw new Error('Not released. The owner\'s own words asking for it ("切って") are the yes: call again with confirmed: true.');
+            await f.disconnect();
+            return { disconnected: true, note: 'The cable is free for MONITORING WORKS or the launcher. tuner_connect takes it back.' };
+        },
+
+        tuner_open_monitoring: async (args) => {
+            if (!f.switchToMonitoring || !f.switchRefusal) throw new Error('This build cannot switch to MONITORING WORKS.');
+            const refused = f.switchRefusal();
+            if (refused) throw new Error(refused);
+            if (args.confirmed !== true) throw new Error('Not switched. The owner\'s own words asking for it ("モニタリングにして") are the yes: call again with confirmed: true.');
+            // After this answer has gone back: the page it leaves is the one answering.
+            const go = f.switchToMonitoring;
+            setTimeout(() => { void go(); }, 400);
+            return {
+                switching: true,
+                note: 'MONITORING WORKS opens in this window, the cable released first. This connector stops answering; the monitoring-works connector answers once MONITORING\'s ASSISTANT is on, and monitoring_connect takes the cable there.',
             };
         },
 

@@ -258,11 +258,11 @@ const JA = {
     titleAssistantOn: 'ASSISTANT をオンにする',
     assistantOn: (): string =>
         'あなたが接続した AI アシスタントが、このタブに問い合わせられるようになります。\n\n'
-        + '送るもの: アシスタントが求めたときだけ、このタブの状態（この端末に付けた名前・接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）、クラウドに送ったセッションの一覧（名前・日時・チューンとログの有無）。VIN とファイル名は送りません。\n'
-        + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。\n'
+        + '送るもの: アシスタントが求めたときだけ、このタブの状態（端末の名前（付けていなければ「ナビ」などの既定の名前）・接続・ログの有無・モード・開いているセッション）、この端末に保存したセッションの一覧（番号・名前・日時・BIN とログの有無）、記録済みのデータログの一部（回転・負荷・点火角・ノックなど、観察モードでは指定アドレスのバイト値と印）、開いているセッションのキャリブレーションのうち問い合わせた項目（名前・説明・アドレス・単位・値）、クラウドに送ったセッションの一覧（名前・日時・チューンとログの有無）。VIN とファイル名は送りません。\n'
+        + '経路: TSUNAGI の中継（Cloudflare）を通ります。中継は何も保存しません。つなぐとき、端末を見分ける無作為な番号と、ナビから開いたかどうかを中継に伝えます（中継はメモリ上でだけ扱います）。\n'
         + '届く先: あなたがアシスタントに接続したサービス（claude.ai など）。そこでの扱いは、そのサービスの規約によります。\n\n'
-        + 'できること: ログの開始と停止、画面の切り替え、セッションを開く・新しく作る・コピーする（NEXT）こと、保存していない変更を捨てること、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（CALIBRATION に変更として置きます）、SAVE、クラウドへの送信（SYNC）とクラウドからの取り込み（記録中はしません。送信と取り込みのデータは、このタブとクラウドの間で直接やり取りします）。\n'
-        + 'できないこと: 車への接続・書き込み・フラッシュ。これらの操作は、あなたが頼んだか、声で確認したときだけです。何かを失う操作（保存していない作業を捨てる、別の端末の新しい版を上書きする、取り込みで置き換える、ログの停止）は、必ず読み上げて確認します。\n\n'
+        + 'できること: ログの開始と停止、画面の切り替え、セッションを開く・新しく作る・コピーする（NEXT）こと、保存していない変更を捨てること、観察（OBSERVE）の計画の設定とログへの印付け、キャリブレーションの値の変更（CALIBRATION に変更として置きます）、SAVE、クラウドへの送信（SYNC）とクラウドからの取り込み（記録中はしません。送信と取り込みのデータは、このタブとクラウドの間で直接やり取りします）、この端末で前に選んだケーブルへのつなぎ直しと切断、MONITORING への切り替え。\n'
+        + 'できないこと: 車への書き込み・フラッシュと、新しいケーブルを選ぶこと。これらの操作は、あなたが頼んだか、声で確認したときだけです。何かを失う操作（保存していない作業を捨てる、別の端末の新しい版を上書きする、取り込みで置き換える、ログの停止）は、必ず読み上げて確認します。\n\n'
         + 'いつでもここでオフにできます。',
     btnAssistantOn: 'オンにする',
 
@@ -527,11 +527,11 @@ Send over it?`,
     titleAssistantOn: 'Turn ASSISTANT on',
     assistantOn: () =>
         'The AI assistant you connected will be able to ask this tab questions.\n\n'
-        + 'What is sent: only when the assistant asks, this tab\'s state (the name you gave this device, link, whether a log is running, mode, the open session),the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), the calibration items of the open session it asks about (name, description, address, units, values), and the list of sessions sent to your cloud (name, dates, whether each has a tune and a log). Never the VIN or a file name.\n'
-        + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing.\n'
+        + 'What is sent: only when the assistant asks, this tab\'s state (the device\'s name — yours, or a default such as the head unit\'s — link, whether a log is running, mode, the open session),the list of sessions saved on this device (number, name, date, whether each has a BIN and a log), parts of the data log it has recorded (rpm, load, ignition angles, knock and the rest; in observation mode, the bytes of the addresses watched and the marks), the calibration items of the open session it asks about (name, description, address, units, values), and the list of sessions sent to your cloud (name, dates, whether each has a tune and a log). Never the VIN or a file name.\n'
+        + 'How: through TSUNAGI\'s relay (Cloudflare), which stores nothing. When it connects, the tab tells the relay a random number that tells devices apart and whether it was opened from the head unit (kept in memory only).\n'
         + 'Where it ends up: the service you connected the assistant to (claude.ai and others), under that service\'s own terms.\n\n'
-        + 'What it can do: start and stop a log, bring a view to the front, open, start and copy (NEXT) sessions, drop unsaved changes, set an observation (OBSERVE) plan and put marks on the log, change calibration values (placed on CALIBRATION as changes), SAVE, and send to your cloud (SYNC) and bring a session back from it (never while a log records; what is sent or brought back goes directly between this tab and the cloud).\n'
-        + 'What it cannot do: connect to, write to or flash the car. It does these only when you ask or confirm out loud; anything that loses something (dropping unsaved work, sending over another device\'s newer copy, replacing a copy here, stopping the log) it always reads back first.\n\n'
+        + 'What it can do: start and stop a log, bring a view to the front, open, start and copy (NEXT) sessions, drop unsaved changes, set an observation (OBSERVE) plan and put marks on the log, change calibration values (placed on CALIBRATION as changes), SAVE, and send to your cloud (SYNC) and bring a session back from it (never while a log records; what is sent or brought back goes directly between this tab and the cloud), reconnect the cable chosen on this device before and release it, and switch to MONITORING.\n'
+        + 'What it cannot do: write to or flash the car, or choose a new cable. It does these only when you ask or confirm out loud; anything that loses something (dropping unsaved work, sending over another device\'s newer copy, replacing a copy here, stopping the log) it always reads back first.\n\n'
         + 'You can turn it off here at any time.',
     btnAssistantOn: 'Turn on',
 

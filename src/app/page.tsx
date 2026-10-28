@@ -132,7 +132,9 @@ import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
 import { detectDialogLang, dialogText } from '@/lib/dialog-text';
 import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
-import { readDeviceName, useAssistantBridge } from '@/hooks/useAssistantBridge';
+import { deviceLabel, isHeadUnit, useAssistantBridge } from '@/hooks/useAssistantBridge';
+import { hasGrantedUsbCable } from '@/lib/dme-link/grantedCable';
+import { MONITORING_WORKS_URL } from '@/config/links';
 import type { TabFacade } from '@/lib/bridge/tools';
 import { AssistantSection } from '@/components/AssistantSection';
 import { buildId, canSync, listStoredSessions, pullNotebook, restoreSession } from '@/lib/session-sync/client';
@@ -2736,6 +2738,52 @@ export default function Home() {
     if (resumeRequestedRef.current) history.replaceState(null, '', location.pathname + location.hash);
   }, []);
 
+  /**
+   * The cable goes back when this page goes behind another app, and is taken again when it comes
+   * forward (WORKS builds; 2026-10-28, from a drive). On the head unit TUNER, MONITORING and the
+   * launcher's tachometer all reach the one USB cable, and whichever holds it keeps it while hidden:
+   * a backgrounded tab does not let go, so the next one's claim fails ("Unable to claim interface").
+   * Released only from idle — never under a log, a read or a write — and taken back only if it was
+   * released here, a few tries apart while whoever has it now lets go. The cable was chosen on the
+   * screen before; reconnecting it needs no chooser (WebUSB's granted list), as the voice reconnect.
+   */
+  const releasedOnHideRef = useRef(false);
+  // The newest link object for the listeners below, which are added once.
+  const latestDmeLinkRef = useRef(dmeLink);
+  useEffect(() => { latestDmeLinkRef.current = dmeLink; });
+  useEffect(() => {
+    if (!isPreviewBuild) return;
+    let cancelled = false;
+    const onHide = () => {
+      const link = latestDmeLinkRef.current;
+      const s = link.readLinkState();
+      if (s.state !== 'connected' || s.mockMode) return;
+      releasedOnHideRef.current = true;
+      void link.disconnect();
+    };
+    const onShow = () => {
+      if (!releasedOnHideRef.current) return;
+      releasedOnHideRef.current = false;
+      void (async () => {
+        for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+          const link = latestDmeLinkRef.current;
+          if (link.readLinkState().state !== 'disconnected' || !(await hasGrantedUsbCable())) return;
+          await link.connect();
+          if (latestDmeLinkRef.current.readLinkState().state === 'connected') return;
+        }
+      })();
+    };
+    const onVisibility = () => { if (document.visibilityState === 'hidden') onHide(); else onShow(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onHide);
+    };
+  }, [isPreviewBuild]);
+
   const recoveryOfferedRef = useRef(false);
   useEffect(() => {
     if (disclaimer.open || sessionDb.loading || recoveryOfferedRef.current) return;
@@ -4248,9 +4296,10 @@ export default function Home() {
           : 'CONNECTION';
       return {
         app: 'MSS54HP CSL CONVERT /// TUNER — WORKS',
-        // The name the owner gave this device under ASSISTANT ("ナビ"), so the assistant can say which
-        // device is answering — with two open, only one is.
-        device: readDeviceName(),
+        // Which device is answering — with two open, only one is: the name the owner gave it under
+        // ASSISTANT, else ナビ for the head unit, else スマホ or PC.
+        device: deviceLabel(),
+        headUnit: isHeadUnit(),
         build: buildId() ?? null,
         practice: dmeLink.mockMode,
         link: dmeLink.state,
@@ -4310,6 +4359,40 @@ export default function Home() {
     // cut: the link idle or off, and nothing in the workspace that exists only until SAVE. The row's
     // own OPEN does not ask — a person at the screen sees what they are leaving — and an assistant
     // talking to a driver does not.
+    // The cable by voice (operator, 2026-10-28): reconnect only a cable this page was already allowed
+    // on the screen — WebUSB's granted list, never the chooser, which only a person can answer — and
+    // release it. Allowing a new device, writing and flashing stay on the screen.
+    connectRefusal: async () => {
+      if (dmeLink.state === 'connected') return 'Already connected.';
+      if (dmeLink.state !== 'disconnected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      if (!(await hasGrantedUsbCable())) return 'No cable this page was allowed on is on the USB bus. Choosing a cable is done once on the screen, with CONNECTION, parked.';
+      return null;
+    },
+    connect: async () => {
+      await handleDmeConnect();
+      const after = dmeLink.readLinkState();
+      return after.state === 'connected' ? null : (after.error ?? 'The cable did not answer.');
+    },
+    disconnectRefusal: () => {
+      if (dmeLink.state === 'disconnected') return 'Not connected.';
+      if (dmeLink.state === 'tuning') return 'A log is recording. Stop it first (read the stop back to the driver), then release the cable.';
+      if (dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      return null;
+    },
+    disconnect: async () => { await dmeLink.disconnect(); },
+    // MONITORING WORKS in this same window: the launcher's asset links name both builds, so it stays
+    // full screen. Not over a running log or unsaved work; the cable is released first so MONITORING
+    // can take it.
+    switchRefusal: () => {
+      if (dmeLink.state === 'tuning') return 'A log is recording. Stop it first (read the stop back to the driver).';
+      if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
+      if (saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly') return 'The open session has work that is not saved. tuner_save keeps it first.';
+      return null;
+    },
+    switchToMonitoring: async () => {
+      if (dmeLink.state === 'connected') await dmeLink.disconnect();
+      location.assign(isHeadUnit() ? `${MONITORING_WORKS_URL}?from=manifold` : MONITORING_WORKS_URL);
+    },
     openRefusal: (discard) => {
       if (dmeLink.state === 'tuning') return 'A log is recording. Opening another session would end it; stop it first (read it back to the driver).';
       if (dmeLink.state !== 'disconnected' && dmeLink.state !== 'connected') return `The link is busy (${dmeLink.state}). Wait until it is idle.`;
@@ -4555,7 +4638,7 @@ export default function Home() {
     if (go) assistant.setOn(true);
   };
   const assistantSection = assistantAllowed
-    ? <AssistantSection on={assistant.on} status={assistant.status} onToggle={(next) => void toggleAssistant(next)}
+    ? <AssistantSection on={assistant.on} status={assistant.status}
         onTakeover={assistant.takeover} device={assistant.device} onDevice={assistant.setDevice} />
     : undefined;
 
@@ -5965,19 +6048,31 @@ export default function Home() {
               {badgeLabel}
             </span>
           )}
-          {/* AI — ASSISTANT is on. Beside the badge for the reason SIGN IN is: a fact about this
-              build's reach, and the one part of a phone's header always on screen. A span, not a
-              button: the switch lives in the SYNC panel, and a second switch here would be the
-              second door to one control. Sky when the assistant can reach this tab, slate while it
-              cannot — the driver hears the difference only by asking, so the head unit shows it. */}
-          {assistant.on && (
-            <span
-              title={assistant.status.state === 'live' ? 'ASSISTANT: connected' : `ASSISTANT: ${assistant.status.detail ?? assistant.status.state}`}
-              className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap ${assistant.status.state === 'live'
-                ? 'text-sky-300 bg-sky-500/15' : 'text-slate-500 bg-slate-500/10'}`}
+          {/* AI — THE switch for ASSISTANT, in every M app the same: right of the build badge
+              (operator, 2026-10-28; tsunagi-m-chrome). Beside the badge for the reason SIGN IN is:
+              a fact about this build's reach, and the one part of a phone's — and the head unit's —
+              header always on screen; nobody found the old switch in the SYNC panel on the road.
+              Pressing it switches on (with the notice of what is sent, first) or off; the panel keeps
+              only what goes with it (this device's name, "switch here"). A tint like the badge, no
+              outline (tsunagi-m-design: a pill is its fill): sky when the assistant reaches this tab,
+              a pulse while it is connecting, amber when another device has it, slate when off. */}
+          {assistantAllowed && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={assistant.on}
+              onClick={() => void toggleAssistant(!assistant.on)}
+              title={!assistant.on ? 'ASSISTANT: off — press to switch on'
+                : assistant.status.state === 'live' ? `ASSISTANT: connected (${deviceLabel()}) — press to switch off`
+                  : `ASSISTANT: ${assistant.status.detail ?? assistant.status.state} — press to switch off`}
+              className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer ${!assistant.on
+                ? 'text-slate-500 bg-slate-500/10 hover:text-slate-300'
+                : assistant.status.state === 'live' ? 'text-sky-300 bg-sky-500/15'
+                  : assistant.status.state === 'held' ? 'text-amber-300 bg-amber-500/15'
+                    : 'text-slate-400 bg-slate-500/10 animate-pulse'}`}
             >
               AI
-            </span>
+            </button>
           )}
           {/* SIGN IN — the WORKS owner-gate session has ended. Beside the badge because it is a
               fact about this BUILD's reach (its store), not about the car, and on a phone this is

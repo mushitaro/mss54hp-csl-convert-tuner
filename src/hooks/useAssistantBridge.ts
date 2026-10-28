@@ -22,10 +22,65 @@ export const ASSISTANT_KEY = 'assistant-bridge:v1';
 /** The name the owner gives this device ("ナビ"), so the assistant — and another device's tab —
  *  can say which device answers. Per device, like the switch. */
 export const DEVICE_KEY = 'assistant-bridge:device';
+/** This device's random number, so the relay can tell its reconnect from another device's tab. */
+export const DID_KEY = 'assistant-bridge:did';
+/** '1' once this device has opened TUNER from the head unit's launcher (TSUNAGI///Manifold). */
+export const NAV_KEY = 'assistant-bridge:nav';
 const MAX_DEVICE_NAME = 24;
+const LAUNCHER_REFERRER = 'android-app://app.tsunagi.e46m3.launcher';
+/**
+ * The launcher's mark on the URL, read when this module loads: before the page takes `?resume=1`
+ * off the address (page.tsx), which removes the whole query. Kept in memory; written to storage only
+ * when the assistant is in use (isHeadUnit), so a build without it stores nothing.
+ */
+const LAUNCHED_FROM_MANIFOLD = typeof location !== 'undefined'
+    && (new URLSearchParams(location.search).get('from') === 'manifold'
+        || (typeof document !== 'undefined' && document.referrer.startsWith(LAUNCHER_REFERRER)));
 
 export function readDeviceName(): string | null {
     try { return localStorage.getItem(DEVICE_KEY)?.trim().slice(0, MAX_DEVICE_NAME) || null; } catch { return null; }
+}
+
+/**
+ * Whether this device is the head unit. The launcher (TSUNAGI///Manifold) opens TUNER with
+ * `?from=manifold` — the referrer it also sends does not survive the sign-in round trip through m3,
+ * which a device without a session takes first (seen on the car, 2026-10-28). Remembered, because a
+ * reload or a later page has neither.
+ */
+export function isHeadUnit(): boolean {
+    try {
+        if (localStorage.getItem(NAV_KEY) === '1') return true;
+        if (LAUNCHED_FROM_MANIFOLD) localStorage.setItem(NAV_KEY, '1');
+        return LAUNCHED_FROM_MANIFOLD;
+    } catch {
+        return LAUNCHED_FROM_MANIFOLD;
+    }
+}
+
+/** The name the assistant hears: the owner's, else ナビ for the head unit, else what the device is. */
+export function deviceLabel(): string {
+    const named = readDeviceName();
+    if (named) return named;
+    if (isHeadUnit()) return 'ナビ';
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    return /Mobi|iPhone|Android/i.test(ua) ? 'スマホ' : 'PC';
+}
+
+/** This device's number, made once. Null when storage refuses: the relay then cannot tell its
+ *  reconnect apart, which only means the old wait. */
+function deviceId(): string | null {
+    try {
+        let id = localStorage.getItem(DID_KEY);
+        if (!id || !/^[A-Za-z0-9_-]{16,64}$/.test(id)) {
+            const bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            id = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            localStorage.setItem(DID_KEY, id);
+        }
+        return id;
+    } catch {
+        return null;
+    }
 }
 
 /** This page's answer when storage refuses, so a switch still works for the session. */
@@ -78,7 +133,8 @@ export function useAssistantBridge(input: {
         const client = new BridgeClient({
             ticketUrl: '/api/bridge/ticket',
             handlers: () => bridgeHandlers(facadeRef.current),
-            hello: () => ({ ...helloRef.current, tools: TOOL_NAMES, device: readDeviceName() }),
+            hello: () => ({ ...helloRef.current, tools: TOOL_NAMES, device: deviceLabel() }),
+            identity: () => ({ did: deviceId(), nav: isHeadUnit() }),
             onStatus: setStatus,
         });
         clientRef.current = client;

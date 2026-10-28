@@ -18,6 +18,14 @@
  * 'held', naming the device that has it; so is a tab another one took the bridge from (4000). A held
  * tab asks again once a minute and gets the bridge when the holder has gone quiet (asleep, closed),
  * or at once when the owner presses "switch here" on it (`takeover`). Two live tabs never trade it.
+ *
+ * A drive on 2026-10-28 showed the network dropping under a live socket: nothing closed it, so the
+ * panel said connected while nothing arrived, and when the network came back the relay still counted
+ * the dead socket live and refused this device's own reconnect. So: a pong must come back within two
+ * pings or the socket is dropped here; the window's `online` cuts any wait short; the socket names
+ * this device (`did`, random, kept on the device) and whether it was opened from the head unit
+ * (`nav`), and the relay lets the same device replace its own old socket (4003 to the old one, on
+ * which a tab does not reconnect) and the head unit take over from any other device.
  */
 import type { Handler } from './tools';
 
@@ -52,9 +60,13 @@ export interface BridgeClientOptions {
     handlers: () => Record<string, Handler>;
     hello: () => { build: string | null; variant: string | null; tools: readonly string[]; device?: string | null };
     onStatus: (s: BridgeStatus) => void;
+    /** This device's number and whether it is the head unit, put on the socket's URL. */
+    identity?: () => { did: string | null; nav: boolean };
     /** Injectable for the verify script; the browser's own otherwise. */
     fetch?: typeof fetch;
     WebSocket?: typeof WebSocket;
+    /** Where `online` / `offline` come from; the window in a browser, none in the verify script. */
+    events?: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> | null;
 }
 
 export const BRIDGE_PROTOCOL = 'tuner-bridge.v1';
@@ -64,7 +76,12 @@ const BACKOFF_S = [1, 2, 5, 10, 30];
 const HELD_RETRY_S = 60;
 /** The relay's refusal: another device's live tab has the assistant. */
 export const HELD_CLOSE_CODE = 4002;
+/** The relay closed this socket for a newer one from this same device (another tab of this app here,
+ *  or this tab's own reconnect after the old socket went dead). Not reconnected on. */
+export const REPLACED_CLOSE_CODE = 4003;
 const PING_MS = 25_000;
+/** No pong for this long and the socket is dead, whatever it says: two pings and a margin. */
+const PONG_DEADLINE_MS = 2 * PING_MS + 5_000;
 /** A handler that has not answered by now is reported as failed; the bridge itself waits 20 s. */
 const HANDLER_TIMEOUT_MS = 15_000;
 /** Largest answer sent; the bridge refuses anything over 2 MB. */
@@ -79,11 +96,30 @@ export class BridgeClient {
     private status: BridgeStatus = { state: 'off', detail: null, calls: 0 };
     /** The next socket asks the relay to take the assistant from a live tab — the owner's press. */
     private takeoverNext = false;
+    /** When the relay last answered a ping (or the socket opened). */
+    private lastPongAt = 0;
     private readonly o: BridgeClientOptions;
+    private readonly onOnline = () => {
+        // The network is back: whatever wait is running is for a network that was not there.
+        if (!this.running || this.status.state === 'live' || this.status.state === 'held') return;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        this.attempt = 0;
+        void this.connect();
+    };
+    private readonly onOffline = () => {
+        // Say so now, rather than "connected" until the pong deadline runs out.
+        if (!this.running || !this.ws) return;
+        this.drop('No network.');
+    };
 
     // A plain field, not a parameter property: Node's type stripping (the verify scripts) refuses those.
     constructor(options: BridgeClientOptions) {
         this.o = options;
+    }
+
+    private get events() {
+        return this.o.events !== undefined ? this.o.events : (typeof window !== 'undefined' ? window : null);
     }
 
     start(): void {
@@ -92,11 +128,15 @@ export class BridgeClient {
         this.attempt = 0;
         this.status = { state: 'connecting', detail: null, calls: 0 };
         this.emit();
+        this.events?.addEventListener('online', this.onOnline);
+        this.events?.addEventListener('offline', this.onOffline);
         void this.connect();
     }
 
     stop(): void {
         this.running = false;
+        this.events?.removeEventListener('online', this.onOnline);
+        this.events?.removeEventListener('offline', this.onOffline);
         if (this.timer) clearTimeout(this.timer);
         this.timer = null;
         this.clearPing();
@@ -141,6 +181,17 @@ export class BridgeClient {
         this.ping = null;
     }
 
+    /** Give up on the current socket from this side — its close may never arrive on a dead network. */
+    private drop(detail: string) {
+        const ws = this.ws;
+        this.ws = null;
+        this.clearPing();
+        try { ws?.close(4100, 'dropped by the tab'); } catch { /* already gone */ }
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        this.retry(detail);
+    }
+
     private retry(detail: string, slow = false) {
         if (!this.running) return;
         const s = slow ? 60 : BACKOFF_S[Math.min(this.attempt, BACKOFF_S.length - 1)];
@@ -169,8 +220,12 @@ export class BridgeClient {
             if (!body.ticket || !body.url) { this.retry('The ticket answer was incomplete.'); return; }
             ticket = body.ticket;
             url = body.url;
-            if (this.takeoverNext) url += `${url.includes('?') ? '&' : '?'}takeover=1`;
+            const add = (k: string, v: string) => { url += `${url.includes('?') ? '&' : '?'}${k}=${encodeURIComponent(v)}`; };
+            if (this.takeoverNext) add('takeover', '1');
             this.takeoverNext = false;
+            const id = this.o.identity?.();
+            if (id?.did) add('did', id.did);
+            if (id?.nav) add('nav', '1');
         } catch {
             this.retry('No network.');
             return;
@@ -189,13 +244,21 @@ export class BridgeClient {
         ws.onopen = () => {
             if (this.ws !== ws) return;
             this.attempt = 0;
+            this.lastPongAt = Date.now();
             this.set('live', null);
             try { ws.send(JSON.stringify({ type: 'hello', ...this.o.hello() })); } catch { /* the close handler takes it */ }
             this.clearPing();
-            this.ping = setInterval(() => { try { ws.send('ping'); } catch { /* close handler */ } }, PING_MS);
+            this.ping = setInterval(() => {
+                if (this.ws !== ws) return;
+                // A socket the network dropped says nothing and stays "open"; the pong is the proof.
+                if (Date.now() - this.lastPongAt > PONG_DEADLINE_MS) { this.drop('The bridge stopped answering.'); return; }
+                try { ws.send('ping'); } catch { /* close handler */ }
+            }, PING_MS);
         };
         ws.onmessage = (ev: MessageEvent) => {
-            if (this.ws !== ws || typeof ev.data !== 'string' || ev.data === 'pong') return;
+            if (this.ws !== ws || typeof ev.data !== 'string') return;
+            this.lastPongAt = Date.now();
+            if (ev.data === 'pong') return;
             let msg: { type?: unknown; id?: unknown; tool?: unknown; args?: unknown };
             try { msg = JSON.parse(ev.data); } catch { return; }
             if (msg.type !== 'call' || typeof msg.id !== 'string' || typeof msg.tool !== 'string') return;
@@ -213,6 +276,13 @@ export class BridgeClient {
             }
             if (ev.code === 4000) {
                 this.hold(null, 'Another device took the assistant. This tab takes it back when that one goes quiet, or now with "switch here".');
+                return;
+            }
+            if (ev.code === REPLACED_CLOSE_CODE) {
+                // Another tab of this app on this device has it now. Asking again each minute would
+                // take it back and forth between the two; "switch here" still takes it.
+                this.status = { ...this.status, state: 'held', detail: 'Another tab on this device has the assistant. "Switch here" takes it back.', holder: null };
+                this.emit();
                 return;
             }
             this.retry('The bridge connection closed.');

@@ -169,7 +169,7 @@ console.log('\n[the rules a tool call meets]');
         observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
     };
     const h = bridgeHandlers(f);
-    check('the tab answers exactly the twenty-five tools', TOOL_NAMES.length === 25 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
+    check('the tab answers exactly the twenty-eight tools', TOOL_NAMES.length === 28 && JSON.stringify(Object.keys(h).sort()) === JSON.stringify([...TOOL_NAMES].sort()));
     let err = null;
     try { await h.tuner_stop_log({}); } catch (e) { err = e.message; }
     check('stop without confirmed: refused, nothing stopped', /confirmed: true/.test(err ?? '') && stopped === 0, err);
@@ -1020,6 +1020,85 @@ console.log('\n[the client: ticket, socket, hello, answers]');
     await sleep(20);
     check('no bridge configured on this build: stops and says so', /stopped:.*no assistant bridge/.test(states.at(-1)), states.at(-1));
     client.stop();
+}
+{
+    // 2026-10-28, a drive: the network dropped under a live socket and came back.
+    class FakeWS {
+        static all = [];
+        constructor(url, protocols) { this.url = url; this.protocols = protocols; this.sent = []; FakeWS.all.push(this); setTimeout(() => this.onopen?.(), 2); }
+        send(t) { this.sent.push(t); }
+        close(code = 1000) { setTimeout(() => this.onclose?.({ code, reason: '' }), 1); }
+    }
+    const events = new EventTarget();
+    const states = [];
+    let failTicket = false;
+    const client = new BridgeClient({
+        ticketUrl: '/api/bridge/ticket', handlers: () => ({}),
+        hello: () => ({ build: 'b1', variant: 'preview', tools: [], device: 'ナビ' }),
+        identity: () => ({ did: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', nav: true }),
+        onStatus: s => states.push(s),
+        fetch: async () => {
+            if (failTicket) throw new TypeError('Failed to fetch');
+            return new Response(JSON.stringify({ ticket: 'v1.abc.def', url: 'wss://bridge/tab' }), { status: 200 });
+        },
+        WebSocket: FakeWS,
+        events,
+    });
+    client.start();
+    await sleep(20);
+    check('the socket names this device and says it is the head unit', FakeWS.all[0]?.url === 'wss://bridge/tab?did=a1b2c3d4e5f60718293a4b5c6d7e8f90&nav=1', FakeWS.all[0]?.url);
+    failTicket = true;
+    events.dispatchEvent(new Event('offline'));
+    await sleep(10);
+    check('offline: no longer says live, and waits to try again', states.at(-1).state === 'retrying' && /No network/.test(states.at(-1).detail ?? ''), JSON.stringify(states.at(-1)));
+    await sleep(1100);
+    check('...the retry without a network fails too and waits longer', states.at(-1).state === 'retrying' && FakeWS.all.length === 1, `${JSON.stringify(states.at(-1))} sockets ${FakeWS.all.length}`);
+    failTicket = false;
+    events.dispatchEvent(new Event('online'));
+    await sleep(20);
+    check('online: reconnects at once, not after the backoff', FakeWS.all.length === 2 && states.at(-1).state === 'live', `${FakeWS.all.length} ${JSON.stringify(states.at(-1))}`);
+    FakeWS.all[1].onclose({ code: 4003, reason: '' });
+    await sleep(20);
+    check('replaced by another tab on this device (4003): held, and does not take it back on its own', states.at(-1).state === 'held' && FakeWS.all.length === 2, `${FakeWS.all.length} ${JSON.stringify(states.at(-1))}`);
+    client.stop();
+}
+{
+    // The cable and the other app, by voice (operator, 2026-10-28).
+    let connected = false;
+    let disconnected = 0;
+    let switched = 0;
+    let granted = false;
+    let logging = false;
+    const f = {
+        status: () => ({}), samples: () => null, startRefusal: () => null, startLog: () => {}, running: () => logging, stopLog: () => {},
+        views: () => [], show: () => {}, observePlan: () => ({ title: '', reads: [], steps: [] }), setObservePlan: () => {}, enterObserve: () => null, mark: () => {},
+        connectRefusal: async () => connected ? 'Already connected.' : granted ? null : 'No cable this page was allowed on is on the USB bus.',
+        connect: async () => { connected = true; return null; },
+        disconnectRefusal: () => !connected ? 'Not connected.' : logging ? 'A log is recording. Stop it first.' : null,
+        disconnect: async () => { connected = false; disconnected++; },
+        switchRefusal: () => logging ? 'A log is recording.' : null,
+        switchToMonitoring: async () => { switched++; },
+    };
+    const h = bridgeHandlers(f);
+    let err = null;
+    try { await h.tuner_connect({}); } catch (e) { err = e.message; }
+    check('connect: refused without a cable allowed on the screen before (no chooser by voice)', /allowed on/.test(err ?? '') && !connected, err);
+    granted = true;
+    const c = await h.tuner_connect({});
+    check('connect: the owner\'s words are the yes, on a cable allowed before', c.connected === true && connected);
+    logging = true;
+    err = null;
+    try { await h.tuner_disconnect({ confirmed: true }); } catch (e) { err = e.message; }
+    check('disconnect: refused while a log records', /recording/.test(err ?? '') && disconnected === 0, err);
+    logging = false;
+    err = null;
+    try { await h.tuner_disconnect({}); } catch (e) { err = e.message; }
+    check('disconnect: needs confirmed (the owner\'s own words)', /confirmed: true/.test(err ?? '') && disconnected === 0, err);
+    const d = await h.tuner_disconnect({ confirmed: true });
+    check('disconnect: releases the cable', d.disconnected === true && disconnected === 1 && !connected);
+    const s = await h.tuner_open_monitoring({ confirmed: true });
+    await sleep(500);
+    check('open MONITORING: answers first, then switches the window', s.switching === true && switched === 1, `${JSON.stringify(s)} ${switched}`);
 }
 
 console.log('\n[the ticket the function mints]');

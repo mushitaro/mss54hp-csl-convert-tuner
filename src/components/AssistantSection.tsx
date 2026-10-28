@@ -5,19 +5,19 @@ import { useDialogLang } from '@/hooks/useDialogLang';
 import type { BridgeStatus } from '@/lib/bridge/bridgeClient';
 
 /**
- * ASSISTANT, inside the SYNC panel: the switch that lets the owner's assistant reach this tab, and
- * what the connection is doing.
- *
- * One switch, two words. The panel is mounted twice (session list, menu sheet) and this is built
- * once by the page, so the two can never disagree. The state line says what is true now — live,
- * trying again and why, or stopped and what to do — because on a head unit the network comes and
- * goes with the car, and "it says ON" is not the same fact as "the assistant can hear this tab".
+ * ASSISTANT, inside the SYNC panel: what the connection is doing, and what goes with it — this
+ * device's name and "switch here". Not the switch: that is AI in the header, right of the build
+ * badge, the same in every M app (operator, 2026-10-28) — one door to one control, and the one part
+ * of the header the head unit always shows. Built once by the page and mounted twice (session list,
+ * menu sheet), so the two can never disagree. The state line says what is true now — live, trying
+ * again and why, or stopped and what to do — because on a head unit the network comes and goes with
+ * the car, and "it says ON" is not the same fact as "the assistant can hear this tab".
  */
 const TEXT = {
     ja: {
         title: 'ASSISTANT',
-        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止、表示の切り替え、セッションの作成・切り替え・保存、キャリブレーションの変更、クラウドとの同期、観察（OBSERVE）の計画と印付けを行えるようになります。車への接続・書き込み・フラッシュはできません。',
-        on: 'オン', off: 'オフ',
+        intro: 'オンにすると、あなたが接続した AI アシスタント（claude.ai など）が、このタブの状態と記録済みのデータログを読み、ログの開始・停止、表示の切り替え、セッションの作成・切り替え・保存、キャリブレーションの変更、クラウドとの同期、観察（OBSERVE）の計画と印付け、前に選んだケーブルへのつなぎ直しと切断、MONITORING への切り替えを行えるようになります。車への書き込み・フラッシュと、新しいケーブルを選ぶことはできません。',
+        where: 'オンとオフは、画面上の WORKS の右にある AI で切り替えます。',
         state: {
             off: 'オフ', connecting: '接続中…', live: '接続済み — アシスタントからこのタブに届きます',
             retrying: '再接続待ち', held: '別の端末がつながっています', stopped: '停止',
@@ -34,8 +34,8 @@ const TEXT = {
     },
     en: {
         title: 'ASSISTANT',
-        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, change the view, start, switch and save sessions, change calibration values, sync with your cloud, and set an observation (OBSERVE) plan and marks. It cannot connect to, write to or flash the car.',
-        on: 'ON', off: 'OFF',
+        intro: 'When on, the AI assistant you connected (claude.ai and others) can read this tab\'s state and the data log it has recorded, start and stop a log, change the view, start, switch and save sessions, change calibration values, sync with your cloud, set an observation (OBSERVE) plan and marks, reconnect the cable chosen here before and release it, and switch to MONITORING. It cannot write to or flash the car, or choose a new cable.',
+        where: 'Switch it on and off with AI at the top, right of WORKS.',
         state: {
             off: 'Off', connecting: 'Connecting…', live: 'Connected — your assistant can reach this tab',
             retrying: 'Waiting to reconnect', held: 'Another device is connected', stopped: 'Stopped',
@@ -55,13 +55,11 @@ const TEXT = {
 export const AssistantSection: React.FC<{
     on: boolean;
     status: BridgeStatus;
-    /** Switching on asks first (the page owns that dialog); switching off does not. */
-    onToggle: (next: boolean) => void;
     /** "Switch here": take the assistant from the device that has it. */
     onTakeover: () => void;
     device: string | null;
     onDevice: (name: string) => void;
-}> = ({ on, status, onToggle, onTakeover, device, onDevice }) => {
+}> = ({ on, status, onTakeover, device, onDevice }) => {
     const t = TEXT[useDialogLang()];
     const tone = status.state === 'live' ? 'text-sky-300'
         : status.state === 'stopped' || status.state === 'held' ? 'text-amber-500/80'
@@ -70,18 +68,9 @@ export const AssistantSection: React.FC<{
         <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] font-bold tracking-wider text-slate-400">{t.title}</span>
-                <button
-                    type="button"
-                    role="switch"
-                    aria-checked={on}
-                    onClick={() => onToggle(!on)}
-                    className={`min-h-8 min-w-14 px-3 rounded border text-[10px] font-bold tracking-widest transition-colors ${on
-                        ? 'border-sky-500/50 text-sky-300 bg-sky-500/10 hover:bg-sky-500/20'
-                        : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}
-                >
-                    {on ? t.on : t.off}
-                </button>
+                <span className={`text-[10px] font-bold tracking-widest ${on ? 'text-sky-300' : 'text-slate-500'}`}>{t.state[on ? status.state : 'off']}</span>
             </div>
+            <p className="text-[9px] text-slate-500">{t.where}</p>
             {on && (
                 <p className={`text-[10px] ${tone}`}>
                     {t.state[status.state]}

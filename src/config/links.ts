@@ -83,6 +83,12 @@ export function meshUrl(lang: DialogLang): string {
  *  many for a URL that has to stay the same in both. */
 export const PROJECT_REPO_URL = 'https://github.com/mushitaro/mss54hp-csl-convert-tuner';
 
+/** E46M3 /// MONITORING's WORKS build, which the assistant switches to in this same window (the
+ *  head unit's launcher trusts both origins, so it stays full screen). WORKS builds only. The head
+ *  unit adds `?from=manifold` on the way, so MONITORING knows it too; another device must not, or
+ *  MONITORING would remember it as the head unit. */
+export const MONITORING_WORKS_URL = 'https://e46m3-monitoring-preview.pages.dev/';
+
 export const CREDIT_LINKS = {
     pavloProfile: 'https://nam3forum.com/forums/member/1552-pavlo',
     karter16Profile: 'https://nam3forum.com/forums/member/9797-karter16',
