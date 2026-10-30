@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { clockAgrees } from '@/lib/session-sync/owner-sync';
 
 /**
  * Where a running update has got to, for the overlay that shows the wait.
@@ -113,6 +114,11 @@ function listenForPrecache() {
  * Failure is silent and reads as "no update". The check is a convenience — the app is fully usable
  * without it, frequently with no network at all in a garage, and a red herring about updates is
  * worse than nothing while someone is trying to read an ECU.
+ *
+ * Except one failure, on WORKS: a 401. That is the owner gate saying this browser is no longer
+ * signed in, and on a build the service worker serves from its cache it is the only place the app
+ * ever hears it — no new build can arrive until the sign-in is renewed, and RELOAD would only
+ * reload the old one (see lib/session-sync/sign-in-lapse).
  */
 const CHUNK = /\/_next\/static\/chunks\/[^"'\s>]+\.js/g;
 /** The stamp build-id.mjs puts in every document's head. Attribute order is fixed by that script,
@@ -289,11 +295,20 @@ export async function reloadForUpdate({ probeMs = 4000, installMs = 60_000, swap
  *        start does not, because on a head unit that is megabytes arriving through the same CPU the
  *        DS2 read loop is running on, mid-drive, unasked. The poll comes round every two minutes,
  *        so it primes itself as soon as the link is idle; nothing has to remember to do it later.
+ * @param gated whether this build sits behind the owner gate (WORKS). Only then is a 401 read as
+ *        anything: production has no gate, and its check behaves exactly as it always did.
+ * @returns `updateAvailable`, and `lapse` — null, or the gate's 401 with whether this device's
+ *        clock agreed with the response's Date header. Cleared by the next check let through.
  */
-export function useAppUpdate(pollMs = 2 * 60 * 1000, busy = false) {
+export function useAppUpdate(pollMs = 2 * 60 * 1000, busy = false, gated = false) {
     const busyRef = useRef(busy);
     useEffect(() => { busyRef.current = busy; }, [busy]);
+    // Read when the answer arrives rather than when the check starts: the mount check starts on the
+    // hydrating render, before the page knows which build it is.
+    const gatedRef = useRef(gated);
+    useEffect(() => { gatedRef.current = gated; }, [gated]);
     const [updateAvailable, setUpdateAvailable] = useState(false);
+    const [lapse, setLapse] = useState<SignInLapse | null>(null);
     /**
      * The build whose download has already been started, as its chunk set.
      *
@@ -309,6 +324,18 @@ export function useAppUpdate(pollMs = 2 * 60 * 1000, busy = false) {
         if (typeof document === 'undefined' || !navigator.onLine) return;
         try {
             const res = await fetch(`${location.origin}/`, { cache: 'no-store' });
+            if (gatedRef.current) {
+                if (res.status === 401) {
+                    // The same object while nothing about it changes, so a page that decides on it
+                    // does not decide again every two minutes over the same answer.
+                    const agrees = clockAgrees(res);
+                    setLapse(prev => (prev?.clockAgrees === agrees ? prev : { clockAgrees: agrees }));
+                    return;
+                }
+                // Let through: signed in again, here or in another tab. A 503 says nothing either
+                // way (m3 could not be asked) and leaves what was known.
+                if (res.ok) setLapse(null);
+            }
             if (!res.ok) return;
             const html = await res.text();
             const served = new Set(html.match(CHUNK) ?? []);
@@ -345,5 +372,12 @@ export function useAppUpdate(pollMs = 2 * 60 * 1000, busy = false) {
         return () => { clearInterval(t); document.removeEventListener('visibilitychange', onShow); };
     }, [check, pollMs]);
 
-    return updateAvailable;
+    return { updateAvailable, lapse };
+}
+
+/** The owner gate's 401 to the update check. */
+export interface SignInLapse {
+    /** `clockAgrees()` of that response — whether going through the gate now would be let through,
+     *  or would only wait on the gate's page for this device to put its clock right. */
+    clockAgrees: boolean;
 }

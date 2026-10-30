@@ -82,7 +82,16 @@ const JA = {
     reloadBusy: 'アプリを再読み込みします。\n\nDMEとの接続は切断され、記録中のデータログと保存していないチューンは失われます。\n\n続行しますか？',
     // ワークス版のサインインし直し。同じタブで m3 を往復するので、ページは置き換わる。
     reauthUnsaved: 'サインインし直すため、このページを m3 経由で開き直します。\n\nまだ保存していないチューンやデータログは失われます。保存済みのものはこの端末に残ります。\n\n続行しますか？',
-    reauthTitle: 'ワークス版のサインインが切れています。押すと m3 を経由してこの画面に戻ります。SYNC はそれまで待機し、この端末のデータはそのまま残ります。',
+    reauthTitle: 'ワークス版のサインインが切れていて、新しい版が届きません（SYNC も待機）。押すと m3 を経由してこの画面に戻り、この端末のデータはそのまま残ります。',
+    // ヘッダの更新の場所に出す、サインインが切れたことの知らせ。Short は電話機の幅のとき。
+    // 新しい版が届かないことを言う。黙っていたせいで、ナビが古い版のまま動き続けた（2026-10-29）。
+    lapseSignedOut: 'サインインが切れて、更新が届きません',
+    lapseSignedOutShort: 'サインイン切れ',
+    lapseWaitTitle: 'ワークス版のサインインが切れていて、新しい版が届きません（SYNC も待機）。ケーブルを外し、オンラインのときに、ここからサインインし直せます。',
+    // 時計がずれたままゲートを通ると、時計が直ったときにまた切れる。押すものは無く、合えば自動で通り直す。
+    lapseClock: '時計がずれています。合えば自動でサインインし直します',
+    lapseClockShort: '時計ずれ',
+    lapseClockTitle: 'この端末の時計が 1 日以上ずれているため、今サインインし直すと、時計が直ったときにまた切れます。時計が合えば自動でサインインし直し、それまで新しい版は届きません。',
     discardLog: '今記録したデータログを破棄して、最初からやり直しますか？',
     deleteSession: (label: string) => `「${label}」を削除しますか？この操作は取り消せません。`,
     noStoredBinary: 'このセッションにはBINが保存されていません。',
@@ -389,7 +398,13 @@ const EN: NativeDialogText = {
     clearLog: 'Discard this data log (CSV)?',
     reloadBusy: 'Reload the app.\n\nThe DME link will drop, and any log being recorded or tune not yet saved will be lost.\n\nContinue?',
     reauthUnsaved: 'Signing in again reopens this page by way of m3.\n\nA tune or a log not yet saved will be lost. Everything saved stays on this device.\n\nContinue?',
-    reauthTitle: 'The WORKS build has signed this device out. This goes through m3 and comes straight back here. SYNC waits until then, and everything on this device stays.',
+    reauthTitle: 'The WORKS build has signed this device out, so no new build can arrive and SYNC waits. This goes through m3 and comes straight back here; everything on this device stays.',
+    lapseSignedOut: "Signed out — updates can't arrive",
+    lapseSignedOutShort: 'Signed out',
+    lapseWaitTitle: 'The WORKS build has signed this device out, so no new build can arrive and SYNC waits. Sign in again here once the cable is disconnected and the device is online.',
+    lapseClock: "Clock is off — signs in again once it's right",
+    lapseClockShort: 'Clock off',
+    lapseClockTitle: "This device's clock is more than a day out, and a sign-in made now would end the moment the clock is put right. Once the clock is right it signs in again by itself; until then no new build arrives.",
     discardLog: 'Discard the log just recorded and start over?',
     deleteSession: (label: string) => `Delete "${label}"? This cannot be undone.`,
     noStoredBinary: 'This session has no stored binary.',

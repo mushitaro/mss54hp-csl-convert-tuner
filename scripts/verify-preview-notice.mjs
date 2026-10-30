@@ -66,7 +66,8 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 globalThis.fetch = async (url, init = {}) => {
     const method = init.method ?? 'GET';
     requests.push({ url: String(url), method, body: init.body ? JSON.parse(init.body) : undefined });
-    if (url === '/_gate/status') return json(200, { state: 'active', account_label: '#TEST' });
+    // With or without `?t=` — the device's clock, which the gate's daily extension needs (gate.ts).
+    if (/^\/_gate\/status(\?t=\d+)?$/.test(String(url))) return json(200, { state: 'active', account_label: '#TEST' });
     if (url === '/api/diagnostics' && method === 'POST') return json(200, { storedBytes: 321 });
     if (String(url).startsWith('/api/sessions') && method === 'GET') return json(200, { sessions: [] });
     return json(404, { error: 'not_found' });

@@ -75,6 +75,7 @@ import { LogDataTable } from '@/components/LogDataTable';
 import { SessionList, OriginBadge } from '@/components/SessionList';
 import { SessionStorePanel } from '@/components/SessionStorePanel';
 import { reauthHref } from '@/lib/session-sync/owner-sync';
+import { lapseAction, repassGuardOpen, spendRepass } from '@/lib/session-sync/sign-in-lapse';
 import { useGateStatus } from '@/hooks/useGateStatus';
 import type { SaveStatus } from '@/lib/session-sync/status';
 import { describeSave, describeSync } from '@/lib/session-sync/status';
@@ -130,7 +131,7 @@ import { TUNE_ADAPTATION_CLEAR, Ds2SupportedBaud } from '@/lib/dme-link/ds2';
 import { saveServiceBackup, listRestorableBackups, loadServiceBackup } from '@/lib/db/serviceBackupRepository';
 import { discardLiveRun, findRecoverableRun, loadLiveRunPoints } from '@/lib/db/liveRunRepository';
 import { downloadBlob, fileSafe, MIME_BIN, MIME_CSV, MIME_JSON } from '@/lib/download';
-import { detectDialogLang, dialogText } from '@/lib/dialog-text';
+import { DIALOG_TEXT, detectDialogLang, dialogText } from '@/lib/dialog-text';
 import { playLinkCue, primeLinkCues } from '@/lib/linkCues';
 import { deviceLabel, isHeadUnit, useAssistantBridge } from '@/hooks/useAssistantBridge';
 import { hasGrantedUsbCable } from '@/lib/dme-link/grantedCable';
@@ -384,11 +385,12 @@ export default function Home() {
   const [narrowPane, setNarrowPane] = useState<'map' | 'graph' | 'dash'>('map');
   const { ask } = dialogs;
   const [menuOpen, setMenuOpen] = useState(false);
-  /* The second argument is "a cable is live": see useAppUpdate. It defers the background
-     download of a new build, not the notice that there is one. */
-  const updateAvailable = useAppUpdate(undefined, dmeLink.state !== 'disconnected');
-  const install = useInstallPrompt();
   const isPreviewBuild = useIsPreviewBuild();
+  /* The second argument is "a cable is live": see useAppUpdate. It defers the background
+     download of a new build, not the notice that there is one. The third is "behind the owner
+     gate", the one build on which the check's 401 means anything — see `lapseNotice`. */
+  const { updateAvailable, lapse } = useAppUpdate(undefined, dmeLink.state !== 'disconnected', isPreviewBuild);
+  const install = useInstallPrompt();
   /** What this build is CALLED — WORKS, STAGING, '' on production (the `app-label` meta; display only,
    *  nothing compares it). The badge is on whenever it is not empty. Not `buildLabel`: that name is
    *  the build id (`<count>.<sha>`) the credits and the menu show, from useDiagnosticsPublisher. */
@@ -415,7 +417,8 @@ export default function Home() {
   const badgeNotRelease = isPreviewBuild || DEV_VARIANT_IS_PREVIEW;
   const online = useOnline();
   /** Where this browser stands with the owner gate — WORKS only; production and staging have no
-   *  gate and ask nothing. Names the SYNC destination, and drives the SIGN IN chip. */
+   *  gate and ask nothing. Names the SYNC destination, and is one of the two ways the sign-in's
+   *  lapse is heard (`lapsed`). */
   const gate = useGateStatus(isPreviewBuild);
   // Sending sessions to the store, and what the three controls that do it say. See useSessionSync.
   const sync = useSessionSync({
@@ -5366,6 +5369,21 @@ export default function Home() {
    *  hundred times per update to move a bar that lives in one small panel. */
   const reloading = useUpdateRunning();
 
+  /**
+   * Whether the owner gate has stopped letting this browser through — WORKS only.
+   *
+   * Heard two ways: the update check's 401 (`lapse`, which also carries whether this device's clock
+   * agreed with the gate's), and the gate's own status or a store request's 401 (`gate`). The update
+   * check is the one that matters — it comes round every two minutes whatever the owner is doing,
+   * and only its answer says anything about the clock.
+   */
+  const lapsed = isPreviewBuild && (lapse !== null || gate.state === 'expired');
+  /** The update check's 401 is news about the gate: ask it, so that SYNC says the same thing. */
+  const recheckGate = gate.recheck;
+  useEffect(() => {
+    if (lapse && gate.state === 'active') void recheckGate();
+  }, [lapse, gate.state, recheckGate]);
+
   /** Asks first only when there is something to lose. Disconnected with no log and no unsaved tune,
    *  a reload costs nothing and a confirmation would just be a step.
    *
@@ -5391,11 +5409,10 @@ export default function Home() {
    * drive not yet saved is asked about first; everything already saved is on this device and
    * survives the trip.
    *
-   * Nothing depends on this being pressed. A signed-out WORKS build keeps working locally; only SYNC
-   * and the store's lists wait for it.
+   * Nothing depends on this being pressed. A signed-out WORKS build keeps working locally; SYNC, the
+   * store's lists and new builds wait for it.
    */
-  const reauthAllowed = isPreviewBuild && gate.state === 'expired' && online
-    && dmeLink.state === 'disconnected' && !reloading;
+  const reauthAllowed = lapsed && online && dmeLink.state === 'disconnected' && !reloading;
   const unsavedWork = saveStatus.phase === 'ready' || saveStatus.phase === 'logOnly';
   const reauth = useCallback(() => {
     // The rule is checked here as well as at every mount: a handler captured by a render in which it
@@ -5404,6 +5421,36 @@ export default function Home() {
     if (unsavedWork && !confirm(dialogText().reauthUnsaved)) return;
     location.assign(reauthHref());
   }, [reauthAllowed, unsavedWork]);
+
+  /**
+   * The same trip, taken by itself when it loses nothing (lib/session-sync/sign-in-lapse): `reauth`'s
+   * rule without its question — no link, nothing `unsavedWork` would ask about (a run being recorded
+   * holds the link), online — and a clock the gate will accept. At most once in ten minutes in this
+   * tab, counted before leaving, so a trip that comes back still signed out (m3 wanting a sign-in of
+   * its own, say) finds it spent and shows the notice instead.
+   *
+   * Decided when one of those facts changes — the cable coming out after a drive, a check finding
+   * the clock put right — and not on every poll, which would take the owner off the screen every ten
+   * minutes over a sign-in that only a person can complete.
+   */
+  const lapseClock = lapse?.clockAgrees ?? null;
+  const lapseLinked = dmeLink.state !== 'disconnected';
+  useEffect(() => {
+    if (!lapsed || reloading) return;
+    const facts = { lapsed, clockAgrees: lapseClock, linked: lapseLinked, unsaved: unsavedWork, online };
+    if (lapseAction({ ...facts, guardOpen: repassGuardOpen() }) === 'repass' && spendRepass()) {
+      location.assign(reauthHref());
+    }
+  }, [lapsed, lapseClock, lapseLinked, unsavedWork, online, reloading]);
+  /** What the header says about it. Never 'repass': the guard is read as spent here, because the
+   *  trip is the effect's to take — and for the instant before it leaves, the notice is the truth. */
+  const lapseNotice = lapseAction({
+    lapsed, clockAgrees: lapseClock, linked: lapseLinked, unsaved: unsavedWork, online, guardOpen: false,
+  });
+  const lapseText = DIALOG_TEXT[dialogLang];
+  /** The update control's word. While signed out the server cannot hand over a build, and an
+   *  UPDATE that reloads into the same one is the silence of 2026-10-29 with a button on it. */
+  const updateOffered = updateAvailable && !lapsed;
 
   /**
    * Toggling the inspected cell, as ONE function.
@@ -6049,9 +6096,9 @@ export default function Home() {
             </span>
           )}
           {/* AI — THE switch for ASSISTANT, in every M app the same: right of the build badge
-              (operator, 2026-10-28; tsunagi-m-chrome). Beside the badge for the reason SIGN IN is:
-              a fact about this build's reach, and the one part of a phone's — and the head unit's —
-              header always on screen; nobody found the old switch in the SYNC panel on the road.
+              (operator, 2026-10-28; tsunagi-m-chrome). Beside the badge because it is a fact about
+              this build's reach, and the one part of a phone's — and the head unit's — header always
+              on screen; nobody found the old switch in the SYNC panel on the road.
               Pressing it switches on (with the notice of what is sent, first) or off; the panel keeps
               only what goes with it (this device's name, "switch here"). A tint like the badge, no
               outline (tsunagi-m-design: a pill is its fill): sky when the assistant reaches this tab,
@@ -6074,23 +6121,10 @@ export default function Home() {
               AI
             </button>
           )}
-          {/* SIGN IN — the WORKS owner-gate session has ended. Beside the badge because it is a
-              fact about this BUILD's reach (its store), not about the car, and on a phone this is
-              the one part of the header that is always on screen. Rendered only when pressing it
-              is safe — see `reauth` — so a cable in the socket hides it rather than greying it:
-              there is nothing to do about it until the drive is over, and the SYNC panel already
-              says the store is waiting. Amber, the badge's own "this is not the release" hue:
-              it states no machine state. */}
-          {reauthAllowed && (
-            <button
-              type="button"
-              onClick={reauth}
-              title={dialogText().reauthTitle}
-              className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold whitespace-nowrap transition-colors cursor-pointer text-amber-300 border border-amber-500/40 hover:bg-amber-500/15"
-            >
-              SIGN IN
-            </button>
-          )}
+          {/* No SIGN IN here any more. It stood beside the badge, as a chip, until the sign-in's
+              lapse became something the update control has to say (2026-10-29): it is the reason no
+              new build can arrive, so it is said where UPDATE would be — see `lapseNotice` — and one
+              action does not keep two places. */}
           {/* Identity, and nothing else. It used to open CREDITS as well, on the argument that a
               version number is a label carrying no state and so costs nothing to make a control.
               What that missed is that CREDITS already has a sign in both layouts — the medal above
@@ -6106,9 +6140,10 @@ export default function Home() {
               two would otherwise crowd the same corner. Hiding the version there lets UPDATE land
               on the spot the version was occupying — the same corner, the same line, one thing at a
               time. The desk shows both: it has the room, and the version sits with the identity it
-              belongs to. */}
+              belongs to. It stands down the same way for the sign-in's lapse, which is said in
+              that corner in UPDATE's place. */}
           <span className={`shrink-0 ml-auto min-[900px]:ml-0 text-[9px] font-mono text-slate-500 whitespace-nowrap
-            ${updateAvailable ? 'hidden min-[900px]:inline' : ''}`}>
+            ${updateOffered || lapseNotice !== 'none' ? 'hidden min-[900px]:inline' : ''}`}>
             V3.0.0 β
           </span>
 
@@ -6246,12 +6281,44 @@ export default function Home() {
               Below 900px nothing changed: this was `min-[900px]:flex`, and the phone's SYNC has
               always been the menu sheet's own row, which still carries the count and the sentence. */}
 
+          {/* The sign-in's lapse — WORKS only, see `lapseNotice`. Said HERE, beside RELOAD and in
+              UPDATE's place, because it is the reason no update can come: on 2026-10-29 the head unit
+              went on running an old build, the update check getting 401 and saying nothing. Drawn at
+              every width, as an update is, and the version stands down for it on a phone.
+
+              Quiet: amber, the badge's "this is not the release" hue, no outline and no pulse —
+              nothing has arrived, and there is often nothing to do yet. A sentence in the reader's language where the header
+              has room (the head unit's 683px included), the short form below 600px, the whole of it
+              in `title`. SIGN IN only when pressing it is safe — see `reauth`; with a cable in the
+              socket it is not there rather than greyed, and with the clock out there is nothing to
+              press at all: the next check that finds the clock right goes through by itself. */}
+          {lapseNotice === 'notice-signin' && reauthAllowed ? (
+            <button
+              type="button"
+              onClick={reauth}
+              title={lapseText.reauthTitle}
+              className="group flex items-center gap-2 shrink-0 py-3 -my-3 whitespace-nowrap text-[10px] cursor-pointer"
+            >
+              <span className="hidden min-[600px]:inline text-amber-400/80">{lapseText.lapseSignedOut}</span>
+              <span className="uppercase font-bold tracking-wider text-amber-300 group-hover:text-amber-200 transition-colors">Sign in</span>
+            </button>
+          ) : lapseNotice !== 'none' && (
+            <span
+              role="status"
+              title={lapseNotice === 'notice-clock' ? lapseText.lapseClockTitle : lapseText.lapseWaitTitle}
+              className="flex items-center shrink-0 whitespace-nowrap text-[10px] text-amber-400/80"
+            >
+              <span className="hidden min-[600px]:inline">{lapseNotice === 'notice-clock' ? lapseText.lapseClock : lapseText.lapseSignedOut}</span>
+              <span className="min-[600px]:hidden">{lapseNotice === 'notice-clock' ? lapseText.lapseClockShort : lapseText.lapseSignedOutShort}</span>
+            </span>
+          )}
+
           <button
             type="button"
             onClick={handleReload}
             title={reloading
               ? 'Downloading the new build — the app reloads into it when it is ready'
-              : updateAvailable
+              : updateOffered
                 ? 'A newer build is on the server — reload to take it'
                 : 'Reload the app'}
             /* `py-3 -my-3` for the hit box: the head unit this runs on is a touchscreen, and the
@@ -6267,7 +6334,7 @@ export default function Home() {
                pulsing blue, and that same blue holding still while the icon spins on the download.
                The pulse and the spin are deliberately not both on — pulsing means "there is
                something here to take", and once it is being taken that is no longer the message. */
-            className={`${updateAvailable ? 'flex' : 'hidden min-[900px]:flex'} items-center shrink-0 py-3 -my-3 transition-colors ${reloading ? 'text-blue-400 cursor-default' : `cursor-pointer ${updateAvailable ? 'text-blue-400 hover:text-blue-300 animate-pulse' : 'text-slate-500 hover:text-slate-300'}`}`}
+            className={`${updateOffered ? 'flex' : 'hidden min-[900px]:flex'} items-center shrink-0 py-3 -my-3 transition-colors ${reloading ? 'text-blue-400 cursor-default' : `cursor-pointer ${updateOffered ? 'text-blue-400 hover:text-blue-300 animate-pulse' : 'text-slate-500 hover:text-slate-300'}`}`}
           >
             {/* ONE of the two, never both. Idle, this is a convenience nobody is being told about,
                 and a glyph is the whole message — the word RELOAD beside it said the same thing a
@@ -6277,7 +6344,7 @@ export default function Home() {
 
                 Mid-download the glyph comes back, spinning. That is the one state where the arrow
                 is literal, and the pulse stops for the same reason it always did. */}
-            {updateAvailable && !reloading ? (
+            {updateOffered && !reloading ? (
               <span className="text-[10px] uppercase font-bold tracking-wider whitespace-nowrap">Update</span>
             ) : (
               /* w-5, the size of the four glyphs before it, for the reason the guide link
@@ -7561,7 +7628,7 @@ export default function Home() {
           onClose={() => setMenuOpen(false)}
           dragFrom={menuDrag}
           onDragEnd={clearMenuDrag}
-          updateAvailable={updateAvailable}
+          updateAvailable={updateOffered}
           reloading={reloading}
           onReload={handleReload}
           installState={install.state}
