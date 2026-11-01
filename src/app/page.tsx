@@ -828,7 +828,7 @@ export default function Home() {
     // takes the driver away from both, to look at a calibration nothing has been derived from yet
     // (operator, 2026-08-25).
     //
-    // A branch (handleNewFrom) does move, to DASH, and the difference is real: it inherits a BASE
+    // A branch (handleNewFrom) does move, to HUB, and the difference is real: it inherits a BASE
     // and a lineage and has nothing left to be given, so its next step is the car.
   };
 
@@ -2148,7 +2148,7 @@ export default function Home() {
     setActiveTab(want);
     // And go and look at it. Below 900px the tab lives in the other pane, so setting it alone moved
     // the map behind a dashboard nobody had left: START TUNE armed LAMBDA FEEDBACK, the first sample
-    // released it, and the screen stayed on DASH with the trim being drawn out of sight. The manual
+    // released it, and the screen stayed on HUB with the trim being drawn out of sight. The manual
     // path already pairs these two (onSelectTab does both); this is the same rule for the armed one.
     setNarrowPane('map');
   }, [TABS, currentMap, newMap, correctionMap, processedLog, warmupMap, tunedRfKorr]);
@@ -2441,10 +2441,10 @@ export default function Home() {
     // TUNED when the rebuild produced one — that is the answer this session exists for and the
     // reason you opened it — and CURRENT otherwise, which is the map you would start from.
     //
-    // The PANE is DASH, not the map: opening a session is the start of a job, and the first thing
+    // The PANE is HUB, not the map: opening a session is the start of a job, and the first thing
     // it needs is the hub — connect, read, start a run. The map is one tap away and is where you
     // go once there is something to look at. (This landed on MAP for a day; the operator asked for
-    // DASH, which is the pane the work actually begins in.)
+    // HUB, which is the pane the work actually begins in.)
     goToTab(rebuilt ? 'new' : 'current');
     setNarrowPane('dash');
   };
@@ -2638,7 +2638,7 @@ export default function Home() {
     // that a job had begun; the pane is the half that moves the screen.
     //
     // Not `handleDmeRead`, which ends with the same two lines minus this one: a READ is pressed AT
-    // the hub and the driver is already standing on DASH, so there is nothing to move them to.
+    // the hub and the driver is already standing on HUB, so there is nothing to move them to.
     goToTab('current');
     setNarrowPane('dash');
   };
@@ -3883,7 +3883,7 @@ export default function Home() {
 
   /** Standing on a destination that has stopped existing. Two ways to get there: the view changed
    *  under you and has no picture, or the phone was rotated back to portrait and the graph went home
-   *  to the dash pane. Both land on DASH, which is where the graph now is in the second case. */
+   *  to the dash pane. Both land on HUB, which is where the graph now is in the second case. */
   useEffect(() => {
     if (narrowPane === 'graph' && (!splitGraph || !graphHasContent)) setNarrowPane('dash');
   }, [narrowPane, splitGraph, graphHasContent]);
@@ -4426,7 +4426,7 @@ export default function Home() {
 
   const narrowPaneTabs = (
     <div className="flex min-[900px]:hidden space-x-6 h-full shrink-0">
-      {([['map', 'MAP', true, ''], ['graph', 'GRAPH', graphHasContent, SPLIT_ONLY_SHOW], ['dash', 'DASH', true, '']] as const).map(([id, label, enabled, shown]) => (
+      {([['map', 'MAP', true, ''], ['graph', 'GRAPH', graphHasContent, SPLIT_ONLY_SHOW], ['dash', 'HUB', true, '']] as const).map(([id, label, enabled, shown]) => (
         <button
           key={id}
           type="button"
@@ -6040,7 +6040,7 @@ export default function Home() {
               thing it acts on, and clear of every other control by the height of the footer. The
               map scrolls underneath, so no cell is permanently behind it.
 
-              Inside the map PANE, so DASH takes it away without a condition of its own — that
+              Inside the map PANE, so HUB takes it away without a condition of its own — that
               pane is `invisible pointer-events-none` while the dash is up. `gridOnScreen` is the
               other half: the session list lives in this pane too, and a zoom over a list of
               sessions adjusts nothing.
@@ -6067,7 +6067,7 @@ export default function Home() {
             (47 ms -> 12 ms, the coverageBands memo) changed nothing anyone could see.
 
             And it was blurring nothing. Measured in both layouts: on a phone the two panes are
-            never painted at the same time — while DASH is up the MAP pane computes to
+            never painted at the same time — while HUB is up the MAP pane computes to
             `visibility: hidden` — and above 900px they are side-by-side flex columns with no
             overlap at all (map 0-791, dash 791-1280 at 1280 wide). So the only thing ever beneath
             this filter is the app's own flat background, and a blur of a flat colour is that colour.

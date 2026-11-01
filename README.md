@@ -251,7 +251,7 @@ instead of just this chart's axis.
 The whole workflow — read, live tune, write — runs on a phone, and on an Android head unit in the
 car. Below 900px the layout is not a shrunken desktop; it is arranged for one hand and short glances.
 
-**One view at a time, chosen from the footer.** `MAP` is the tables, `DASH` is the connection and the
+**One view at a time, chosen from the footer.** `MAP` is the tables, `HUB` is the connection and the
 controls, and `GRAPH` appears as its own destination only when the screen is too short to stack the
 3D view above the panel — on a tall phone in portrait the two stay together, because there is room
 and splitting them would charge a tap for nothing.
@@ -262,7 +262,7 @@ aimed: press the button, slide to the entry you want, release. The lists run bot
 entry sits nearest your thumb, and Close lands on the exact coordinates the press started on, so a
 second tap closes what the first opened without moving your hand.
 
-The controls that decide what gets written to the DME are never in that sheet. They stay on `DASH`,
+The controls that decide what gets written to the DME are never in that sheet. They stay on `HUB`,
 visible, one tap apart.
 
 **`−` / `＋` resize the map grid**, and they sit **on the grid** — on the statistics band above it
